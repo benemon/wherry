@@ -844,7 +844,7 @@ func TestEchoAndAdvertisementBindTheirPool(t *testing.T) {
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	keys := signed.Keys{"receiver-a": {Current: key.Public().(ed25519.PublicKey)}}
 	echo := func(tenant, pool string) []byte {
-		return sign(t, &wire.Echo{Receiver: "receiver-a", Tenant: tenant, Pool: pool, Run: "run-a", Placement: wire.Placement{Agent: "agent-a"}, TaskHash: strings.Repeat("a", 64), MessageID: "message-a"}, key)
+		return sign(t, &wire.Echo{Receiver: "receiver-a", Tenant: tenant, Host: "host-a", Pool: pool, Run: "run-a", Placement: wire.Placement{Agent: "agent-a"}, TaskHash: strings.Repeat("a", 64), MessageID: "message-a"}, key)
 	}
 	if _, err := AuthorizeEcho(wire.ParseRecord, state, keys, echo("tenant-a", "pool-a"), "tenant-a"); err != nil {
 		t.Fatal(err)

@@ -8,8 +8,10 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -639,12 +641,28 @@ func (f fixture) produce(t *testing.T, topic, key string, value []byte) *kgo.Rec
 	return record
 }
 
-// testSubmission is a task for run as a host builds it.
-func testSubmission(run string) *wire.Submission {
+// testNonce is a fixed run nonce for name.
+func testNonce(name string) string {
+	sum := sha256.Sum256([]byte(name))
+	return base64.RawURLEncoding.EncodeToString(sum[:16])
+}
+
+// testRun is the run ID testHost derives from name's nonce.
+func testRun(name string) string { return wire.RunID(testTenant, testHost, testNonce(name)) }
+
+// named puts task under the run testHost derives from name's nonce.
+func named(task *wire.Submission, name string) {
+	run := testRun(name)
+	task.Wherry.Run, task.Wherry.RunNonce, task.Message.TaskID, task.Message.ContextID = run, testNonce(name), run, run
+}
+
+// testSubmission is a task for name's run as a host builds it.
+func testSubmission(name string) *wire.Submission {
+	run := testRun(name)
 	return &wire.Submission{
 		Message: wire.Message{MessageID: "msg-a", ContextID: run, TaskID: run, Role: wire.RoleUser, Parts: []wire.Part{{Text: "hi"}}, Extensions: []string{wire.ExtensionURI}},
 		Wherry: wire.SubmissionBinding{
-			Tenant: testTenant, Host: testHost, Pool: testPool, Run: run,
+			Tenant: testTenant, Host: testHost, Pool: testPool, Run: run, RunNonce: testNonce(name),
 			Placement:     wire.Placement{Agent: "claude", Selector: []wire.Requirement{}},
 			TaskStartedBy: time.Now().Add(time.Minute).Unix(), TaskEndedBy: time.Now().Add(time.Minute).Unix(),
 		},
@@ -719,11 +737,11 @@ func (f fixture) poolKey(t *testing.T) *ecdsa.PublicKey {
 	return snapshot.Current.Key.Key.(*ecdsa.PublicKey)
 }
 
-func (f fixture) turn(t *testing.T, run string, turn int64) *kgo.Record {
+func (f fixture) turn(t *testing.T, name string, turn int64) *kgo.Record {
 	t.Helper()
 	return f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.Run = run
-		task.Message.MessageID, task.Message.TaskID, task.Message.ContextID = fmt.Sprintf("msg-%d", turn), run, run
+		named(task, name)
+		task.Message.MessageID = fmt.Sprintf("msg-%d", turn)
 	})
 }
 
@@ -932,7 +950,7 @@ func runToTask(t *testing.T, f fixture) wire.Task {
 	t.Cleanup(stop)
 	f.run(t, ctx)
 	f.submit(t, f.host, nil)
-	return f.await(t, "run-a", anyTask)
+	return f.await(t, testRun("run-a"), anyTask)
 }
 
 func TestEndToEndWithFakePlugin(t *testing.T) {
@@ -946,7 +964,7 @@ func TestEndToEndWithFakePlugin(t *testing.T) {
 		var echo wire.Echo
 		if wire.ParseRecord(record.Value, f.keys(), &echo) == nil {
 			echoes++
-			if echo.Pool != testPool || echo.Run != "run-a" || echo.MessageID != "msg-a" || echo.Placement.Agent != "claude" {
+			if echo.Pool != testPool || echo.Run != testRun("run-a") || echo.MessageID != "msg-a" || echo.Placement.Agent != "claude" || wire.CheckEchoRunID(echo) != nil {
 				t.Fatalf("echo %#v", echo)
 			}
 		}
@@ -1098,12 +1116,12 @@ func TestRunExitsOnConfigChange(t *testing.T) {
 func TestRunAppliesUpdatedTerms(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.run(t, f.ctx)
-	collectedUnder := func(run string) int64 {
+	collectedUnder := func(name string) int64 {
 		t.Helper()
 		f.submit(t, f.host, func(task *wire.Submission) {
-			task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run
+			named(task, name)
 		})
-		f.await(t, run, anyTask)
+		f.await(t, testRun(name), anyTask)
 		f.plugin.mu.Lock()
 		defer f.plugin.mu.Unlock()
 		return f.plugin.limits.FileBytes
@@ -1408,10 +1426,10 @@ var (
 	arm         = []wire.Requirement{in("class", "arm")}
 )
 
-func (m multiFixture) execute(t *testing.T, run string, selector []wire.Requirement, attempt int64) kgo.AckStatus {
+func (m multiFixture) execute(t *testing.T, name string, selector []wire.Requirement, attempt int64) kgo.AckStatus {
 	t.Helper()
 	record := m.submit(t, m.host, func(task *wire.Submission) {
-		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run
+		named(task, name)
 		task.Wherry.Placement.Selector = selector
 	})
 	return m.fixture.execute(t, record, attempt)
@@ -1522,7 +1540,7 @@ func TestStopReleasesHeldTaskOnce(t *testing.T) {
 			case <-time.After(10 * time.Second):
 				t.Fatalf("Run kept its held run; logs:\n%s", f.logs.String())
 			}
-			record, delivered := f.pollPool(t, "run-a", 10*time.Second)
+			record, delivered := f.pollPool(t, testRun("run-a"), 10*time.Second)
 			if !delivered {
 				t.Fatal("task not delivered after the stop")
 			}
@@ -1581,21 +1599,21 @@ func TestConfigChangeDrainsHeldRun(t *testing.T) {
 	config.Capacity = 2
 	f.appendConfig(t, config)
 	f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-b", "run-b", "run-b"
+		named(task, "run-b")
 	})
 	if err := f.stopped(t, done, 20*time.Second); !errors.Is(err, ErrConfigChanged) {
 		t.Fatalf("Run returned %v, want ErrConfigChanged", err)
 	}
-	if !f.completed(t, "run-a") {
+	if !f.completed(t, testRun("run-a")) {
 		t.Fatalf("Run exited before the held run completed; logs:\n%s", f.logs.String())
 	}
 	if dispatches, _, _, _ := f.plugin.counts(); dispatches != 1 {
 		t.Fatalf("dispatches = %d, want 1: the draining receiver claimed another task", dispatches)
 	}
-	if record, delivered := f.pollPool(t, "run-b", 10*time.Second); !delivered || record.DeliveryCount() != 1 {
+	if record, delivered := f.pollPool(t, testRun("run-b"), 10*time.Second); !delivered || record.DeliveryCount() != 1 {
 		t.Fatal("the draining receiver acquired run-b")
 	}
-	if _, delivered := f.pollPool(t, "run-a", 2*time.Second); delivered {
+	if _, delivered := f.pollPool(t, testRun("run-a"), 2*time.Second); delivered {
 		t.Fatal("the completed run's task went back to the pool")
 	}
 }
@@ -1611,7 +1629,7 @@ func TestPinChangeDrainsHeldRun(t *testing.T) {
 	if err := f.stopped(t, done, 20*time.Second); !errors.Is(err, ErrConfigChanged) {
 		t.Fatalf("Run returned %v, want ErrConfigChanged", err)
 	}
-	if !f.completed(t, "run-a") {
+	if !f.completed(t, testRun("run-a")) {
 		t.Fatalf("Run exited before the held run completed; logs:\n%s", f.logs.String())
 	}
 }
@@ -1628,11 +1646,11 @@ func TestCancelStopsADrainingRun(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	// The cancel goes on the pool's events alone: the receiver's own read of them must find it.
-	f.produce(t, admin.PoolEventsTopic(testPool), "run-a", must(t)(wire.SignRecord(&wire.Cancel{Tenant: testTenant, Host: testHost, Pool: testPool, Run: "run-a"}, f.host)))
+	f.produce(t, admin.PoolEventsTopic(testPool), testRun("run-a"), must(t)(wire.SignRecord(&wire.Cancel{Tenant: testTenant, Host: testHost, Pool: testPool, Run: testRun("run-a")}, f.host)))
 	if err := f.stopped(t, done, 10*time.Second); !errors.Is(err, ErrConfigChanged) {
 		t.Fatalf("Run returned %v, want ErrConfigChanged", err)
 	}
-	if task := f.lastTask(t); task.ID != "run-a" || task.Status.State != wire.TaskStateCanceled {
+	if task := f.lastTask(t); task.ID != testRun("run-a") || task.Status.State != wire.TaskStateCanceled {
 		t.Fatalf("last task %s %s, want run-a CANCELED", task.ID, task.Status.State)
 	}
 }
@@ -1653,7 +1671,7 @@ func TestForceEndsADrain(t *testing.T) {
 	if err := f.stopped(t, done, 10*time.Second); !errors.Is(err, ErrConfigChanged) {
 		t.Fatalf("Run returned %v, want ErrConfigChanged", err)
 	}
-	if _, delivered := f.pollPool(t, "run-a", 10*time.Second); !delivered {
+	if _, delivered := f.pollPool(t, testRun("run-a"), 10*time.Second); !delivered {
 		t.Fatal("task not released after the forced change")
 	}
 }
@@ -1677,11 +1695,11 @@ func TestStopDrainsWithinTheDrainTimeout(t *testing.T) {
 			if err := f.stopped(t, done, 15*time.Second); !errors.Is(err, context.Canceled) {
 				t.Fatalf("Run returned %v, want context canceled", err)
 			}
-			if completed := f.completed(t, "run-a"); completed != c.complete {
+			if completed := f.completed(t, testRun("run-a")); completed != c.complete {
 				t.Fatalf("run completed %t, want %t; logs:\n%s", completed, c.complete, f.logs.String())
 			}
 			if c.complete {
-				if _, delivered := f.pollPool(t, "run-a", 2*time.Second); delivered {
+				if _, delivered := f.pollPool(t, testRun("run-a"), 2*time.Second); delivered {
 					t.Fatal("the completed run's task went back to the pool")
 				}
 				return
@@ -1689,7 +1707,7 @@ func TestStopDrainsWithinTheDrainTimeout(t *testing.T) {
 			if stopped := time.Since(signalled); stopped < c.drain {
 				t.Fatalf("Run returned %s after the stop, inside the drain timeout", stopped)
 			}
-			if record, delivered := f.pollPool(t, "run-a", 10*time.Second); !delivered || record.DeliveryCount() != 2 {
+			if record, delivered := f.pollPool(t, testRun("run-a"), 10*time.Second); !delivered || record.DeliveryCount() != 2 {
 				t.Fatal("the held task was not released at the drain timeout")
 			}
 		})
@@ -1771,8 +1789,8 @@ func TestHeldRunPastTheShutdownDeadlineIsLeftUnacknowledged(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the run outlasted the shutdown deadline")
 	}
-	if kinds := f.kinds(t); slices.Contains(kinds, "released") || f.completed(t, "run-a") {
-		t.Fatalf("statuses %v, completed %t, want neither released nor completed", kinds, f.completed(t, "run-a"))
+	if kinds := f.kinds(t); slices.Contains(kinds, "released") || f.completed(t, testRun("run-a")) {
+		t.Fatalf("statuses %v, completed %t, want neither released nor completed", kinds, f.completed(t, testRun("run-a")))
 	}
 }
 
@@ -1828,7 +1846,7 @@ func TestRevocationLeavesAHeldRunToAnAdopter(t *testing.T) {
 			stops := f.plugin.stops
 			f.plugin.job, f.plugin.endDelay = pluginsdk.JobRunning, 0
 			f.plugin.mu.Unlock()
-			if stops != 0 || f.completed(t, "run-a") {
+			if stops != 0 || f.completed(t, testRun("run-a")) {
 				t.Fatalf("revoked receiver stopped the job %d times or completed its run", stops)
 			}
 			close(revoked)

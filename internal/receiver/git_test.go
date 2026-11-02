@@ -90,7 +90,7 @@ func TestGitInputReachesTheAgentAsFilesAndCommands(t *testing.T) {
 			"--config protocol.ssh.allow=always --config user.name=wherry --config user.email=wherry@invalid -- 'ssh://git@git.example.test:2222/org/repo.git' 'src/repo'",
 		"    git -C 'src/repo' checkout 'v1.2.0' --",
 		"    git -C 'src/repo' format-patch --output=\"/task/outputs/changes.patch\" refs/wherry/start..HEAD",
-		"    git -C 'src/repo' push origin HEAD:refs/heads/wherry/run-a",
+		"    git -C 'src/repo' push origin HEAD:refs/heads/wherry/" + testRun("run-a"),
 	} {
 		if !strings.Contains(prompt, line+"\n") {
 			t.Errorf("prompt lacks %q:\n%s", line, prompt)

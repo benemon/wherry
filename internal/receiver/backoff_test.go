@@ -35,7 +35,7 @@ func TestRedeliveryAfterOwnStartFailureReleasesWithoutDispatch(t *testing.T) {
 	if dispatches, _, _, _ := f.plugin.counts(); dispatches != 0 || len(f.eventStatuses(t)) != 0 {
 		t.Fatalf("dispatches %d, statuses %v: want neither", dispatches, f.kinds(t))
 	}
-	if !strings.Contains(f.logs.String(), "run run-a: already failed here; releasing for another member") {
+	if !strings.Contains(f.logs.String(), "run "+testRun("run-a")+": already failed here; releasing for another member") {
 		t.Fatalf("logs:\n%s", f.logs.String())
 	}
 	f.receiver.mu.Lock()
@@ -65,7 +65,7 @@ func TestRedeliveryAtTheBudgetAfterOwnStartFailureEnds(t *testing.T) {
 	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckReject {
 		t.Fatalf("admitted=%v ack=%v, want reject; logs:\n%s", admitted != nil, ack, f.logs.String())
 	}
-	if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "delivery budget exhausted" {
+	if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != "delivery budget exhausted" {
 		t.Fatalf("terminal %s %q", state, reason)
 	}
 	if dispatches, _, _, _ := f.plugin.counts(); dispatches != 0 {
@@ -166,12 +166,12 @@ func TestStartFailureOfAnotherTenantsRunDoesNotHoldTheTaskBack(t *testing.T) {
 	task := testSubmission("run-a")
 	asTenantB(task)
 	failure := &wire.StartFailure{Wherry: f.receiver.binding(task, 1), Profile: "nomad", Agent: "claude", Class: "dispatch", TaskHash: wire.TaskHash(other.Value)}
-	f.produce(t, admin.PoolEventsTopic(testPool), "run-a", must(t)(wire.SignRecord(failure, f.receiver.signing)))
+	f.produce(t, admin.PoolEventsTopic(testPool), testRun("run-a"), must(t)(wire.SignRecord(failure, f.receiver.signing)))
 	events, err := f.receiver.readEvents(f.ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if failures := events.startFailures["run-a"]; len(failures) != 1 || failures[0].Wherry.Tenant != "tenant-b" {
+	if failures := events.startFailures[testRun("run-a")]; len(failures) != 1 || failures[0].Wherry.Tenant != "tenant-b" {
 		t.Fatalf("start failures %+v, want tenant-b's", failures)
 	}
 	f.admitted(t, record)
@@ -199,15 +199,15 @@ func TestPoolEventsRefuseUnboundStatusesAndStartFailures(t *testing.T) {
 				mutate(&failure.Wherry)
 			}
 			for _, value := range []wire.Record{status, failure} {
-				f.produce(t, admin.PoolEventsTopic(testPool), "run-a", must(t)(wire.SignRecord(value, f.receiver.signing)))
+				f.produce(t, admin.PoolEventsTopic(testPool), testRun("run-a"), must(t)(wire.SignRecord(value, f.receiver.signing)))
 			}
 			events, err := f.receiver.readEvents(f.ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
-			counted := len(events.statuses["run-a"]) + len(events.startFailures["run-a"])
-			if want := map[bool]int{true: 2, false: 0}[mutate == nil]; counted != want || len(events.others["run-a"]) != 0 {
-				t.Fatalf("%d records counted and %d kept as others, want %d counted", counted, len(events.others["run-a"]), want)
+			counted := len(events.statuses[testRun("run-a")]) + len(events.startFailures[testRun("run-a")])
+			if want := map[bool]int{true: 2, false: 0}[mutate == nil]; counted != want || len(events.others[testRun("run-a")]) != 0 {
+				t.Fatalf("%d records counted and %d kept as others, want %d counted", counted, len(events.others[testRun("run-a")]), want)
 			}
 		})
 	}
@@ -227,7 +227,7 @@ func TestPoolEventsRefuseAnEndedMember(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events.statuses["run-a"]) != 0 || len(events.startFailures["run-a"]) != 0 {
+	if len(events.statuses[testRun("run-a")]) != 0 || len(events.startFailures[testRun("run-a")]) != 0 {
 		t.Fatalf("an ended member's records counted: %+v", events)
 	}
 }

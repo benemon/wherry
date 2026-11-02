@@ -150,12 +150,14 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 			b.joined(t, ctx, logs)
 			submission := testSubmission("run-broker")
 			submission.Wherry.Tenant, submission.Wherry.Host, submission.Wherry.Pool = tenant, host, pool
+			run := wire.RunID(tenant, host, submission.Wherry.RunNonce)
+			submission.Wherry.Run, submission.Message.TaskID, submission.Message.ContextID = run, run, run
 			b.seal(t, ctx, submission)
 			value, err := wire.SignRecord(submission, hostKey)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.PoolTasksTopic(pool), Key: []byte("run-broker"), Value: value}).FirstErr(); err != nil {
+			if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.PoolTasksTopic(pool), Key: []byte(run), Value: value}).FirstErr(); err != nil {
 				t.Fatal(err)
 			}
 			for {
@@ -182,7 +184,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 			for redelivered == nil {
 				pollCtx, cancelPoll := context.WithTimeout(ctx, 2*time.Second)
 				for _, record := range member.PollRecords(pollCtx, 1).Records() {
-					if string(record.Key) == "run-broker" {
+					if string(record.Key) == run {
 						redelivered = record
 					}
 				}
@@ -337,15 +339,17 @@ func TestDeliveryBudgetEndsATaskTwoMembersFailedOnRealBroker(t *testing.T) {
 	b.joined(t, ctx, firstLogs)
 	submission := testSubmission("run-budget")
 	submission.Wherry.Tenant, submission.Wherry.Host, submission.Wherry.Pool = b.tenant, b.host, b.pool
+	run := wire.RunID(b.tenant, b.host, submission.Wherry.RunNonce)
+	submission.Wherry.Run, submission.Message.TaskID, submission.Message.ContextID = run, run, run
 	b.seal(t, ctx, submission)
 	value, err := wire.SignRecord(submission, hostKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.PoolTasksTopic(b.pool), Key: []byte("run-budget"), Value: value}).FirstErr(); err != nil {
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.PoolTasksTopic(b.pool), Key: []byte(run), Value: value}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
-	for !strings.Contains(firstLogs.String(), "run run-budget: already failed here; releasing for another member") {
+	for !strings.Contains(firstLogs.String(), "run "+run+": already failed here; releasing for another member") {
 		if ctx.Err() != nil {
 			t.Fatalf("the first member never released its redelivery; logs:\n%s", firstLogs.String())
 		}
@@ -385,7 +389,7 @@ func TestDeliveryBudgetEndsATaskTwoMembersFailedOnRealBroker(t *testing.T) {
 	}
 	defer poller.Close()
 	for _, record := range poller.PollRecords(pollCtx, 1).Records() {
-		if string(record.Key) == "run-budget" {
+		if string(record.Key) == run {
 			t.Fatal("the ended task was redelivered")
 		}
 	}

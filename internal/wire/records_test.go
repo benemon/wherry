@@ -47,7 +47,7 @@ func testRecords() map[string]Record {
 			{ArtifactID: TranscriptArtifact, Parts: []Part{{Data: []byte(`{}`), MediaType: ReferenceMediaType}}, Extensions: []string{ExtensionURI}},
 		}, History: []Message{testMessage("run-a")}},
 			Wherry: ResultBinding{ReceiverBinding: testBinding(), TaskHash: testHash}},
-		"echo":                         &Echo{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: "run-a", Placement: placement, TaskHash: testHash, MessageID: "message-a"},
+		"echo":                         &Echo{Receiver: "receiver-a", Tenant: "tenant-a", Host: "host-a", Pool: "pool-a", Run: "run-a", Placement: placement, TaskHash: testHash, MessageID: "message-a"},
 		"advertisement":                &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{{Profile: "nomad", Agent: "claude"}}, Capacity: 2, AtMS: 1},
 		"advertisement without offers": &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{}, Capacity: 2, AtMS: 1},
 		"start failure":                &StartFailure{Wherry: testBinding(), Profile: "nomad", Agent: "claude", Class: "dispatch", TaskHash: testHash},
@@ -69,6 +69,13 @@ func testKeys(t *testing.T) (signed.Keys, ed25519.PrivateKey, ed25519.PrivateKey
 		signed.HostOwner("tenant-a", "host-a"): {Current: host.Public().(ed25519.PublicKey)},
 		"receiver-a":                           {Current: receiver.Public().(ed25519.PublicKey)},
 	}, host, receiver
+}
+
+// RunID hashes the tenant, host and nonce text with NUL separators and keeps 128 bits.
+func TestRunIDVector(t *testing.T) {
+	if got := RunID("tenant-a", "host-a", "ZrHrUw-3SKTyOPCMstQuRA"); got != "run-ffe954bd75cb624cd910511f55cc1f10" {
+		t.Fatalf("RunID = %s", got)
+	}
 }
 
 func TestRecordsIgnoreUnknownMembers(t *testing.T) {

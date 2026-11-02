@@ -169,7 +169,7 @@ func TestSuspendedPoolIsNotClaimedFromUntilResumed(t *testing.T) {
 	if err := f.service.PoolSuspend(f.ctx, testPool, false); err != nil {
 		t.Fatal(err)
 	}
-	if task := f.await(t, "run-a", func(task wire.Task) bool { return task.Status.State == wire.TaskStateCompleted }); task.ID != "run-a" {
+	if task := f.await(t, testRun("run-a"), func(task wire.Task) bool { return task.Status.State == wire.TaskStateCompleted }); task.ID != testRun("run-a") {
 		t.Fatalf("task %+v after resume", task)
 	}
 }
@@ -329,13 +329,13 @@ func TestSuspendReturnsOnceTheKeyCustodianAcknowledges(t *testing.T) {
 		t.Fatalf("the first start decided before the suspension ended %v; logs:\n%s", status, f.logs.String())
 	}
 	second := f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-b", "run-b", "run-b"
+		named(task, "run-b")
 	})
 	if status := f.execute(t, second, 1); status != kgo.AckRelease || f.answeredWith(t, wire.RefusedPoolSuspended) != 1 {
 		t.Fatalf("a first start after the acknowledgement ended %v with %d pool suspended refusals, want released and one", status, f.answeredWith(t, wire.RefusedPoolSuspended))
 	}
 	for _, record := range f.records(t, admin.PoolEventsTopic(testPool)) {
-		if recordType(record.Value) == wire.AttemptWrapType && (string(record.Key) != "run-a" || record.Timestamp.After(records[len(records)-1].Timestamp)) {
+		if recordType(record.Value) == wire.AttemptWrapType && (string(record.Key) != testRun("run-a") || record.Timestamp.After(records[len(records)-1].Timestamp)) {
 			t.Fatalf("an attempt wrap for %s appended at %s, after the acknowledgement at %s", record.Key, record.Timestamp, records[len(records)-1].Timestamp)
 		}
 	}
@@ -350,9 +350,9 @@ func TestOneSuspensionReadPerPass(t *testing.T) {
 	if err := f.service.PoolSuspend(f.ctx, testPool, true); err != nil {
 		t.Fatal(err)
 	}
-	for _, run := range []string{"run-a", "run-b", "run-c"} {
+	for _, name := range []string{"run-a", "run-b", "run-c"} {
 		record := f.submit(t, f.host, func(task *wire.Submission) {
-			task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run
+			named(task, name)
 		})
 		f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
 		f.openAs(t, record, testReceiver, f.receiver.signing, 1)

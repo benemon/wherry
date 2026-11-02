@@ -93,7 +93,7 @@ func TestPoolEventsIncrementalViewEqualsAFullRead(t *testing.T) {
 		{
 			func() { f.startFailed(t, record, testReceiver, f.receiver.signing) },
 			func() {
-				f.produce(t, events, "run-a", must(t)(wire.SignRecord(&wire.Cancel{Tenant: testTenant, Host: testHost, Pool: testPool, Run: "run-a"}, f.host)))
+				f.produce(t, events, testRun("run-a"), must(t)(wire.SignRecord(&wire.Cancel{Tenant: testTenant, Host: testHost, Pool: testPool, Run: testRun("run-a")}, f.host)))
 			},
 		},
 		{func() { f.answered(t, f.openAs(t, record, testReceiver, f.receiver.signing, 1)) }},
@@ -103,7 +103,7 @@ func TestPoolEventsIncrementalViewEqualsAFullRead(t *testing.T) {
 			},
 			func() { f.statusAs(t, other, "receiver-b", keyB, "claimed", 1) },
 			func() { f.openAs(t, other, "receiver-b", keyB, 1) },
-			func() { f.produce(t, events, "run-b", []byte("not a record")) },
+			func() { f.produce(t, events, testRun("run-b"), []byte("not a record")) },
 		},
 		{func() { f.statusAs(t, other, "receiver-b", keyB, "started", 1) }},
 	}
@@ -114,7 +114,7 @@ func TestPoolEventsIncrementalViewEqualsAFullRead(t *testing.T) {
 		sameAsFullRead(t, f, fresh)
 	}
 	view := sameAsFullRead(t, f, fresh)
-	if len(view.statuses["run-a"]) != 1 || len(view.statuses["run-b"]) != 2 || len(view.requests) != 2 || len(view.answered) != 1 {
+	if len(view.statuses[testRun("run-a")]) != 1 || len(view.statuses[testRun("run-b")]) != 2 || len(view.requests) != 2 || len(view.answered) != 1 {
 		t.Fatalf("view %s, want every append counted", describeEvents(view))
 	}
 }
@@ -127,7 +127,7 @@ func TestPoolEventsDropWhatRetentionDeleted(t *testing.T) {
 	fresh := freshReader(t, f)
 	record := f.submit(t, f.host, nil)
 	topic := admin.PoolEventsTopic(testPool)
-	f.produce(t, topic, "run-a", must(t)(wire.SignRecord(&wire.Cancel{Tenant: testTenant, Host: testHost, Pool: testPool, Run: "run-a"}, f.host)))
+	f.produce(t, topic, testRun("run-a"), must(t)(wire.SignRecord(&wire.Cancel{Tenant: testTenant, Host: testHost, Pool: testPool, Run: testRun("run-a")}, f.host)))
 	var eventID string
 	f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, func(status *wire.RunStatus) { eventID = status.Wherry.EventID })
 	before := sameAsFullRead(t, f, fresh)
@@ -145,10 +145,10 @@ func TestPoolEventsDropWhatRetentionDeleted(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := sameAsFullRead(t, f, fresh)
-	if len(before.others["run-a"]) != 1 || len(after.others["run-a"]) != 0 {
-		t.Fatalf("cancels %d before and %d after the deletion, want 1 and 0", len(before.others["run-a"]), len(after.others["run-a"]))
+	if len(before.others[testRun("run-a")]) != 1 || len(after.others[testRun("run-a")]) != 0 {
+		t.Fatalf("cancels %d before and %d after the deletion, want 1 and 0", len(before.others[testRun("run-a")]), len(after.others[testRun("run-a")]))
 	}
-	if kept := after.records["run-a"]; len(kept) != 1 || kept[0].Offset != repeated {
+	if kept := after.records[testRun("run-a")]; len(kept) != 1 || kept[0].Offset != repeated {
 		t.Fatalf("status records %d, want the one repeating the deleted status's event ID", len(kept))
 	}
 }
@@ -161,7 +161,7 @@ func TestPoolEventsDropByTheStartInEffectAfterTheFetch(t *testing.T) {
 	fresh := freshReader(t, f)
 	record := f.submit(t, f.host, nil)
 	topic := admin.PoolEventsTopic(testPool)
-	f.produce(t, topic, "run-a", must(t)(wire.SignRecord(&wire.Cancel{Tenant: testTenant, Host: testHost, Pool: testPool, Run: "run-a"}, f.host)))
+	f.produce(t, topic, testRun("run-a"), must(t)(wire.SignRecord(&wire.Cancel{Tenant: testTenant, Host: testHost, Pool: testPool, Run: testRun("run-a")}, f.host)))
 	before := sameAsFullRead(t, f, fresh)
 	f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
 	records := f.records(t, topic)
@@ -176,8 +176,8 @@ func TestPoolEventsDropByTheStartInEffectAfterTheFetch(t *testing.T) {
 		return true
 	}})
 	after := sameAsFullRead(t, f, fresh)
-	if len(before.others["run-a"]) != 1 || len(after.others["run-a"]) != 0 || len(after.statuses["run-a"]) != 1 {
-		t.Fatalf("cancels %d before and %d after, statuses %d after, want 1, 0 and the retained status", len(before.others["run-a"]), len(after.others["run-a"]), len(after.statuses["run-a"]))
+	if len(before.others[testRun("run-a")]) != 1 || len(after.others[testRun("run-a")]) != 0 || len(after.statuses[testRun("run-a")]) != 1 {
+		t.Fatalf("cancels %d before and %d after, statuses %d after, want 1, 0 and the retained status", len(before.others[testRun("run-a")]), len(after.others[testRun("run-a")]), len(after.statuses[testRun("run-a")]))
 	}
 }
 
@@ -190,12 +190,12 @@ func TestPoolEventsRebuildWhenMembershipChanges(t *testing.T) {
 	record := f.submit(t, f.host, nil)
 	f.statusAs(t, record, "receiver-b", keyB, "claimed", 1)
 	f.statusAs(t, record, testReceiver, f.receiver.signing, "claimed", 2)
-	if before := sameAsFullRead(t, f, fresh); len(before.statuses["run-a"]) != 2 {
-		t.Fatalf("statuses %d before the revocation, want 2", len(before.statuses["run-a"]))
+	if before := sameAsFullRead(t, f, fresh); len(before.statuses[testRun("run-a")]) != 2 {
+		t.Fatalf("statuses %d before the revocation, want 2", len(before.statuses[testRun("run-a")]))
 	}
 	f.revoke(t, "receiver-b")
-	if after := sameAsFullRead(t, f, fresh); len(after.statuses["run-a"]) != 1 {
-		t.Fatalf("statuses %d after the revocation, want this receiver's alone", len(after.statuses["run-a"]))
+	if after := sameAsFullRead(t, f, fresh); len(after.statuses[testRun("run-a")]) != 1 {
+		t.Fatalf("statuses %d after the revocation, want this receiver's alone", len(after.statuses[testRun("run-a")]))
 	}
 }
 
@@ -220,7 +220,7 @@ func TestPoolEventsVerifyEachRecordOnce(t *testing.T) {
 	record := f.submit(t, f.host, nil)
 	f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
 	f.startFailed(t, record, testReceiver, f.receiver.signing)
-	f.publishCancel(t, "run-a", 1, f.host, nil)
+	f.publishCancel(t, testRun("run-a"), 1, f.host, nil)
 	f.openAs(t, record, testReceiver, f.receiver.signing, 1)
 	read := func() poolEvents {
 		t.Helper()
@@ -234,7 +234,7 @@ func TestPoolEventsVerifyEachRecordOnce(t *testing.T) {
 		return events
 	}
 	for range 5 {
-		if events := read(); len(events.statuses["run-a"]) != 1 || len(events.startFailures["run-a"]) != 1 || len(events.others["run-a"]) != 1 || len(events.requests) != 1 {
+		if events := read(); len(events.statuses[testRun("run-a")]) != 1 || len(events.startFailures[testRun("run-a")]) != 1 || len(events.others[testRun("run-a")]) != 1 || len(events.requests) != 1 {
 			t.Fatalf("events %s, want one status, one start failure, the cancel and the open request", describeEvents(events))
 		}
 	}

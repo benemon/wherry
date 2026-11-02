@@ -33,16 +33,16 @@ import (
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
-// testActiveRun is a run of a submitted first turn with the receiver's transactional producer.
-func testActiveRun(t *testing.T, f fixture, run string, attempt int64) *activeRun {
+// testActiveRun is a run of name's submitted first turn with the receiver's transactional producer.
+func testActiveRun(t *testing.T, f fixture, name string, attempt int64) *activeRun {
 	t.Helper()
-	producer, err := f.receiver.newProducer(run)
+	producer, err := f.receiver.newProducer(testRun(name))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(producer.Close)
 	record := f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run
+		named(task, name)
 	})
 	task := f.parse(t, record)
 	return &activeRun{receiver: f.receiver, producer: producer, task: task, taskHash: wire.TaskHash(record.Value), history: []wire.Message{task.Message}, attempt: attempt, profile: f.receiver.profiles[0], redactionKey: testRedactionKey}
@@ -180,7 +180,7 @@ func TestTaskMetadataRecordsPlacement(t *testing.T) {
 		want := map[string]any{
 			"receiver_id": testReceiver, "pool": testPool, "profile": "nomad",
 			"labels": map[string]any{"zone": "dc1", "example.com/gpu": "none"},
-			"job":    "agent-run-a",
+			"job":    "agent-" + testRun("run-a"),
 		}
 		if got := decodeObject(t, f.lastTask(t).Metadata); !reflect.DeepEqual(got, want) {
 			t.Fatalf("task metadata %v, want %v", got, want)
@@ -193,7 +193,7 @@ func TestTaskMetadataRecordsPlacement(t *testing.T) {
 		if status := m.execute(t, "run-moved", cpu, 2); status != kgo.AckAccept {
 			t.Fatalf("status %v", status)
 		}
-		want := map[string]any{"receiver_id": testReceiver, "pool": testPool, "profile": "cloud", "job": "agent-run-moved"}
+		want := map[string]any{"receiver_id": testReceiver, "pool": testPool, "profile": "cloud", "job": "agent-" + testRun("run-moved")}
 		if got := decodeObject(t, m.lastTask(t).Metadata); !reflect.DeepEqual(got, want) {
 			t.Fatalf("task metadata %v, want %v", got, want)
 		}
@@ -232,7 +232,7 @@ func TestTranscriptArtifactChunks(t *testing.T) {
 				if i == test.pointer {
 					mediaType = wire.ReferenceMediaType
 				}
-				if update.TaskID != "run-a" || update.ContextID != "run-a" || update.Artifact.ArtifactID != "transcript" || chunk.Wherry.Seq != offset || part.MediaType != mediaType ||
+				if update.TaskID != testRun("run-a") || update.ContextID != testRun("run-a") || update.Artifact.ArtifactID != "transcript" || chunk.Wherry.Seq != offset || part.MediaType != mediaType ||
 					chunk.Wherry.Tenant != testTenant || chunk.Wherry.Pool != testPool {
 					t.Fatalf("chunk %d: %#v", i, chunk)
 				}
@@ -263,7 +263,7 @@ func TestTranscriptArtifactChunks(t *testing.T) {
 			if !test.progress {
 				return
 			}
-			offsets := f.progress(t, testReceiver, "run-a")
+			offsets := f.progress(t, testReceiver, testRun("run-a"))
 			// Once both lines have arrived, a tick commits the first and records where the held second starts.
 			if want := int64(len(test.stream[0]) + 1); len(offsets) < 2 || offsets[len(offsets)-2] != want {
 				t.Fatalf("progress offsets %v, want the last at %d before the tombstone", offsets, want)
@@ -301,11 +301,12 @@ func TestProgressStaysOffTheStateTopics(t *testing.T) {
 	// A second line moves the transcript, so a progress tick commits.
 	f.plugin.stream = append([]string{`{"type":"system"}`}, noResultStream...)
 	f.plugin.endDelay = 4 * renewInterval
-	runs := []string{"run-a", "run-b", "run-c"}
-	for _, run := range runs {
+	var runs []string
+	for _, name := range []string{"run-a", "run-b", "run-c"} {
 		f.execute(t, f.submit(t, f.host, func(task *wire.Submission) {
-			task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run
+			named(task, name)
 		}), 1)
+		runs = append(runs, testRun(name))
 	}
 	progress := f.progressByRun(t, testReceiver)
 	for _, run := range runs {
@@ -362,7 +363,7 @@ func TestProgressOnlyWhenTheTranscriptMoves(t *testing.T) {
 	for _, chunk := range f.chunks(t) {
 		starts[chunk.Wherry.Seq] = true
 	}
-	offsets := f.progress(t, testReceiver, "run-a")
+	offsets := f.progress(t, testReceiver, testRun("run-a"))
 	if len(offsets) == 0 || offsets[len(offsets)-1] != -1 {
 		t.Fatalf("progress offsets %v, want a tombstone last", offsets)
 	}
@@ -422,7 +423,7 @@ func TestTaskResultTextPartOtherwise(t *testing.T) {
 			if part.Text != result || part.Data != nil || part.MediaType != "" {
 				t.Fatalf("result part %#v, want text %q", part, result)
 			}
-			if task.ID != "run-text" || task.ContextID != "run-text" || len(task.History) != 1 || task.History[0].MessageID != "msg-a" {
+			if task.ID != testRun("run-text") || task.ContextID != testRun("run-text") || len(task.History) != 1 || task.History[0].MessageID != "msg-a" {
 				t.Fatalf("task ids or history %#v", task)
 			}
 		})
@@ -470,7 +471,7 @@ func TestReceiverReleasesAfterTerminal(t *testing.T) {
 		}
 		f.plugin.mu.Lock()
 		defer f.plugin.mu.Unlock()
-		if f.plugin.stops != 1 || f.plugin.releases != 1 || f.plugin.releaseIDs[0] != "run-release-stop" {
+		if f.plugin.stops != 1 || f.plugin.releases != 1 || f.plugin.releaseIDs[0] != testRun("run-release-stop") {
 			t.Fatalf("stops=%d releases=%v", f.plugin.stops, f.plugin.releaseIDs)
 		}
 	})
@@ -553,7 +554,7 @@ func TestStopFailureReleasesWithoutTerminal(t *testing.T) {
 			if status != kgo.AckReject {
 				t.Fatalf("status %v, want reject", status)
 			}
-			if state, reason := terminalReason(t, f, "run-stop-budget-"+test.name); state != wire.TaskStateFailed || reason != "delivery budget exhausted" {
+			if state, reason := terminalReason(t, f, testRun("run-stop-budget-"+test.name)); state != wire.TaskStateFailed || reason != "delivery budget exhausted" {
 				t.Fatalf("terminal %s %q", state, reason)
 			}
 		})
@@ -616,10 +617,10 @@ func TestAdoptionResumesFromLastOffset(t *testing.T) {
 	started := int64(5)
 	f.holding(t, task, hash, testReceiver, f.receiver.signing, "started", &started)
 	for _, offset := range []int64{10, 42} {
-		f.produce(t, admin.ReceiverProgressTopic(testReceiver), "run-adopt", progressRecord(t, hash, offset, nil))
+		f.produce(t, admin.ReceiverProgressTopic(testReceiver), testRun("run-adopt"), progressRecord(t, hash, offset, nil))
 	}
 	// A fenced holder's aborted progress must not move the resume point.
-	aborted, err := f.receiver.newProducer("run-adopt")
+	aborted, err := f.receiver.newProducer(testRun("run-adopt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -627,7 +628,7 @@ func TestAdoptionResumesFromLastOffset(t *testing.T) {
 	if err := aborted.BeginTransaction(); err != nil {
 		t.Fatal(err)
 	}
-	if err := aborted.ProduceSync(f.ctx, &kgo.Record{Topic: admin.ReceiverProgressTopic(testReceiver), Key: []byte("run-adopt"), Value: progressRecord(t, hash, 99, nil)}).FirstErr(); err != nil {
+	if err := aborted.ProduceSync(f.ctx, &kgo.Record{Topic: admin.ReceiverProgressTopic(testReceiver), Key: []byte(testRun("run-adopt")), Value: progressRecord(t, hash, 99, nil)}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	if err := aborted.EndTransaction(f.ctx, kgo.TryAbort); err != nil {
@@ -647,7 +648,7 @@ func TestAdoptedRunEndsFromTheOutcomeFile(t *testing.T) {
 	record := f.submit(t, f.host, nil)
 	resume := int64(len(stream[0]) + 1)
 	f.holding(t, f.parse(t, record), wire.TaskHash(record.Value), testReceiver, f.receiver.signing, "claimed", nil)
-	f.produce(t, admin.ReceiverProgressTopic(testReceiver), "run-a", progressRecord(t, wire.TaskHash(record.Value), resume, nil))
+	f.produce(t, admin.ReceiverProgressTopic(testReceiver), testRun("run-a"), progressRecord(t, wire.TaskHash(record.Value), resume, nil))
 	if status := f.execute(t, record, 2); status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
@@ -693,9 +694,9 @@ func TestLastOffsetIgnoresMismatchedStatus(t *testing.T) {
 		progressRecord(t, hash, 99, func(progress *wire.Progress) { progress.Tenant = "tenant-b" }),
 		[]byte(`{"v":1,"tenant":"tenant-a","tenant":"tenant-a","task_hash":"` + hash + `","attempt":1,"log_offset":99}`),
 	} {
-		f.produce(t, admin.ReceiverProgressTopic(testReceiver), "run-offset-binding", value)
+		f.produce(t, admin.ReceiverProgressTopic(testReceiver), testRun("run-offset-binding"), value)
 	}
-	f.produce(t, admin.ReceiverProgressTopic(testReceiver), "run-other", progressRecord(t, hash, 99, nil))
+	f.produce(t, admin.ReceiverProgressTopic(testReceiver), testRun("run-other"), progressRecord(t, hash, 99, nil))
 	if got, _, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
 		t.Fatalf("resume offset %d err %v, want 42", got, err)
 	}
@@ -738,8 +739,8 @@ func TestAdoptionTrustsPeerProgress(t *testing.T) {
 	hash := strings.Repeat("a", 64)
 	f.holding(t, task, hash, "receiver-peer", peerSigning, "claimed", nil)
 	f.holding(t, task, hash, "receiver-other-pool", otherSigning, "claimed", nil)
-	f.produce(t, admin.ReceiverProgressTopic("receiver-peer"), "run-peer", progressRecord(t, hash, 42, nil))
-	f.produce(t, admin.ReceiverProgressTopic("receiver-other-pool"), "run-peer", progressRecord(t, hash, 99, nil))
+	f.produce(t, admin.ReceiverProgressTopic("receiver-peer"), testRun("run-peer"), progressRecord(t, hash, 42, nil))
+	f.produce(t, admin.ReceiverProgressTopic("receiver-other-pool"), testRun("run-peer"), progressRecord(t, hash, 99, nil))
 	if got, _, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
 		t.Fatalf("peer progress offset %d err %v, want 42", got, err)
 	}
@@ -757,7 +758,7 @@ func TestAdoptionFallsBackToStartedWithoutTheHoldersProgress(t *testing.T) {
 			started := int64(7)
 			f.holding(t, task, hash, testReceiver, f.receiver.signing, "started", &started)
 			f.holding(t, task, hash, "receiver-peer", peerSigning, "claimed", nil)
-			f.produce(t, admin.ReceiverProgressTopic("receiver-peer"), "run-peer", progressRecord(t, hash, 42, nil))
+			f.produce(t, admin.ReceiverProgressTopic("receiver-peer"), testRun("run-peer"), progressRecord(t, hash, 42, nil))
 			if got, _, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
 				t.Fatalf("live peer's progress offset %d err %v, want 42", got, err)
 			}
@@ -800,7 +801,7 @@ func TestLastOffsetSkipsOnlyAnEndedHoldersTopicDenial(t *testing.T) {
 	started := int64(7)
 	f.holding(t, task, hash, testReceiver, f.receiver.signing, "started", &started)
 	f.holding(t, task, hash, "receiver-peer", peerSigning, "claimed", nil)
-	f.produce(t, admin.ReceiverProgressTopic("receiver-peer"), "run-peer", progressRecord(t, hash, 42, nil))
+	f.produce(t, admin.ReceiverProgressTopic("receiver-peer"), testRun("run-peer"), progressRecord(t, hash, 42, nil))
 	revocationBounds(t, f.service, "1")
 	result := f.service.RevokeReceiver(f.ctx, "receiver-peer", time.Millisecond, func(context.Context, string, string) error { return admin.ErrAuthorizationDenied })
 	revocationBounds(t, f.service, "")
@@ -852,7 +853,7 @@ func TestFencedProducerStopsRunWrites(t *testing.T) {
 	if err := zombie.commit(f.ctx, zombie.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(admin.TransactionalPrefix(testPool)+"run-fence", "p."+testPool+".") {
+	if !strings.HasPrefix(admin.TransactionalPrefix(testPool)+testRun("run-fence"), "p."+testPool+".") {
 		t.Fatal("transactional ID is outside the pool's prefix")
 	}
 	adopter := testActiveRun(t, f, "run-fence", 2)
@@ -866,7 +867,7 @@ func TestFencedProducerStopsRunWrites(t *testing.T) {
 	if status := zombie.abandon(err); status != 0 {
 		t.Fatalf("fenced run returned ack %v, want 0 (no acknowledgement)", status)
 	}
-	if offsets := f.progress(t, testReceiver, "run-fence"); len(offsets) != 0 {
+	if offsets := f.progress(t, testReceiver, testRun("run-fence")); len(offsets) != 0 {
 		t.Fatalf("zombie progress %v is readable after fencing", offsets)
 	}
 }
@@ -900,7 +901,7 @@ func TestStartFailureWriteDenialStopsTheReceiver(t *testing.T) {
 	if status := run.startFailure(f.ctx, "dispatch", "profile nomad created no job"); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
 	}
-	if err := halt(); err == nil || !strings.HasPrefix(err.Error(), "denied write: ") || !strings.Contains(f.logs.String(), "run run-a: write failed") {
+	if err := halt(); err == nil || !strings.HasPrefix(err.Error(), "denied write: ") || !strings.Contains(f.logs.String(), "run "+testRun("run-a")+": write failed") {
 		t.Fatalf("a start failure that could not be written was not denied and logged; logs:\n%s", f.logs.String())
 	}
 	f.plugin.mu.Lock()
@@ -976,7 +977,7 @@ func TestFollowLinkLossFailsAfterOneLockDuration(t *testing.T) {
 	if waited := time.Since(started); waited < 2*time.Second {
 		t.Fatalf("run failed %s after the loss, before one lock duration", waited)
 	}
-	if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "log stream failed" {
+	if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != "log stream failed" {
 		t.Fatalf("terminal %s %q; want FAILED log stream failed", state, reason)
 	}
 	if _, _, follows, _ := f.plugin.counts(); follows < 2 {
@@ -1016,7 +1017,7 @@ func TestFollowErrorResumesFromOffsetByJobState(t *testing.T) {
 			if want := strings.Join(resultStream, ""); transcript.String() != want {
 				t.Fatalf("transcript %q, want %q", transcript.String(), want)
 			}
-			if want := fmt.Sprintf("run run-a: follow failed (%s); following again from offset %d\n", test.name, first); strings.Count(f.logs.String(), want) != 1 {
+			if want := fmt.Sprintf("run %s: follow failed (%s); following again from offset %d\n", testRun("run-a"), test.name, first); strings.Count(f.logs.String(), want) != 1 {
 				t.Fatalf("logs lack one %q:\n%s", want, f.logs.String())
 			}
 		})
@@ -1062,7 +1063,7 @@ func TestFollowErrorFailsAfterOneLockDuration(t *testing.T) {
 			if waited := time.Since(started); waited < 2*time.Second {
 				t.Fatalf("run failed %s after the failure, before one lock duration", waited)
 			}
-			if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "log stream failed" {
+			if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != "log stream failed" {
 				t.Fatalf("terminal %s %q; want FAILED log stream failed", state, reason)
 			}
 			if _, lookups, _, _ := f.plugin.counts(); lookups < 2 {
@@ -1118,11 +1119,11 @@ func TestDispatchErrorDetailIsNotPublished(t *testing.T) {
 
 func TestDispatchErrorIsLoggedRedacted(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.plugin.dispatchErr = &pluginsdk.Error{Op: "write variable nomad/jobs/agent-run-a-t1", Class: "denied", Err: errors.New("status 403: echoed " + testToken)}
+	f.plugin.dispatchErr = &pluginsdk.Error{Op: "write variable nomad/jobs/agent-" + testRun("run-a") + "-t1", Class: "denied", Err: errors.New("status 403: echoed " + testToken)}
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v", status)
 	}
-	want := "dispatch failed: op=write variable nomad/jobs/agent-run-a-t1 class=denied: status 403: echoed " + signed.RedactionMarker(testRedactionKey, credentialName) + "\n"
+	want := "dispatch failed: op=write variable nomad/jobs/agent-" + testRun("run-a") + "-t1 class=denied: status 403: echoed " + signed.RedactionMarker(testRedactionKey, credentialName) + "\n"
 	if logs := f.logs.String(); !strings.Contains(logs, want) || strings.Contains(logs, testToken) {
 		t.Fatalf("dispatch error log lacks %q or holds the credential: %q", want, logs)
 	}
@@ -1504,15 +1505,15 @@ func TestReceiverDeliversTheAgentsCredentialsInEveryProfile(t *testing.T) {
 	m := newMultiFixture(t)
 	want := []pluginsdk.Secret{{Name: credentialName, Env: credentialEnv, Value: []byte(testToken)}}
 	for _, routed := range []struct {
-		run      string
+		name     string
 		selector []wire.Requirement
 		plugin   *fakePlugin
 	}{{"run-lab", cpu, m.lab}, {"run-edge", arm, m.edge}} {
-		if status := m.execute(t, routed.run, routed.selector, 1); status != kgo.AckAccept {
-			t.Fatalf("%s status %v", routed.run, status)
+		if status := m.execute(t, routed.name, routed.selector, 1); status != kgo.AckAccept {
+			t.Fatalf("%s status %v", routed.name, status)
 		}
 		if got := routed.plugin.lastRun.Credentials; !reflect.DeepEqual(got, want) {
-			t.Fatalf("%s dispatched %d credentials, want the agent's at its environment variable", routed.run, len(got))
+			t.Fatalf("%s dispatched %d credentials, want the agent's at its environment variable", routed.name, len(got))
 		}
 	}
 	if strings.Contains(m.logs.String(), testToken) {
@@ -1666,7 +1667,7 @@ func (f fixture) leftRunning(t *testing.T) {
 	if kinds := f.kinds(t); slices.Contains(kinds, "released") || slices.Contains(kinds, "terminal") {
 		t.Fatalf("stopped receiver acknowledged its held run: statuses %v", kinds)
 	}
-	if record, delivered := f.pollPool(t, "run-a", 30*time.Second); !delivered || record.DeliveryCount() < 2 {
+	if record, delivered := f.pollPool(t, testRun("run-a"), 30*time.Second); !delivered || record.DeliveryCount() < 2 {
 		t.Fatal("the held run's task was not delivered again")
 	}
 }
@@ -1738,10 +1739,10 @@ func TestRestartedReceiverAdoptsTheJobADeniedOneLeft(t *testing.T) {
 // adoptedOnce waits for run-a's one terminal result, which an adopter of the job the first dispatch created reached.
 func (f fixture) adoptedOnce(t *testing.T) {
 	t.Helper()
-	f.await(t, "run-a", func(task wire.Task) bool { return wire.Terminal(task.Status.State) })
+	f.await(t, testRun("run-a"), func(task wire.Task) bool { return wire.Terminal(task.Status.State) })
 	terminals := 0
 	for _, result := range f.results(t) {
-		if result.Task.ID == "run-a" && wire.Terminal(result.Task.Status.State) {
+		if result.Task.ID == testRun("run-a") && wire.Terminal(result.Task.Status.State) {
 			terminals++
 		}
 	}
@@ -1828,7 +1829,7 @@ func TestAdoptionTrustsRotatedPeerKey(t *testing.T) {
 	task := testSubmission("run-peer")
 	hash := strings.Repeat("a", 64)
 	f.holding(t, task, hash, "receiver-peer", next, "claimed", nil)
-	f.produce(t, admin.ReceiverProgressTopic("receiver-peer"), "run-peer", progressRecord(t, hash, 42, nil))
+	f.produce(t, admin.ReceiverProgressTopic("receiver-peer"), testRun("run-peer"), progressRecord(t, hash, 42, nil))
 	if got, _, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
 		t.Fatalf("claim under the peer's rotated key: offset %d err %v, want 42", got, err)
 	}
@@ -1899,7 +1900,7 @@ func TestReturnTaskAtTheBudgetFailsWithoutRemoving(t *testing.T) {
 	if status := run.returnTask(f.ctx, nil); status != kgo.AckReject {
 		t.Fatalf("status %v, want reject", status)
 	}
-	if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "delivery budget exhausted" {
+	if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != "delivery budget exhausted" {
 		t.Fatalf("terminal %s %q", state, reason)
 	}
 	f.plugin.mu.Lock()
@@ -1935,7 +1936,7 @@ func TestMismatchedJobIsPurgedNotAdopted(t *testing.T) {
 			if dispatches, _, follows, _ := m.lab.counts(); dispatches != 1 || follows != 1 {
 				t.Fatalf("matched profile dispatches=%d follows=%d, want a fresh dispatch", dispatches, follows)
 			}
-			if want := fmt.Sprintf("run run-mismatch: purged a job from profile %q agent %q", profile, agent); !strings.Contains(m.logs.String(), want) {
+			if want := fmt.Sprintf("run %s: purged a job from profile %q agent %q", testRun("run-mismatch"), profile, agent); !strings.Contains(m.logs.String(), want) {
 				t.Fatalf("logs lack %q:\n%s", want, m.logs.String())
 			}
 		})
@@ -1983,8 +1984,8 @@ func TestNeverStartedPluginClassIsAPlatformStartFailure(t *testing.T) {
 // redacted; without a reason the line is as it was.
 func TestNeverStartedReasonIsLoggedRedacted(t *testing.T) {
 	for _, test := range []struct{ name, reason, want string }{
-		{"reason", "template rendered " + testToken, "run run-a: job never started (driver): template rendered " + signed.RedactionMarker(testRedactionKey, credentialName) + "\n"},
-		{"no reason", "", "run run-a: job never started (driver)\n"},
+		{"reason", "template rendered " + testToken, "run " + testRun("run-a") + ": job never started (driver): template rendered " + signed.RedactionMarker(testRedactionKey, credentialName) + "\n"},
+		{"no reason", "", "run " + testRun("run-a") + ": job never started (driver)\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
@@ -2084,7 +2085,7 @@ func TestBudgetExhaustedByStartFailuresNamesTheLastCause(t *testing.T) {
 			if status := f.execute(t, f.submit(t, f.host, nil), 4); status != kgo.AckReject {
 				t.Fatalf("status %v, want reject; logs:\n%s", status, f.logs.String())
 			}
-			if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != test.want {
+			if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != test.want {
 				t.Fatalf("terminal %s %q, want %q", state, reason, test.want)
 			}
 		})
@@ -2147,7 +2148,7 @@ func TestPurgeFailingPastTheDeadlineFails(t *testing.T) {
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckReject {
 		t.Fatalf("status %v, want reject", status)
 	}
-	if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "start failed and the job could not be removed" {
+	if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != "start failed and the job could not be removed" {
 		t.Fatalf("terminal %s %q", state, reason)
 	}
 	f.plugin.mu.Lock()
@@ -2178,7 +2179,7 @@ func TestStartFailureAtTheDeliveryBudgetFails(t *testing.T) {
 			if test.ack != kgo.AckReject {
 				return
 			}
-			if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "delivery budget exhausted after 9 attempts; last: profile nomad created no job" {
+			if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != "delivery budget exhausted after 9 attempts; last: profile nomad created no job" {
 				t.Fatalf("terminal %s %q", state, reason)
 			}
 		})
@@ -2235,7 +2236,7 @@ func TestOversizedJobNameIsRejected(t *testing.T) {
 			}
 			record := f.submit(t, f.host, nil)
 			if test.cancelled {
-				f.publishCancel(t, "run-a", 0, f.host, nil)
+				f.publishCancel(t, testRun("run-a"), 0, f.host, nil)
 			}
 			if status := f.execute(t, record, test.attempt); status != test.ack {
 				t.Fatalf("status %v, want %v; logs:\n%s", status, test.ack, f.logs.String())
@@ -2310,7 +2311,7 @@ func TestReleasesAtTheBudgetFail(t *testing.T) {
 			if !test.readable {
 				return
 			}
-			if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "delivery budget exhausted" {
+			if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != "delivery budget exhausted" {
 				t.Fatalf("terminal %s %q", state, reason)
 			}
 		})
@@ -2366,7 +2367,7 @@ func TestAdoptionMatchesTheProfileNameInJobMetadata(t *testing.T) {
 	if dispatches, _, follows, _ := m.cloud.counts(); dispatches != 0 || follows != 1 {
 		t.Fatalf("cloud dispatches=%d follows=%d, want the job its metadata names cloud adopted", dispatches, follows)
 	}
-	if want := "run run-adopted: found attempt 1's job in profile cloud"; !strings.Contains(m.logs.String(), want) {
+	if want := "run " + testRun("run-adopted") + ": found attempt 1's job in profile cloud"; !strings.Contains(m.logs.String(), want) {
 		t.Fatalf("logs lack %q:\n%s", want, m.logs.String())
 	}
 }

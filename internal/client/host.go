@@ -391,8 +391,9 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, fmt.Errorf("%w: git remote host %s is not in pool %s's vcs hosts", ErrInvalidInput, host, pool)
 		}
 	}
-	runID := wire.RandomID("run-")
-	submission, err := h.submission(runID, pool, placement, append([]wire.Part{{Text: input.Prompt}}, input.Parts...), input.StartBy, input.EndBy)
+	nonce := wire.RunNonce()
+	runID := wire.RunID(h.tenant, h.host, nonce)
+	submission, err := h.submission(runID, nonce, pool, placement, append([]wire.Part{{Text: input.Prompt}}, input.Parts...), input.StartBy, input.EndBy)
 	if err != nil {
 		return SubmitResult{}, err
 	}
@@ -597,11 +598,11 @@ func (h *Host) Cancel(ctx context.Context, runID string) (CancelResult, error) {
 	return CancelResult{RunID: runID, Skipped: r.skipped}, nil
 }
 
-func (h *Host) submission(runID, pool string, placement wire.Placement, parts []wire.Part, startBy, endBy time.Time) (*wire.Submission, error) {
+func (h *Host) submission(runID, nonce, pool string, placement wire.Placement, parts []wire.Part, startBy, endBy time.Time) (*wire.Submission, error) {
 	return &wire.Submission{
 		Message: wire.Message{MessageID: wire.RandomID("msg-"), ContextID: runID, TaskID: runID, Role: wire.RoleUser, Parts: parts, Extensions: []string{wire.ExtensionURI}},
 		Wherry: wire.SubmissionBinding{
-			Tenant: h.tenant, Host: h.host, Pool: pool, Run: runID, Placement: placement,
+			Tenant: h.tenant, Host: h.host, Pool: pool, Run: runID, RunNonce: nonce, Placement: placement,
 			TaskStartedBy: startBy.Unix(), TaskEndedBy: endBy.Unix(),
 		},
 	}, nil
@@ -762,6 +763,8 @@ type runRecord struct {
 	Task *wire.Submission `json:"task,omitzero"`
 	// Replacement names the run that resubmits this one, recorded before the replacement is built.
 	Replacement string `json:"replacement,omitzero"`
+	// ReplacementNonce is the replacement's run nonce.
+	ReplacementNonce string `json:"replacement_nonce,omitzero"`
 	// Signed is a resubmission's exact signed submission, stored before it is produced, and Produced records that the
 	// broker acknowledged it.
 	Signed   []byte `json:"signed,omitzero"`

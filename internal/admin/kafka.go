@@ -1142,7 +1142,7 @@ func (service *Service) recordLimits(ctx context.Context, state State, pool stri
 var taskRecord = struct {
 	name  string
 	batch int64
-}{"a task with a maximum envelope", 89385}
+}{"a task with a maximum envelope", 89326}
 
 // feedRecords are the largest bounded records a receiver writes to a feed, as a refusal names them, each with the size
 // of a record batch holding it alone, signed. TestFeedRecordsArePinned builds and signs each record to pin these.

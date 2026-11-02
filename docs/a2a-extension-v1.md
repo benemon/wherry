@@ -255,6 +255,7 @@ A submission is the task of one run.
     "host": "laptop",
     "pool": "build",
     "run": "run-0f3c...",
+    "run_nonce": "ZrHrUw-3SKTyOPCMstQuRA",
     "placement": {
       "agent": "coder",
       "selector": [{"key": "isolation", "operator": "In", "values": ["container"]}],
@@ -283,6 +284,11 @@ A submission is the task of one run.
 - `message` is the run's A2A `Message`, with `role` `ROLE_USER`. Readers
   reject a submission with another role. Its `taskId` and `contextId` are
   the run ID.
+- `run_nonce` is 16 random bytes in base64url without padding: exactly 22
+  characters that decode, strictly, to 16 bytes. `run` is `run-` and the
+  first 32 lowercase hex digits of the SHA-256 of `wherry-run`, `tenant`,
+  `host` and `run_nonce`, joined by NUL bytes. A host draws a fresh
+  `run_nonce` for each run, so a run ID is bound to the host that signs it.
 - `placement.agent` is an agent from the pool's terms. `placement.selector`
   is a list of `{key, operator, values}` requirements: `operator` is `In`,
   `NotIn`, `Exists` or `DoesNotExist`; `In` and `NotIn` take one or more
@@ -350,7 +356,8 @@ A submission is the task of one run.
 - `replaces` and `s3_input_run` appear together, on a resubmission alone.
   `replaces` is the run, other than this one, that the resubmission
   replaces, and `s3_input_run` the run under whose prefix its S3 inputs lie,
-  the first run of the chain of replacements. Both are run IDs.
+  the first run of the chain of replacements. Both are run IDs. A
+  resubmission's `run` derives from its own `run_nonce`.
 - `envelope` and `wrap` appear together, as ordinary members of `wherry`.
   `envelope` is a compact JWE of at most 64 KiB, protected header exactly
   `alg` `dir`, `enc` `A256GCM` and `typ`
@@ -492,7 +499,7 @@ base64 does. The fixed texts are:
   `not started by task_started_by (<RFC 3339 time>)`,
   `not ended by task_ended_by (<RFC 3339 time>)`,
   `task_ended_by is past task_started_by plus the 6h run cap`,
-  `unsupported message part`, `run ID in use`,
+  `unsupported message part`, `run ID does not match its signer`,
   `git remote host <host> is not in pool <pool>'s vcs hosts`, and
   `pool <pool> has no storage for S3 inputs and outputs`;
 - failed: `not started by task_started_by (<RFC 3339 time>)`,
@@ -746,8 +753,8 @@ An echo tells every host of a tenant where a run was admitted.
 ```json
 {
   "v": 1,
-  "receiver": "nomad-1", "tenant": "alice", "pool": "build",
-  "run": "run-0f3c...",
+  "receiver": "nomad-1", "tenant": "alice", "host": "laptop", "pool": "build",
+  "run": "run-0f3c...", "run_nonce": "ZrHrUw-3SKTyOPCMstQuRA",
   "placement": {"agent": "coder", "selector": []},
   "task_hash": "9d2a...",
   "message_id": "msg-77c0..."
@@ -758,11 +765,13 @@ A receiver writes the echo in the transaction that holds the run's
 `claimed` or `rejected` status, or its `terminal` status when the receiver
 ends at the [delivery budget](#delivery-budget) a run no ready plugin profile
 satisfies or a run it already failed to start. The echo's fields copy the
-submission's. A
-host that has no record of the run takes the run's pool from its first
-valid echo, and ignores records of the run from any other pool. A status or
-chunk binds to the run when its `task_hash` equals the hash of the run's
-submission.
+submission's, so the echo of a task rejected with `run ID does not match its
+signer` carries the `host` and `run_nonce` that do not derive its `run`. A
+host that has no record of the run takes the run's pool and submission hash
+from its first valid echo whose `tenant`, `host` and `run_nonce` derive its
+`run` ([Submission](#submission)), ignores every other echo, and ignores
+records of the run from any other pool. A status or chunk binds to the run
+when its `task_hash` equals the hash of the run's submission.
 
 ## Advertisement
 
@@ -942,7 +951,7 @@ These releases are exempt:
 - a receiver that cannot read the pool's events at admission releases the
   task, since it cannot check for a committed terminal;
 - a receiver that cannot read the run's submissions at admission releases the
-  task, since it cannot tell whose run ID it is;
+  task, since it cannot tell which is the run's earliest accepted submission;
 - a receiver that is shutting down releases the task, since an adopter
   continues the run;
 - a denied receiver releases the task, since it cannot write;
@@ -1329,20 +1338,18 @@ A receiver that claims a submission:
    status in a terminal state, `TASK_STATE_REJECTED` included, with its task
    hash;
 2. drops it when it fails the [signed-record checks](#signed-records), or
-   when its Kafka key is not its `run`, and acknowledges it and writes nothing
-   when it is a later copy, byte for byte, of the run's earliest accepted
-   submission: the earliest on the pool's task topic, read to its last stable
-   offset, that passes those checks under its run's Kafka key, carries an
-   `envelope`, and whose bounds hold at its append time: `task_started_by`
-   not passed and within the pool's `start_by_limit_ms`, and
-   `task_ended_by` neither before `task_started_by` nor more than six hours
-   after it;
-3. rejects it with `run ID in use` when the run ID belongs to another
-   tenant: the tenant of the run's earliest submission on the pool's task
-   topic that a live host's current key verifies, or of the run's earliest
-   status other than a rejection on the pool's events. Ownership survives
-   the owner's host being ended, since the run's statuses still name its
-   tenant. This check comes before any record is written under the run ID;
+   when its Kafka key is not its `run`;
+3. rejects it with `run ID does not match its signer` when its `run_nonce`
+   is missing or not canonical, or its `tenant`, `host` and `run_nonce` do
+   not derive its `run` ([Submission](#submission)), and acknowledges it and
+   writes nothing when it is a later copy, byte for byte, of the run's
+   earliest accepted submission: the earliest on the pool's task topic, read
+   to its last stable offset, that passes those checks and this one under its
+   run's Kafka key, carries an `envelope`, and whose bounds hold at its append
+   time: `task_started_by` not passed and within the pool's
+   `start_by_limit_ms`, and `task_ended_by` neither before `task_started_by`
+   nor more than six hours after it. The rejection names the signer's tenant
+   and task hash, so it binds to no other host's run;
 4. rejects it with `the task carries no envelope` when it has none, and when
    its agent is outside the pool's terms; with
    `model not in the pool's terms` when the agent has `models` and the
@@ -1657,7 +1664,7 @@ attribute to a host and run with a `rejected` [status](#status) in
 
 | Refusal | Outcome | Message text |
 | --- | --- | --- |
-| the run ID belongs to another tenant | rejected | `run ID in use` |
+| the `run_nonce` is missing or not canonical, or the `tenant`, `host` and `run_nonce` do not derive the `run` | rejected | `run ID does not match its signer` |
 | the agent is not in the pool's terms | rejected | `agent is outside the pool terms` |
 | the model is not in the agent's terms | rejected | `model not in the pool's terms` |
 | a later submission of a run ID | rejected | `duplicate submission` |

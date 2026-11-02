@@ -364,6 +364,9 @@ func TestAKeyLostRunIsResubmitted(t *testing.T) {
 		t.Fatal(err)
 	}
 	binding, original := replacement.Wherry, task.submission.Wherry
+	if wire.CheckRunID(original) != nil || wire.CheckRunID(binding) != nil {
+		t.Fatalf("run IDs %s and %s; want each derived from its tenant, host and nonce", original.Run, binding.Run)
+	}
 	if binding.Run != status.Replacement || binding.Replaces != runID || binding.S3InputRun != runID || binding.TaskStartedBy != original.TaskStartedBy ||
 		binding.TaskEndedBy != original.TaskEndedBy || !reflect.DeepEqual(binding.Placement.Selector, original.Placement.Selector) || binding.Placement.Agent != original.Placement.Agent {
 		t.Fatalf("replacement binding %+v; original %+v", binding, original)
@@ -457,6 +460,32 @@ func TestAStoredReplacementIsProducedAsStored(t *testing.T) {
 	}
 	if produced, err := f.host.localRun(local.Replacement); err != nil || !produced.Produced {
 		t.Fatalf("replacement record %+v, %v; want it marked produced", produced, err)
+	}
+}
+
+// A crash after the replacement's run is recorded and before its bytes are stored leaves the next pass to build it under
+// the recorded run ID.
+func TestAReplacementRetriedBeforeItsBytesKeepsItsRunID(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	source := f.host.credentials["model"]
+	f.host.credentials["model"] = credential.Source{Command: []string{"false"}}
+	receiver.keyLost(t, f.ctx, task)
+	if _, err := f.host.resubmit(f.ctx, runID, false); err == nil {
+		t.Fatal("resubmit succeeded without its credential")
+	}
+	local, err := f.host.localRun(runID)
+	if err != nil || local.Replacement == "" {
+		t.Fatalf("record %+v, %v; want the replacement recorded", local, err)
+	}
+	f.host.credentials["model"] = source
+	if replacement, err := f.host.resubmit(f.ctx, runID, false); err != nil || replacement != local.Replacement {
+		t.Fatalf("retry replaced with %q, %v; want %s", replacement, err, local.Replacement)
+	}
+	replacement, _, err := open(t, f, local.Replacement, f.poolKeys["pool-a"])
+	if err != nil || wire.CheckRunID(replacement.Wherry) != nil {
+		t.Fatalf("replacement %+v, %v; want its run ID derived from its nonce", replacement.Wherry, err)
 	}
 }
 

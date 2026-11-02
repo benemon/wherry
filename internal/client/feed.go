@@ -226,6 +226,11 @@ func (r *runView) addEcho(ctx context.Context, record *kgo.Record, kid string) b
 	if err != nil || echo.Run != r.run {
 		return false
 	}
+	// An echo of a task whose run ID its signer does not derive names a run that is not its own.
+	if wire.CheckEchoRunID(echo) != nil {
+		r.unread++
+		return true
+	}
 	if r.pool == "" {
 		r.pool = echo.Pool
 	}

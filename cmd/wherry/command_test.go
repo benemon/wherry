@@ -278,7 +278,7 @@ func (b *bus) binding(task task) wire.ReceiverBinding {
 
 func (b *bus) echo(t *testing.T, task task) []byte {
 	binding := task.submission.Wherry
-	return b.sign(t, &wire.Echo{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: binding.Run, Placement: binding.Placement,
+	return b.sign(t, &wire.Echo{Receiver: "receiver-a", Tenant: "tenant-a", Host: binding.Host, Pool: "pool-a", Run: binding.Run, RunNonce: binding.RunNonce, Placement: binding.Placement,
 		TaskHash: task.hash, MessageID: task.submission.Message.MessageID})
 }
 

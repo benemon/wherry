@@ -255,7 +255,10 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		held.budgetEnded()
 		return nil, kgo.AckReject
 	}
-	// Nothing is written under the run key before its owner is known; unreadable submissions leave it unknown.
+	// A mismatch's rejection carries its signer's tenant and hash, which every reader of the run's statuses filters by.
+	if err := wire.CheckRunID(task.Wherry); err != nil {
+		return reject(err.Error())
+	}
 	all, err := r.readSubmissions(ctx, run)
 	if err != nil {
 		r.logger.Printf("read run %s submissions: %v", run, err)
@@ -268,9 +271,6 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	winner := slices.IndexFunc(all, func(submission runSubmission) bool { return admissible(submission, terms) })
 	if winner >= 0 && all[winner].hash == hash && all[winner].offset != record.Offset {
 		return nil, kgo.AckAccept
-	}
-	if foreignRun(all, events.statuses[run], task.Wherry.Tenant) {
-		return reject("run ID in use")
 	}
 	if task.Wherry.Envelope == "" {
 		return reject("the task carries no envelope")
@@ -373,18 +373,6 @@ func modelInTerms(agent admin.AgentTerms, model string) bool {
 	return slices.Contains(agent.Models, model) || len(agent.Models) == 0 && model == ""
 }
 
-// foreignRun reports that a run ID belongs to a tenant other than tenant: the tenant of its earliest
-// submission a live host's key verifies, or of its earliest status a holder wrote. Receivers cannot read
-// an ended host's key topic, so for a run whose host has ended the status is the only source.
-// Every non-rejected status counts as a claim, so admission writes nothing else under the run key before this check.
-func foreignRun(all []runSubmission, statuses []wire.RunStatus, tenant string) bool {
-	if len(all) > 0 && all[0].record.Wherry.Tenant != tenant {
-		return true
-	}
-	held := slices.IndexFunc(statuses, func(status wire.RunStatus) bool { return status.Wherry.Kind != "rejected" })
-	return held >= 0 && statuses[held].Wherry.Tenant != tenant
-}
-
 // s3Outputs names the outputs that return through the pool's bucket.
 func s3Outputs(outputs []wire.ExpectedOutput) []string {
 	var names []string
@@ -428,8 +416,8 @@ func (r *Receiver) publishRejection(ctx context.Context, task *wire.Submission, 
 
 func (r *Receiver) echo(task *wire.Submission, hash string) *wire.Echo {
 	return &wire.Echo{
-		Receiver: r.id, Tenant: task.Wherry.Tenant, Pool: r.config.Pool, Run: task.Wherry.Run, Placement: task.Wherry.Placement,
-		TaskHash: hash, MessageID: task.Message.MessageID,
+		Receiver: r.id, Tenant: task.Wherry.Tenant, Host: task.Wherry.Host, Pool: r.config.Pool, Run: task.Wherry.Run,
+		RunNonce: task.Wherry.RunNonce, Placement: task.Wherry.Placement, TaskHash: hash, MessageID: task.Message.MessageID,
 	}
 }
 
@@ -510,7 +498,7 @@ func (r *Receiver) readSubmissions(ctx context.Context, run string) ([]runSubmis
 }
 
 // submissions are the run's submissions among records in log order: each verified as an authorised host's, with the
-// run as its Kafka key.
+// run as its Kafka key and derived run ID.
 func (r *Receiver) submissions(records []*kgo.Record, run string) []runSubmission {
 	state, _, hosts := r.snapshot()
 	var result []runSubmission
@@ -519,7 +507,7 @@ func (r *Receiver) submissions(records []*kgo.Record, run string) []runSubmissio
 			continue
 		}
 		submission, err := authorizeSubmission(state, hosts, record.Value, r.config.Pool)
-		if err == nil && submission.Wherry.Run == run {
+		if err == nil && submission.Wherry.Run == run && wire.CheckRunID(submission.Wherry) == nil {
 			result = append(result, runSubmission{record: &submission, hash: wire.TaskHash(record.Value), submitted: record.Timestamp, offset: record.Offset})
 		}
 	}
@@ -537,7 +525,7 @@ func (r *Receiver) earliestSubmissions(records []*kgo.Record) map[string]*runSub
 			continue
 		}
 		submission, err := authorizeSubmission(state, hosts, record.Value, r.config.Pool)
-		if err != nil || submission.Wherry.Run != run {
+		if err != nil || submission.Wherry.Run != run || wire.CheckRunID(submission.Wherry) != nil {
 			continue
 		}
 		candidate := runSubmission{record: &submission, hash: wire.TaskHash(record.Value), submitted: record.Timestamp, offset: record.Offset}

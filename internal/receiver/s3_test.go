@@ -113,7 +113,7 @@ func withURLs(urls func(input, output string) (string, string)) func(*wire.Submi
 
 func validURLs(origin string) func(string, string) (string, string) {
 	return func(input, output string) (string, string) {
-		return presigned(origin, wire.S3InputKey(testTenant, "run-a", input)), presigned(origin, wire.S3OutputKey(testTenant, "run-a", output))
+		return presigned(origin, wire.S3InputKey(testTenant, testRun("run-a"), input)), presigned(origin, wire.S3OutputKey(testTenant, testRun("run-a"), output))
 	}
 }
 
@@ -126,7 +126,7 @@ func TestS3ObjectsTravelOnlyInTheEnvelope(t *testing.T) {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
 	run := f.lastRun()
-	get := presigned(s.endpoint(), wire.S3InputKey(testTenant, "run-a", "dataset.bin"))
+	get := presigned(s.endpoint(), wire.S3InputKey(testTenant, testRun("run-a"), "dataset.bin"))
 	if !slices.Equal(run.Fetches, []pluginsdk.Fetch{{Name: "dataset.bin", URL: get, Size: int64(len(s3Content)), SHA256: sha([]byte(s3Content))}}) {
 		t.Fatalf("fetches %+v", run.Fetches)
 	}
@@ -143,7 +143,7 @@ func TestS3ObjectsTravelOnlyInTheEnvelope(t *testing.T) {
 			}
 		}
 	}
-	key := wire.S3OutputKey(testTenant, "run-a", "report.pdf")
+	key := wire.S3OutputKey(testTenant, testRun("run-a"), "report.pdf")
 	if data, ok := s.put("/" + s3Bucket + "/" + key); !ok || string(data) != "report" {
 		t.Fatalf("store holds %q, %v for the output", data, ok)
 	}
@@ -170,17 +170,17 @@ func TestS3URLsAreCheckedAgainstPoolStorage(t *testing.T) {
 	s := newStore(t)
 	origin := s.endpoint()
 	parsed, _ := url.Parse(origin)
-	inputKey := wire.S3InputKey(testTenant, "run-a", "dataset.bin")
+	inputKey := wire.S3InputKey(testTenant, testRun("run-a"), "dataset.bin")
 	for name, get := range map[string]string{
 		"http":           strings.Replace(presigned(origin, inputKey), "https://", "http://", 1),
 		"another host":   presigned("https://127.0.0.2:"+parsed.Port(), inputKey),
 		"another port":   presigned("https://127.0.0.1:1", inputKey),
 		"default port":   presigned("https://127.0.0.1", inputKey),
-		"another run":    presigned(origin, wire.S3InputKey(testTenant, "run-b", "dataset.bin")),
-		"another tenant": presigned(origin, wire.S3InputKey("tenant-b", "run-a", "dataset.bin")),
+		"another run":    presigned(origin, wire.S3InputKey(testTenant, testRun("run-b"), "dataset.bin")),
+		"another tenant": presigned(origin, wire.S3InputKey("tenant-b", testRun("run-a"), "dataset.bin")),
 		"another bucket": strings.Replace(presigned(origin, inputKey), "/"+s3Bucket+"/", "/other-bucket/", 1),
 		"userinfo":       strings.Replace(presigned(origin, inputKey), "https://", "https://user:pass@", 1),
-		"dot segments":   presigned(origin, wire.S3InputKey(testTenant, "run-a", "x/../dataset.bin")),
+		"dot segments":   presigned(origin, wire.S3InputKey(testTenant, testRun("run-a"), "x/../dataset.bin")),
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := s3Fixture(t, s, resultStream, nil)
@@ -209,7 +209,7 @@ func TestS3URLsAreCheckedAgainstPoolStorage(t *testing.T) {
 		f := s3Fixture(t, s, resultStream, nil)
 		f.envelope = withURLs(func(input, output string) (string, string) {
 			get, _ := validURLs(origin)(input, output)
-			return get, presigned("https://127.0.0.1:1", wire.S3OutputKey(testTenant, "run-a", output))
+			return get, presigned("https://127.0.0.1:1", wire.S3OutputKey(testTenant, testRun("run-a"), output))
 		})
 		done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
 		if status := <-done; status != kgo.AckReject || !strings.Contains(f.logs.String(), "the URL for S3 output report.pdf is not its object in the pool's storage") {
@@ -232,13 +232,13 @@ func TestS3OverLoopbackHTTP(t *testing.T) {
 	if fetches := f.lastRun().Fetches; len(fetches) != 1 || !strings.HasPrefix(fetches[0].URL, s.endpoint()+"/") {
 		t.Fatalf("fetches %+v", fetches)
 	}
-	if data, ok := s.put("/" + s3Bucket + "/" + wire.S3OutputKey(testTenant, "run-a", "report.pdf")); !ok || string(data) != "report" {
+	if data, ok := s.put("/" + s3Bucket + "/" + wire.S3OutputKey(testTenant, testRun("run-a"), "report.pdf")); !ok || string(data) != "report" {
 		t.Fatalf("store holds %q, %v for the output", data, ok)
 	}
 	if strings.Contains(f.logs.String(), s3Signature) {
 		t.Fatalf("logs hold a URL:\n%s", f.logs.String())
 	}
-	inputKey := wire.S3InputKey(testTenant, "run-a", "dataset.bin")
+	inputKey := wire.S3InputKey(testTenant, testRun("run-a"), "dataset.bin")
 	for name, get := range map[string]string{
 		"https":        presigned(strings.Replace(s.endpoint(), "http://", "https://", 1), inputKey),
 		"default port": presigned("http://127.0.0.1", inputKey),
@@ -285,7 +285,7 @@ func TestS3UseWithoutPoolStorageIsRejected(t *testing.T) {
 // The agent prints its input's URL whole and its signature alone; neither reaches the transcript or the result.
 func TestS3URLsAreRedacted(t *testing.T) {
 	s := newStore(t)
-	get := presigned(s.endpoint(), wire.S3InputKey(testTenant, "run-a", "dataset.bin"))
+	get := presigned(s.endpoint(), wire.S3InputKey(testTenant, testRun("run-a"), "dataset.bin"))
 	quoted := strings.ReplaceAll(get, "&", `&`)
 	stream := []string{`{"type":"assistant","message":"fetched ` + get + `"}`, `{"type":"assistant","message":"signature ` + s3Signature + `"}`,
 		completedWith("used " + quoted)}
@@ -459,7 +459,7 @@ func TestAnAdoptedRunReturnsAnS3Output(t *testing.T) {
 	if status := <-done; status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
-	key := wire.S3OutputKey(testTenant, "run-a", "report.pdf")
+	key := wire.S3OutputKey(testTenant, testRun("run-a"), "report.pdf")
 	if data, ok := s.put("/" + s3Bucket + "/" + key); !ok || string(data) != "report" {
 		t.Fatalf("store holds %q, %v for the adopted run's output", data, ok)
 	}

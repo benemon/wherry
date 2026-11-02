@@ -72,7 +72,7 @@ func TestScrapeAfterARun(t *testing.T) {
 // URL in its error, leaves none of that material in a label or value.
 func TestScrapeCarriesNoRunMaterial(t *testing.T) {
 	s := newStore(t)
-	url := presigned(s.endpoint(), wire.S3InputKey(testTenant, "run-a", "dataset.bin"))
+	url := presigned(s.endpoint(), wire.S3InputKey(testTenant, testRun("run-a"), "dataset.bin"))
 	f := s3Fixture(t, s, []string{`{"type":"assistant","message":"token ` + testToken + ` url ` + url + `"}`}, nil)
 	f.plugin.mu.Lock()
 	f.plugin.ended = &pluginsdk.Terminal{Started: true, ExitCode: 3, Node: "node-secret-7"}
@@ -92,7 +92,7 @@ func TestScrapeCarriesNoRunMaterial(t *testing.T) {
 		`wherry_sweep_failures_total{pool="pool-a",profile="nomad"} `,
 	)
 	host := strings.TrimPrefix(s.endpoint(), "https://")
-	for _, forbidden := range []string{"run-a", credentialName, testToken, host, s3Bucket, s3Signature, "X-Amz", "dataset.bin", "report.pdf", "agent reported no outcome", "node-secret-7", testHost} {
+	for _, forbidden := range []string{testRun("run-a"), credentialName, testToken, host, s3Bucket, s3Signature, "X-Amz", "dataset.bin", "report.pdf", "agent reported no outcome", "node-secret-7", testHost} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("scrape holds %q:\n%s", forbidden, text)
 		}
@@ -136,7 +136,7 @@ func TestPluginSamplesAreValidated(t *testing.T) {
 		`wherry_metrics_dropped_total{pool="pool-a",profile="nomad",reason="label_value"} `,
 		`wherry_metrics_dropped_total{pool="pool-a",profile="nomad",reason="kind"} `,
 	)
-	for _, dropped := range []string{"wherry_plugin_jobs_total", "node-1", "run-a", "} 11\n", "} 12\n", "} 13\n", "} 14\n"} {
+	for _, dropped := range []string{"wherry_plugin_jobs_total", "node-1", testRun("run-a"), "} 11\n", "} 12\n", "} 13\n", "} 14\n"} {
 		if strings.Contains(text, dropped) {
 			t.Fatalf("scrape holds the dropped %q:\n%s", dropped, text)
 		}
@@ -264,7 +264,7 @@ func TestRejectionReasonsThatQuoteTheTaskAreFixed(t *testing.T) {
 	text := scraped(t, f.receiver,
 		`wherry_rejections_total{pool="pool-a",reason="git remote host outside the pool's vcs hosts",tenant="tenant-a"} 1`,
 	)
-	for _, forbidden := range []string{"git.example.test", "run-a"} {
+	for _, forbidden := range []string{"git.example.test", testRun("run-a")} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("scrape holds %q:\n%s", forbidden, text)
 		}

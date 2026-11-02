@@ -29,6 +29,16 @@ func (f *fixture) anotherRun(t *testing.T, receiver *testReceiver) claimed {
 	return task
 }
 
+// Each submit draws a fresh run nonce and derives its run ID from its tenant, host and nonce.
+func TestEachSubmitDerivesItsRunIDFromAFreshNonce(t *testing.T) {
+	f := newFixture(t)
+	receiver, first := f.admitted(t)
+	a, b := first.submission.Wherry, f.anotherRun(t, receiver).submission.Wherry
+	if wire.CheckRunID(a) != nil || wire.CheckRunID(b) != nil || a.RunNonce == b.RunNonce || a.Run == b.Run {
+		t.Fatalf("runs %s and %s from nonces %q and %q; want each derived from a fresh nonce", a.Run, b.Run, a.RunNonce, b.RunNonce)
+	}
+}
+
 // The local record precedes the task, so a submission whose record cannot be written publishes nothing.
 func TestSubmitRecordsTheRunBeforeProducing(t *testing.T) {
 	f := newFixture(t)
@@ -53,7 +63,7 @@ func TestAFailedTaskWriteLeavesNoRecord(t *testing.T) {
 	_, task := f.admitted(t)
 	cancelled, cancel := context.WithCancel(f.ctx)
 	cancel()
-	fresh, err := f.host.submission("run-fresh", "pool-a", task.submission.Wherry.Placement, []wire.Part{{Text: "new"}}, time.Now().Add(time.Minute), time.Now().Add(time.Minute))
+	fresh, err := f.host.submission("run-fresh", "", "pool-a", task.submission.Wherry.Placement, []wire.Part{{Text: "new"}}, time.Now().Add(time.Minute), time.Now().Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
