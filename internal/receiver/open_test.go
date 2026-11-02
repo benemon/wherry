@@ -26,6 +26,7 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
 	jose "github.com/go-jose/go-jose/v4"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -1808,22 +1809,41 @@ func TestAnOlderClaimsRequestDoesNotBlockTheRekey(t *testing.T) {
 }
 
 // The claim check reads the run's task from the claim's offset with a bounded number of fetches, however long the log
-// that follows it: a claimed record early in the task topic, followed by many large records, is served in one read.
+// that follows it: a claimed record early in the task topic, followed by many records, is served in one fetch.
 func TestTheClaimCheckReadsABoundedAmountOfALongTrailingLog(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.quiet()
 	keyB := f.addPeer(t, "receiver-b", testPool)
 	record := f.submit(t, f.host, nil)
-	// Each trailing record fills most of a partition fetch, so reading the log to its end takes a fetch per record.
-	filler := bytes.Repeat([]byte("x"), 600<<10)
-	const trailing = 12
+	const trailing = 20
 	for range trailing {
-		f.produce(t, admin.PoolTasksTopic(testPool), testRun("run-filler"), filler)
+		f.produce(t, admin.PoolTasksTopic(testPool), testRun("run-filler"), []byte("filler"))
 	}
+	// Every fetch of the task topic returns one record batch, and each record above was produced alone, so reading the
+	// log from the claim's offset to its end takes a fetch per trailing record.
+	topic := admin.PoolTasksTopic(testPool)
+	details, err := kadm.NewClient(f.service.Admin).ListTopics(f.ctx, topic)
+	if err != nil || details[topic].Err != nil {
+		t.Fatalf("list %s: %v %v", topic, err, details[topic].Err)
+	}
+	f.cluster.ControlKey(kmsg.Fetch.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		f.cluster.KeepControl()
+		fetch := request.(*kmsg.FetchRequest)
+		for i, fetched := range fetch.Topics {
+			if fetched.Topic != topic && fetched.TopicID != details[topic].ID {
+				continue
+			}
+			fetch.MaxBytes = 1
+			for j := range fetched.Partitions {
+				fetch.Topics[i].Partitions[j].PartitionMaxBytes = 1
+			}
+		}
+		return nil, nil, false
+	})
 	f.statusAs(t, record, "receiver-b", keyB, "claimed", 1)
 	fetches, below := f.taskFetches(t, record.Offset)
-	if answer := f.answered(t, f.openAs(t, record, "receiver-b", keyB, 1)); answer != "wrap" || fetches.Load() == 0 || fetches.Load() > 2 || below.Load() != 0 {
-		t.Fatalf("answer %q after %d task fetches, %d from below the claim's offset; want served within 2 fetches of a %d-record trailing log",
+	if answer := f.answered(t, f.openAs(t, record, "receiver-b", keyB, 1)); answer != "wrap" || fetches.Load() != 1 || below.Load() != 0 {
+		t.Fatalf("answer %q after %d task fetches, %d from below the claim's offset; want served in one fetch of a %d-record trailing log",
 			answer, fetches.Load(), below.Load(), trailing)
 	}
 }
