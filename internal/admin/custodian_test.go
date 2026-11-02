@@ -237,10 +237,11 @@ func largestEnvelopeTask() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	name, run := strings.Repeat("n", 32), largestKey
+	name, nonce := strings.Repeat("n", 32), wire.RunNonce()
+	run := wire.RunID(name, name, nonce)
 	task := &wire.Submission{
 		Message: wire.Message{MessageID: "msg-" + strings.Repeat("0", 32), ContextID: run, TaskID: run, Role: wire.RoleUser, Parts: []wire.Part{{Text: "p"}}, Extensions: []string{wire.ExtensionURI}},
-		Wherry:  wire.SubmissionBinding{Tenant: name, Host: name, Pool: name, Run: run, RunNonce: wire.RunNonce(), Placement: wire.Placement{Agent: name, Selector: []wire.Requirement{}}},
+		Wherry:  wire.SubmissionBinding{Tenant: name, Host: name, Pool: name, Run: run, RunNonce: nonce, Placement: wire.Placement{Agent: name, Selector: []wire.Requirement{}}},
 	}
 	wrap, err := signed.WrapContentKey(make([]byte, 32), &poolKey.PublicKey)
 	if err != nil {
