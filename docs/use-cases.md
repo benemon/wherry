@@ -57,5 +57,5 @@ A pool's terms can name several agents, each launched by its own harness.
 Submitting the same prompt once per agent, with `--agent`, runs the same task
 through each harness, to check behaviour that should not depend on the
 harness. The [pool terms example](configuration.md#pool-terms-example) names
-three agents, and [`wherry submit`](commands.md#wherry-submit) takes the
+three agents, and [`wherry submit`](commands.md#wherry-host-submit) takes the
 agent.

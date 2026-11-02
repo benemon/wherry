@@ -18,7 +18,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// keyHost is host-a of tenant-a on a TLS kfake cluster, initialised through wherry init.
+// keyHost is host-a of tenant-a on a TLS kfake cluster, initialised through wherry host init.
 type keyHost struct {
 	ctx      context.Context
 	service  *operator.Service
@@ -41,9 +41,9 @@ func newKeyHost(t *testing.T) keyHost {
 	h := keyHost{ctx: ctx, service: service, config: filepath.Join(dir, "config.yaml"), keyPath: filepath.Join(dir, "host.key"), stateDir: filepath.Join(dir, "state")}
 	bundle := filepath.Join(dir, "host.yaml")
 	for _, step := range []func() error{
-		func() error { return service.PoolCreate(ctx, "pool-a", terms) },
+		func() error { return service.PoolApply(ctx, "pool-a", terms, false) },
 		func() error { return service.TenantAdd(ctx, "tenant-a", "pool-a") },
-		func() error { return service.HostAdd(ctx, "tenant-a", "host-a", bundle) },
+		func() error { return service.HostAdd(ctx, "tenant-a", "host-a", bundle, false) },
 	} {
 		if err := step(); err != nil {
 			t.Fatal(err)
@@ -54,7 +54,7 @@ func newKeyHost(t *testing.T) keyHost {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	if err := run([]string{"init", "--config-file", h.config}, &stdout, &stderr); err != nil {
+	if err := run([]string{"host", "init", "--config-file", h.config}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	return h
@@ -99,7 +99,7 @@ func TestKeyRotateReplacesTheHostKey(t *testing.T) {
 	h := newKeyHost(t)
 	old := h.key(t)
 	var stdout, stderr bytes.Buffer
-	if err := run([]string{"key", "rotate", "--config-file", h.config}, &stdout, &stderr); err != nil {
+	if err := run([]string{"host", "key", "rotate", "--config-file", h.config}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	next := h.key(t)
@@ -116,8 +116,8 @@ func TestKeyRotateReplacesTheHostKey(t *testing.T) {
 	}
 	// A command after a finished rotation changes nothing.
 	stdout.Reset()
-	if err := run([]string{"key", "--config-file", h.config}, &stdout, &stderr); err != nil || stdout.String() != keyID(next)+"\n" {
-		t.Fatalf("key after rotation: %v, stdout %q", err, stdout.String())
+	if err := run([]string{"host", "receivers", "--config-file", h.config}, &stdout, &stderr); err != nil {
+		t.Fatalf("receivers after rotation: %v", err)
 	}
 	if records, _ := h.topic(t); len(records) != 2 || !h.key(t).Equal(next) {
 		t.Fatal("a command after the rotation changed the key or its topic")
@@ -135,7 +135,7 @@ func TestKeyRotateRefusesWhileARunIsUnfinished(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	err := run([]string{"key", "rotate", "--config-file", h.config}, &stdout, &stderr)
+	err := run([]string{"host", "key", "rotate", "--config-file", h.config}, &stdout, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "run-open") || !strings.Contains(err.Error(), "MCP server") {
 		t.Fatalf("rotate with an unfinished run: %v; want a refusal naming it", err)
 	}
@@ -154,8 +154,8 @@ func TestHostCommandSettlesALeftoverNextKey(t *testing.T) {
 	if _, err := trust.GenerateSigningKeyFile(h.keyPath + ".next"); err != nil {
 		t.Fatal(err)
 	}
-	if err := run([]string{"key", "--config-file", h.config}, &stdout, &stderr); err != nil || stdout.String() != keyID(old)+"\n" {
-		t.Fatalf("key with an unpublished next key: %v, stdout %q", err, stdout.String())
+	if err := run([]string{"host", "receivers", "--config-file", h.config}, &stdout, &stderr); err != nil {
+		t.Fatalf("receivers with an unpublished next key: %v", err)
 	}
 	noNextKey(t, h.keyPath)
 	if !h.key(t).Equal(old) {
@@ -175,16 +175,12 @@ func TestHostCommandSettlesALeftoverNextKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	stdout.Reset()
-	if err := run([]string{"receivers", "--config-file", h.config}, &stdout, &stderr); err != nil {
+	if err := run([]string{"host", "receivers", "--config-file", h.config}, &stdout, &stderr); err != nil {
 		t.Fatalf("receivers with a published next key: %v", err)
 	}
 	noNextKey(t, h.keyPath)
 	if !h.key(t).Equal(next) {
 		t.Fatal("the key file does not hold the published next key")
-	}
-	stdout.Reset()
-	if err := run([]string{"key", "--config-file", h.config}, &stdout, &stderr); err != nil || stdout.String() != keyID(next)+"\n" {
-		t.Fatalf("key after recovery: %v, stdout %q", err, stdout.String())
 	}
 }
 
@@ -199,7 +195,7 @@ func TestKeyRotateKeepsTheKeyFileWhenTheTopicRefusesTheRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	if err := run([]string{"key", "rotate", "--config-file", h.config}, &stdout, &stderr); err == nil {
+	if err := run([]string{"host", "key", "rotate", "--config-file", h.config}, &stdout, &stderr); err == nil {
 		t.Fatal("rotation the key topic refused reported success")
 	}
 	if !h.key(t).Equal(stray) || stdout.Len() != 0 {
@@ -216,7 +212,7 @@ func TestReceiverRotateKey(t *testing.T) {
 		Broker: address, CA: ca, DeliveryCeiling: 10}
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}}}}}, DefaultAgent: "claude",
 		DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
-	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()

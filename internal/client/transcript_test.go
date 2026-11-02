@@ -73,7 +73,7 @@ func (f *fixture) endOffset(t *testing.T, topic string) int64 {
 func (f *fixture) countedReader(t *testing.T, counted *traffic) *Host {
 	t.Helper()
 	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := f.service.HostAdd(f.ctx, "tenant-a", fmt.Sprintf("host-%d", time.Now().UnixNano()%1e6), bundle); err != nil {
+	if err := f.service.HostAdd(f.ctx, "tenant-a", fmt.Sprintf("host-%d", time.Now().UnixNano()%1e6), bundle, false); err != nil {
 		t.Fatal(err)
 	}
 	return f.countedHost(t, bundle, f.host.stateDir, counted)
@@ -370,7 +370,7 @@ func TestTranscriptStreamTailsTheTopic(t *testing.T) {
 	task := receiver.claim(t, f.ctx, runID)[0]
 	topic := operator.TenantTranscriptTopic("tenant-a")
 	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-tail", bundle); err != nil {
+	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-tail", bundle, false); err != nil {
 		t.Fatal(err)
 	}
 	// Long enough that a line returned before it ends came from a fetch the commit woke.

@@ -156,7 +156,7 @@ func (r *Receiver) newClient(extra ...kgo.Opt) (*kgo.Client, error) {
 
 // Run registers the receiver's keys, rotates them when New was asked to, waits for its configuration, then advertises
 // and claims until ctx ends or the configuration changes. Held runs then go on: after a configuration change until they
-// end, and after ctx ends for at most the drain timeout. A forced configuration change releases their tasks at once.
+// end, and after ctx ends for at most the drain timeout.
 // A Kafka authorisation error or a plugin process's exit ends Run at once with that error: held runs are left
 // unacknowledged and their jobs running, for an adopter to find once the broker redelivers their tasks.
 func (r *Receiver) Run(ctx context.Context) error {
@@ -235,9 +235,6 @@ func (r *Receiver) Run(ctx context.Context) error {
 		r.every(running, refreshInterval, func(running context.Context) error {
 			err := r.refresh(running)
 			if errors.Is(err, ErrConfigChanged) {
-				if state, _, _ := r.snapshot(); state.Receivers[r.id].Force {
-					releaseHeld()
-				}
 				if ctx.Err() == nil {
 					r.logger.Printf("configuration changed; exiting once held runs end")
 					stop(ErrConfigChanged)

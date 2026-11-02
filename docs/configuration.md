@@ -124,9 +124,9 @@ successor publishes a `takeover` either way, which raises
 ([Pool keys](concepts.md#pool-keys-and-the-key-custodian)).
 
 Planned changes go through
-[`receiver update`](operations.md#change-a-receiver-s-configuration), which
-drains with no time limit. `receiver update --force` and
-[`receiver revoke`](operations.md#revoke-a-host-or-receiver) are hard stops.
+[`receiver apply`](operations.md#change-a-receiver-s-configuration), which
+drains with no time limit.
+[`receiver remove`](operations.md#revoke-a-host-or-receiver) is a hard stop.
 A Kafka authorisation error or a plugin process's exit also stops the
 receiver at once, with no drain and no key custodian re-key, leaving its
 runs' jobs for an adopter. The receiver exits non-zero and relies on its
@@ -167,8 +167,8 @@ and is not part of it, and a password of nothing else is refused.
 
 ## Pool terms
 
-The YAML file `pool create --config-file` and `pool update --config-file` read. Unknown fields are errors.
-With `--config-dir`, `pool.yaml` holds every field except `agents`, and
+The YAML file `pool apply -f` reads. Unknown fields are errors.
+When `-f` names a directory, `pool.yaml` holds every field except `agents`, and
 `agents/*.yaml` each hold one agent in file-name order. Hidden entries are
 ignored. Any other entry and a directory with no agent files are errors.
 
@@ -176,7 +176,7 @@ ignored. Any other entry and a directory with no agent files are errors.
 | --- | --- |
 | `agents` | one or more `{name, credentials, models, default_model}`: an agent, the [credentials](#agent-credentials) it takes, and optionally the models a task may name for it and the one a task naming none runs |
 | `default_agent` | an agent from `agents`, used when a task names none; optional when `agents` holds one, which it then defaults to |
-| `start_by_limit` | optional duration, default `72h`: the latest [`task_started_by`](#task-bounds) a run may ask for, from its submission, and the time from a run's submission past which a receiver rejects it unclaimed; it also sets the pool topics' minimum retention, which `pool update` raises and never lowers. With `storage`, it plus six hours must not exceed 7 days, the longest an S3 SigV4 presigned URL lasts |
+| `start_by_limit` | optional duration, default `72h`: the latest [`task_started_by`](#task-bounds) a run may ask for, from its submission, and the time from a run's submission past which a receiver rejects it unclaimed; it also sets the pool topics' minimum retention, which `pool apply` raises and never lowers. With `storage`, it plus six hours must not exceed 7 days, the longest an S3 SigV4 presigned URL lasts |
 | `delivery_limit` | optional, default 5: the share group's `share.delivery.count.limit` |
 | `lock_duration` | optional duration, default `15s`: the share group's `share.record.lock.duration.ms` |
 | `producer_byte_rate` | host quota, bytes per second |
@@ -249,14 +249,14 @@ by a member with no matching profile. From attempt
 `delivery budget exhausted` where it would release it, except in the cases
 the [extension](a2a-extension-v1.md#delivery-budget) lists.
 
-[`pool update`](commands.md#wherry-operator-pool-update-pool) changes an existing
+[`pool apply`](commands.md#wherry-operator-pool-apply-pool) changes an existing
 pool's terms. A lowered `delivery_limit` applies to a task in flight at its
 next release.
 
 ### Pool terms example
 
 Terms for pool `build` that set every field, as one file for
-`pool create build --config-file build.yaml`:
+`pool apply build -f build.yaml`:
 
 ```yaml
 agents:
@@ -295,7 +295,7 @@ storage:
   bucket: wherry
 ```
 
-The same terms as a directory for `pool create build --config-dir build`:
+The same terms as a directory for `pool apply build -f build`:
 
 ```
 build/
@@ -373,11 +373,11 @@ the tenants entitled to the pool, from a receiver that batches at most
 2 MiB (2097152 bytes), the `max.message.bytes` wherry sets on every tenant
 feed and transcript topic. The Kafka cluster must allow a topic
 `max.message.bytes` of 2 MiB.
-`pool create` records the tasks topic's record limit in the pool's terms,
-and [`submit`](commands.md#wherry-submit) measures each submission against it. A pool file
+`pool apply` records the tasks topic's record limit in the pool's terms,
+and [`submit`](commands.md#wherry-host-submit) measures each submission against it. A pool file
 does not set it.
 
-`pool create`, `pool entitle` and `check` sign four records and measure
+`pool apply`, `pool entitle` and `check` sign four records and measure
 them as record batches: the largest output chunk, of 256 KiB, two largest
 results, and the largest transcript chunk, a line of 512 KiB. Each result
 has the run's message with its 256 input files named but not carried, and a
@@ -395,7 +395,7 @@ An input file travels base64-encoded inside the signed record, which is itself
 base64url-encoded, so an inline input takes about 16/9 of its size in the
 submission record.
 
-`pool create`, `pool update` and `pool entitle` check against the broker at the time.
+`pool apply` and `pool entitle` check against the broker at the time.
 Receivers apply the limits from their view of `wherry.operator`, which they
 read every 15 seconds, so a changed limit takes effect within that
 window.
@@ -408,10 +408,10 @@ entitled to.
 
 ## Receiver configuration
 
-What `receiver add` and `receiver update` read, recorded on
-`wherry.operator`: a [directory](#receiver-configuration-directory) named by
-`--config-dir`, or a single YAML file named by `--config-file` with the same
-entries in maps and lists. Exactly one is required. The receiver and pool
+What `receiver apply` reads, recorded on
+`wherry.operator`: a [directory](#receiver-configuration-directory) or a
+single YAML file with the same entries in maps and lists, named by `-f`.
+The receiver and pool
 come from the command, as do the plugin pins: `--plugin-sha256 TYPE=HEX`
 for each plugin type, the line for the plugin binary in its release's
 signed `checksums.txt` ([Install plugins](operations.md#install-plugins)).
@@ -512,7 +512,7 @@ driver, the resources and the label `platform: nomad`, and the image
 same address, credential and resources, the `exec` driver with `command`
 alone in its driver configuration, and the labels `platform: nomad` and
 `isolation: host`.
-`wherry operator receiver update ID --dry-run` prints what a file resolves
+`wherry operator receiver apply ID --dry-run` prints what a file resolves
 to, with the pins, and `wherry operator receiver show ID` prints what a receiver's record
 holds ([commands](commands.md#wherry-operator-receiver-show-receiver)).
 
@@ -552,7 +552,7 @@ plugin profile's `config` holds only what the example needs; the
 lists every setting. Neither profile names an agent credential: each
 delivers its agent's credentials at the targets the pool's terms give them.
 As one file for
-`receiver add nomad-1 --pool build --config-file nomad-1.yaml --plugin-sha256 nomad=<sha256>`:
+`receiver apply nomad-1 --pool build -f nomad-1.yaml --plugin-sha256 nomad=<sha256>`:
 
 ```yaml
 capacity: 3
@@ -592,7 +592,7 @@ plugins:
 ```
 
 The same configuration as a directory for
-`receiver add nomad-1 --pool build --config-dir nomad-1 --plugin-sha256 nomad=<sha256>`:
+`receiver apply nomad-1 --pool build -f nomad-1 --plugin-sha256 nomad=<sha256>`:
 
 ```
 nomad-1/

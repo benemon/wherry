@@ -175,7 +175,7 @@ func TestPluginLaunchesOnlyFromItsPin(t *testing.T) {
 	plugins := &plugins{dir: dir, logs: io.Discard, logger: discard, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	settings := operator.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}
-	if _, err := plugins.profile("build", settings, ""); err == nil || err.Error() != "plugin type fake has no pinned SHA-256; set it with receiver update --plugin-sha256 fake=HEX" {
+	if _, err := plugins.profile("build", settings, ""); err == nil || err.Error() != "plugin type fake has no pinned SHA-256; set it with receiver apply --plugin-sha256 fake=HEX" {
 		t.Fatalf("unpinned plugin: %v; want refused naming the type and the flag", err)
 	}
 	other := strings.Repeat("0", 64)

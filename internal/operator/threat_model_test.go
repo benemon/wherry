@@ -283,7 +283,7 @@ func TestRevocationRunsAllSixStepsInOrder(t *testing.T) {
 	_ = cluster
 	ctx := context.Background()
 	terms := modelTerms()
-	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
 	config := modelConfig("receiver-a", "pool-a")
@@ -334,7 +334,7 @@ func TestRevocationWithoutAWaitWaitsTheBrokersLongestTimeout(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
@@ -355,7 +355,7 @@ func TestRevocationRefusesAWaitBelowTheBrokersLongestTimeout(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
@@ -421,7 +421,7 @@ func TestReconcileDuringRevocationRestoresNoGrant(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
@@ -453,7 +453,7 @@ func TestRevocationReRunContinuesAfterAFailedStep(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
@@ -555,7 +555,7 @@ func TestProvisioningSurvivesReconciliation(t *testing.T) {
 	pool, receiver := "p"+suffix, "r"+suffix
 	ctx := context.Background()
 	terms := modelTerms()
-	if err := service.PoolCreate(ctx, pool, terms); err != nil {
+	if err := service.PoolApply(ctx, pool, terms, false); err != nil {
 		t.Fatal(err)
 	}
 	config := modelConfig(receiver, pool)
@@ -581,7 +581,7 @@ func TestShareGroupStartsAtEarliest(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.SuperUser.ProduceSync(ctx, &kgo.Record{Topic: PoolTasksTopic("pool-a"), Value: []byte("submitted-before-fetch")}).FirstErr(); err != nil {
@@ -763,7 +763,7 @@ func TestLoadNamesALaterReleasesRecord(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	reader := NewReader(service.Operator)
@@ -824,7 +824,7 @@ func TestLoadRefusesAnUndecodableRecord(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	removed := []byte(`{"v":1,"kind":"skip","offset":0,"sha256":"` + strings.Repeat("0", 64) + `","at_ms":1}`)
@@ -874,7 +874,7 @@ func TestReceiverUpdateKeepsThePrincipal(t *testing.T) {
 	cluster, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "bundle.yaml")
@@ -932,7 +932,7 @@ func TestRevocationProbeRetriesWhileBrokersSettle(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {

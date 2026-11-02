@@ -254,7 +254,7 @@ func storageFixture(t *testing.T) (*fixture, *oracle, *testReceiver) {
 	f := newFixture(t)
 	terms := testTerms()
 	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
-	if err := f.service.PoolCreate(f.ctx, "pool-s3", terms); err != nil {
+	if err := f.service.PoolApply(f.ctx, "pool-s3", terms, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-s3"); err != nil {
@@ -336,7 +336,7 @@ func TestSubmitMovesInputsOverSmallestProfileLimitToS3(t *testing.T) {
 	f := newFixture(t)
 	terms := testTerms()
 	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
-	if err := f.service.PoolCreate(f.ctx, "pool-inline", terms); err != nil {
+	if err := f.service.PoolApply(f.ctx, "pool-inline", terms, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-inline"); err != nil {
@@ -374,14 +374,14 @@ func recordLimitFixture(t *testing.T, stored bool) (*fixture, *uploadOracle, *te
 		f.host.storage = o.config
 		maps.Copy(f.host.credentials, o.sources)
 	}
-	if err := f.service.PoolCreate(f.ctx, "pool-r", terms); err != nil {
+	if err := f.service.PoolApply(f.ctx, "pool-r", terms, false); err != nil {
 		t.Fatal(err)
 	}
 	limit := "100000"
 	if responses, err := kadm.NewClient(f.service.SuperUser).AlterTopicConfigs(f.ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "max.message.bytes", Value: &limit}}, operator.PoolTasksTopic("pool-r")); err != nil || responses[0].Err != nil {
 		t.Fatalf("alter topic: %v %v", err, responses)
 	}
-	if err := f.service.PoolUpdate(f.ctx, "pool-r", terms, false); err != nil {
+	if err := f.service.PoolApply(f.ctx, "pool-r", terms, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-r"); err != nil {
@@ -462,7 +462,7 @@ func TestSubmitAppliesTheProfileLimitOfAStaleReceiver(t *testing.T) {
 	f := newFixture(t)
 	terms := testTerms()
 	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
-	if err := f.service.PoolCreate(f.ctx, "pool-inline", terms); err != nil {
+	if err := f.service.PoolApply(f.ctx, "pool-inline", terms, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-inline"); err != nil {

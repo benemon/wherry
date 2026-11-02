@@ -115,14 +115,14 @@ func newBus(t *testing.T) *bus {
 		{TaskCredential: wire.TaskCredential{Name: "github-token", Env: "GH_TOKEN"}, Required: &optional},
 	}}}, DefaultAgent: "claude", DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
 		VCS: []string{"git.example.test"}}
-	if err := b.service.PoolCreate(ctx, "pool-a", terms); err != nil {
+	if err := b.service.PoolApply(ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
 	b.hostBundle = filepath.Join(t.TempDir(), "host.yaml")
-	if err := b.service.HostAdd(ctx, "tenant-a", "host-a", b.hostBundle); err != nil {
+	if err := b.service.HostAdd(ctx, "tenant-a", "host-a", b.hostBundle, false); err != nil {
 		t.Fatal(err)
 	}
 	receiverBundle := filepath.Join(t.TempDir(), "receiver.yaml")
@@ -735,16 +735,14 @@ func TestPromptFileReadsStandardInput(t *testing.T) {
 func TestCleanupRefusesAnUnfinishedRun(t *testing.T) {
 	b := newBus(t)
 	runID := b.admitted(t).submission.Wherry.Run
-	var stdout, stderr bytes.Buffer
-	if err := runCleanup(b.ctx, b.client, []string{runID}, &stdout, &stderr); !errors.Is(err, busclient.ErrInvalidInput) || !strings.Contains(err.Error(), "has not ended") {
+	if err := b.client.Cleanup(b.ctx, runID); !errors.Is(err, busclient.ErrInvalidInput) || !strings.Contains(err.Error(), "has not ended") {
 		t.Fatalf("cleanup of a working run: %v", err)
 	}
 }
 
 func TestCleanupRecognizesAFailedRunAsEnded(t *testing.T) {
 	b, admitted := publishFailedRun(t)
-	var stdout, stderr bytes.Buffer
-	if err := runCleanup(b.ctx, b.client, []string{admitted.submission.Wherry.Run}, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "no storage credential") || strings.Contains(err.Error(), "has not ended") {
+	if err := b.client.Cleanup(b.ctx, admitted.submission.Wherry.Run); err == nil || !strings.Contains(err.Error(), "no storage credential") || strings.Contains(err.Error(), "has not ended") {
 		t.Fatalf("cleanup of a failed run: %v", err)
 	}
 }
@@ -757,16 +755,16 @@ func TestUsageErrors(t *testing.T) {
 	}{
 		{"submit argument", func(stderr *bytes.Buffer) error {
 			return runSubmit(context.Background(), nil, []string{"--selector", "a=b", "extra"}, stderr, stderr)
-		}, "usage: wherry submit"},
+		}, "usage: wherry host submit"},
 		{"submit labels", func(stderr *bytes.Buffer) error {
 			return runSubmit(context.Background(), nil, []string{"--selector", "a=b", "--labels", "region=eu", "--prompt", "p"}, stderr, stderr)
 		}, "flag provided but not defined: -labels"},
 		{"cancel argument", func(stderr *bytes.Buffer) error {
 			return runCancel(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
-		}, "usage: wherry cancel"},
+		}, "usage: wherry host cancel"},
 		{"wait argument", func(stderr *bytes.Buffer) error {
 			return runWait(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
-		}, "usage: wherry wait"},
+		}, "usage: wherry host wait"},
 		{"wait quiet", func(stderr *bytes.Buffer) error {
 			return runWait(context.Background(), nil, []string{"run-a", "-q"}, stderr, stderr)
 		}, "flag provided but not defined: -q"},
@@ -778,7 +776,7 @@ func TestUsageErrors(t *testing.T) {
 		}, "flag provided but not defined: -result-only"},
 		{"logs argument", func(stderr *bytes.Buffer) error {
 			return runLogs(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
-		}, "usage: wherry logs"},
+		}, "usage: wherry host logs"},
 		{"logs offset", func(stderr *bytes.Buffer) error {
 			return runLogs(context.Background(), nil, []string{"run-a", "--offset", "1"}, stderr, stderr)
 		}, "flag provided but not defined: -offset"},
@@ -793,7 +791,7 @@ func TestUsageErrors(t *testing.T) {
 		}, "unknown command \"transcript\""},
 		{"status argument", func(stderr *bytes.Buffer) error {
 			return runStatus(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
-		}, "usage: wherry status"},
+		}, "usage: wherry host status"},
 		{"submit selector", func(stderr *bytes.Buffer) error {
 			return runSubmit(context.Background(), nil, []string{"--selector", "runtime==exec", "--prompt", "p"}, stderr, stderr)
 		}, "selector: requirement values must be valid and unique"},
@@ -821,6 +819,30 @@ func TestUsageErrors(t *testing.T) {
 		{"removed resume", func(stderr *bytes.Buffer) error {
 			return run([]string{"resume", "run-a"}, stderr, stderr)
 		}, "unknown command \"resume\""},
+		{"removed init", func(stderr *bytes.Buffer) error {
+			return run([]string{"init"}, stderr, stderr)
+		}, "unknown command \"init\""},
+		{"removed key", func(stderr *bytes.Buffer) error {
+			return run([]string{"key"}, stderr, stderr)
+		}, "unknown command \"key\""},
+		{"removed receivers", func(stderr *bytes.Buffer) error {
+			return run([]string{"receivers"}, stderr, stderr)
+		}, "unknown command \"receivers\""},
+		{"removed mcp", func(stderr *bytes.Buffer) error {
+			return run([]string{"mcp"}, stderr, stderr)
+		}, "unknown command \"mcp\""},
+		{"removed cleanup", func(stderr *bytes.Buffer) error {
+			return run([]string{"cleanup"}, stderr, stderr)
+		}, "unknown command \"cleanup\""},
+		{"removed host key", func(stderr *bytes.Buffer) error {
+			return run([]string{"host", "key"}, stderr, stderr)
+		}, "usage: wherry host key rotate"},
+		{"removed host cleanup", func(stderr *bytes.Buffer) error {
+			return run([]string{"host", "cleanup", "run-a"}, stderr, stderr)
+		}, "unknown host command \"cleanup\""},
+		{"removed reset verb", func(stderr *bytes.Buffer) error {
+			return run([]string{"dev", "reset"}, stderr, stderr)
+		}, "usage: wherry dev"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var output bytes.Buffer
@@ -839,24 +861,21 @@ func TestKeyAndInit(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	if err := run([]string{"init", "--config-file", config}, &stdout, &stderr); err == nil || !strings.HasPrefix(err.Error(), "read bundle") {
+	if err := run([]string{"host", "init", "--config-file", config}, &stdout, &stderr); err == nil || !strings.HasPrefix(err.Error(), "read bundle") {
 		t.Fatalf("init without a bundle: %v", err)
 	}
 	key, err := trust.LoadSigningKeyFile(keyPath)
 	if err != nil {
 		t.Fatalf("init did not create the host key: %v", err)
 	}
-	if err := run([]string{"init", "--config-file", config}, &stdout, &stderr); err == nil || !strings.HasPrefix(err.Error(), "read bundle") {
+	if err := run([]string{"host", "init", "--config-file", config}, &stdout, &stderr); err == nil || !strings.HasPrefix(err.Error(), "read bundle") {
 		t.Fatalf("second init: %v", err)
 	}
 	if again, err := trust.LoadSigningKeyFile(keyPath); err != nil || !again.Equal(key) {
 		t.Fatal("second init replaced the host key")
 	}
-	if err := run([]string{"key", "--config-file", config, "extra"}, &stdout, &stderr); err == nil || err.Error() != "usage: wherry key [rotate] [--config-file FILE]" {
-		t.Fatalf("got %v, want key usage error", err)
-	}
-	if err := run([]string{"key", "--config-file", config}, &stdout, &stderr); err != nil || stdout.String() != signed.KeyID(key.Public().(ed25519.PublicKey))+"\n" {
-		t.Fatalf("key: %v, stdout %q", err, stdout.String())
+	if err := run([]string{"host", "key", "rotate", "--config-file", config, "extra"}, &stdout, &stderr); err == nil || err.Error() != "usage: wherry host key rotate [--config-file FILE]" {
+		t.Fatalf("got %v, want key rotate usage error", err)
 	}
 }
 
@@ -996,4 +1015,24 @@ func readTopic(ctx context.Context, client *kgo.Client, topic string) ([]*kgo.Re
 	reader := operator.NewReader(client)
 	defer reader.Close()
 	return reader.ReadFrom(ctx, topic, 0)
+}
+
+// Each shortcut runs the host command of its name, and wherry --help lists them as its shortcuts.
+func TestShortcutsRunTheHostCommands(t *testing.T) {
+	for name, args := range map[string][]string{
+		"submit": {"extra"}, "cancel": nil, "wait": nil, "status": {"run-a", "run-b"}, "events": nil, "logs": nil,
+	} {
+		var stdout, stderr bytes.Buffer
+		shortcut := run(append([]string{name}, args...), &stdout, &stderr)
+		host := run(append([]string{"host", name}, args...), &stdout, &stderr)
+		if shortcut == nil || host == nil || shortcut.Error() != host.Error() || !strings.HasPrefix(host.Error(), "usage: wherry host "+name) {
+			t.Errorf("wherry %s = %v and wherry host %s = %v; want the host command's usage from both", name, shortcut, name, host)
+		}
+	}
+	for _, help := range []string{"--help", "-h"} {
+		var stdout bytes.Buffer
+		if err := run([]string{help}, &stdout, io.Discard); err != nil || !strings.Contains(stdout.String(), "shortcuts for wherry host submit|wait|status|events|logs|cancel:\n  wherry submit|wait|status|events|logs|cancel\n") {
+			t.Errorf("wherry %s = %v printing\n%s\nwant the shortcuts listed", help, err, stdout.String())
+		}
+	}
 }

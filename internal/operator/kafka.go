@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -98,18 +99,10 @@ func KafkaOpts(broker string, ca []byte, user, password string) ([]kgo.Opt, erro
 	}, nil
 }
 
-// PoolCreate records terms for a new pool and creates its topics and share group.
-func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms) error {
-	return service.poolTerms(ctx, pool, terms, false, false)
-}
-
-// PoolUpdate records new terms for an existing pool and re-applies its share group's delivery limit and lock
-// duration. With dryRun it makes the checks and writes nothing.
-func (service *Service) PoolUpdate(ctx context.Context, pool string, terms Terms, dryRun bool) error {
-	return service.poolTerms(ctx, pool, terms, true, dryRun)
-}
-
-func (service *Service) poolTerms(ctx context.Context, pool string, terms Terms, update, dryRun bool) error {
+// PoolApply records terms for pool and converges its topics and share group: an absent pool is created, a present one
+// with other terms is updated, and one with the same terms has its missing topics completed. With dryRun it makes the
+// checks and writes nothing.
+func (service *Service) PoolApply(ctx context.Context, pool string, terms Terms, dryRun bool) error {
 	if err := validateNames(pool); err != nil {
 		return err
 	}
@@ -135,23 +128,15 @@ func (service *Service) poolTerms(ctx context.Context, pool string, terms Terms,
 	if effective.DeliveryLimit > service.DeliveryCeiling {
 		return fmt.Errorf("delivery limit exceeds broker ceiling %d", service.DeliveryCeiling)
 	}
-	if !update {
-		if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
-			return err
-		}
+	if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
+		return err
 	}
 	current, err := service.LoadState(ctx)
 	if err != nil {
 		return err
 	}
 	_, exists := current.Pools[pool]
-	switch {
-	// pool create with the recorded terms completes a create that failed after recording them.
-	case exists && !update && !sameTerms(current.Pools[pool], terms):
-		return errors.New("pool exists; change its terms with pool update")
-	case !exists && update:
-		return errors.New("no pool by that name")
-	case exists:
+	if exists {
 		if err := strandedReceivers(current, pool, terms); err != nil {
 			return err
 		}
@@ -165,6 +150,9 @@ func (service *Service) poolTerms(ctx context.Context, pool string, terms Terms,
 	if terms.RecordLimit, err = service.checkLimits(ctx, current, pool, dryRun); err != nil {
 		return err
 	}
+	// The same terms at the same record limit again complete an apply that failed after recording them.
+	recorded := current.Pools[pool]
+	update := exists && (!sameTerms(recorded, terms) || recorded.RecordLimit != terms.RecordLimit)
 	if err := service.checkPoolFeedsRetention(ctx, current, pool, retention.feed); err != nil {
 		return err
 	}
@@ -246,7 +234,7 @@ func strandedReceivers(state State, pool string, terms Terms) error {
 	return nil
 }
 
-// sameTerms reports whether terms are recorded's but for the record limit, which pool create reads from the broker.
+// sameTerms reports whether terms are recorded's but for the record limit, which pool apply reads from the broker.
 func sameTerms(recorded, terms Terms) bool {
 	terms = withDefaults(terms)
 	terms.RecordLimit = recorded.RecordLimit
@@ -262,7 +250,7 @@ func (service *Service) ReceiverCheck(ctx context.Context, config ReceiverConfig
 		return ReceiverConfig{}, err
 	}
 	if _, exists := state.Receivers[config.Receiver]; exists {
-		return ReceiverConfig{}, errors.New("receiver exists; change its configuration with receiver update")
+		return ReceiverConfig{}, errors.New("receiver exists")
 	}
 	terms, ok := state.Pools[config.Pool]
 	if !ok {
@@ -278,7 +266,7 @@ func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, 
 	if _, err := service.ReceiverCheck(ctx, config); err != nil {
 		return err
 	}
-	bundle, err := createBundle(bundlePath)
+	bundle, err := createBundle(bundlePath, false)
 	if err != nil {
 		return err
 	}
@@ -302,6 +290,28 @@ func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, 
 		return err
 	}
 	return writeBundle(bundle, Bundle{service.Broker, service.CA, ReceiverPrincipal(config.Receiver), password})
+}
+
+// ReceiverReissue gives a live receiver a new password and writes its bundle to bundlePath, replacing any file there.
+// Its configuration record is untouched; Kafka keeps one SCRAM credential per user, so the old password stops working.
+func (service *Service) ReceiverReissue(ctx context.Context, receiver, bundlePath string) (err error) {
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return err
+	}
+	if _, ok := state.Receivers[receiver]; !ok || state.Ended[ReceiverPrincipal(receiver)] {
+		return errors.New("no live receiver by that name")
+	}
+	bundle, err := createBundle(bundlePath, true)
+	if err != nil {
+		return err
+	}
+	defer closeBundle(bundle, &err)
+	password, err := service.upsertUser(ctx, ReceiverPrincipal(receiver))
+	if err != nil {
+		return err
+	}
+	return writeBundle(bundle, Bundle{service.Broker, service.CA, ReceiverPrincipal(receiver), password})
 }
 
 // ReceiverUpdate records a new configuration for an existing receiver in its
@@ -343,8 +353,20 @@ func asRecorded(record Record) (ReceiverConfig, error) {
 	return *decoded.Config, nil
 }
 
-func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath string) (err error) {
-	bundle, err := createBundle(bundlePath)
+// HostAdd provisions host in tenant and writes its bundle to bundlePath. A host that exists is refused unless force,
+// which gives it a new password and replaces the bundle at bundlePath.
+func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath string, force bool) (err error) {
+	if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
+		return err
+	}
+	current, err := service.LoadState(ctx)
+	if err != nil {
+		return err
+	}
+	if _, exists := current.Hosts[TenantPrincipal(tenant, host)]; exists && !force {
+		return errors.New("host exists; --force gives it a new password and bundle")
+	}
+	bundle, err := createBundle(bundlePath, force)
 	if err != nil {
 		return err
 	}
@@ -454,7 +476,7 @@ func (service *Service) LoadState(ctx context.Context) (State, error) {
 // the most a receiver's producer batches: a result lists a reference artifact for each output it returns.
 const FeedRecordLimit = 2 << 20
 
-// feedConfigs are the configs host add, pool entitle, pool create and pool update set on tenant feeds beyond the
+// feedConfigs are the configs host add, pool entitle and pool apply set on tenant feeds beyond the
 // retention they are created with.
 var feedConfigs = map[string]string{"max.message.bytes": strconv.Itoa(FeedRecordLimit)}
 
@@ -1156,23 +1178,42 @@ var feedRecords = []struct {
 	{"a transcript chunk", 933498},
 }
 
-func createBundle(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+// createBundle opens a temporary file beside path that writeBundle fills and closeBundle renames to path, so a reader
+// of path never sees part of a bundle. Without replace, an existing file at path is refused.
+func createBundle(path string, replace bool) (*bundleFile, error) {
+	if _, err := os.Lstat(path); err == nil && !replace {
+		return nil, fmt.Errorf("bundle %s: %w", path, os.ErrExist)
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
+		return nil, err
+	}
+	return &bundleFile{file, path}, nil
 }
 
-// closeBundle removes a bundle whose command failed, so a retry can create it.
-func closeBundle(file *os.File, err *error) {
-	file.Close()
+type bundleFile struct {
+	*os.File
+	path string
+}
+
+// closeBundle renames a written bundle to its path, and removes it if its command failed, so a retry can create it.
+func closeBundle(bundle *bundleFile, err *error) {
+	if closeErr := bundle.Close(); *err == nil {
+		*err = closeErr
+	}
+	if *err == nil {
+		*err = os.Rename(bundle.Name(), bundle.path)
+	}
 	if *err != nil {
-		os.Remove(file.Name())
+		os.Remove(bundle.Name())
 	}
 }
 
-func writeBundle(file *os.File, bundle Bundle) error {
-	encoded, err := yaml.Marshal(bundle)
+func writeBundle(bundle *bundleFile, contents Bundle) error {
+	encoded, err := yaml.Marshal(contents)
 	if err != nil {
 		return err
 	}
-	_, err = file.Write(encoded)
+	_, err = bundle.Write(encoded)
 	return err
 }

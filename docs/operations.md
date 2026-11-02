@@ -68,11 +68,11 @@ A pool's terms apply to every receiver in it. Write them as a
 [terms file](configuration.md#pool-terms) and create the pool:
 
 ```sh
-wherry operator pool create build --config-file build-terms.yaml
+wherry operator pool apply build -f build-terms.yaml
 ```
 
 The [pool terms example](configuration.md#pool-terms-example) sets every field,
-as one file and as a `--config-dir` directory.
+as one file and as a directory.
 
 - `delivery_limit` bounds how often the broker delivers one task. Each
   start failure, and each member with no matching plugin profile, returns a task
@@ -82,7 +82,7 @@ as one file and as a `--config-dir` directory.
   attempt `delivery_limit` minus 1, a receiver ends a run it would return to the
   pool `TASK_STATE_FAILED` with `delivery budget exhausted`, except in the
   cases the [extension](a2a-extension-v1.md#delivery-budget) lists. `pool
-  create` refuses a `delivery_limit` above the broker's
+  apply` refuses a `delivery_limit` above the broker's
   `group.share.max.delivery.count.limit`.
 - `lock_duration` is how long a claim survives without renewal. Receivers
   renew every 10 seconds.
@@ -93,18 +93,18 @@ as one file and as a `--config-dir` directory.
   See [Retention](#retention).
 - `reply_limit` bounds the redacted reply a result returns beyond the 64 KiB
   its text carries; it defaults to 1 MiB, or to `output_limit` when that is
-  lower, and `pool create` and `pool update` refuse one over `output_limit`,
+  lower, and `pool apply` refuses one over `output_limit`,
   which also bounds the outcome file. A longer reply is cut to it, and the
   result says so.
 - `output_limit` bounds a run's outputs; it defaults to 8 MiB. The
   broker's record limit bounds a task's inline input files, and
-  `pool create` records it in the terms. See
+  `pool apply` records it in the terms. See
   [Size a pool against the broker](#size-a-pool-against-the-broker).
 - An agent's `credentials` lists the credentials it takes, each
   `{name, env}` or `{name, file}`: the environment variable, or the file in
   the directory `WHERRY_CREDENTIALS_DIR` names, the agent finds it at.
   `required: false` lets a run go without it when the submitting host has no
-  source for it. `pool create` refuses a duplicate name, two credentials on
+  source for it. `pool apply` refuses a duplicate name, two credentials on
   one target, both or neither of `env` and `file`, and an `env` a plugin
   sets itself, such as `HOME` or `WHERRY_CREDENTIALS_DIR`:
 
@@ -147,10 +147,10 @@ file.
 4. Record the terms:
 
    ```sh
-   wherry operator pool update build --config-file build-terms.yaml
+   wherry operator pool apply build -f build-terms.yaml
    ```
 
-   `pool update` checks every live receiver in the pool against the new
+   `pool apply` checks every live receiver in the pool against the new
    terms first, and refuses terms that would strand one, naming each
    receiver, plugin and profile:
 
@@ -171,10 +171,10 @@ refuses such a `task_started_by` before it publishes. Every run therefore ends
 within six hours after `start_by_limit`. A longer limit keeps prompts on
 the broker longer. Lowering `start_by_limit` leaves the pool topics'
 retention where it is, so runs submitted under the longer limit keep their
-records; `pool update` raises the retention, and waits until the brokers
+records; `pool apply` raises the retention, and waits until the brokers
 apply it, before it records a longer limit.
 
-`pool create` and `pool update` set the retention of the pool's tasks and events topics, new and
+`pool apply` sets the retention of the pool's tasks and events topics, new and
 existing, to at least `start_by_limit` plus the six-hour maximum run time plus a
 one-day margin, their timestamp type to `LogAppendTime`, since a run's age
 runs from the broker's time, their `retention.bytes` to `-1` and
@@ -187,13 +187,13 @@ topics of the pool's live receivers. With the 72-hour default that is `367200000
 and six hours, after which a run's prompts leave the broker. Tenant feeds keep
 statuses and results, and tenant transcript topics transcripts, outputs and
 replies over 64 KiB, for 30 days, and both must keep them for at least `start_by_limit` plus six
-hours, so `pool create` refuses a limit above 29 days and 18 hours, and
+hours, so `pool apply` refuses a limit above 29 days and 18 hours, and
 `pool entitle` refuses a feed or transcript topic that keeps less. Identity and
 configuration topics stay forever. `wherry operator check` reports a topic whose
 retention drops below its bound, a pool topic whose timestamp type is not
 `LogAppendTime`, and a tasks or events topic without the hourly
 `segment.ms`, `cleanup.policy=delete` or `retention.bytes=-1`, or with more
-than one partition. `pool update` refuses a tasks or events topic with more
+than one partition. `pool apply` refuses a tasks or events topic with more
 than one partition; partitions cannot be removed, so recreate the pool's topics.
 
 A tenant transcript topic whose retention is shorter than its feed's loses an
@@ -211,11 +211,11 @@ feed and transcript topic has it, and receivers batch up to it. A result
 names each output the run returned, so the largest result is a
 1259677-byte record batch, over a broker's default limit. `host add` and
 `pool entitle` create a tenant's feed and transcript topic at 2 MiB, and
-`pool entitle`, `pool create` and `pool update` set existing ones to it. A
+`pool entitle` and `pool apply` set existing ones to it. A
 cluster policy that refuses the setting fails the command, and
 `wherry operator check` reports a tenant topic below 2 MiB.
 
-`pool create` reads
+`pool apply` reads
 `message.max.bytes` from every broker and `max.message.bytes` from the
 pool's tasks topic and its tenants' feeds and transcript topics, records the
 tasks topic's record limit in the pool's terms, signs the largest output and
@@ -234,7 +234,7 @@ base64-encoded inside a record that is itself base64url-encoded. A host
 batches at most 1000012 bytes, which is the tasks topic's limit with brokers
 and the topic at their defaults. Raising `message.max.bytes` or the tasks
 topic's `max.message.bytes` leaves the limit there, and lowering either
-lowers it. Run `pool update` after changing either, so the terms record the
+lowers it. Run `pool apply` after changing either, so the terms record the
 new limit. An output chunk holds
 256 KiB whatever `output_limit` is, so `output_limit` spans as many records
 as it needs and the record limit does not bound it. A reply chunk is an
@@ -271,10 +271,16 @@ Prerequisites: the `wherry operator` environment
 
 The tenant then writes its
 [client configuration](configuration.md#client-configuration), with a source
-for each credential the pool's agents take, and runs `wherry init`, as in
+for each credential the pool's agents take, and runs `wherry host init`, as in
 [Quickstart](quickstart.md#_3-write-the-host-configuration).
 
 A tenant can be entitled to several pools; run `pool entitle` once per pool.
+
+To rotate a host's Kafka password or replace a lost bundle, run `host add`
+again with `--force`. It writes a new bundle over `FILE`, and the old
+password stops working at once, so the host is offline until its user puts
+the new bundle in place. `receiver apply RECEIVER --force --bundle-file FILE`
+does the same for a receiver.
 
 ## Add a receiver
 
@@ -388,14 +394,14 @@ target.
    nothing:
 
    ```sh
-   wherry operator receiver add nomad-1 --pool build --config-dir nomad-1 \
+   wherry operator receiver apply nomad-1 --pool build -f nomad-1 \
      --plugin-sha256 nomad=<sha256> --dry-run
    ```
 
 3. Add the receiver:
 
    ```sh
-   wherry operator receiver add nomad-1 --pool build --config-dir nomad-1 \
+   wherry operator receiver apply nomad-1 --pool build -f nomad-1 \
      --plugin-sha256 nomad=<sha256> --bundle-file nomad-1.bundle
    ```
 
@@ -431,7 +437,7 @@ configuration, and the receiver exits with:
 profile container: credential "nomad-token" has no source in the receiver's configuration
 ```
 
-6. On a host of an entitled tenant, check that `wherry receivers` shows the
+6. On a host of an entitled tenant, check that `wherry host receivers` shows the
    receiver `live` with each profile `ready=true`.
 
 To rotate a platform credential, replace the value at its source and
@@ -445,11 +451,11 @@ configuration.
 1. Check the configuration. `--plugin-sha256` gives the pin of each
    plugin type, as [Install plugins](#install-plugins) takes it from the
    release's `checksums.txt`. `--dry-run` validates the configuration
-   against the pool's terms as `update` does, and prints the pins and each
+   against the pool's terms as `apply` does, and prints the pins and each
    plugin profile as the record would hold them, writing nothing:
 
    ```sh
-   wherry operator receiver update nomad-1 --config-dir nomad-1 --plugin-sha256 nomad=<sha256> --dry-run
+   wherry operator receiver apply nomad-1 -f nomad-1 --plugin-sha256 nomad=<sha256> --dry-run
    ```
 
 2. Compare the output with what the receiver runs now, which
@@ -458,29 +464,26 @@ configuration.
 3. Record the configuration:
 
    ```sh
-   wherry operator receiver update nomad-1 --config-dir nomad-1 --plugin-sha256 nomad=<sha256>
+   wherry operator receiver apply nomad-1 -f nomad-1 --plugin-sha256 nomad=<sha256>
    ```
 
 4. At its next configuration check, within 15 seconds, the receiver stops
    claiming and closes its idle claims. Each run it holds goes on to its end
    and commits its result, with no time limit. The receiver then exits and
    its supervisor restarts it with the new configuration. Check that
-   `wherry receivers` shows it `live` with the new profiles.
+   `wherry host receivers` shows it `live` with the new profiles.
 
 The bundle and password stay as they are. Planned changes go through
-`receiver update`, which drains with no window.
+`receiver apply`, which drains with no window.
 
-`receiver update --force` is a hard stop. The receiver releases the tasks
-it holds at once and exits, leaving their jobs running, and the next
-delivery of each task adopts its job. When the new configuration renames a
-run's profile or changes its agent, the adopting receiver stops and purges
-the run's job and dispatches the run again:
-
-```sh
-wherry operator receiver update nomad-1 --config-dir nomad-1 --plugin-sha256 nomad=<sha256> --force
-```
-
-A `--force` update during a drain ends it.
+To apply a change at once, restart the receiver through its platform, as
+with `kubectl rollout restart`, `nomad alloc restart` or
+`systemctl restart`. It stops within its
+[`drain_timeout`](configuration.md#drain-timeout-and-the-stop-window), and
+its held runs are released to other receivers, whose next delivery of each
+task adopts its job. When the new configuration renames a run's profile or
+changes its agent, the adopting receiver stops and purges the run's job and
+dispatches the run again.
 
 ## Run a receiver
 
@@ -514,7 +517,7 @@ A `--force` update during a drain ends it.
 On first start the receiver logs `registered key: signing=<key id>`, then
 `configured: pool=<pool> profiles=<n> capacity=<n>`. It logs
 `waiting for configuration` while its record is missing. After its first
-advertisement, `wherry receivers` on a host of an entitled tenant shows it
+advertisement, `wherry host receivers` on a host of an entitled tenant shows it
 `live`.
 
 A plugin that exits, or fails a ping and is killed, stops the receiver:
@@ -568,7 +571,7 @@ and the receiver's configuration, and the verified `checksums.txt`:
 
 ```sh
 sha256=$(awk -v name="wherry-plugin-${plugin}_${version}_${os}_${arch}" '$2 == name {print $1}' checksums.txt)
-wherry operator receiver update nomad-1 --config-dir nomad-1 --plugin-sha256 "$plugin=$sha256"
+wherry operator receiver apply nomad-1 -f nomad-1 --plugin-sha256 "$plugin=$sha256"
 ```
 
 Give `--plugin-sha256` once for each plugin type the configuration names.
@@ -583,7 +586,7 @@ and a type with no binary with `profile <name>: no plugin for type <type>`.
 
 An upgrade or rollback takes the same steps with the other version: verify
 its `checksums.txt`, install the binary, then record its pin with
-`receiver update`. The receiver runs the new binary from its next start on
+`receiver apply`. The receiver runs the new binary from its next start on
 the new record.
 
 To check the install, start the receiver and find one line per plugin,
@@ -728,7 +731,7 @@ and another live receiver in the pool.
 
 2. Stop the pool's receivers one at a time, as for an
    [upgrade](#upgrade-wherry), and wait for each to be `live` again in
-   `wherry receivers` before stopping the next.
+   `wherry host receivers` before stopping the next.
 
 3. When the custodian stops, check its log for
    `custodian: stepping down in pool <pool>; waiting up to <timeout> for a successor`
@@ -762,8 +765,8 @@ credential and ACLs.
 1. Run the revocation:
 
    ```sh
-   wherry operator host revoke laptop --tenant alice
-   wherry operator receiver revoke nomad-1
+   wherry operator host remove laptop --tenant alice
+   wherry operator receiver remove nomad-1
    ```
 
    When it ends, the command prints one line per
@@ -825,7 +828,7 @@ grants a resume restored, or a revoked principal's credential and ACLs.
    the hard stop for a receiver:
 
    ```sh
-   wherry operator receiver revoke nomad-1
+   wherry operator receiver remove nomad-1
    ```
 
 3. When the revoked receiver was the pool's key custodian, wait for a new
@@ -891,7 +894,7 @@ For a host:
 3. Run the rotation:
 
    ```sh
-   wherry key rotate
+   wherry host key rotate
    ```
 
    It prints `old_key_id=<id> new_key_id=<id>`. It refuses while a run the
@@ -918,7 +921,7 @@ rotation was published loses the key.
 
 A host or receiver key cannot be recovered or re-registered.
 
-- A host whose `host_key` is lost fails `wherry init` with
+- A host whose `host_key` is lost fails `wherry host init` with
   `host key topic holds another key`.
 - A receiver whose state directory is lost fails at start with
   `receiver key topic holds another key than the state directory`.
@@ -958,7 +961,7 @@ append-only and read from offset 0, so no record on it can be passed over.
 No `wherry` command reads state while this holds, so the reset works on the
 platform and on Kafka directly.
 
-1. Stop every receiver and every `wherry mcp` and host command.
+1. Stop every receiver and every `wherry host mcp` and host command.
 2. Stop and remove every run's platform job (the Nomad job, Kubernetes Job
    or systemd unit each [plugin](plugins.md) creates for a run). Once the
    tasks topics are gone no receiver can adopt these jobs or end them at
@@ -977,7 +980,7 @@ platform and on Kafka directly.
 
 A run's outputs hold its `output_limit` in 256 entries at most. The broker's
 record limit and each plugin profile's declared limit bound a task's inline input
-files, as [`wherry submit`](commands.md#wherry-submit) describes; a plugin
+files, as [`wherry submit`](commands.md#wherry-host-submit) describes; a plugin
 declares each profile's limit through `InlineLimit`, and the receiver keeps
 the plugin's dispatch check as a backstop.
 
@@ -1012,8 +1015,8 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
 
 3. Give each tenant's hosts a credential that reaches only that tenant's
    prefix: read, write and delete objects under `wherry/<tenant>/`, and list
-   the bucket under that prefix, which `wherry cleanup` and the end of a run
-   use. A bucket policy for tenant `alice`, whose principal syntax varies by
+   the bucket under that prefix, which `wait` uses at the end of a
+   run. A bucket policy for tenant `alice`, whose principal syntax varies by
    store (Ceph RGW names a user `arn:aws:iam:::user/<uid>`):
 
    ```json
@@ -1266,7 +1269,7 @@ connects to:
 
 | Party | Connects to |
 | --- | --- |
-| Hosts: `wherry` and `wherry mcp` | the Kafka brokers' TLS listener; the pool's storage endpoint when the host's configuration has `storage` |
+| Hosts: `wherry` and `wherry host mcp` | the Kafka brokers' TLS listener; the pool's storage endpoint when the host's configuration has `storage` |
 | Receiver hosts: the receiver and its plugins | the Kafka brokers' TLS listener; the platform's API (the Nomad or Kubernetes API, or the local systemd bus); the storage endpoint, to upload S3 outputs and, for the Kubernetes and systemd plugins, fetch S3 inputs |
 | Nomad clients | the storage endpoint, to fetch S3 inputs |
 | Agent jobs | DNS; the model API the agent's harness calls; the hosts in the pool's `vcs`, for git inputs; and whatever else the task's own work needs |
@@ -1286,7 +1289,7 @@ rejects unknown members on `wherry.operator` records cannot decode pool terms
 that set `models` or `default_model`, and stops reading `wherry.operator` while
 they hold them, so upgrade every receiver and host before the terms set them.
 Such a release reports those records as written by a later release;
-upgrade it. A harness does not restart a running `wherry mcp` when its binary
+upgrade it. A harness does not restart a running `wherry host mcp` when its binary
 changes, so restart the MCP server after upgrading.
 
 The [release notes](https://github.com/benemon/wherry/releases) mark a
@@ -1315,11 +1318,11 @@ configuration, bundle and state directory.
    window. Restart a pool's receivers one at a time, so that a stopping key
    custodian re-keys its tasks to a live successor
    ([Stop a pool's key custodian](#stop-a-pool-s-key-custodian)).
-4. Restart the harness sessions that run `wherry mcp`.
+4. Restart the harness sessions that run `wherry host mcp`.
 
 ## Harness integration
 
-`wherry mcp` serves the host operations as MCP tools over stdio. It reads
+`wherry host mcp` serves the host operations as MCP tools over stdio. It reads
 the client configuration and connects to Kafka as one host when it starts.
 Every tool call reuses that host and its one tenant-feed follower, and
 `wait`, `events` and `logs` also read the tenant's transcript topic. While
@@ -1344,11 +1347,11 @@ harness user.
 2. Check the connection with the `receivers` tool, which lists the
    receivers the tenant may use.
 
-The packaged `plugins/wherry/mcp.json` starts `wherry mcp` with the default
+The packaged `plugins/wherry/mcp.json` starts `wherry host mcp` with the default
 configuration path. For a configuration elsewhere, keep it at the default path
 or link the default path to it, or register a server of your own that runs
-`wherry mcp --config-file PATH` and disable the packaged one, for example with
-[`claude mcp add wherry -- wherry mcp --config-file PATH`](https://docs.anthropic.com/en/docs/claude-code/mcp)
+`wherry host mcp --config-file PATH` and disable the packaged one, for example with
+[`claude mcp add wherry -- wherry host mcp --config-file PATH`](https://docs.anthropic.com/en/docs/claude-code/mcp)
 in Claude Code. A plugin update replaces the packaged `mcp.json`, so edits to it
 do not last.
 

@@ -40,14 +40,15 @@ One `wherry` binary with three sides:
   bundles, records receiver configurations, revokes access, suspends and
   resumes pools and rotates their keys, and checks the result against the
   broker.
-- **Host:** `wherry init` and `wherry key` register and show the host's signing
-  key. `receivers` lists the receivers the tenant may use with their plugin
+- **Host:** `wherry host init` registers the host's signing key and prints
+  its key ID. `wherry host receivers` lists the receivers the tenant may use with their plugin
   profiles and labels. `submit` places a task by agent and label selector and publishes
   it with its credentials in the task's envelope. `wait`, `status`,
   `events` and `cancel` follow and stop a run. `status` without a run ID lists every run the host
-  can see, `logs` prints a run's agent output, and `cleanup` deletes
-  a run's S3 objects. `mcp` serves every one of these commands but `init`
-  and `key` as an MCP tool of the same name; see
+  can see, and `logs` prints a run's agent output. `wherry submit`, `wait`,
+  `status`, `events`, `logs` and `cancel` are shortcuts for these `wherry host`
+  commands. `wherry host mcp` serves `receivers` and these six as MCP tools of
+  the same name; see
   [Harness integration](operations.md#harness-integration).
 - **Receiver:** `wherry receiver run` claims its pool's tasks and runs each one
   as a job on one of its profiles, through a plugin, such as

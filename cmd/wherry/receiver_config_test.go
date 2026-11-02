@@ -444,16 +444,16 @@ func TestReceiverConfigFileRefusesIdentity(t *testing.T) {
 
 func TestOperatorArgsParseAsFlags(t *testing.T) {
 	for _, args := range [][]string{
-		{"pool", "update", "p", "--config-file=x", "--dry-run"},
-		{"pool", "update", "p", "-config-file", "x", "-dry-run=true"},
-		{"pool", "update", "--config-file", "y", "p", "--config-file", "x", "--dry-run"},
+		{"pool", "apply", "p", "-f=x", "--dry-run"},
+		{"pool", "apply", "p", "-f", "x", "-dry-run=true"},
+		{"pool", "apply", "-f", "y", "p", "--f", "x", "--dry-run"},
 	} {
 		positional, options, err := operatorArgs(args)
-		if err != nil || !slices.Equal(positional, []string{"pool", "update", "p"}) || !maps.Equal(options, map[string]string{"config-file": "x", "dry-run": "true"}) {
-			t.Errorf("operatorArgs(%q) = %q, %v, %v; want pool update p with --config-file x and --dry-run", args, positional, options, err)
+		if err != nil || !slices.Equal(positional, []string{"pool", "apply", "p"}) || !maps.Equal(options, map[string]string{"f": "x", "dry-run": "true"}) {
+			t.Errorf("operatorArgs(%q) = %q, %v, %v; want pool apply p with -f x and --dry-run", args, positional, options, err)
 		}
 	}
-	if _, options, err := operatorArgs([]string{"receiver", "update", "r", "--force=false"}); err != nil || len(options) != 0 {
+	if _, options, err := operatorArgs([]string{"receiver", "apply", "r", "--force=false"}); err != nil || len(options) != 0 {
 		t.Errorf("operatorArgs with --force=false = %v, %v; want no options", options, err)
 	}
 }

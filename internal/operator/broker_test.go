@@ -294,8 +294,8 @@ func provision(t *testing.T) *fixture {
 			t.Fatal(err)
 		}
 	}
-	must(service.PoolCreate(ctx, f.poolA, terms))
-	must(service.PoolCreate(ctx, f.poolB, terms))
+	must(service.PoolApply(ctx, f.poolA, terms, false))
+	must(service.PoolApply(ctx, f.poolB, terms, false))
 	must(service.TenantAdd(ctx, f.tenantA, f.poolA))
 	must(service.TenantAdd(ctx, f.tenantB, f.poolB))
 	for _, receiver := range [][2]string{{f.receiverA, f.poolA}, {f.receiverB, f.poolB}} {
@@ -305,7 +305,7 @@ func provision(t *testing.T) *fixture {
 	}
 	for _, host := range [][2]string{{f.tenantA, f.hostA1}, {f.tenantA, f.hostA2}, {f.tenantB, f.hostB1}} {
 		path := filepath.Join(dir, host[0]+"."+host[1])
-		must(service.HostAdd(ctx, host[0], host[1], path))
+		must(service.HostAdd(ctx, host[0], host[1], path, false))
 		f.bundles[TenantPrincipal(host[0], host[1])] = readBundle(t, path)
 	}
 	must(kafkatest.Led(ctx, service.SuperUser, PoolTasksTopic(f.poolA), PoolEventsTopic(f.poolA), PoolTasksTopic(f.poolB), PoolEventsTopic(f.poolB),
@@ -408,16 +408,16 @@ func TestPoolGroupTakesTermDefaultsOnRealBroker(t *testing.T) {
 	ctx := context.Background()
 	terms := modelTerms()
 	terms.DeliveryLimit, terms.LockDurationMS = 0, 0
-	// The broker keeps wherry.operator between runs and pool create refuses an existing pool, so each run names its own.
+	// The broker keeps wherry.operator between runs and pool apply would update an existing pool, so each run names its own.
 	pool := fmt.Sprintf("defaults-%d", time.Now().UnixNano())
-	if err := service.PoolCreate(ctx, pool, terms); err != nil {
+	if err := service.PoolApply(ctx, pool, terms, false); err != nil {
 		t.Fatal(err)
 	}
 	groupTerms(t, service, pool, "5", "15000")
 }
 
-// pool update re-applies the share group's delivery limit and lock duration; its dry run leaves them.
-func TestPoolUpdateReappliesTheShareGroupOnRealBroker(t *testing.T) {
+// pool apply re-applies the share group's delivery limit and lock duration; its dry run leaves them.
+func TestPoolApplyUpdateReappliesTheShareGroupOnRealBroker(t *testing.T) {
 	if os.Getenv("WHERRY_TRUST_BROKER") == "" {
 		t.Skip("WHERRY_TRUST_BROKER is not set")
 	}
@@ -427,22 +427,22 @@ func TestPoolUpdateReappliesTheShareGroupOnRealBroker(t *testing.T) {
 	terms := modelTerms()
 	terms.DeliveryLimit, terms.LockDurationMS = 5, 15000
 	pool := fmt.Sprintf("update-%d", time.Now().UnixNano())
-	if err := service.PoolCreate(ctx, pool, terms); err != nil {
+	if err := service.PoolApply(ctx, pool, terms, false); err != nil {
 		t.Fatal(err)
 	}
 	terms.DeliveryLimit, terms.LockDurationMS = 3, 30000
-	if err := service.PoolUpdate(ctx, pool, terms, true); err != nil {
+	if err := service.PoolApply(ctx, pool, terms, true); err != nil {
 		t.Fatal(err)
 	}
 	groupTerms(t, service, pool, "5", "15000")
-	if err := service.PoolUpdate(ctx, pool, terms, false); err != nil {
+	if err := service.PoolApply(ctx, pool, terms, false); err != nil {
 		t.Fatal(err)
 	}
 	groupTerms(t, service, pool, "3", "30000")
 }
 
-// pool update to a shorter start_by_limit leaves the pool topics at the longer terms' retention, which check accepts.
-func TestPoolUpdateKeepsTheLongerRetentionOnRealBroker(t *testing.T) {
+// pool apply to a shorter start_by_limit leaves the pool topics at the longer terms' retention, which check accepts.
+func TestPoolApplyUpdateKeepsTheLongerRetentionOnRealBroker(t *testing.T) {
 	if os.Getenv("WHERRY_TRUST_BROKER") == "" {
 		t.Skip("WHERRY_TRUST_BROKER is not set")
 	}
@@ -452,10 +452,10 @@ func TestPoolUpdateKeepsTheLongerRetentionOnRealBroker(t *testing.T) {
 	terms := modelTerms()
 	terms.StartByLimitMS = Millis((10 * 24 * time.Hour).Milliseconds())
 	pool := fmt.Sprintf("retention-%d", time.Now().UnixNano())
-	if err := service.PoolCreate(ctx, pool, terms); err != nil {
+	if err := service.PoolApply(ctx, pool, terms, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.PoolUpdate(ctx, pool, modelTerms(), false); err != nil {
+	if err := service.PoolApply(ctx, pool, modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	want := int64(terms.StartByLimitMS) + MaxRunDurationMS + retentionMarginMS

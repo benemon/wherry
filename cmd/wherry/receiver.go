@@ -203,7 +203,7 @@ func (p *plugins) profile(pool string, settings operator.ProfileSettings, plugin
 	if !ok {
 		checksum, err := hex.DecodeString(pluginSHA256)
 		if err != nil || len(checksum) != sha256.Size {
-			return receiver.Named{}, fmt.Errorf("plugin type %s has no pinned SHA-256; set it with receiver update --plugin-sha256 %s=HEX", settings.Plugin, settings.Plugin)
+			return receiver.Named{}, fmt.Errorf("plugin type %s has no pinned SHA-256; set it with receiver apply --plugin-sha256 %s=HEX", settings.Plugin, settings.Plugin)
 		}
 		running, err = pluginsdk.Launch(settings.Plugin, func() (string, error) { return pluginPath(p.dir, settings.Plugin) }, checksum, p.logs)
 		if err != nil {

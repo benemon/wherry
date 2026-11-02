@@ -265,10 +265,10 @@ func TestRoundTrip(t *testing.T) {
 			Config: map[string]any{"outputs": true, "finish": true, "inline_limit": 1000, "credential": "fake-token"}}},
 		PluginSHA256: map[string]string{"fake": fakeSHA256}}
 	for _, step := range []func() error{
-		func() error { return service.PoolCreate(ctx, "pool-a", terms) },
+		func() error { return service.PoolApply(ctx, "pool-a", terms, false) },
 		func() error { return service.TenantAdd(ctx, "tenant-a", "pool-a") },
-		func() error { return service.HostAdd(ctx, "tenant-a", "host-a", hostBundle) },
-		func() error { return service.HostAdd(ctx, "tenant-a", "host-b", otherBundle) },
+		func() error { return service.HostAdd(ctx, "tenant-a", "host-a", hostBundle, false) },
+		func() error { return service.HostAdd(ctx, "tenant-a", "host-b", otherBundle, false) },
 		func() error { return service.ReceiverAdd(ctx, config, receiverBundle) },
 	} {
 		if err := step(); err != nil {
@@ -676,7 +676,7 @@ func TestPlatformCredentialIsRedactedFromTheReceiverLog(t *testing.T) {
 	}, PluginSHA256: map[string]string{"fake": fakeSHA256}}
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "receiver.yaml")
-	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.ReceiverAdd(ctx, config, bundlePath); err != nil {

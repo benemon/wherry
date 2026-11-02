@@ -116,7 +116,7 @@ func TestSuspendedPoolRefusesSubmitBeforeResolvingAnything(t *testing.T) {
 	f := newFixture(t)
 	terms := testTerms()
 	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
-	if err := f.service.PoolUpdate(f.ctx, "pool-a", terms, false); err != nil {
+	if err := f.service.PoolApply(f.ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
 	f.host.storage = o.config
@@ -549,7 +549,7 @@ func keyLostS3Run(t *testing.T) (*uploadOracle, *fixture, *testReceiver, claimed
 	f := newFixture(t)
 	terms := testTerms()
 	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
-	if err := f.service.PoolUpdate(f.ctx, "pool-a", terms, false); err != nil {
+	if err := f.service.PoolApply(f.ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
 	f.host.storage = o.config

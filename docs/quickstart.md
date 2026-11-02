@@ -92,7 +92,7 @@ once, and prints:
 ready: instance default (nomad 2.0.7, kafka 1a2b3c4d5e6f, plugin nomad/v0.1.0-rc.16, wherry v0.1.0-rc.24)
 config: /home/me/.local/share/wherry/dev/default/env/host/config.yaml
 submit: wherry submit --config-file /home/me/.local/share/wherry/dev/default/env/host/config.yaml --prompt "..."
-claude: claude mcp add wherry-default -- /home/me/.local/share/wherry/dev/default/cache/wherry mcp --config-file /home/me/.local/share/wherry/dev/default/env/host/config.yaml
+claude: claude mcp add wherry-default -- /home/me/.local/share/wherry/dev/default/cache/wherry host mcp --config-file /home/me/.local/share/wherry/dev/default/env/host/config.yaml
 ```
 
 The `claude:` line registers the MCP server with Claude Code, so a session
@@ -113,7 +113,8 @@ wherry submit --config-file "$config" --prompt "List the files in your input dir
 ```
 
 `submit` prints `run_id=run-<id> pool=dev`. Each harness runs its own
-default model.
+default model. `wherry submit` is a [shortcut](commands.md#shortcuts) for
+`wherry host submit`, as `wherry wait` is for `wherry host wait`.
 
 ### 4. Wait
 
@@ -131,7 +132,7 @@ wherry dev down
 ```
 
 `down` stops everything and deletes the environment's data and
-credentials. `wherry dev reset` deletes the downloads.
+credentials. `wherry dev down --reset` deletes the downloads.
 
 ## Operator
 
@@ -230,10 +231,10 @@ invalid input: auth required: credential claude-oauth-token is not in this host'
 On the operator's machine:
 
 ```sh
-wherry operator pool create build --config-file build-terms.yaml
+wherry operator pool apply build -f build-terms.yaml
 ```
 
-`pool create` records the terms on `wherry.operator` and creates the pool's
+`pool apply` creates the pool: it records the terms on `wherry.operator` and creates the pool's
 topics and share group.
 
 ### 5. Entitle the tenant
@@ -327,7 +328,7 @@ profile container: credential "nomad-token" has no source in the receiver's conf
 The same configuration also works as a
 [directory](configuration.md#receiver-configuration-directory) with one file
 for the receiver, one for the plugin and one for each plugin profile, given
-with `--config-dir`.
+with `-f` naming the directory.
 
 ### 2. Check the receiver configuration
 
@@ -350,7 +351,7 @@ sha256=$(awk -v name="wherry-plugin-${plugin}_${version}_linux_${arch}" '$2 == n
 Check the file against the pool's terms, with the pin:
 
 ```sh
-wherry operator receiver add nomad-1 --pool build --config-file nomad-1.yaml \
+wherry operator receiver apply nomad-1 --pool build -f nomad-1.yaml \
   --plugin-sha256 "nomad=$sha256" --dry-run
 ```
 
@@ -416,11 +417,11 @@ profile whose agent is outside the pool's terms fails with
 On the operator's machine:
 
 ```sh
-wherry operator receiver add nomad-1 --pool build --config-file nomad-1.yaml \
+wherry operator receiver apply nomad-1 --pool build -f nomad-1.yaml \
   --plugin-sha256 "nomad=$sha256" --bundle-file nomad-1.bundle
 ```
 
-`receiver add` records the configuration and the pin on `wherry.operator`, creates the
+`receiver apply` adds the receiver: it records the configuration and the pin on `wherry.operator`, creates the
 receiver's Kafka principal, and writes its bundle, `nomad-1.bundle`, with mode
 0600. The bundle holds the receiver's Kafka password; hand it to the receiver
 host over a channel you trust.
@@ -448,7 +449,7 @@ install -m 0755 wherry-plugin-nomad /usr/local/libexec/wherry/plugins/
 
 The binary in the archive has the SHA-256 that step 2 pinned. To upgrade
 the plugin later, install the new version's binary, then record its pin with
-`receiver update --plugin-sha256`, as
+`receiver apply --plugin-sha256`, as
 [Install plugins](operations.md#install-plugins) describes.
 
 ### 5. Place the bundle
@@ -583,11 +584,11 @@ profiles:
                 memory_mb: 2048
 ```
 
-On `laptop`, once it is set up as in [Host](#host), `wherry receivers`
+On `laptop`, once it is set up as in [Host](#host), `wherry host receivers`
 lists the receiver as the tenant sees it:
 
 ```sh
-wherry receivers
+wherry host receivers
 ```
 
 ```
@@ -671,18 +672,18 @@ environment variable of the submitting process,
 On `laptop`:
 
 ```sh
-wherry init
+wherry host init
 ```
 
-`init` creates `~/.config/wherry/host.key`, registers it on the host's key
-topic, and prints its key ID, its RFC 7638 thumbprint in base64url. `wherry key` prints the
-same ID later. `wherry receivers` now lists `nomad-1` as
+`host init` creates `~/.config/wherry/host.key`, registers it on the host's key
+topic, and prints its key ID, its RFC 7638 thumbprint in base64url.
+`wherry host receivers` now lists `nomad-1` as
 [Receiver step 9](#_9-check-the-receiver) shows.
 
 ### 5. Connect a harness
 
 On `laptop`, install the wherry plugin in the harness, so that its agent
-submits tasks through `wherry mcp`. In Claude Code:
+submits tasks through `wherry host mcp`. In Claude Code:
 
 ```sh
 claude plugin marketplace add benemon/wherry

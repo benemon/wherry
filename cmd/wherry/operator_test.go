@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -92,10 +93,10 @@ func TestOperatorCommandUsage(t *testing.T) {
 		{[]string{"host", "add", "tenant-a", "host-a", "--bundle-file", bundle}, "usage: wherry operator host add HOST --tenant TENANT"},
 		{[]string{"host", "add", "tenant-a", "host-a", "--tenant", "tenant-a", "--bundle-file", bundle}, "usage: wherry operator host add HOST --tenant TENANT"},
 		{[]string{"host", "add", "host-a", "--tenant", "tenant-a"}, "usage: wherry operator host add HOST --tenant TENANT"},
-		{[]string{"host", "revoke", "host-a"}, "usage: wherry operator host revoke HOST --tenant TENANT"},
-		{[]string{"host", "revoke", "--tenant", "tenant-a"}, "usage: wherry operator host revoke HOST --tenant TENANT"},
-		{[]string{"receiver", "revoke"}, "usage: wherry operator receiver revoke RECEIVER"},
-		{[]string{"receiver", "revoke", "receiver-a", "receiver-b"}, "usage: wherry operator receiver revoke RECEIVER"},
+		{[]string{"host", "remove", "host-a"}, "usage: wherry operator host remove HOST --tenant TENANT"},
+		{[]string{"host", "remove", "--tenant", "tenant-a"}, "usage: wherry operator host remove HOST --tenant TENANT"},
+		{[]string{"receiver", "remove"}, "usage: wherry operator receiver remove RECEIVER"},
+		{[]string{"receiver", "remove", "receiver-a", "receiver-b"}, "usage: wherry operator receiver remove RECEIVER"},
 		{[]string{"pool", "entitle", "build"}, "usage: wherry operator pool entitle POOL --tenant TENANT"},
 		{[]string{"pool", "entitle", "--tenant", "tenant-a"}, "usage: wherry operator pool entitle POOL --tenant TENANT"},
 		{[]string{"tenant", "add", "tenant-a", "--pool", "build"}, "unknown operator command"},
@@ -104,7 +105,14 @@ func TestOperatorCommandUsage(t *testing.T) {
 		{[]string{"receiver", "configure", "receiver-a"}, "unknown operator command"},
 		{[]string{"skip", "42", "--sha256", strings.Repeat("0", 64)}, "unknown operator command"},
 		{[]string{"skip", "42"}, "unknown operator command"},
-		{[]string{"pool", "update"}, "usage: wherry operator pool update NAME"},
+		{[]string{"pool", "apply"}, "usage: wherry operator pool apply NAME -f PATH"},
+		{[]string{"receiver", "apply"}, "usage: wherry operator receiver apply NAME"},
+		{[]string{"pool", "create", "pool-a"}, "unknown operator command"},
+		{[]string{"pool", "update", "pool-a"}, "unknown operator command"},
+		{[]string{"receiver", "add", "receiver-a"}, "unknown operator command"},
+		{[]string{"receiver", "update", "receiver-a"}, "unknown operator command"},
+		{[]string{"receiver", "revoke", "receiver-a"}, "unknown operator command"},
+		{[]string{"host", "revoke", "host-a", "--tenant", "tenant-a"}, "unknown operator command"},
 		{[]string{"pool", "suspend"}, "usage: wherry operator pool suspend POOL"},
 		{[]string{"pool", "resume", "pool-a", "pool-b"}, "usage: wherry operator pool resume POOL"},
 		{[]string{"pool", "rotate-key"}, "usage: wherry operator pool rotate-key POOL [--suspect-key KID]..."},
@@ -150,7 +158,7 @@ tasks=1
 func TestRevokePrintsTheCauseOfAFailedStep(t *testing.T) {
 	operatorEnv(t)
 	var stdout, stderr bytes.Buffer
-	err := runOperator([]string{"receiver", "revoke", "receiver-a", "--wait", "1ms"}, &stdout, &stderr)
+	err := runOperator([]string{"receiver", "remove", "receiver-a", "--wait", "1ms"}, &stdout, &stderr)
 	if err == nil || err.Error() != "revocation incomplete" {
 		t.Fatalf("revoke = %v, want revocation incomplete", err)
 	}
@@ -170,10 +178,10 @@ func TestRevokeRefusesAWaitThatIsNotPositive(t *testing.T) {
 	operatorEnv(t)
 	const want = "--wait must be positive; omit it to compute the safe wait from the broker's timeouts"
 	for _, args := range [][]string{
-		{"receiver", "revoke", "receiver-a", "--wait", "0s"},
-		{"receiver", "revoke", "receiver-a", "--wait", "-1s"},
-		{"host", "revoke", "host-a", "--tenant", "tenant-a", "--wait", "0s"},
-		{"host", "revoke", "host-a", "--tenant", "tenant-a", "--wait", "-1s"},
+		{"receiver", "remove", "receiver-a", "--wait", "0s"},
+		{"receiver", "remove", "receiver-a", "--wait", "-1s"},
+		{"host", "remove", "host-a", "--tenant", "tenant-a", "--wait", "0s"},
+		{"host", "remove", "host-a", "--tenant", "tenant-a", "--wait", "-1s"},
 	} {
 		var stdout bytes.Buffer
 		if err := runOperator(args, &stdout, io.Discard); err == nil || err.Error() != want || stdout.Len() != 0 {
@@ -181,12 +189,12 @@ func TestRevokeRefusesAWaitThatIsNotPositive(t *testing.T) {
 		}
 	}
 	var stdout bytes.Buffer
-	if err := runOperator([]string{"receiver", "revoke", "receiver-a"}, &stdout, io.Discard); err != nil && err.Error() == want || !strings.HasPrefix(stdout.String(), "step=1 ") {
+	if err := runOperator([]string{"receiver", "remove", "receiver-a"}, &stdout, io.Discard); err != nil && err.Error() == want || !strings.HasPrefix(stdout.String(), "step=1 ") {
 		t.Fatalf("revoke without --wait = %v with output %q, want the revocation steps run", err, stdout.String())
 	}
 }
 
-// receiver show prints the recorded configuration; update --dry-run records nothing and prints what recording the
+// receiver show prints the recorded configuration; apply --dry-run records nothing and prints what recording the
 // file would store, as show prints it once recorded.
 // The record decodes numbers as float64; show prints a whole one as an integer.
 func TestReceiverShowPrintsWholeNumbersAsIntegers(t *testing.T) {
@@ -207,7 +215,7 @@ func TestReceiverShowAndDryRun(t *testing.T) {
 	service := operatorEnv(t)
 	ctx := context.Background()
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
-	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
 	recorded := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 3, Profiles: []operator.ProfileSettings{{Name: "old", Plugin: "nomad", Agent: "claude"}},
@@ -249,16 +257,16 @@ profiles:
 	before := records()
 	pin := "nomad=" + fakeSHA256
 	for _, bad := range []string{"nomad=" + strings.ToUpper(fakeSHA256), "nomad=" + fakeSHA256[1:], "nomad=" + fakeSHA256 + "0", "nomad=" + strings.Repeat("g", 64), "Nomad=" + fakeSHA256, "nomad"} {
-		if err := runOperator([]string{"receiver", "update", "receiver-a", "--config-file", file, "--plugin-sha256", bad}, io.Discard, io.Discard); err == nil || records() != before {
-			t.Fatalf("update --plugin-sha256 %s: %v; want it refused before writing", bad, err)
+		if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", file, "--plugin-sha256", bad}, io.Discard, io.Discard); err == nil || records() != before {
+			t.Fatalf("apply --plugin-sha256 %s: %v; want it refused before writing", bad, err)
 		}
 	}
-	if err := runOperator([]string{"receiver", "update", "receiver-a", "--config-file", file}, io.Discard, io.Discard); err == nil || err.Error() != "plugin type nomad has no pinned SHA-256; set it with receiver update --plugin-sha256 nomad=HEX" || records() != before {
-		t.Fatalf("update without a pin: %v; want it refused before writing", err)
+	if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", file}, io.Discard, io.Discard); err == nil || err.Error() != "plugin type nomad has no pinned SHA-256; set it with receiver apply --plugin-sha256 nomad=HEX" || records() != before {
+		t.Fatalf("apply without a pin: %v; want it refused before writing", err)
 	}
-	dryRun := wherry("receiver", "update", "receiver-a", "--config-file", file, "--plugin-sha256", pin, "--dry-run")
+	dryRun := wherry("receiver", "apply", "receiver-a", "-f", file, "--plugin-sha256", pin, "--dry-run")
 	if records() != before {
-		t.Fatal("update --dry-run produced a record")
+		t.Fatal("apply --dry-run produced a record")
 	}
 	resolved := `capacity: 1
 plugin_sha256:
@@ -286,39 +294,33 @@ profiles:
 	if dryRun != resolved {
 		t.Fatalf("dry run printed\n%s\nwant\n%s", dryRun, resolved)
 	}
-	if got := wherry("receiver", "add", "receiver-b", "--pool", "pool-a", "--config-file", file, "--plugin-sha256", pin, "--dry-run"); got != resolved || records() != before {
-		t.Fatalf("receiver add --dry-run printed\n%s\nand left %d records; want the resolution and %d records", got, records(), before)
+	if got := wherry("receiver", "apply", "receiver-b", "--pool", "pool-a", "-f", file, "--plugin-sha256", pin, "--dry-run"); got != resolved || records() != before {
+		t.Fatalf("apply --dry-run of a new receiver printed\n%s\nand left %d records; want the resolution and %d records", got, records(), before)
 	}
 	if err := runOperator([]string{"receiver", "show", "receiver-b"}, io.Discard, io.Discard); err == nil {
-		t.Fatal("receiver add --dry-run recorded receiver-b")
+		t.Fatal("apply --dry-run recorded receiver-b")
 	}
 	if got := wherry("receiver", "show", "receiver-a"); got != shown {
 		t.Fatalf("after a dry run, show printed\n%s\nwant the recorded configuration", got)
 	}
 	outside := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": basePlugin + item("name: codex\nagent: codex\n", "      ")}), "receiver.yaml")
-	if err := runOperator([]string{"receiver", "update", "receiver-a", "--config-file", outside, "--plugin-sha256", pin, "--dry-run"}, io.Discard, io.Discard); err == nil || err.Error() != "receiver agent is outside pool terms" {
+	if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", outside, "--plugin-sha256", pin, "--dry-run"}, io.Discard, io.Discard); err == nil || err.Error() != "receiver agent is outside pool terms" {
 		t.Fatalf("dry run of an agent outside the pool's terms: %v; want it refused", err)
 	}
-	if got := wherry("receiver", "update", "receiver-a", "--config-file", file, "--plugin-sha256", pin); got != "" || records() != before+1 {
-		t.Fatalf("update printed %q and left %d records; want nothing printed and one record more than %d", got, records(), before)
+	if err := runOperator([]string{"receiver", "apply", "receiver-a", "--pool", "pool-b", "-f", file, "--plugin-sha256", pin}, io.Discard, io.Discard); err == nil || err.Error() != "receiver cannot move pool" || records() != before {
+		t.Fatalf("apply naming another pool: %v; want it refused before writing", err)
+	}
+	if got := wherry("receiver", "apply", "receiver-a", "--pool", "pool-a", "-f", file, "--plugin-sha256", pin); got != "" || records() != before+1 {
+		t.Fatalf("apply printed %q and left %d records; want nothing printed and one record more than %d", got, records(), before)
 	}
 	if got := wherry("receiver", "show", "receiver-a"); got != dryRun {
 		t.Fatalf("show printed\n%s\nwant what the dry run printed\n%s", got, dryRun)
 	}
-	if state, err := service.LoadState(ctx); err != nil || state.Receivers["receiver-a"].Force {
-		t.Fatalf("update without --force recorded force: %v", err)
-	}
-	if got := wherry("receiver", "update", "receiver-a", "--force", "--config-file", file, "--plugin-sha256", pin); got != "" || records() != before+2 {
-		t.Fatalf("update --force printed %q and left %d records; want one record more", got, records())
-	}
-	if state, err := service.LoadState(ctx); err != nil || !state.Receivers["receiver-a"].Force {
-		t.Fatalf("update --force recorded no force: %v", err)
-	}
 }
 
-// pool update records new terms and re-applies the share group's delivery limit and lock duration; pool create refuses
-// an existing pool and --dry-run writes nothing.
-func TestPoolUpdate(t *testing.T) {
+// pool apply creates a pool, records other terms for it and re-applies the share group's delivery limit and lock
+// duration, records nothing for the same terms, and with --dry-run writes nothing.
+func TestPoolApply(t *testing.T) {
 	service := operatorEnv(t)
 	ctx := context.Background()
 	// runOperator reads the delivery ceiling from the broker, and kfake reports none until it is set.
@@ -364,27 +366,169 @@ func TestPoolUpdate(t *testing.T) {
 		}
 		return group["share.delivery.count.limit"], group["share.record.lock.duration.ms"], state.Pools["pool-a"]
 	}
-	if err := runOperator([]string{"pool", "create", "pool-a", "--config-file", pool(5, "15s")}, io.Discard, io.Discard); err != nil {
+	apply := func(path string, options ...string) error {
+		return runOperator(append([]string{"pool", "apply", "pool-a", "-f", path}, options...), io.Discard, io.Discard)
+	}
+	if err := apply(pool(5, "15s"), "--dry-run"); err != nil {
 		t.Fatal(err)
 	}
-	if err := runOperator([]string{"pool", "update", "pool-b", "--config-file", pool(3, "30s")}, io.Discard, io.Discard); err == nil || err.Error() != "no pool by that name" {
-		t.Fatalf("update of a missing pool = %v, want no pool by that name", err)
+	if state, err := service.LoadState(ctx); err != nil || len(state.Pools) != 0 {
+		t.Fatalf("pools %v, %v; want none recorded by a dry run", state.Pools, err)
+	}
+	if err := apply(pool(5, "15s")); err != nil {
+		t.Fatal(err)
 	}
 	before := records()
-	if err := runOperator([]string{"pool", "create", "pool-a", "--config-file", pool(3, "30s")}, io.Discard, io.Discard); err == nil || err.Error() != "pool exists; change its terms with pool update" {
-		t.Fatalf("create of an existing pool = %v, want it refused naming pool update", err)
+	if limit, lock, recorded := terms(); limit != "5" || lock != "15000" || recorded.DeliveryLimit != 5 || recorded.LockDurationMS != 15000 {
+		t.Fatalf("after create: share group %s/%s, terms %d/%d; want 5/15000 throughout", limit, lock, recorded.DeliveryLimit, recorded.LockDurationMS)
+	}
+	if err := apply(pool(5, "15s")); err != nil || records() != before {
+		t.Fatalf("apply of the same terms = %v with %d records; want %d", err, records(), before)
 	}
 	var stdout bytes.Buffer
-	if err := runOperator([]string{"pool", "update", "pool-a", "--config-file", pool(3, "30s"), "--dry-run"}, &stdout, io.Discard); err != nil {
+	if err := runOperator([]string{"pool", "apply", "pool-a", "-f", pool(3, "30s"), "--dry-run"}, &stdout, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if limit, lock, recorded := terms(); records() != before || stdout.Len() != 0 || limit != "5" || lock != "15000" || recorded.DeliveryLimit != 5 || recorded.LockDurationMS != 15000 {
-		t.Fatalf("after create and dry run: %d records, output %q, share group %s/%s, terms %d/%d; want %d records, no output and 5/15000 throughout", records(), stdout.String(), limit, lock, recorded.DeliveryLimit, recorded.LockDurationMS, before)
+		t.Fatalf("after a dry run: %d records, output %q, share group %s/%s, terms %d/%d; want %d records, no output and 5/15000 throughout", records(), stdout.String(), limit, lock, recorded.DeliveryLimit, recorded.LockDurationMS, before)
 	}
-	if err := runOperator([]string{"pool", "update", "pool-a", "--config-file", pool(3, "30s")}, io.Discard, io.Discard); err != nil {
+	if err := apply(pool(3, "30s")); err != nil {
 		t.Fatal(err)
 	}
 	if limit, lock, recorded := terms(); records() != before+1 || limit != "3" || lock != "30000" || recorded.DeliveryLimit != 3 || recorded.LockDurationMS != 30000 {
 		t.Fatalf("after update: %d records, share group %s/%s, terms %d/%d; want %d records and 3/30000 throughout", records(), limit, lock, recorded.DeliveryLimit, recorded.LockDurationMS, before+1)
+	}
+}
+
+// bundleWorks reports whether the broker takes the bundle at path, once its credential is stored as kfake reads it.
+func bundleWorks(t *testing.T, service *operator.Service, path string, resalted bool) bool {
+	t.Helper()
+	bundle, err := operator.ReadBundle(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resalted {
+		resalt(t, service, path)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return connectTLS(t, bundle.Broker, bundle.CA, bundle.Principal, bundle.Password).Ping(ctx) == nil
+}
+
+// receiver apply adds a receiver and writes its bundle, refuses to write another for it without --force, and with
+// --force gives it a new password and bundle without a record; the old bundle stops working.
+func TestReceiverApplyForceReissuesTheIdentity(t *testing.T) {
+	service := operatorEnv(t)
+	ctx := context.Background()
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": basePlugin + item("name: claude\nagent: claude\n", "      ")}), "receiver.yaml")
+	pin := "nomad=" + fakeSHA256
+	dir := t.TempDir()
+	bundle, other := filepath.Join(dir, "receiver-a.bundle"), filepath.Join(dir, "other.bundle")
+	apply := func(options ...string) error {
+		return runOperator(append([]string{"receiver", "apply", "receiver-a"}, options...), io.Discard, io.Discard)
+	}
+	if err := apply("--pool", "pool-a", "-f", file, "--plugin-sha256", pin, "--bundle-file", bundle); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(bundle); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("bundle %v, %v; want it written with mode 0600", info, err)
+	}
+	state, err := service.LoadState(ctx)
+	if err != nil || state.Receivers["receiver-a"].Pool != "pool-a" {
+		t.Fatalf("receivers %v, %v; want receiver-a recorded", state.Receivers, err)
+	}
+	if !bundleWorks(t, service, bundle, true) {
+		t.Fatal("the broker refused the new receiver's bundle")
+	}
+	records := func() int64 {
+		t.Helper()
+		offsets, err := kadm.NewClient(service.SuperUser).ListEndOffsets(ctx, operator.OperatorTopic)
+		if err != nil || offsets.Error() != nil {
+			t.Fatal(err, offsets.Error())
+		}
+		offset, _ := offsets.Lookup(operator.OperatorTopic, 0)
+		return offset.Offset
+	}
+	before := records()
+	if err := apply("--pool", "pool-a", "-f", file, "--plugin-sha256", pin, "--bundle-file", other); err == nil || err.Error() != "receiver exists; --force gives it a new password and bundle" {
+		t.Fatalf("apply of an existing receiver with a bundle file = %v; want it refused without --force", err)
+	}
+	if _, err := os.Stat(other); !errors.Is(err, os.ErrNotExist) || records() != before || !bundleWorks(t, service, bundle, false) {
+		t.Fatalf("a refused apply wrote %s (%v), left %d records or changed the password", other, err, records())
+	}
+	if err := apply("--force", "-f", file, "--bundle-file", bundle); err == nil || !strings.HasPrefix(err.Error(), "usage: wherry operator receiver apply NAME --force --bundle-file FILE") {
+		t.Fatalf("apply --force with a config = %v; want it refused", err)
+	}
+	old, err := os.ReadFile(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := apply("--force", "--bundle-file", bundle); err != nil {
+		t.Fatal(err)
+	}
+	if records() != before {
+		t.Fatalf("apply --force left %d records, want %d", records(), before)
+	}
+	oldBundle := filepath.Join(dir, "old.bundle")
+	if err := os.WriteFile(oldBundle, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if bundleWorks(t, service, oldBundle, false) {
+		t.Fatal("the broker took the old bundle after apply --force")
+	}
+	if !bundleWorks(t, service, bundle, true) {
+		t.Fatal("the broker refused the bundle apply --force wrote")
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 2 {
+		t.Fatalf("bundle directory holds %v, %v; want the bundle and the old copy alone", entries, err)
+	}
+}
+
+// host add refuses an existing host without --force, and with --force replaces its bundle with one holding a new
+// password; the old bundle stops working.
+func TestHostAddForceReissuesTheIdentity(t *testing.T) {
+	service := operatorEnv(t)
+	dir := t.TempDir()
+	bundle, other := filepath.Join(dir, "host-a.bundle"), filepath.Join(dir, "other.bundle")
+	add := func(path string, options ...string) error {
+		return runOperator(append([]string{"host", "add", "host-a", "--tenant", "tenant-a", "--bundle-file", path}, options...), io.Discard, io.Discard)
+	}
+	if err := add(bundle); err != nil {
+		t.Fatal(err)
+	}
+	if !bundleWorks(t, service, bundle, true) {
+		t.Fatal("the broker refused the new host's bundle")
+	}
+	for _, path := range []string{other, bundle} {
+		if err := add(path); err == nil || err.Error() != "host exists; --force gives it a new password and bundle" {
+			t.Fatalf("host add of an existing host to %s = %v; want it refused without --force", path, err)
+		}
+	}
+	if _, err := os.Stat(other); !errors.Is(err, os.ErrNotExist) || !bundleWorks(t, service, bundle, false) {
+		t.Fatalf("a refused host add wrote %s (%v) or changed the password", other, err)
+	}
+	old, err := os.ReadFile(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := add(bundle, "--force"); err != nil {
+		t.Fatal(err)
+	}
+	oldBundle := filepath.Join(dir, "old.bundle")
+	if err := os.WriteFile(oldBundle, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if bundleWorks(t, service, oldBundle, false) {
+		t.Fatal("the broker took the old bundle after host add --force")
+	}
+	if !bundleWorks(t, service, bundle, true) {
+		t.Fatal("the broker refused the bundle host add --force wrote")
+	}
+	if err := runOperator([]string{"host", "add", "host-b", "--tenant", "tenant-a", "--bundle-file", bundle}, io.Discard, io.Discard); err == nil || !errors.Is(err, os.ErrExist) {
+		t.Fatalf("host add of a new host over an existing bundle file = %v; want it refused", err)
 	}
 }

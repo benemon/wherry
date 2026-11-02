@@ -137,11 +137,11 @@ func TestMCPToolsList(t *testing.T) {
 			}
 		}
 	})
-	if want := []string{"cancel", "cleanup", "events", "logs", "receivers", "status", "submit", "wait"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"cancel", "events", "logs", "receivers", "status", "submit", "wait"}; !reflect.DeepEqual(names, want) {
 		t.Fatalf("tools %v, want %v", names, want)
 	}
 	required := map[string][]string{
-		"wait": {"id"}, "cancel": {"id"}, "cleanup": {"id"}, "events": {"id"}, "receivers": nil, "status": nil,
+		"wait": {"id"}, "cancel": {"id"}, "events": {"id"}, "receivers": nil, "status": nil,
 		"submit": nil, "logs": {"id"},
 	}
 	for name, tool := range schemas {
@@ -855,24 +855,6 @@ func TestMCPPromptFile(t *testing.T) {
 			t.Errorf("empty prompt file: %+v", failure)
 		}
 	})
-}
-
-func TestMCPCleanup(t *testing.T) {
-	b := newBus(t)
-	admitted := b.admitted(t)
-	runID := admitted.submission.Wherry.Run
-	session := mcpSession(t, b.connect(t), nil)
-	if failure := callToolError(t, b.ctx, session, "cleanup", map[string]any{"id": runID}); failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, "has not ended") {
-		t.Fatalf("cleanup of a working run: %+v", failure)
-	}
-	b.feed(t, runID, b.status(t, admitted, "rejected-1", "rejected", now(wire.TaskStateRejected)))
-	failure := callToolError(t, b.ctx, session, "cleanup", map[string]any{"id": runID})
-	if failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, "no storage credential") {
-		t.Fatalf("cleanup on a host without storage: %+v", failure)
-	}
-	if failure := callToolError(t, b.ctx, session, "cleanup", map[string]any{"id": "run-missing"}); failure.Code != "RUN_NOT_FOUND" {
-		t.Fatalf("cleanup of an unknown run: %+v", failure)
-	}
 }
 
 func TestWaitCommand(t *testing.T) {

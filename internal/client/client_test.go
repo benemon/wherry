@@ -131,7 +131,7 @@ func newFixture(t *testing.T, opts ...kfake.Opt) *fixture {
 
 func (f *fixture) pool(t *testing.T, pool string) {
 	t.Helper()
-	if err := f.service.PoolCreate(f.ctx, pool, testTerms()); err != nil {
+	if err := f.service.PoolApply(f.ctx, pool, testTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.service.TenantAdd(f.ctx, "tenant-a", pool); err != nil {
@@ -163,11 +163,11 @@ func (f *fixture) connect(t *testing.T, path string, extra ...kgo.Opt) (*kgo.Cli
 	return kafka, bundle.Principal
 }
 
-// newHost provisions host in tenant-a and registers its key, as wherry init does.
+// newHost provisions host in tenant-a and registers its key, as wherry host init does.
 func (f *fixture) newHost(t *testing.T, host, stateDir string) *Host {
 	t.Helper()
 	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := f.service.HostAdd(f.ctx, "tenant-a", host, bundle); err != nil {
+	if err := f.service.HostAdd(f.ctx, "tenant-a", host, bundle, false); err != nil {
 		t.Fatal(err)
 	}
 	kafka, principal := f.connect(t, bundle)
@@ -611,7 +611,7 @@ func (f *fixture) modelPool(t *testing.T, defaultModel string) *testReceiver {
 	t.Helper()
 	terms := testTerms()
 	terms.Agents[0].Models, terms.Agents[0].DefaultModel = []string{"haiku", "sonnet"}, defaultModel
-	if err := f.service.PoolCreate(f.ctx, "pool-b", terms); err != nil {
+	if err := f.service.PoolApply(f.ctx, "pool-b", terms, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-b"); err != nil {
@@ -727,7 +727,7 @@ func TestSubmitIgnoresStaleOrUnauthorisedAdvertisements(t *testing.T) {
 			f.end(t, "receiver-a")
 		},
 		"pool not entitled": func(t *testing.T, f *fixture) {
-			if err := f.service.PoolCreate(f.ctx, "pool-b", testTerms()); err != nil {
+			if err := f.service.PoolApply(f.ctx, "pool-b", testTerms(), false); err != nil {
 				t.Fatal(err)
 			}
 			f.addReceiver(t, "receiver-b", "pool-b").advertise(t, f.ctx, nil)
@@ -1043,7 +1043,7 @@ func TestSubmitRefusesAKeyThatIsNotCurrentBeforePublishing(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
-	if err == nil || !strings.Contains(err.Error(), "host key is not the current key") || !strings.Contains(err.Error(), "wherry init") {
+	if err == nil || !strings.Contains(err.Error(), "host key is not the current key") || !strings.Contains(err.Error(), "wherry host init") {
 		t.Fatalf("submit = %v, want the host key refused as not current", err)
 	}
 	if n := f.tasksEnd(t, "pool-a"); n != 0 {
@@ -1156,7 +1156,7 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	f.addReceiver(t, "receiver-d", "pool-a").advertise(t, f.ctx, nil)
 	f.submit(t, defaultSelector())
 	f.end(t, "receiver-d")
-	if err := f.service.PoolCreate(f.ctx, "pool-c", testTerms()); err != nil {
+	if err := f.service.PoolApply(f.ctx, "pool-c", testTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	f.addReceiver(t, "receiver-e", "pool-c").advertise(t, f.ctx, nil)
@@ -1541,7 +1541,7 @@ func TestEchoOfAMismatchingTaskDoesNotBindTheRun(t *testing.T) {
 func TestRegisterConcurrently(t *testing.T) {
 	f := newFixture(t)
 	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-c", bundle); err != nil {
+	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-c", bundle, false); err != nil {
 		t.Fatal(err)
 	}
 	hosts := make([]*Host, 8)
@@ -2070,7 +2070,7 @@ func TestHostReadsBoundTheirConnectionsAndRequests(t *testing.T) {
 	f := newFixture(t, kfake.NumBrokers(1))
 	_, task := f.admitted(t)
 	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-c", bundle); err != nil {
+	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-c", bundle, false); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []struct {
@@ -2101,7 +2101,7 @@ func TestAwaitOfAFinishedRunBoundsItsConnectionsAndRequests(t *testing.T) {
 	runID := task.submission.Wherry.Run
 	receiver.feed(t, f.ctx, runID, receiver.result(t, task, 1, wire.TaskStateCompleted, nil), receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateCompleted, nil))
 	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-c", bundle); err != nil {
+	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-c", bundle, false); err != nil {
 		t.Fatal(err)
 	}
 	var counted traffic

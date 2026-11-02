@@ -108,7 +108,7 @@ profiles declare.
 Everything the task receives lands as files. A submission's `raw` and
 `data` parts are input files that the agent finds in the directory
 `WHERRY_INPUT_DIR` names. They travel inline in the submission record,
-within the broker's record limit, which `pool create` records, and the
+within the broker's record limit, which `pool apply` records, and the
 limit each plugin profile declares. Over either, they go through S3 when the pool
 has storage and the host a storage credential; otherwise submit refuses,
 naming the limit. Credentials are files in the directory

@@ -432,7 +432,7 @@ func testTerms() operator.Terms {
 			{Name: "codex", Credentials: []operator.AgentCredential{}},
 		},
 		DefaultAgent: "claude", DeliveryLimit: 10, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
-		// What pool create records at a broker's defaults: franz-go's producer maximum.
+		// What pool apply records at a broker's defaults: franz-go's producer maximum.
 		RecordLimit: 1000012,
 	}
 }
@@ -496,13 +496,13 @@ func newService(t *testing.T, ctx context.Context, terms operator.Terms) (*kfake
 	}
 	t.Cleanup(operatorClient.Close)
 	service := &operator.Service{SuperUser: root, Operator: operatorClient, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}
-	if err := service.PoolCreate(ctx, testPool, terms); err != nil {
+	if err := service.PoolApply(ctx, testPool, terms, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.TenantAdd(ctx, testTenant, testPool); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, testTenant, testHost, filepath.Join(t.TempDir(), "host.yaml")); err != nil {
+	if err := service.HostAdd(ctx, testTenant, testHost, filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
 		t.Fatal(err)
 	}
 	return cluster, service
@@ -1087,7 +1087,7 @@ func TestConfigureRefusesUnpinnedPluginType(t *testing.T) {
 	config.PluginSHA256 = map[string]string{"other": testPluginSHA256}
 	f.appendConfig(t, config)
 	restarted := &Receiver{id: testReceiver, base: f.receiver.base, reader: operator.NewReader(f.receiver.base), logger: f.receiver.logger, factory: f.receiver.factory, metrics: newMetrics(prometheus.NewRegistry())}
-	if err := restarted.configure(f.ctx); err == nil || !strings.Contains(err.Error(), "plugin type fake has no pinned SHA-256; set it with receiver update --plugin-sha256 fake=HEX") {
+	if err := restarted.configure(f.ctx); err == nil || !strings.Contains(err.Error(), "plugin type fake has no pinned SHA-256; set it with receiver apply --plugin-sha256 fake=HEX") {
 		t.Fatalf("configure: %v, want a refusal naming the type and the flag", err)
 	}
 }
@@ -1114,7 +1114,7 @@ func TestRunExitsOnConfigChange(t *testing.T) {
 	}
 }
 
-// A pool update reaches a running receiver at its next read of wherry.operator: the next claim collects under the new
+// A pool apply reaches a running receiver at its next read of wherry.operator: the next claim collects under the new
 // output limit, with no restart.
 func TestRunAppliesUpdatedTerms(t *testing.T) {
 	f := newFixture(t, resultStream)
@@ -1134,7 +1134,7 @@ func TestRunAppliesUpdatedTerms(t *testing.T) {
 	}
 	terms := testTerms()
 	terms.OutputLimit = 1000
-	if err := f.service.PoolUpdate(f.ctx, testPool, terms, false); err != nil {
+	if err := f.service.PoolApply(f.ctx, testPool, terms, false); err != nil {
 		t.Fatal(err)
 	}
 	for {
@@ -1147,7 +1147,7 @@ func TestRunAppliesUpdatedTerms(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if limit := collectedUnder("run-b"); limit != 1000 {
-		t.Fatalf("collected under %d after the pool update, want 1000", limit)
+		t.Fatalf("collected under %d after the pool apply, want 1000", limit)
 	}
 }
 
@@ -1511,7 +1511,7 @@ func readTopic(ctx context.Context, client *kgo.Client, topic string) ([]*kgo.Re
 // TestStopReleasesHeldTaskOnce stops a receiver with more slots than the pool's delivery limit while it holds a run:
 // the next member takes the task as its second delivery.
 func TestStopReleasesHeldTaskOnce(t *testing.T) {
-	for name, want := range map[string]error{"cancelled": context.Canceled, "forced configuration change": ErrConfigChanged} {
+	for name, want := range map[string]error{"cancelled": context.Canceled} {
 		t.Run(name, func(t *testing.T) {
 			terms, config := testTerms(), testConfig(testReceiver)
 			terms.DeliveryLimit, config.Capacity = 5, 6
@@ -1529,12 +1529,7 @@ func TestStopReleasesHeldTaskOnce(t *testing.T) {
 				}
 				time.Sleep(50 * time.Millisecond)
 			}
-			if want == ErrConfigChanged {
-				config.Capacity, config.Force = 7, true
-				f.appendConfig(t, config)
-			} else {
-				stop()
-			}
+			stop()
 			select {
 			case err := <-done:
 				if !errors.Is(err, want) {
@@ -1655,27 +1650,6 @@ func TestCancelStopsADrainingRun(t *testing.T) {
 	}
 	if task := f.lastTask(t); task.ID != testRun("run-a") || task.Status.State != wire.TaskStateCanceled {
 		t.Fatalf("last task %s %s, want run-a CANCELED", task.ID, task.Status.State)
-	}
-}
-
-// TestForceEndsADrain writes a forced configuration record while the receiver drains for an earlier change: the held
-// task is released at once.
-func TestForceEndsADrain(t *testing.T) {
-	f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: noResultStream, endDelay: time.Minute}})
-	done, _ := holdRun(t, f)
-	config := testConfig(testReceiver)
-	config.Capacity = 2
-	f.appendConfig(t, config)
-	for !strings.Contains(f.logs.String(), "configuration changed") {
-		time.Sleep(50 * time.Millisecond)
-	}
-	config.Capacity, config.Force = 3, true
-	f.appendConfig(t, config)
-	if err := f.stopped(t, done, 10*time.Second); !errors.Is(err, ErrConfigChanged) {
-		t.Fatalf("Run returned %v, want ErrConfigChanged", err)
-	}
-	if _, delivered := f.pollPool(t, testRun("run-a"), 10*time.Second); !delivered {
-		t.Fatal("task not released after the forced change")
 	}
 }
 

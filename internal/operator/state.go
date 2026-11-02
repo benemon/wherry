@@ -62,7 +62,7 @@ type Terms struct {
 	VCS []string `json:"vcs,omitzero" yaml:"vcs"`
 	// Storage is the pool's S3 lane; nil allows no S3 input or output.
 	Storage *Storage `json:"storage,omitzero" yaml:"storage"`
-	// RecordLimit is the tasks topic's record limit as pool create reads it from the broker; no pool file sets it.
+	// RecordLimit is the tasks topic's record limit as pool apply reads it from the broker; no pool file sets it.
 	RecordLimit int64 `json:"record_limit,omitzero" yaml:"-"`
 }
 
@@ -202,8 +202,6 @@ type ReceiverConfig struct {
 	// PluginSHA256 maps each plugin type to the lowercase hex SHA-256 its binary must have; the receiver refuses to
 	// start a plugin whose type has none.
 	PluginSHA256 map[string]string `json:"plugin_sha256"`
-	// Force has the receiver running the previous configuration release its held tasks at once.
-	Force bool `json:"force,omitzero"`
 }
 
 // ProfileSettings configures one profile: the plugin that runs it, the agent it launches, the labels its
@@ -412,7 +410,7 @@ func ValidateConfig(config ReceiverConfig, terms Terms) error {
 		}
 		names[profile.Name] = true
 		if _, ok := config.PluginSHA256[profile.Plugin]; !ok {
-			return fmt.Errorf("plugin type %s has no pinned SHA-256; set it with receiver update --plugin-sha256 %s=HEX", profile.Plugin, profile.Plugin)
+			return fmt.Errorf("plugin type %s has no pinned SHA-256; set it with receiver apply --plugin-sha256 %s=HEX", profile.Plugin, profile.Plugin)
 		}
 		if err := wire.ValidateLabels(profile.Labels); err != nil {
 			return err

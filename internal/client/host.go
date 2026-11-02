@@ -316,7 +316,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		return SubmitResult{}, err
 	}
 	if current := keys[owner].Current; current == nil || !current.Equal(h.key.Public()) {
-		return SubmitResult{}, errors.New("the host key is not the current key of this host's key topic: when <host_key>.next exists, the next wherry command completes the interrupted wherry key rotate; otherwise this host was re-keyed elsewhere and needs wherry init on a re-provisioned host")
+		return SubmitResult{}, errors.New("the host key is not the current key of this host's key topic: when <host_key>.next exists, the next wherry command completes the interrupted wherry host key rotate; otherwise this host was re-keyed elsewhere and needs wherry host init on a re-provisioned host")
 	}
 	now := time.Now()
 	// A receiver keeps its plugin's declared limit through a restart, so an advertisement of any age counts for the

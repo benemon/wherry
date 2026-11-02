@@ -1313,15 +1313,14 @@ writes, each with `v`, `kind` and `at_ms` (Unix milliseconds).
 | `revoking` | `receiver`, or `tenant` and `host` | records a revocation in progress: the principal is granted no ACL and stays a member until its `end` |
 
 `terms` has the members of the [pool terms](configuration.md#pool-terms) file
-and `record_limit`, the tasks topic's record limit that `pool create` reads
+and `record_limit`, the tasks topic's record limit that `pool apply` reads
 from the broker, with `start_by_limit_ms` and `lock_duration_ms` in milliseconds for its
 `start_by_limit` and `lock_duration`. `config` holds `receiver` and `pool`,
 which equal the record's, the receiver's `capacity`, and its `profiles` in
 routing order, the plugins in the order of their names. Each plugin profile is the
 [profile entry](configuration.md#receiver-configuration) as `name`, `plugin`
 naming its plugin, `agent`, `labels` when set, and the merged
-`config`, which keeps a `credential` name and never a credential value. `config`
-also holds `force`, `true` when `receiver update --force` wrote the record. An `end` names
+`config`, which keeps a `credential` name and never a credential value. An `end` names
 exactly one of `receiver`, or `tenant` and `host`. A `revoking` names exactly one of `receiver`, or
 `tenant` and `host`, and no other member.
 Readers fold the records in order. A reader loads no state when:

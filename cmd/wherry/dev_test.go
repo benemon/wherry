@@ -166,7 +166,7 @@ func TestDevUpRefusals(t *testing.T) {
 		{[]string{"dev", "up", "--instance", "default"}, "instance default is already up"},
 		{[]string{"dev", "up", "--instance", "other"}, "instance default is up; run wherry dev down --instance default first"},
 		{[]string{"dev", "init", "--instance", "default"}, "instance default is up; run wherry dev down first"},
-		{[]string{"dev", "reset", "--instance", "default"}, "instance default is up; run wherry dev down first"},
+		{[]string{"dev", "down", "--reset", "--instance", "default"}, "instance default is up; run wherry dev down first"},
 	} {
 		if _, _, err := runCapture(c.args...); err == nil || err.Error() != c.want {
 			t.Errorf("%v: %v; want %q", c.args, err, c.want)
@@ -177,8 +177,14 @@ func TestDevUpRefusals(t *testing.T) {
 	}
 
 	writeUp(t, instance, deadPID(t))
-	if stdout, _, err := runCapture("dev", "reset"); err != nil || stdout != "reset: instance default\n" {
-		t.Fatalf("reset with a dead pid: %q, %v; want the instance read as not up", stdout, err)
+	if err := os.MkdirAll(instance.cache(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if stdout, _, err := runCapture("dev", "down", "--reset"); err != nil || stdout != "reset: instance default\n" {
+		t.Fatalf("down --reset with a dead pid: %q, %v; want the instance read as not up", stdout, err)
+	}
+	if _, err := os.Stat(instance.cache()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cache after down --reset: %v; want it removed", err)
 	}
 	if _, _, err := runCapture("dev", "up"); err == nil || err.Error() != "nothing acquired for instance default; run wherry dev init first" {
 		t.Fatalf("up with a dead pid: %v; want the manifest check next", err)
