@@ -169,18 +169,19 @@ submission, and a task whose `task_started_by` is later, with
 `task_started_by is past the pool's start_by_limit`; `wherry submit`
 refuses such a `task_started_by` before it publishes. Every run therefore ends
 within six hours after `start_by_limit`. A longer limit keeps prompts on
-the broker longer. Lowering `start_by_limit` of a pool with runs in progress lowers its topics'
-retention at once: Kafka then deletes the records of runs older than the new
-bound, and receivers reject a redelivered task whose submission is gone.
+the broker longer. Lowering `start_by_limit` leaves the pool topics'
+retention where it is, so runs submitted under the longer limit keep their
+records; `pool update` raises the retention, and waits until the brokers
+apply it, before it records a longer limit.
 
-`pool create` sets the retention of the pool's tasks and events topics, new and
-existing, to `start_by_limit` plus the six-hour maximum run time plus a
+`pool create` and `pool update` set the retention of the pool's tasks and events topics, new and
+existing, to at least `start_by_limit` plus the six-hour maximum run time plus a
 one-day margin, their timestamp type to `LogAppendTime`, since a run's age
 runs from the broker's time, and their `segment.ms` to one hour, so
 retention deletes a record within about an hour of its bound. The deadlines
 of replaced pool keys fall inside this retention
 ([Rotation](concepts.md#rotation)). The pool's snapshot topic is compacted
-and keeps its latest snapshot forever; it holds public keys only. It sets the same retention on the progress
+and keeps its latest snapshot forever; it holds public keys only. It sets the tasks topic's retention on the progress
 topics of the pool's live receivers. With the 72-hour default that is `367200000` ms, 4 days
 and six hours, after which a run's prompts leave the broker. Tenant feeds keep
 statuses and results, and tenant transcript topics transcripts, outputs and

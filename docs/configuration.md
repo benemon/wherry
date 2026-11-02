@@ -176,7 +176,7 @@ ignored. Any other entry and a directory with no agent files are errors.
 | --- | --- |
 | `agents` | one or more `{name, credentials, models, default_model}`: an agent, the [credentials](#agent-credentials) it takes, and optionally the models a task may name for it and the one a task naming none runs |
 | `default_agent` | an agent from `agents`, used when a task names none; optional when `agents` holds one, which it then defaults to |
-| `start_by_limit` | optional duration, default `72h`: the latest [`task_started_by`](#task-bounds) a run may ask for, from its submission, and the time from a run's submission past which a receiver rejects it unclaimed; it also sets the pool topics' retention. With `storage`, it plus six hours must not exceed 7 days, the longest an S3 SigV4 presigned URL lasts |
+| `start_by_limit` | optional duration, default `72h`: the latest [`task_started_by`](#task-bounds) a run may ask for, from its submission, and the time from a run's submission past which a receiver rejects it unclaimed; it also sets the pool topics' minimum retention, which `pool update` raises and never lowers. With `storage`, it plus six hours must not exceed 7 days, the longest an S3 SigV4 presigned URL lasts |
 | `delivery_limit` | optional, default 5: the share group's `share.delivery.count.limit` |
 | `lock_duration` | optional duration, default `15s`: the share group's `share.record.lock.duration.ms` |
 | `producer_byte_rate` | host quota, bytes per second |

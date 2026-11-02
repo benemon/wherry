@@ -753,10 +753,11 @@ break the [pool terms](configuration.md#pool-terms) rules, and a delivery limit 
 [records do not fit the broker](configuration.md#record-limit). It refuses an
 existing pool with `pool exists; change its terms with pool update`. On new and
 existing topics it sets the tasks and events `retention.ms` to
-`start_by_limit` plus six hours plus one day, and their
+`start_by_limit` plus six hours plus one day unless it is already longer, and their
 `message.timestamp.type` to `LogAppendTime`, and creates the progress topic
 of each live receiver in the pool, or sets an existing one's configuration,
-with the same `retention.ms`. It refuses a `start_by_limit` above
+with the tasks topic's `retention.ms`. It fails when a topic configuration it
+sets is not applied within 10 seconds. It refuses a `start_by_limit` above
 29 days and 18 hours, or one that with six hours added exceeds the
 `retention.ms` of the feed or transcript topic of a tenant entitled to the
 pool. For a pool with `storage` it refuses a `start_by_limit` that with six
@@ -780,7 +781,9 @@ does not exist with `no pool by that name`. It first checks the recorded
 configuration of every receiver in the pool whose membership has not ended
 against the new terms, as `receiver add` checks a new receiver, and refuses
 the terms when a plugin profile no longer fits, naming each receiver, plugin
-and profile and the reason. Receivers apply the new terms at their next read
+and profile and the reason. It sets the pool's topics before it records the terms, so a failure leaves the
+old terms in force, and never lowers their `retention.ms`: runs submitted
+under a longer `start_by_limit` keep their records. Receivers apply the new terms at their next read
 of `wherry.admin`, within 15 seconds, without a restart. A lowered
 `delivery_limit` applies to a task in flight at its next release.
 

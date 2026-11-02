@@ -40,7 +40,7 @@ func TestCompactionAcrossReplicasOnCluster(t *testing.T) {
 	if err := service.createTopicsWith(ctx, receiversConfigs, ReceiversTopic); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.createTopicsWith(ctx, progressConfigs(retentionBounds{tasks: 7 * 24 * 60 * 60 * 1000}), progress); err != nil {
+	if err := service.createTopicsWith(ctx, progressConfigs(7*24*60*60*1000), progress); err != nil {
 		t.Fatal(err)
 	}
 	if err := kafkatest.Led(ctx, kafka, ReceiversTopic, progress); err != nil {

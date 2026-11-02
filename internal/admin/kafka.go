@@ -166,20 +166,21 @@ func (service *Service) poolTerms(ctx context.Context, pool string, terms Terms,
 	if dryRun {
 		return nil
 	}
+	// Terms with a longer start_by_limit take effect only once the retention they need has.
+	if update {
+		if err := service.poolTopics(ctx, current, pool, retention.tasks); err != nil {
+			return err
+		}
+	}
 	record := Record{Kind: "pool", Pool: pool, Terms: &terms}
 	state, err := service.appendChecked(ctx, []byte("pool."+pool), record)
 	if err != nil {
 		return err
 	}
-	value := strconv.FormatInt(retention.tasks, 10)
-	if err := service.createTopics(ctx, value, PoolTasksTopic(pool), PoolEventsTopic(pool)); err != nil {
-		return err
-	}
-	if err := service.configureTopicRetention(ctx, value, PoolTasksTopic(pool), PoolEventsTopic(pool)); err != nil {
-		return err
-	}
-	if err := service.configureTopics(ctx, poolSegments, PoolTasksTopic(pool), PoolEventsTopic(pool)); err != nil {
-		return err
+	if !update {
+		if err := service.poolTopics(ctx, state, pool, retention.tasks); err != nil {
+			return err
+		}
 	}
 	if err := service.createTopicsWith(ctx, custodianConfigs, CustodianTopic(pool)); err != nil {
 		return err
@@ -187,13 +188,26 @@ func (service *Service) poolTerms(ctx context.Context, pool string, terms Terms,
 	if err := service.configureTopics(ctx, custodianConfigs, CustodianTopic(pool)); err != nil {
 		return err
 	}
-	if err := service.progressTopics(ctx, state, pool); err != nil {
-		return err
-	}
 	if err := service.configureGroup(ctx, pool, effective); err != nil {
 		return err
 	}
 	return service.reconcileACLs(ctx, state)
+}
+
+// poolTopics creates pool's tasks and events topics and converges them, and its live receivers' progress topics, on
+// their configs.
+func (service *Service) poolTopics(ctx context.Context, state State, pool string, retentionMS int64) error {
+	topics := []string{PoolTasksTopic(pool), PoolEventsTopic(pool)}
+	if err := service.createTopics(ctx, strconv.FormatInt(retentionMS, 10), topics...); err != nil {
+		return err
+	}
+	if err := service.configureTopicRetention(ctx, retentionMS, topics...); err != nil {
+		return err
+	}
+	if err := service.configureTopics(ctx, poolSegments, topics...); err != nil {
+		return err
+	}
+	return service.progressTopics(ctx, state, pool)
 }
 
 // strandedReceivers refuses terms for pool under which a live receiver's recorded configuration fails ValidateConfig,
@@ -473,19 +487,15 @@ var custodianConfigs = map[string]string{
 }
 
 // progressConfigs are a receiver's progress topic configs: an adopter wants each run's latest offset, its key's latest
-// record, while the pool's topics keep the run.
-func progressConfigs(retention retentionBounds) map[string]string {
+// record, while the pool's tasks topic, at retentionMS, keeps the run.
+func progressConfigs(retentionMS int64) map[string]string {
 	configs := maps.Clone(receiversConfigs)
-	configs["retention.ms"] = strconv.FormatInt(retention.tasks, 10)
+	configs["retention.ms"] = strconv.FormatInt(retentionMS, 10)
 	return configs
 }
 
 // progressTopics creates the progress topics of pool's live receivers and converges existing ones on their configs.
 func (service *Service) progressTopics(ctx context.Context, state State, pool string) error {
-	retention, err := poolRetention(state.Pools[pool])
-	if err != nil {
-		return err
-	}
 	var topics []string
 	for receiver, config := range state.Receivers {
 		if config.Pool == pool && !state.Ended[ReceiverPrincipal(receiver)] {
@@ -495,10 +505,15 @@ func (service *Service) progressTopics(ctx context.Context, state State, pool st
 	if len(topics) == 0 {
 		return nil
 	}
-	if err := service.createTopicsWith(ctx, progressConfigs(retention), topics...); err != nil {
+	retentions, err := service.topicRetentions(ctx, PoolTasksTopic(pool))
+	if err != nil {
 		return err
 	}
-	return service.configureTopics(ctx, progressConfigs(retention), topics...)
+	configs := progressConfigs(retentions[PoolTasksTopic(pool)])
+	if err := service.createTopicsWith(ctx, configs, topics...); err != nil {
+		return err
+	}
+	return service.configureTopics(ctx, configs, topics...)
 }
 
 const retentionMarginMS = 24 * 60 * 60 * 1000
@@ -617,9 +632,24 @@ func (service *Service) propagating(ctx context.Context, topics []string) bool {
 	return false
 }
 
-func (service *Service) configureTopicRetention(ctx context.Context, value string, topics ...string) error {
-	// Admission measures a run's age from the broker's timestamp of its submission.
-	return service.configureTopics(ctx, map[string]string{"retention.ms": value, "message.timestamp.type": "LogAppendTime"}, topics...)
+// configureTopicRetention sets each of topics' retention.ms to minimum unless it is already at least that: a run
+// submitted under longer terms needs the retention they derived.
+func (service *Service) configureTopicRetention(ctx context.Context, minimum int64, topics ...string) error {
+	retentions, err := service.topicRetentions(ctx, topics...)
+	if err != nil {
+		return err
+	}
+	for _, topic := range topics {
+		value := minimum
+		if retentionAtLeast(retentions[topic], minimum) {
+			value = retentions[topic]
+		}
+		// Admission measures a run's age from the broker's timestamp of its submission.
+		if err := service.configureTopics(ctx, map[string]string{"retention.ms": strconv.FormatInt(value, 10), "message.timestamp.type": "LogAppendTime"}, topic); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (service *Service) configureTopics(ctx context.Context, values map[string]string, topics ...string) error {
@@ -642,7 +672,10 @@ func (service *Service) configureTopics(ctx context.Context, values map[string]s
 	// The controller accepts the change before each broker applies it from the metadata log, and a describe that broker
 	// answers meanwhile returns the old value.
 	deadline := time.Now().Add(topicWait)
-	for !service.configured(ctx, values, topics) && time.Now().Before(deadline) {
+	for !service.configured(ctx, values, topics) {
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("configure topics %s: not applied within %s", strings.Join(topics, ", "), topicWait)
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

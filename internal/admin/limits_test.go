@@ -182,6 +182,117 @@ func TestPoolCreateSetsDerivedRetentionOnNewAndExistingTopics(t *testing.T) {
 	}
 }
 
+// A run submitted five days ago under a 10-day start_by_limit keeps its task record and events after an update to the
+// 72h default, whose derived retention is under five days.
+func TestPoolUpdateNeverLowersPoolTopicRetention(t *testing.T) {
+	cluster, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	terms := modelTerms()
+	terms.StartByLimitMS = Millis((10 * 24 * time.Hour).Milliseconds())
+	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
+		t.Fatal(err)
+	}
+	want := int64(terms.StartByLimitMS) + MaxRunDurationMS + retentionMarginMS
+	topics := []string{PoolTasksTopic("pool-a"), PoolEventsTopic("pool-a")}
+	for _, topic := range topics {
+		setTopicConfig(t, service, topic, "message.timestamp.type", "CreateTime")
+		if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: topic, Value: []byte("run-a"), Timestamp: time.Now().Add(-5 * 24 * time.Hour)}).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := service.PoolUpdate(ctx, "pool-a", modelTerms(), false); err != nil {
+		t.Fatal(err)
+	}
+	cluster.ApplyRetention()
+	starts, err := kadm.NewClient(service.Admin).ListStartOffsets(ctx, topics...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, topic := range topics {
+		if got := topicRetention(t, service, topic); got != want {
+			t.Fatalf("%s retention.ms = %d, want %d, the 10-day terms' own", topic, got, want)
+		}
+		if start, _ := starts.Lookup(topic, 0); start.Err != nil || start.Offset != 0 {
+			t.Fatalf("%s starts at %d, %v; want the pending run's record kept", topic, start.Offset, start.Err)
+		}
+	}
+	if err := service.Check(ctx); err != nil {
+		t.Fatalf("check = %v; want retention above the derived floor accepted", err)
+	}
+}
+
+// A longer start_by_limit is recorded only after the pool topics' retention is raised to it: the terms record failing
+// leaves the old terms over the raised retention.
+func TestPoolUpdateRaisesRetentionBeforeLongerTerms(t *testing.T) {
+	cluster, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	terms := modelTerms()
+	terms.StartByLimitMS = Millis((10 * 24 * time.Hour).Milliseconds())
+	want := int64(terms.StartByLimitMS) + MaxRunDurationMS + retentionMarginMS
+	cluster.ControlKey(int16(kmsg.Produce), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		produce := request.(*kmsg.ProduceRequest)
+		response := produce.ResponseKind().(*kmsg.ProduceResponse)
+		for _, topic := range produce.Topics {
+			refused := kmsg.NewProduceResponseTopic()
+			refused.Topic, refused.TopicID = topic.Topic, topic.TopicID
+			for _, partition := range topic.Partitions {
+				failed := kmsg.NewProduceResponseTopicPartition()
+				failed.Partition, failed.ErrorCode = partition.Partition, kerr.PolicyViolation.Code
+				refused.Partitions = append(refused.Partitions, failed)
+			}
+			response.Topics = append(response.Topics, refused)
+		}
+		return response, nil, true
+	})
+	if err := service.PoolUpdate(ctx, "pool-a", terms, false); err == nil || !strings.Contains(err.Error(), "write admin record") {
+		t.Fatalf("pool update = %v; want the terms record refused", err)
+	}
+	for _, topic := range []string{PoolTasksTopic("pool-a"), PoolEventsTopic("pool-a")} {
+		if got := topicRetention(t, service, topic); got != want {
+			t.Fatalf("%s retention.ms = %d, want %d raised before the terms", topic, got, want)
+		}
+	}
+	if state, err := service.LoadState(ctx); err != nil || state.Pools["pool-a"].StartByLimitMS != Millis((72*time.Hour).Milliseconds()) {
+		t.Fatalf("pool-a terms %+v, %v; want the old 72h start_by_limit", state.Pools["pool-a"], err)
+	}
+}
+
+// An alteration the broker acknowledges but never applies fails pool update after topicWait and records no terms.
+func TestPoolUpdateFailsOnRetentionNotApplied(t *testing.T) {
+	t.Parallel()
+	cluster, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	terms := modelTerms()
+	terms.StartByLimitMS = Millis((10 * 24 * time.Hour).Milliseconds())
+	cluster.ControlKey(int16(kmsg.IncrementalAlterConfigs), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		cluster.KeepControl()
+		alter := request.(*kmsg.IncrementalAlterConfigsRequest)
+		response := alter.ResponseKind().(*kmsg.IncrementalAlterConfigsResponse)
+		for _, resource := range alter.Resources {
+			altered := kmsg.NewIncrementalAlterConfigsResponseResource()
+			altered.ResourceType, altered.ResourceName = resource.ResourceType, resource.ResourceName
+			response.Resources = append(response.Resources, altered)
+		}
+		return response, nil, true
+	})
+	err := service.PoolUpdate(ctx, "pool-a", terms, false)
+	if err == nil || err.Error() != "configure topics wherry.pool.pool-a.tasks: not applied within 10s" {
+		t.Fatalf("pool update = %v; want the unapplied retention reported", err)
+	}
+	if state, err := service.LoadState(ctx); err != nil || state.Pools["pool-a"].StartByLimitMS != Millis((72*time.Hour).Milliseconds()) {
+		t.Fatalf("pool-a terms %+v, %v; want the old 72h start_by_limit", state.Pools["pool-a"], err)
+	}
+}
+
 func TestPoolCreateRefusesStartByLimitPastFeedRetention(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
@@ -520,8 +631,8 @@ func TestTenantAddRefusesAFeedThePoolDoesNotFit(t *testing.T) {
 		}
 		return response, nil, true
 	})
-	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err == nil || !strings.HasSuffix(err.Error(), "over the 400000-byte record limit") {
-		t.Fatalf("tenant add = %v; want the tenant feed's limit", err)
+	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err == nil || !strings.HasSuffix(err.Error(), "not applied within 10s") {
+		t.Fatalf("tenant add = %v; want the tenant feed's limit unapplied", err)
 	}
 	if state, err := service.LoadState(ctx); err != nil || len(state.Entitlements) != 0 {
 		t.Fatalf("entitlements %v, %v; want none written", state.Entitlements, err)

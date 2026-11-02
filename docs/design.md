@@ -132,7 +132,7 @@ naming 256 outputs fits.
 | --- | --- | --- |
 | `wherry.admin` | any recording command | `-1` |
 | `wherry.receivers` | any recording command | `604800000` (7 days) |
-| `wherry.pool.<pool>.tasks` | `pool create` | `start_by_limit` plus 30 hours, in milliseconds; default `367200000` |
+| `wherry.pool.<pool>.tasks` | `pool create` | at least `start_by_limit` plus 30 hours, in milliseconds; default `367200000`; `pool update` never lowers it |
 | `wherry.pool.<pool>.events` | `pool create` | at least tasks; `pool create` sets the same value |
 | `wherry.pool.<pool>.custodian` | `pool create` | `-1`, outside the pool retention bound |
 | `wherry.tenant.<tenant>` | `pool entitle`, `host add` | `2592000000` (30 days) |
@@ -150,8 +150,8 @@ at `-1`, and `wherry.receivers` remains a seven-day liveness topic.
 
 `wherry admin` leaves an existing topic's configuration as it is, except
 that every recording command sets the configuration above on
-`wherry.receivers`, `pool create` and `pool update` set the retention,
-timestamp type and `segment.ms` of the pool's tasks and events topics and
+`wherry.receivers`, `pool create` and `pool update` set the retention, never
+lowering it, timestamp type and `segment.ms` of the pool's tasks and events topics and
 the configuration of its snapshot topic, and `receiver add` and `pool create` set every
 configuration above on the progress topics of the pool's live receivers.
 `pool entitle`, `pool create` and `pool update` set `max.message.bytes` on
