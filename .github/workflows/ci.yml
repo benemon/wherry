@@ -72,7 +72,7 @@ jobs:
       - name: Run the real-broker tests
         run: |
           . "$RUNNER_TEMP/kafka/env"
-          go test -p 1 -count=1 ./internal/admin/ ./internal/receiver/ ./internal/client/ ./cmd/wherry/
+          go test -p 1 -count=1 -timeout 30m ./internal/admin/ ./internal/receiver/ ./internal/client/ ./cmd/wherry/
 
   s3:
     runs-on: ubuntu-latest
