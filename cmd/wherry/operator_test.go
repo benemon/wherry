@@ -525,8 +525,28 @@ func TestHostAddForceReissuesTheIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	hosts := func() int {
+		t.Helper()
+		reader := operator.NewReader(service.SuperUser)
+		defer reader.Close()
+		records, err := reader.ReadFrom(context.Background(), operator.OperatorTopic, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		count := 0
+		for _, record := range records {
+			if decoded, err := operator.DecodeRecord(record.Value); err == nil && decoded.Kind == "host" {
+				count++
+			}
+		}
+		return count
+	}
+	before := hosts()
 	if err := add(bundle, "--force"); err != nil {
 		t.Fatal(err)
+	}
+	if after := hosts(); before != 1 || after != before {
+		t.Fatalf("host add --force left %d host records, %d before; want the one record untouched", after, before)
 	}
 	oldBundle := filepath.Join(dir, "old.bundle")
 	if err := os.WriteFile(oldBundle, old, 0o600); err != nil {

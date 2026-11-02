@@ -336,16 +336,21 @@ func (service *Service) ReceiverReissue(ctx context.Context, receiver, bundlePat
 	if _, ok := state.Receivers[receiver]; !ok || state.Ended[ReceiverPrincipal(receiver)] {
 		return errors.New("no live receiver by that name")
 	}
+	return service.reissue(ctx, ReceiverPrincipal(receiver), bundlePath)
+}
+
+// reissue gives principal a new password and writes its bundle to bundlePath, replacing any file there.
+func (service *Service) reissue(ctx context.Context, principal, bundlePath string) (err error) {
 	bundle, err := createBundle(bundlePath, true)
 	if err != nil {
 		return err
 	}
 	defer closeBundle(bundle, &err)
-	password, err := service.upsertUser(ctx, ReceiverPrincipal(receiver))
+	password, err := service.upsertUser(ctx, principal)
 	if err != nil {
 		return err
 	}
-	return writeBundle(bundle, Bundle{service.Broker, service.CA, ReceiverPrincipal(receiver), password})
+	return writeBundle(bundle, Bundle{service.Broker, service.CA, principal, password})
 }
 
 // ReceiverUpdate records a new configuration for an existing receiver in its
@@ -388,7 +393,7 @@ func asRecorded(record Record) (ReceiverConfig, error) {
 }
 
 // HostAdd provisions host in tenant and writes its bundle to bundlePath. A host that exists is refused unless force,
-// which gives it a new password and replaces the bundle at bundlePath.
+// which gives it a new password and replaces the bundle at bundlePath, leaving its record untouched.
 func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath string, force bool) (err error) {
 	if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
 		return err
@@ -397,8 +402,15 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	if err != nil {
 		return err
 	}
-	if _, exists := current.Hosts[TenantPrincipal(tenant, host)]; exists && !force {
-		return errors.New("host exists; --force gives it a new password and bundle")
+	principal := TenantPrincipal(tenant, host)
+	if _, exists := current.Hosts[principal]; exists {
+		if !force {
+			return errors.New("host exists; --force gives it a new password and bundle")
+		}
+		if current.Ended[principal] {
+			return errors.New("host cannot return after its membership end")
+		}
+		return service.reissue(ctx, principal, bundlePath)
 	}
 	bundle, err := createBundle(bundlePath, force)
 	if err != nil {
@@ -410,7 +422,6 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	if err != nil {
 		return err
 	}
-	principal := TenantPrincipal(tenant, host)
 	password, err := service.upsertUser(ctx, principal)
 	if err != nil {
 		return err
