@@ -334,6 +334,16 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 		if err := r.acknowledgeSuspension(ctx, keys, latest, state); err != nil {
 			return err
 		}
+		// A transaction a failed pass left open is aborted before the events are read, so an answer whose commit was
+		// unconfirmed but landed is seen as answered.
+		if err := r.custody.producer.EndTransaction(ctx, kgo.TryAbort); err != nil {
+			if fenced(err) {
+				r.contest()
+			} else {
+				r.deny(err, capWrite)
+			}
+			return fmt.Errorf("abort an open transaction: %w", err)
+		}
 	}
 	events, err := r.readEvents(ctx)
 	if err != nil {
@@ -356,15 +366,6 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 	earliest := r.earliestSubmissions(tasks)
 	if !custodian {
 		return r.rekey(ctx, pending, events, earliest, keys, current)
-	}
-	// A transaction a failed pass left open is aborted first.
-	if err := r.custody.producer.EndTransaction(ctx, kgo.TryAbort); err != nil {
-		if fenced(err) {
-			r.contest()
-		} else {
-			r.deny(err, capWrite)
-		}
-		return fmt.Errorf("abort an open transaction: %w", err)
 	}
 	check := &claimCheck{r: r, events: events, earliest: earliest, keys: keys, now: time.Now(), suspended: suspended}
 	for _, request := range pending {
