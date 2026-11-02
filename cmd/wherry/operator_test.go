@@ -79,7 +79,7 @@ func operatorEnv(t *testing.T) *operator.Service {
 	t.Setenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE", filepath.Join(dir, "operator"))
 	address := cluster.ListenAddrs()[0]
 	return &operator.Service{SuperUser: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, CA: ca, DeliveryCeiling: 10}
+		Broker: address, CA: ca, DeliveryCeiling: 10, LockCeilingMS: 60000}
 }
 
 func TestOperatorCommandUsage(t *testing.T) {
@@ -319,13 +319,14 @@ profiles:
 }
 
 // pool apply creates a pool, records other terms for it and re-applies the share group's delivery limit and lock
-// duration, records nothing for the same terms, and with --dry-run writes nothing.
+// duration, records nothing for the same terms, and with --dry-run writes nothing. A lock duration above the broker's
+// ceiling is refused before anything is recorded (agb-345n).
 func TestPoolApply(t *testing.T) {
 	service := operatorEnv(t)
 	ctx := context.Background()
-	// runOperator reads the delivery ceiling from the broker, and kfake reports none until it is set.
-	ceiling := "10"
-	responses, err := kadm.NewClient(service.SuperUser).AlterBrokerConfigs(ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "group.share.max.delivery.count.limit", Value: &ceiling}})
+	// runOperator reads the delivery and lock ceilings from the broker, and kfake reports neither until it is set.
+	ceiling, lockCeiling := "10", "60000"
+	responses, err := kadm.NewClient(service.SuperUser).AlterBrokerConfigs(ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "group.share.max.delivery.count.limit", Value: &ceiling}, {Op: kadm.SetConfig, Name: "group.share.max.record.lock.duration.ms", Value: &lockCeiling}})
 	if err == nil {
 		err = responses[0].Err
 	}
@@ -375,6 +376,12 @@ func TestPoolApply(t *testing.T) {
 	if state, err := service.LoadState(ctx); err != nil || len(state.Pools) != 0 {
 		t.Fatalf("pools %v, %v; want none recorded by a dry run", state.Pools, err)
 	}
+	if err := apply(pool(5, "2m")); err == nil || err.Error() != "lock_duration 2m0s exceeds the broker's group.share.max.record.lock.duration.ms 1m0s" {
+		t.Fatalf("apply above the lock ceiling = %v, want it refused naming the field and the ceiling", err)
+	}
+	if state, err := service.LoadState(ctx); err != nil || len(state.Pools) != 0 {
+		t.Fatalf("pools %v, %v; want none recorded", state.Pools, err)
+	}
 	if err := apply(pool(5, "15s")); err != nil {
 		t.Fatal(err)
 	}
@@ -391,6 +398,9 @@ func TestPoolApply(t *testing.T) {
 	}
 	if limit, lock, recorded := terms(); records() != before || stdout.Len() != 0 || limit != "5" || lock != "15000" || recorded.DeliveryLimit != 5 || recorded.LockDurationMS != 15000 {
 		t.Fatalf("after a dry run: %d records, output %q, share group %s/%s, terms %d/%d; want %d records, no output and 5/15000 throughout", records(), stdout.String(), limit, lock, recorded.DeliveryLimit, recorded.LockDurationMS, before)
+	}
+	if err := apply(pool(3, "2m")); err == nil || records() != before {
+		t.Fatalf("update above the lock ceiling = %v with %d records; want it refused with %d", err, records(), before)
 	}
 	if err := apply(pool(3, "30s")); err != nil {
 		t.Fatal(err)

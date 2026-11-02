@@ -34,6 +34,7 @@ type Service struct {
 	Broker          string
 	CA              string // PEM, copied into bundles
 	DeliveryCeiling int32
+	LockCeilingMS   int64
 }
 
 type Bundle struct {
@@ -127,6 +128,15 @@ func (service *Service) PoolApply(ctx context.Context, pool string, terms Terms,
 	}
 	if effective.DeliveryLimit > service.DeliveryCeiling {
 		return fmt.Errorf("delivery limit exceeds broker ceiling %d", service.DeliveryCeiling)
+	}
+	// The broker refuses the share group's lock duration only once the terms are recorded.
+	if service.LockCeilingMS == 0 {
+		if service.LockCeilingMS, err = service.brokerSetting(ctx, "group.share.max.record.lock.duration.ms", func(a, b int64) int64 { return min(a, b) }); err != nil {
+			return err
+		}
+	}
+	if int64(effective.LockDurationMS) > service.LockCeilingMS {
+		return fmt.Errorf("lock_duration %s exceeds the broker's group.share.max.record.lock.duration.ms %s", effective.LockDuration(), time.Duration(service.LockCeilingMS)*time.Millisecond)
 	}
 	if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
 		return err

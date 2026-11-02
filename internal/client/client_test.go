@@ -112,7 +112,7 @@ func newFixtureNoHost(t *testing.T, opts ...kfake.Opt) *fixture {
 	t.Cleanup(operatorClient.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	f := &fixture{ctx: ctx, cluster: cluster, service: &operator.Service{SuperUser: root, Operator: operatorClient, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, receivers: map[string]*testReceiver{}, poolKeys: map[string]*ecdsa.PrivateKey{}, logs: &syncBuffer{}}
+	f := &fixture{ctx: ctx, cluster: cluster, service: &operator.Service{SuperUser: root, Operator: operatorClient, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10, LockCeilingMS: 60000}, receivers: map[string]*testReceiver{}, poolKeys: map[string]*ecdsa.PrivateKey{}, logs: &syncBuffer{}}
 	f.pool(t, "pool-a")
 	return f
 }

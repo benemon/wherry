@@ -247,7 +247,7 @@ func TestRoundTrip(t *testing.T) {
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
 	service := &operator.Service{SuperUser: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, CA: ca, DeliveryCeiling: 10}
+		Broker: address, CA: ca, DeliveryCeiling: 10, LockCeilingMS: 60000}
 	dir := t.TempDir()
 	optional := false
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{
@@ -669,7 +669,7 @@ func TestPlatformCredentialIsRedactedFromTheReceiverLog(t *testing.T) {
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
 	service := &operator.Service{SuperUser: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, CA: ca, DeliveryCeiling: 10}
+		Broker: address, CA: ca, DeliveryCeiling: 10, LockCeilingMS: 60000}
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []operator.ProfileSettings{
 		{Name: "fake", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": "fake-token", "log_credential": true}},

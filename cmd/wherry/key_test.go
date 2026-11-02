@@ -34,7 +34,7 @@ func newKeyHost(t *testing.T) keyHost {
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
 	service := &operator.Service{SuperUser: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, CA: ca, DeliveryCeiling: 10}
+		Broker: address, CA: ca, DeliveryCeiling: 10, LockCeilingMS: 60000}
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}}}}}, DefaultAgent: "claude",
 		DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	dir := t.TempDir()
@@ -209,7 +209,7 @@ func TestReceiverRotateKey(t *testing.T) {
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
 	service := &operator.Service{SuperUser: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, CA: ca, DeliveryCeiling: 10}
+		Broker: address, CA: ca, DeliveryCeiling: 10, LockCeilingMS: 60000}
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}}}}}, DefaultAgent: "claude",
 		DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {

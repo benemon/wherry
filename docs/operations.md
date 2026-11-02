@@ -85,7 +85,8 @@ as one file and as a directory.
   apply` refuses a `delivery_limit` above the broker's
   `group.share.max.delivery.count.limit`.
 - `lock_duration` is how long a claim survives without renewal. Receivers
-  renew every 10 seconds.
+  renew every 10 seconds. `pool apply` refuses a `lock_duration` above the
+  broker's `group.share.max.record.lock.duration.ms`.
 - `start_by_limit` is the latest `task_started_by` a task may ask for, from
   its submission, and bounds how long after its submission a run's task is
   admitted. It defaults to 72 hours. For a pool with `storage`, it plus six

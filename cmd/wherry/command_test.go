@@ -108,7 +108,7 @@ func newBus(t *testing.T) *bus {
 	t.Cleanup(operatorClient.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
-	b := &bus{ctx: ctx, service: &operator.Service{SuperUser: root, Operator: operatorClient, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, stateDir: t.TempDir(), logs: &syncBuffer{}}
+	b := &bus{ctx: ctx, service: &operator.Service{SuperUser: root, Operator: operatorClient, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10, LockCeilingMS: 60000}, stateDir: t.TempDir(), logs: &syncBuffer{}}
 	optional := false
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{
 		{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}},

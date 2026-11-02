@@ -495,7 +495,7 @@ func newService(t *testing.T, ctx context.Context, terms operator.Terms) (*kfake
 		t.Fatal(err)
 	}
 	t.Cleanup(operatorClient.Close)
-	service := &operator.Service{SuperUser: root, Operator: operatorClient, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}
+	service := &operator.Service{SuperUser: root, Operator: operatorClient, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10, LockCeilingMS: 60000}
 	if err := service.PoolApply(ctx, testPool, terms, false); err != nil {
 		t.Fatal(err)
 	}

@@ -693,7 +693,7 @@ func kfakeService(t *testing.T) (*kfake.Cluster, *Service, func()) {
 	if err := operator.Ping(context.Background()); err != nil {
 		t.Fatalf("operator ping: %v", err)
 	}
-	service := &Service{SuperUser: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}
+	service := &Service{SuperUser: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10, LockCeilingMS: 60000}
 	return cluster, service, func() { operator.Close(); root.Close(); cluster.Close() }
 }
 

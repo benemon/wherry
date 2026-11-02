@@ -158,7 +158,10 @@ terms' `delivery_limit` and `lock_duration`, 5 and `15s` when the terms omit
 them. It refuses, before it reads the broker, terms whose agent credentials
 break the [pool terms](configuration.md#pool-terms) rules, and a delivery limit above the lowest
 `group.share.max.delivery.count.limit` across the brokers, and terms whose
-[records do not fit the broker](configuration.md#record-limit). Before it records the terms it refuses a pool
+[records do not fit the broker](configuration.md#record-limit). Before it
+records anything it refuses a `lock_duration` above the brokers'
+`group.share.max.record.lock.duration.ms`, naming the field and the ceiling.
+Before it records the terms it refuses a pool
 name that is not valid and an existing tasks or events topic with more than one
 partition; it creates the topics after it records the terms, which is when it
 checks the pool's names against every other recorded name. On new and
