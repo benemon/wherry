@@ -293,14 +293,14 @@ func (service *Service) ReceiverCheck(ctx context.Context, config ReceiverConfig
 }
 
 func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, bundlePath string) (err error) {
-	if _, err := service.ReceiverCheck(ctx, config); err != nil {
-		return err
-	}
 	bundle, err := createBundle(bundlePath, false)
 	if err != nil {
 		return err
 	}
 	defer closeBundle(bundle, &err)
+	if _, err := service.ReceiverCheck(ctx, config); err != nil {
+		return err
+	}
 	record := Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &config}
 	state, _, err := service.planRecord(ctx, record)
 	if err != nil {
@@ -403,6 +403,14 @@ func asRecorded(record Record) (ReceiverConfig, error) {
 // HostAdd provisions host in tenant and writes its bundle to bundlePath. A host that exists is refused unless force,
 // which gives it a new password and replaces the bundle at bundlePath, leaving its record untouched.
 func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath string, force bool) (err error) {
+	// Without force the bundle's file is reserved before anything changes in Kafka.
+	var bundle *bundleFile
+	if !force {
+		if bundle, err = createBundle(bundlePath, false); err != nil {
+			return err
+		}
+		defer closeBundle(bundle, &err)
+	}
 	if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
 		return err
 	}
@@ -420,11 +428,12 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 		}
 		return service.reissue(ctx, principal, bundlePath)
 	}
-	bundle, err := createBundle(bundlePath, force)
-	if err != nil {
-		return err
+	if force {
+		if bundle, err = createBundle(bundlePath, true); err != nil {
+			return err
+		}
+		defer closeBundle(bundle, &err)
 	}
-	defer closeBundle(bundle, &err)
 	record := Record{Kind: "host", Tenant: tenant, Host: host}
 	state, err := service.appendChecked(ctx, []byte(tenant+"."+host), record)
 	if err != nil {
@@ -1243,13 +1252,17 @@ var feedRecords = []struct {
 	{"a transcript chunk", 933498},
 }
 
-// createBundle opens a temporary file beside path that writeBundle fills and closeBundle moves to path, so a reader
-// of path never sees part of a bundle. Without replace, an existing file at path is refused.
+// createBundle opens the file that writeBundle fills and closeBundle completes. Without replace it creates path itself,
+// refusing an existing file. With replace it opens a temporary file beside path that closeBundle renames to path, so
+// a reader of path never sees part of a bundle.
 func createBundle(path string, replace bool) (*bundleFile, error) {
-	if _, err := os.Lstat(path); err == nil && !replace {
-		return nil, fmt.Errorf("bundle %s: %w", path, os.ErrExist)
+	var file *os.File
+	var err error
+	if replace {
+		file, err = os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	} else {
+		file, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	}
-	file, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
 		return nil, err
 	}
@@ -1262,28 +1275,27 @@ type bundleFile struct {
 	replace bool
 }
 
-// Tests replace these to fail a bundle's write, close, link or rename.
+// Tests replace these to fail a bundle's write, sync, close or rename.
 var (
 	writeFile  = (*os.File).Write
+	syncFile   = (*os.File).Sync
 	closeFile  = (*os.File).Close
-	linkFile   = os.Link
 	renameFile = os.Rename
 )
 
-// closeBundle moves a written bundle to its path and removes its temporary name, so a retry can create it. Without
-// replace it links rather than renames: a link refuses a file created at path since createBundle checked.
+// closeBundle syncs and closes a bundle and, with replace, renames it to its path. On failure it removes the file it
+// created, so a retry can create it.
 func closeBundle(bundle *bundleFile, err *error) {
+	if *err == nil {
+		*err = syncFile(bundle.File)
+	}
 	if closeErr := closeFile(bundle.File); *err == nil {
 		*err = closeErr
 	}
-	switch {
-	case *err != nil:
-	case bundle.replace:
+	if *err == nil && bundle.replace {
 		*err = renameFile(bundle.Name(), bundle.path)
-	default:
-		*err = linkFile(bundle.Name(), bundle.path)
 	}
-	if *err != nil || !bundle.replace {
+	if *err != nil {
 		os.Remove(bundle.Name())
 	}
 }

@@ -136,10 +136,10 @@ the [pool terms](configuration.md#pool-terms) or
 `host add` refuses a host that exists unless given `--force`. `receiver apply`
 of a receiver that exists updates its configuration, and refuses
 `--bundle-file`, which would write a new bundle, unless given `--force`.
-Without `--force`, a command never replaces a file at `FILE`: it writes the
-bundle to a temporary file beside `FILE` and links it to `FILE`, which fails
-when a file is there, including one created while the command ran. A command
-that fails leaves no bundle and no temporary file of its own.
+Without `--force`, a command never replaces a file at `FILE`: before it
+changes anything in Kafka it creates `FILE`, failing when a file is there, and
+writes the bundle into it at the end. A command that fails leaves no bundle and
+no temporary file of its own.
 
 `--force` reissues the identity of an existing host or receiver: a new SCRAM
 password and a new bundle, written to a temporary file that is then renamed

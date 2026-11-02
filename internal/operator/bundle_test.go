@@ -1,41 +1,92 @@
 package operator
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/twmb/franz-go/pkg/kadm"
 )
 
-// A bundle written without replace leaves a file created at its path after createBundle checked it.
-func TestBundleWithoutReplaceKeepsAFileCreatedAfterTheCheck(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "host.bundle")
-	bundle, err := createBundle(path, false)
+// kafkaChanges counts wherry.operator's records and the SCRAM users, which a provisioning command changes first.
+func kafkaChanges(t *testing.T, service *Service) [2]int64 {
+	t.Helper()
+	admin := kadm.NewClient(service.SuperUser)
+	offsets, err := admin.ListEndOffsets(t.Context(), OperatorTopic)
+	if err == nil {
+		err = offsets.Error()
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func(link, rename func(string, string) error) { linkFile, renameFile = link, rename }(linkFile, renameFile)
-	inject := func(link func(string, string) error) func(string, string) error {
-		return func(from, to string) error {
-			if err := os.WriteFile(to, []byte("other"), 0o600); err != nil {
-				return err
+	users, err := admin.DescribeUserSCRAMs(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	end, _ := offsets.Lookup(OperatorTopic, 0)
+	return [2]int64{end.Offset, int64(len(users))}
+}
+
+var bundleAdds = []struct {
+	name string
+	add  func(*Service, string) error
+}{
+	{"host", func(service *Service, path string) error {
+		return service.HostAdd(context.Background(), "tenant-a", "host-b", path, false)
+	}},
+	{"receiver", func(service *Service, path string) error {
+		return service.ReceiverAdd(context.Background(), modelConfig("receiver-b", "pool-a"), path)
+	}},
+}
+
+// A bundle written without --force refuses a file at its path before anything changes in Kafka, leaving the file.
+func TestBundleWithoutForceRefusesAnExistingFileFirst(t *testing.T) {
+	for _, identity := range bundleAdds {
+		t.Run(identity.name, func(t *testing.T) {
+			_, service, _ := compromiseFixture(t)
+			path := filepath.Join(t.TempDir(), "other.bundle")
+			if err := os.WriteFile(path, []byte("other"), 0o600); err != nil {
+				t.Fatal(err)
 			}
-			return link(from, to)
-		}
+			before := kafkaChanges(t, service)
+			if err := identity.add(service, path); !errors.Is(err, os.ErrExist) {
+				t.Fatalf("add = %v; want the existing file refused", err)
+			}
+			if after := kafkaChanges(t, service); after != before {
+				t.Fatalf("records and SCRAM users %v, were %v; want nothing changed", after, before)
+			}
+			if contents, err := os.ReadFile(path); err != nil || string(contents) != "other" {
+				t.Fatalf("%s holds %q, %v; want the other file", path, contents, err)
+			}
+		})
 	}
-	linkFile, renameFile = inject(linkFile), inject(renameFile)
-	err = writeBundle(bundle, Bundle{Broker: "broker:9093", Principal: "tenant.tenant-a.host-a", Password: "password"})
-	closeBundle(bundle, &err)
-	if !errors.Is(err, os.ErrExist) {
-		t.Fatalf("closeBundle = %v; want the file created since the check refused", err)
-	}
-	if contents, err := os.ReadFile(path); err != nil || string(contents) != "other" {
-		t.Fatalf("%s holds %q, %v; want the file created since the check", path, contents, err)
-	}
-	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 {
-		t.Fatalf("bundle directory holds %v, %v; want the other file alone", entries, err)
+}
+
+// A bundle written without --force that fails after reserving its file removes it.
+func TestBundleWithoutForceRemovesItsFileOnFailure(t *testing.T) {
+	injected := errors.New("injected")
+	for _, identity := range bundleAdds {
+		t.Run(identity.name, func(t *testing.T) {
+			_, service, _ := compromiseFixture(t)
+			dir := t.TempDir()
+			path := filepath.Join(dir, "new.bundle")
+			defer func(saved func(*os.File, []byte) (int, error)) { writeFile = saved }(writeFile)
+			writeFile = func(file *os.File, _ []byte) (int, error) {
+				if _, err := os.Stat(path); err != nil {
+					t.Errorf("bundle file before the write: %v; want it reserved", err)
+				}
+				return 0, injected
+			}
+			if err := identity.add(service, path); !errors.Is(err, injected) {
+				t.Fatalf("add = %v; want the injected failure", err)
+			}
+			if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+				t.Fatalf("bundle directory holds %v, %v; want nothing", entries, err)
+			}
+		})
 	}
 }
 
