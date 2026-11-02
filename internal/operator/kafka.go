@@ -138,10 +138,7 @@ func (service *Service) PoolApply(ctx context.Context, pool string, terms Terms,
 	if int64(effective.LockDurationMS) > service.LockCeilingMS {
 		return fmt.Errorf("lock_duration %s exceeds the broker's group.share.max.record.lock.duration.ms %s", effective.LockDuration(), time.Duration(service.LockCeilingMS)*time.Millisecond)
 	}
-	if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
-		return err
-	}
-	current, err := service.LoadState(ctx)
+	current, err := service.loadPoolState(ctx, dryRun)
 	if err != nil {
 		return err
 	}
@@ -167,7 +164,7 @@ func (service *Service) PoolApply(ctx context.Context, pool string, terms Terms,
 		return err
 	}
 	if dryRun {
-		return nil
+		return service.onePartition(ctx, true, PoolTasksTopic(pool), PoolEventsTopic(pool))
 	}
 	// Terms with a longer start_by_limit take effect only once the retention they need has.
 	if update {
@@ -200,6 +197,29 @@ func (service *Service) PoolApply(ctx context.Context, pool string, terms Terms,
 		return err
 	}
 	return service.reconcileACLs(ctx, state)
+}
+
+// loadPoolState is the recorded state, creating wherry.operator unless dryRun: a dry run changes nothing, and an absent
+// wherry.operator records nothing.
+func (service *Service) loadPoolState(ctx context.Context, dryRun bool) (State, error) {
+	if !dryRun {
+		if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
+			return State{}, err
+		}
+		return service.LoadState(ctx)
+	}
+	request := kmsg.NewPtrMetadataRequest()
+	requested := kmsg.NewMetadataRequestTopic()
+	requested.Topic = kmsg.StringPtr(OperatorTopic)
+	request.Topics = append(request.Topics, requested)
+	response, err := request.RequestWith(ctx, service.SuperUser)
+	if err != nil {
+		return State{}, err
+	}
+	if len(response.Topics) == 1 && response.Topics[0].ErrorCode == kerr.UnknownTopicOrPartition.Code {
+		return NewState(), nil
+	}
+	return service.LoadState(ctx)
 }
 
 // poolTopics creates pool's tasks and events topics and converges them, and its live receivers' progress topics, on

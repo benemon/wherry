@@ -362,6 +362,67 @@ func TestPoolApplyCreateRefusesAPartitionedTopicBeforeRecording(t *testing.T) {
 	}
 }
 
+// pool apply --dry-run on a cluster without wherry.operator creates no topic and finds no pool.
+func TestPoolApplyDryRunCreatesNoTopic(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	admin := kadm.NewClient(service.SuperUser)
+	responses, err := admin.DeleteTopics(ctx, OperatorTopic)
+	if err == nil {
+		err = responses.Error()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), true); err != nil {
+		t.Fatalf("pool apply --dry-run = %v", err)
+	}
+	// kadm's ListTopics answers from cached metadata, which lists a topic the dry run found absent.
+	response, err := kmsg.NewPtrMetadataRequest().RequestWith(ctx, service.SuperUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Topics) != 0 {
+		t.Fatalf("dry run left %d topics, first %s; want none", len(response.Topics), *response.Topics[0].Topic)
+	}
+}
+
+// pool apply --dry-run refuses a tasks or events topic with more than one partition as the real apply does, for a new
+// pool and an existing one.
+func TestPoolApplyDryRunRefusesAPartitionedTopic(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		for _, topic := range []string{PoolTasksTopic("pool-a"), PoolEventsTopic("pool-a")} {
+			t.Run(fmt.Sprintf("existing=%t/%s", existing, topic), func(t *testing.T) {
+				_, service, closeFixture := kfakeService(t)
+				defer closeFixture()
+				ctx := context.Background()
+				if existing {
+					if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
+						t.Fatal(err)
+					}
+					addPartition(t, service, topic)
+				} else {
+					responses, err := kadm.NewClient(service.SuperUser).CreateTopics(ctx, 2, -1, nil, topic)
+					if err == nil {
+						err = responses.Error()
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				want := "topic " + topic + " has 2 partitions, want 1"
+				if err := service.PoolApply(ctx, "pool-a", modelTerms(), true); err == nil || err.Error() != want {
+					t.Fatalf("pool apply --dry-run = %v; want %q", err, want)
+				}
+				if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err == nil || err.Error() != want {
+					t.Fatalf("pool apply = %v; want %q", err, want)
+				}
+			})
+		}
+	}
+}
+
 // onePartition reports a metadata error other than an absent topic as that error, never as a count of partitions
 // (agb-r11i).
 func TestOnePartitionReportsAMetadataError(t *testing.T) {
