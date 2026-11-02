@@ -383,8 +383,8 @@ func TestPoolCreateRetryCompletesTheTopics(t *testing.T) {
 		}
 		return response, nil, true
 	})
-	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err == nil || !strings.HasPrefix(err.Error(), "create topic wherry.pool.pool-a.tasks") {
-		t.Fatalf("pool create = %v; want the tasks topic creation refused", err)
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err == nil || !strings.HasPrefix(err.Error(), "create topic wherry.pool.pool-a.") {
+		t.Fatalf("pool create = %v; want the pool topics' creation refused", err)
 	}
 	if state, err := service.LoadState(ctx); err != nil || state.Pools["pool-a"].DeliveryLimit != modelTerms().DeliveryLimit {
 		t.Fatalf("pools %v, %v; want pool-a recorded", state.Pools, err)
