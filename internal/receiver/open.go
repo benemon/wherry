@@ -357,6 +357,15 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 	if !custodian {
 		return r.rekey(ctx, pending, events, earliest, keys, current)
 	}
+	// A transaction a failed pass left open is aborted first.
+	if err := r.custody.producer.EndTransaction(ctx, kgo.TryAbort); err != nil {
+		if fenced(err) {
+			r.contest()
+		} else {
+			r.deny(err, capWrite)
+		}
+		return fmt.Errorf("abort an open transaction: %w", err)
+	}
 	check := &claimCheck{r: r, events: events, earliest: earliest, keys: keys, now: time.Now(), suspended: suspended}
 	for _, request := range pending {
 		records := check.decide(ctx, request)
