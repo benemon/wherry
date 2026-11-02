@@ -110,7 +110,7 @@ func TestBundleReportsAFailedRemoval(t *testing.T) {
 			removeFile = func(string) error { return unremoved }
 			err = writeBundle(bundle, Bundle{Broker: "broker:9093", Principal: "tenant.tenant-a.host-a", Password: "secret-password"})
 			closeBundle(bundle, &err)
-			if !errors.Is(err, injected) || !errors.Is(err, unremoved) || !strings.Contains(err.Error(), bundle.Name()+" holds the new password and could not be removed") {
+			if !errors.Is(err, injected) || !errors.Is(err, unremoved) || !strings.Contains(err.Error(), bundle.Name()+" could not be removed and may hold the new password") {
 				t.Fatalf("closeBundle = %v; want the failure and that %s could not be removed", err, bundle.Name())
 			}
 			if strings.Contains(err.Error(), "secret-password") {

@@ -1300,7 +1300,7 @@ func closeBundle(bundle *bundleFile, err *error) {
 		return
 	}
 	if removeErr := removeFile(bundle.Name()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-		*err = fmt.Errorf("%w; %s holds the new password and could not be removed: %w", *err, bundle.Name(), removeErr)
+		*err = fmt.Errorf("%w; %s could not be removed and may hold the new password: %w", *err, bundle.Name(), removeErr)
 	}
 }
 
