@@ -7,7 +7,10 @@ version 1. An [advertisement](#advertisement) no longer carries
 `started_ms` or `stepping_down`, and a
 [custodian snapshot](#custodian-snapshot)'s `reason` is no longer
 `handover`: every custodian change publishes `takeover` or `contested`.
-A snapshot with reason `handover` is refused. A host no longer refuses to
+A snapshot with reason `handover` is refused, as snapshots are decoded
+strictly; that is the change's one incompatibility. An earlier
+advertisement's `started_ms` or `stepping_down` is an unknown member,
+ignored as on any record, and has no effect. A host no longer refuses to
 submit when the current snapshot's custodian has no live advertisement:
 advertisements place tasks and custody follows the custodian group's
 session.
