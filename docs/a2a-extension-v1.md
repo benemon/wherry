@@ -1395,7 +1395,9 @@ job and material in place ([Open request](#open-request)).
 A run whose commit has an unknown outcome gives its task back
 unacknowledged. The task's next holder acknowledges it without running when
 the commit's terminal status is on the pool's events, and runs it again
-otherwise, so an ambiguous commit costs one redelivery cycle of latency.
+otherwise, so an ambiguous commit costs one redelivery cycle of latency. The
+job of a run whose terminal committed is not released by its holder; it is left
+to the plugin's sweep.
 
 ## Git input
 

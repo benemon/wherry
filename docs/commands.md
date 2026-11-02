@@ -1356,9 +1356,9 @@ before any profile took it, has `profile="none"` in `wherry_runs_total` and
 | `wherry_claims_total` | counter | `tenant` | claimed tasks whose submission verifies |
 | `wherry_admissions_total` | counter | `tenant`, `profile` | tasks admitted, by the profile they were routed to |
 | `wherry_rejections_total` | counter | `tenant`, `reason` | rejections, by reason |
-| `wherry_runs_total` | counter | `tenant`, `profile`, `agent`, `model`, `state` | runs ended `completed`, `failed` or `canceled` |
+| `wherry_runs_total` | counter | `tenant`, `profile`, `agent`, `model`, `state` | runs ended `completed`, `failed` or `canceled`, except a run whose terminal's commit had an unknown outcome and committed, which no receiver counts |
 | `wherry_delivery_budget_exhausted_total` | counter | `tenant`, `profile` | runs ended `failed` with `delivery budget exhausted` |
-| `wherry_run_duration_seconds` | histogram | `tenant`, `profile`, `agent`, `model`, `state` | time from this attempt's claim to the run's terminal state; an adopted run counts the adopting attempt only |
+| `wherry_run_duration_seconds` | histogram | `tenant`, `profile`, `agent`, `model`, `state` | time from this attempt's claim to the run's terminal state; an adopted run counts the adopting attempt only, and a run whose terminal's commit had an unknown outcome and committed is not observed |
 | `wherry_queue_wait_seconds` | histogram | `tenant`, `profile` | time from submission to first claim |
 | `wherry_adoptions_total` | counter | `tenant`, `profile` | runs that adopted an earlier attempt's job |
 | `wherry_redeliveries_total` | counter | `tenant`, `profile` | runs executed on a redelivery |
