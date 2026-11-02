@@ -1140,6 +1140,164 @@ func TestDrainWithNoSuccessorKeepsTheKeys(t *testing.T) {
 	}
 }
 
+// A custodian draining at the same time as the last other member of the custodian group, and a whole-group stop: each
+// receiver stopped together returns from Run within the stop window, drain_timeout + stepDownMargin of the stop, whether
+// the other member took custody in the meantime or not. No key is lost: each receiver keeps the keys it held unless it
+// re-keyed and deleted them on a handover, and the current snapshot's custodian holds the snapshot's key. That
+// custodian, restarted alone, resumes with the key and publishes nothing.
+// In the rebalancing case the broker holds the custodian group's JoinGroups, as it does until every member rejoins, so
+// the custodian and the last other member are stopped with their rejoins after receiver-c's leave in flight.
+func TestConcurrentDrainsStopInTheWindowKeepingTheKeys(t *testing.T) {
+	for name, test := range map[string]struct{ lastOther, rebalancing bool }{
+		"with the last other member":                    {lastOther: true},
+		"with the last other member during a rebalance": {lastOther: true, rebalancing: true},
+		"whole group": {},
+	} {
+		t.Run(name, func(t *testing.T) { concurrentDrains(t, test.lastOther, test.rebalancing) })
+	}
+}
+
+// holdJoins holds every JoinGroup of the pool's custodian group until release closes, and returns the count of those
+// held.
+func holdJoins(f fixture, release <-chan struct{}) *atomic.Int32 {
+	held := &atomic.Int32{}
+	f.cluster.ControlKey(kmsg.JoinGroup.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		f.cluster.KeepControl()
+		if request.(*kmsg.JoinGroupRequest).Group == admin.CustodianGroup(testPool) {
+			held.Add(1)
+			f.cluster.SleepControl(func() { <-release })
+		}
+		return nil, nil, false
+	})
+	return held
+}
+
+// drainingMember is a receiver run until its stop, with its own logs and the time its Run returned.
+type drainingMember struct {
+	r     *Receiver
+	logs  *syncBuffer
+	stop  context.CancelFunc
+	ended chan time.Time
+}
+
+func runMember(t *testing.T, ctx context.Context, r *Receiver, logs *syncBuffer) *drainingMember {
+	t.Helper()
+	ctx, stop := context.WithCancel(ctx)
+	m := &drainingMember{r: r, logs: logs, stop: stop, ended: make(chan time.Time, 1)}
+	go func() {
+		_ = r.Run(ctx)
+		m.ended <- time.Now()
+	}()
+	t.Cleanup(func() {
+		stop()
+		select {
+		case <-m.ended:
+		case <-time.After(time.Minute):
+		}
+	})
+	return m
+}
+
+func concurrentDrains(t *testing.T, lastOther, rebalancing bool) {
+	f := newBareFixture(t)
+	f.receiver.drainTimeout = 2 * time.Second
+	members := []*drainingMember{runMember(t, f.ctx, f.receiver, f.logs)}
+	f.awaitSnapshots(t, 1)
+	awaitActing(t, f, f.receiver)
+	for _, id := range []string{"receiver-b", "receiver-c"} {
+		r, logs := f.newReceiver(t, testConfig(id))
+		r.drainTimeout = f.receiver.drainTimeout
+		members = append(members, runMember(t, f.ctx, r, logs))
+		for !strings.Contains(logs.String(), "configured:") {
+			if f.ctx.Err() != nil {
+				t.Fatalf("%s never configured", id)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	// Each Run refreshes its view of the pool's members every refreshInterval.
+	time.Sleep(5 * custodyInterval)
+	together := members
+	release := make(chan struct{})
+	releaseJoins := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseJoins)
+	var held *atomic.Int32
+	if rebalancing {
+		held = holdJoins(f, release)
+	}
+	if lastOther {
+		// receiver-c leaves first, so receiver-b is the last other member of the group when the custodian drains.
+		members[2].stop()
+		select {
+		case at := <-members[2].ended:
+			members[2].ended <- at
+		case <-time.After(f.receiver.drainTimeout + stepDownMargin + time.Second):
+			t.Fatalf("receiver-c did not stop; logs:\n%s", members[2].logs.String())
+		}
+		together = members[:2]
+	}
+	for rebalancing && held.Load() < int32(len(together)) {
+		if f.ctx.Err() != nil {
+			t.Fatalf("%d rejoins held, want %d", held.Load(), len(together))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	keys := map[*Receiver]map[string]*poolKey{}
+	for _, m := range members {
+		keys[m.r] = heldKeys(t, m.r)
+	}
+	stopped := time.Now()
+	for _, m := range together {
+		m.stop()
+	}
+	bound := f.receiver.drainTimeout + stepDownMargin
+	for _, m := range together {
+		select {
+		case at := <-m.ended:
+			m.ended <- at
+			if took := at.Sub(stopped); took > bound {
+				t.Fatalf("%s stopped %s after the stop, want within %s; logs:\n%s", m.r.id, took, bound, m.logs.String())
+			}
+		case <-time.After(time.Until(stopped.Add(bound + time.Second))):
+			t.Fatalf("%s did not stop within %s; logs:\n%s", m.r.id, bound, m.logs.String())
+		}
+	}
+	releaseJoins()
+	for _, m := range members {
+		after := heldKeys(t, m.r)
+		for id := range keys[m.r] {
+			if _, ok := after[id]; !ok && !strings.Contains(m.logs.String(), "custodian: re-keyed") {
+				t.Fatalf("%s lost key %s with no handover: holds %s, held %s; logs:\n%s", m.r.id, id, describeKeys(after), describeKeys(keys[m.r]), m.logs.String())
+			}
+		}
+	}
+	records := f.snapshotRecords(t)
+	latest := records[len(records)-1]
+	var holder *drainingMember
+	var current wire.Snapshot
+	for _, m := range members {
+		if snapshot, err := wire.ParseSnapshot(latest.Value, signed.Keys{m.r.id: {Current: m.r.signing.Public().(ed25519.PublicKey)}}); err == nil {
+			holder, current = m, snapshot
+		}
+	}
+	if holder == nil {
+		t.Fatal("the current snapshot is no member's")
+	}
+	if _, ok := heldKeys(t, holder.r)[current.Current.KeyID]; !ok {
+		t.Fatalf("custodian %s does not hold the current key %s: holds %s", holder.r.id, current.Current.KeyID, describeKeys(heldKeys(t, holder.r)))
+	}
+	again := restarted(t, holder.r)
+	runUntilStopped(t, f.ctx, again)
+	awaitActing(t, f, again)
+	time.Sleep(5 * custodyInterval)
+	if after := f.snapshotRecords(t); len(after) != len(records) {
+		t.Fatalf("snapshots = %d after %s restarted, want %d; logs:\n%s", len(after), holder.r.id, len(records), holder.logs.String())
+	}
+	if _, ok := heldKeys(t, again)[current.Current.KeyID]; !ok {
+		t.Fatalf("%s holds %s after the restart, want the current key %s", again.id, describeKeys(heldKeys(t, again)), current.Current.KeyID)
+	}
+}
+
 // fence initialises the custodian transactional ID as another writer would, fencing its producer.
 func fence(t *testing.T, f fixture) {
 	t.Helper()
