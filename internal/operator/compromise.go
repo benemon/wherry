@@ -34,7 +34,7 @@ func (service *Service) PoolSuspendAcknowledged(ctx context.Context, pool string
 	if suspend {
 		kind, effect = "suspend", "suspended: its key custodian acknowledged the suspend record at wherry.operator offset %d; no new start opens"
 	}
-	reader := NewReader(service.SuperUser)
+	reader := NewReader(service.Operator)
 	defer reader.Close()
 	state, err := service.LoadState(ctx)
 	if err != nil {
@@ -138,7 +138,7 @@ func (service *Service) PoolRotateKey(ctx context.Context, pool string, suspects
 	if !state.Suspended[pool] {
 		return RotateReport{}, fmt.Errorf("pool %s is not suspended; run wherry operator pool suspend %s first", pool, pool)
 	}
-	reader := NewReader(service.SuperUser)
+	reader := NewReader(service.Operator)
 	defer reader.Close()
 	if len(suspects) == 0 {
 		current, err := currentSnapshot(ctx, reader, state, pool)

@@ -29,17 +29,15 @@ import (
 )
 
 type Service struct {
-	SuperUser       *kgo.Client // connected as the Kafka super user
-	Operator        *kgo.Client
-	Broker          string
-	CA              string // PEM, copied into bundles
+	Operator        *kgo.Client // connected as wherry.operator
+	Broker          string      // the broker address host bundles carry
+	CA              []byte      // PEM the operator trusts the broker with; nil for the system roots
 	DeliveryCeiling int32
 	LockCeilingMS   int64
 }
 
 type Bundle struct {
 	Broker    string `yaml:"broker"`
-	CA        string `yaml:"ca"`
 	Principal string `yaml:"principal"`
 	Password  string `yaml:"password"`
 }
@@ -78,15 +76,19 @@ func ReadBundle(path string) (Bundle, error) {
 var yamlLine = regexp.MustCompile(`line \d+`)
 
 // KafkaOpts are the options of a TLS and SCRAM-SHA-512 connection to broker as user, trusting the PEM certificates in
-// ca. A trailing line break, as a password file ends with, is not part of password, and nothing else is no password.
+// ca, or the system roots when ca is nil. A trailing line break, as a password file ends with, is not part of password,
+// and nothing else is no password.
 func KafkaOpts(broker string, ca []byte, user, password string) ([]kgo.Opt, error) {
 	password = strings.TrimRight(password, "\r\n")
 	if password == "" {
 		return nil, errors.New("password is empty")
 	}
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(ca) {
-		return nil, errors.New("CA contains no certificates")
+	var roots *x509.CertPool
+	if ca != nil {
+		roots = x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(ca) {
+			return nil, errors.New("CA contains no certificates")
+		}
 	}
 	// Brokers that answer ApiVersions at v4 at most refuse v5, the default, at a round trip per broker per client.
 	versions := kversion.Stable()
@@ -272,7 +274,8 @@ func (service *Service) ReceiverCheck(ctx context.Context, config ReceiverConfig
 	return asRecorded(Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &config})
 }
 
-func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, bundlePath string) (err error) {
+// ReceiverAdd provisions config's receiver and writes its bundle, naming broker, to bundlePath.
+func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, broker, bundlePath string) (err error) {
 	if _, err := service.ReceiverCheck(ctx, config); err != nil {
 		return err
 	}
@@ -303,12 +306,13 @@ func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, 
 	if _, err := service.appendChecked(ctx, []byte(config.Receiver), record); err != nil {
 		return err
 	}
-	return writeBundle(bundle, Bundle{service.Broker, service.CA, ReceiverPrincipal(config.Receiver), password})
+	return writeBundle(bundle, Bundle{broker, ReceiverPrincipal(config.Receiver), password})
 }
 
-// ReceiverReissue gives a live receiver a new password and writes its bundle to bundlePath, replacing any file there.
-// Its configuration record is untouched; Kafka keeps one SCRAM credential per user, so the old password stops working.
-func (service *Service) ReceiverReissue(ctx context.Context, receiver, bundlePath string) (err error) {
+// ReceiverReissue gives a live receiver a new password and writes its bundle, naming broker, to bundlePath, replacing
+// any file there. Its configuration record is untouched; Kafka keeps one SCRAM credential per user, so the old password
+// stops working.
+func (service *Service) ReceiverReissue(ctx context.Context, receiver, broker, bundlePath string) (err error) {
 	state, err := service.LoadState(ctx)
 	if err != nil {
 		return err
@@ -325,7 +329,7 @@ func (service *Service) ReceiverReissue(ctx context.Context, receiver, bundlePat
 	if err != nil {
 		return err
 	}
-	return writeBundle(bundle, Bundle{service.Broker, service.CA, ReceiverPrincipal(receiver), password})
+	return writeBundle(bundle, Bundle{broker, ReceiverPrincipal(receiver), password})
 }
 
 // ReceiverUpdate records a new configuration for an existing receiver in its
@@ -407,7 +411,7 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	if err := service.applyQuota(ctx, state, tenant, principal); err != nil {
 		return err
 	}
-	return writeBundle(bundle, Bundle{service.Broker, service.CA, principal, password})
+	return writeBundle(bundle, Bundle{service.Broker, principal, password})
 }
 
 func (service *Service) TenantAdd(ctx context.Context, tenant, pool string) error {
@@ -662,7 +666,7 @@ func (service *Service) createTopicsWith(ctx context.Context, values map[string]
 	for name, value := range values {
 		configs[name] = kadm.StringPtr(value)
 	}
-	responses, err := kadm.NewClient(service.SuperUser).CreateTopics(ctx, 1, -1, configs, topics...)
+	responses, err := kadm.NewClient(service.Operator).CreateTopics(ctx, 1, -1, configs, topics...)
 	if err != nil {
 		return err
 	}
@@ -685,7 +689,7 @@ func (service *Service) createTopicsWith(ctx context.Context, values map[string]
 // propagating reports whether a broker's own metadata lacks one of topics or a leader for one of their partitions, as
 // it does until a created topic's metadata reaches it; describes and config changes it answers fail until then.
 func (service *Service) propagating(ctx context.Context, topics []string) bool {
-	metadata, err := kadm.NewClient(service.SuperUser).BrokerMetadata(ctx)
+	metadata, err := kadm.NewClient(service.Operator).BrokerMetadata(ctx)
 	if err != nil {
 		return false
 	}
@@ -696,7 +700,7 @@ func (service *Service) propagating(ctx context.Context, topics []string) bool {
 		request.Topics = append(request.Topics, requested)
 	}
 	for _, broker := range metadata.Brokers {
-		response, err := request.RequestWith(ctx, service.SuperUser.Broker(int(broker.NodeID)))
+		response, err := request.RequestWith(ctx, service.Operator.Broker(int(broker.NodeID)))
 		if err != nil {
 			return false
 		}
@@ -744,7 +748,7 @@ func (service *Service) configureTopics(ctx context.Context, values map[string]s
 	for name, value := range values {
 		configs = append(configs, kadm.AlterConfig{Op: kadm.SetConfig, Name: name, Value: &value})
 	}
-	responses, err := kadm.NewClient(service.SuperUser).AlterTopicConfigs(ctx, configs, topics...)
+	responses, err := kadm.NewClient(service.Operator).AlterTopicConfigs(ctx, configs, topics...)
 	if err != nil {
 		return err
 	}
@@ -806,7 +810,7 @@ func (service *Service) topicRetentions(ctx context.Context, topics ...string) (
 }
 
 func (service *Service) topicConfigs(ctx context.Context, name string, topics ...string) (map[string]string, error) {
-	resources, err := kadm.NewClient(service.SuperUser).DescribeTopicConfigs(ctx, topics...)
+	resources, err := kadm.NewClient(service.Operator).DescribeTopicConfigs(ctx, topics...)
 	if err != nil {
 		return nil, err
 	}
@@ -961,7 +965,7 @@ func (service *Service) onePartition(ctx context.Context, absent bool, topics ..
 		requested.Topic = kmsg.StringPtr(topic)
 		request.Topics = append(request.Topics, requested)
 	}
-	response, err := request.RequestWith(ctx, service.SuperUser)
+	response, err := request.RequestWith(ctx, service.Operator)
 	if err != nil {
 		return err
 	}
@@ -997,7 +1001,7 @@ func (service *Service) configureGroup(ctx context.Context, pool string, terms T
 	}
 	request := kmsg.NewPtrIncrementalAlterConfigsRequest()
 	request.Resources = []kmsg.IncrementalAlterConfigsRequestResource{resource}
-	response, err := service.SuperUser.Request(ctx, request)
+	response, err := service.Operator.Request(ctx, request)
 	if err != nil {
 		return err
 	}
@@ -1009,19 +1013,32 @@ func (service *Service) configureGroup(ctx context.Context, pool string, terms T
 }
 
 func (service *Service) upsertUser(ctx context.Context, user string) (string, error) {
+	password, err := Password()
+	if err != nil {
+		return "", err
+	}
+	return password, setSCRAM(ctx, service.Operator, user, password)
+}
+
+// Password is a new random SCRAM password.
+func Password() (string, error) {
 	random := make([]byte, 32)
 	if _, err := rand.Read(random); err != nil {
 		return "", err
 	}
-	password := base64.RawURLEncoding.EncodeToString(random)
-	results, err := kadm.NewClient(service.SuperUser).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{{User: user, Mechanism: kadm.ScramSha512, Iterations: 8192, Password: password}})
+	return base64.RawURLEncoding.EncodeToString(random), nil
+}
+
+// setSCRAM creates user's SCRAM credential, or replaces it, with password.
+func setSCRAM(ctx context.Context, client *kgo.Client, user, password string) error {
+	results, err := kadm.NewClient(client).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{{User: user, Mechanism: kadm.ScramSha512, Iterations: 8192, Password: password}})
 	if err != nil {
-		return "", err
+		return err
 	}
 	if err := results.Error(); err != nil {
-		return "", fmt.Errorf("create SCRAM credential: %w", err)
+		return fmt.Errorf("create SCRAM credential: %w", err)
 	}
-	return password, nil
+	return nil
 }
 
 func (service *Service) applyQuota(ctx context.Context, state State, tenant, principal string) error {
@@ -1039,7 +1056,7 @@ func (service *Service) applyQuota(ctx context.Context, state State, tenant, pri
 	if rate == 0 {
 		return nil
 	}
-	results, err := kadm.NewClient(service.SuperUser).AlterClientQuotas(ctx, []kadm.AlterClientQuotaEntry{{Entity: kadm.ClientQuotaEntity{{Type: "user", Name: &principal}}, Ops: []kadm.AlterClientQuotaOp{{Key: "producer_byte_rate", Value: float64(rate)}, {Key: "request_percentage", Value: request}}}})
+	results, err := kadm.NewClient(service.Operator).AlterClientQuotas(ctx, []kadm.AlterClientQuotaEntry{{Entity: kadm.ClientQuotaEntity{{Type: "user", Name: &principal}}, Ops: []kadm.AlterClientQuotaOp{{Key: "producer_byte_rate", Value: float64(rate)}, {Key: "request_percentage", Value: request}}}})
 	if err != nil {
 		return err
 	}
@@ -1075,7 +1092,7 @@ func (service *Service) checkFeedLimits(ctx context.Context, state State) error 
 
 // brokerSetting reads a numeric setting from every broker, combining values with pick.
 func (service *Service) brokerSetting(ctx context.Context, name string, pick func(a, b int64) int64) (int64, error) {
-	client := kadm.NewClient(service.SuperUser)
+	client := kadm.NewClient(service.Operator)
 	brokers, err := client.ListBrokers(ctx)
 	if err != nil {
 		return 0, err
@@ -1144,12 +1161,12 @@ func (service *Service) recordLimits(ctx context.Context, state State, pool stri
 			topics = append(topics, TenantTopic(tenant), TenantTranscriptTopic(tenant))
 		}
 	}
-	resources, err := kadm.NewClient(service.SuperUser).DescribeTopicConfigs(ctx, topics...)
+	resources, err := kadm.NewClient(service.Operator).DescribeTopicConfigs(ctx, topics...)
 	if err != nil {
 		return 0, 0, err
 	}
-	// Hosts, like the super-user client, produce with franz-go's default batch maximum, and receivers with FeedRecordLimit.
-	tasks, feeds := int64(service.SuperUser.OptValue(kgo.ProducerBatchMaxBytes).(int32)), int64(FeedRecordLimit)
+	// Hosts, like the operator's client, produce with franz-go's default batch maximum, and receivers with FeedRecordLimit.
+	tasks, feeds := int64(service.Operator.OptValue(kgo.ProducerBatchMaxBytes).(int32)), int64(FeedRecordLimit)
 	for _, resource := range resources {
 		// A topic without its own max.message.bytes, as a pool's task topic before its first create, takes each
 		// broker's message.max.bytes; one set on the topic overrides them.
@@ -1233,6 +1250,16 @@ func closeBundle(bundle *bundleFile, err *error) {
 	if *err != nil {
 		os.Remove(bundle.Name())
 	}
+}
+
+// ReplaceBundle writes contents to the bundle at path, replacing any file there.
+func ReplaceBundle(path string, contents Bundle) (err error) {
+	bundle, err := createBundle(path, true)
+	if err != nil {
+		return err
+	}
+	defer closeBundle(bundle, &err)
+	return writeBundle(bundle, contents)
 }
 
 func writeBundle(bundle *bundleFile, contents Bundle) error {

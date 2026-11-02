@@ -17,9 +17,12 @@ principals and group configurations; the cluster itself is prepared once.
 - **Share groups** are enabled, so receivers can claim tasks. See
   [KIP-932](https://cwiki.apache.org/confluence/display/KAFKA/KIP-932%3A+Queues+for+Kafka).
 - **A TLS listener with SCRAM-SHA-512** is reachable from every host and
-  receiver. Its address and CA certificate go into every bundle.
+  receiver. Its address goes into every bundle; its CA does not. Each host
+  and receiver trusts the broker through the system's roots, or a `ca_file`
+  in its own configuration when the CA is private, kept current by whoever
+  distributes the Kafka CA.
 - **An authoriser** denies anything no ACL allows, and `super.users` names
-  the principal `wherry operator` uses as root. See
+  the Kafka super user, which `wherry operator init` uses once. See
   [Authorization and ACLs](https://kafka.apache.org/documentation/#security_authz).
 - **`auto.create.topics.enable=false`**, so a mistyped topic name fails.
 - **`connections.max.reauth.ms`** is set on the listener. Revocation
@@ -29,47 +32,68 @@ principals and group configurations; the cluster itself is prepared once.
   `connections.max.reauth.ms` and
   `group.share.max.record.lock.duration.ms`. Kafka's default makes each
   revocation wait that long.
-- **Two SCRAM principals** exist: the super user, and `wherry.operator`
-  with Read, Write and Describe on topic `wherry.operator`.
+- **One SCRAM principal** exists: the Kafka super user. `wherry operator
+  init` creates `wherry.operator` and grants it its ACLs.
 
 ### Strimzi
 
 On a [Strimzi](https://strimzi.io/documentation/) cluster, declare the
-super user and `wherry.operator` as `KafkaUser` resources. `wherry operator`
-creates host and receiver principals through the Kafka Admin API, which
-Strimzi's User Operator removes unless it ignores them. Set the User
-Operator's `STRIMZI_IGNORED_USERS_PATTERN` environment variable, described
-in the [Strimzi documentation](https://strimzi.io/documentation/), to:
+super user as a `KafkaUser` resource. `wherry operator` creates
+`wherry.operator` and the host and receiver principals through the Kafka
+Admin API, which Strimzi's User Operator removes unless it ignores them. Set
+the User Operator's `STRIMZI_IGNORED_USERS_PATTERN` environment variable,
+described in the [Strimzi documentation](https://strimzi.io/documentation/),
+to:
 
 ```
-^wherry\.(tnt|rcv)\..+
+^wherry\.(operator|tnt\..+|rcv\..+)$
 ```
+
+Strimzi issues and renews the cluster CA; hosts and receivers name its
+certificate as their `ca_file`, and a renewal needs no wherry step.
 
 ## Set up `wherry operator`
 
-`wherry operator` reads its connection from the environment. The broker
-address and CA file are also what it writes into bundles, so use the
-address hosts and receivers reach.
+Make one working directory per installation and run
+[`wherry operator init`](commands.md#wherry-operator-init) in it with the
+Kafka super user, from flags or, on a terminal, its prompts:
 
 ```sh
-export WHERRY_TRUST_BROKER=kafka.example.com:9093
-export WHERRY_TRUST_CA=/etc/wherry/kafka-ca.pem
-export WHERRY_TRUST_SUPER_USER=kafka-admin
-export WHERRY_TRUST_SUPER_USER_PASSWORD_FILE=/etc/wherry/admin-password
-export WHERRY_TRUST_OPERATOR_PASSWORD_FILE=/etc/wherry/operator-password
+mkdir wherry-prod && cd wherry-prod
+wherry operator init --broker kafka.example.com:9093 --ca-file /etc/wherry/kafka-ca.pem \
+  --super-user kafka-admin --super-user-password-file /etc/wherry/admin-password
 ```
+
+Leave out `--ca-file` when the listener's certificate chains to a system
+root. `init` creates `wherry.operator` with a new password, grants it the
+[ACLs provisioning needs](security.md#the-operator-principal), creates the
+installation-wide topics, and writes `operator.yaml` and
+`operator.password`. The broker address is what host bundles name, so use
+the address hosts reach; a receiver's file can name another. Every other
+`wherry operator` command runs in the working directory, or with `--dir`,
+and connects as `wherry.operator` alone. Keep the directory private: it
+holds every bundle ([Security](security.md#the-operator-working-directory)).
+
+To rotate `wherry.operator`'s password, run `init` again with the super
+user; commands then use the new password.
 
 ## Create a pool
 
-Prerequisites: the `wherry operator` environment
+Prerequisites: the working directory
 ([Set up `wherry operator`](#set-up-wherry-operator)).
 
 A pool's terms apply to every receiver in it. Write them as a
-[terms file](configuration.md#pool-terms) and create the pool:
+[terms file](configuration.md#pool-terms) at `pools/build.yaml` in the
+working directory and create the pool:
 
 ```sh
-wherry operator pool apply build -f build-terms.yaml
+wherry operator pool apply build
 ```
+
+Without the file, on a terminal, `pool apply` asks for the agents, their
+models and credentials, the default agent, the quotas and the start-by
+limit, writes `pools/build.yaml`, then applies it. `-f PATH` applies a file
+or directory elsewhere.
 
 The [pool terms example](configuration.md#pool-terms-example) sets every field,
 as one file and as a directory.
@@ -130,8 +154,8 @@ as one file and as a directory.
 
 ### Change a pool's terms
 
-Prerequisites: the `wherry operator` environment and the pool's new terms
-file.
+Prerequisites: the working directory and the pool's new terms in
+`pools/<pool>.yaml`.
 
 1. Find the receivers the new terms would strand: a live receiver in the
    pool with a plugin profile whose agent the new terms drop.
@@ -148,7 +172,7 @@ file.
 4. Record the terms:
 
    ```sh
-   wherry operator pool apply build -f build-terms.yaml
+   wherry operator pool apply build
    ```
 
    `pool apply` checks every live receiver in the pool against the new
@@ -250,7 +274,7 @@ output collection use a changed limit within that window.
 
 ## Add tenants and hosts
 
-Prerequisites: the `wherry operator` environment
+Prerequisites: the working directory
 ([Set up `wherry operator`](#set-up-wherry-operator)) and the pool.
 [Quickstart: Host](quickstart.md#host) walks through these steps for host
 `laptop` of tenant `acme`, with its complete configuration.
@@ -264,11 +288,14 @@ Prerequisites: the `wherry operator` environment
 2. Add each host the tenant submits from:
 
    ```sh
-   wherry operator host add laptop --tenant acme --bundle-file laptop.bundle
+   wherry operator host add laptop --tenant acme
    ```
 
-3. Hand the bundle to the host's user over a channel you trust. It holds
-   the host's Kafka password.
+3. Hand the bundle, `bundles/hosts/laptop.bundle`, to the host's user over
+   a channel you trust. It holds the host's Kafka password. When the
+   broker's certificate chains to a private CA, the host also needs that
+   CA's certificate, at `~/.config/wherry/ca.pem` or the `ca_file` its
+   configuration names; the bundle does not carry it.
 
 The tenant then writes its
 [client configuration](configuration.md#client-configuration), with a source
@@ -277,11 +304,11 @@ for each credential the pool's agents take, and runs `wherry host init`, as in
 
 A tenant can be entitled to several pools; run `pool entitle` once per pool.
 
-To rotate a host's Kafka password or replace a lost bundle, run `host add`
-again with `--force`. It writes a new bundle over `FILE`, and the old
-password stops working at once, so the host is offline until its user puts
-the new bundle in place. `receiver apply RECEIVER --force --bundle-file FILE`
-does the same for a receiver.
+To rotate a host's Kafka password, replace a lost bundle or change the
+broker address a host uses, run `host add` again with `--force`. It writes a
+new bundle over the old one, and the old password stops working at once, so
+the host is offline until its user puts the new bundle in place.
+`receiver apply RECEIVER --force` does the same for a receiver.
 
 ## Add a receiver
 
@@ -301,14 +328,20 @@ says.
 [Quickstart: Receiver](quickstart.md#receiver) walks through adding and
 starting receiver `nomad-1`, with every file it writes.
 
-Prerequisites: the `wherry operator` environment
+Prerequisites: the working directory
 ([Set up `wherry operator`](#set-up-wherry-operator)), the pool, and a receiver
 host that meets [Run a receiver](#run-a-receiver).
 
 1. Write the configuration directory. This configuration of receiver
    `nomad-1`, against the
    [pool terms example](configuration.md#pool-terms-example), runs `claude`
-   in a container and `codex` under the `exec` driver:
+   in a container and `codex` under the `exec` driver. Its `plugin_sha256`
+   pins the Nomad plugin binary's SHA-256, its line in the release's
+   verified `checksums.txt` ([Install plugins](#install-plugins)); a
+   `broker:` line would give the receiver a broker address other than
+   `operator.yaml`'s. A single file at `receivers/nomad-1.yaml` in the
+   working directory, as the [Quickstart](quickstart.md#receiver) writes,
+   needs no `-f`:
 
    ```
    nomad-1/
@@ -324,6 +357,9 @@ host that meets [Run a receiver](#run-a-receiver).
 `receiver.yaml`:
 
 ```yaml
+pool: build
+plugin_sha256:
+  nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 capacity: 3
 ```
 
@@ -387,28 +423,25 @@ how a command reads `WHERRY_MODEL`.
 covers the `codex exec` flags and the API key variable the pool's terms
 target.
 
-2. Check the configuration. `--plugin-sha256 nomad=HEX` pins the Nomad
-   plugin binary's SHA-256, its line in the release's verified
-   `checksums.txt` ([Install plugins](#install-plugins)). `--dry-run`
-   validates the configuration against the pool's terms and prints the
-   pins and each plugin profile as the record would hold them, writing
-   nothing:
+2. Check the configuration. `--dry-run` validates the configuration
+   against the pool's terms and prints the pins and each plugin profile as
+   the record would hold them, writing nothing:
 
    ```sh
-   wherry operator receiver apply nomad-1 --pool build -f nomad-1 \
-     --plugin-sha256 nomad=<sha256> --dry-run
+   wherry operator receiver apply nomad-1 -f nomad-1 --dry-run
    ```
 
 3. Add the receiver:
 
    ```sh
-   wherry operator receiver apply nomad-1 --pool build -f nomad-1 \
-     --plugin-sha256 nomad=<sha256> --bundle-file nomad-1.bundle
+   wherry operator receiver apply nomad-1 -f nomad-1
    ```
 
-4. Deliver the bundle to the receiver host over a channel you trust, such
-   as the platform's secret mechanism. It holds the receiver's Kafka
-   password.
+4. Deliver the bundle, `bundles/receivers/nomad-1.bundle`, to the receiver
+   host over a channel you trust, such as the platform's secret mechanism.
+   It holds the receiver's Kafka password and no CA: when the broker's
+   certificate chains to a private CA, the receiver host also needs that
+   CA's certificate, named as `ca_file` in its local configuration.
 
 5. Install wherry and the receiver's plugins, as in
    [Install plugins](#install-plugins), and write the receiver's [local
@@ -419,6 +452,8 @@ target.
 
 ```yaml
 bundle: /etc/wherry/receiver.bundle
+# A private CA the broker's certificate chains to; without ca_file, the system roots.
+ca_file: /etc/wherry/kafka-ca.pem
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
 metrics_addr: ":9464"
@@ -446,17 +481,17 @@ restart the receiver; the bundle stays as it is.
 
 ### Change a receiver's configuration
 
-Prerequisites: the `wherry operator` environment and the receiver's new
-configuration.
+Prerequisites: the working directory and the receiver's new
+configuration, with a `plugin_sha256` pin for each plugin type, as
+[Install plugins](#install-plugins) takes it from the release's
+`checksums.txt`.
 
-1. Check the configuration. `--plugin-sha256` gives the pin of each
-   plugin type, as [Install plugins](#install-plugins) takes it from the
-   release's `checksums.txt`. `--dry-run` validates the configuration
+1. Check the configuration. `--dry-run` validates the configuration
    against the pool's terms as `apply` does, and prints the pins and each
    plugin profile as the record would hold them, writing nothing:
 
    ```sh
-   wherry operator receiver apply nomad-1 -f nomad-1 --plugin-sha256 nomad=<sha256> --dry-run
+   wherry operator receiver apply nomad-1 -f nomad-1 --dry-run
    ```
 
 2. Compare the output with what the receiver runs now, which
@@ -465,7 +500,7 @@ configuration.
 3. Record the configuration:
 
    ```sh
-   wherry operator receiver apply nomad-1 -f nomad-1 --plugin-sha256 nomad=<sha256>
+   wherry operator receiver apply nomad-1 -f nomad-1
    ```
 
 4. At its next configuration check, within 15 seconds, the receiver stops
@@ -474,8 +509,11 @@ configuration.
    its supervisor restarts it with the new configuration. Check that
    `wherry host receivers` shows it `live` with the new profiles.
 
-The bundle and password stay as they are. Planned changes go through
-`receiver apply`, which drains with no window.
+The password stays as it is. When the configuration's `broker` differs from
+the address in `bundles/receivers/nomad-1.bundle`, `receiver apply` rewrites
+the bundle with the new address and the same password; deliver it to the
+receiver host before the old address stops working. Planned changes go
+through `receiver apply`, which drains with no window.
 
 To apply a change at once, restart the receiver through its platform, as
 with `kubectl rollout restart`, `nomad alloc restart` or
@@ -567,15 +605,20 @@ install -m 0755 wherry-plugin-nomad /usr/local/libexec/wherry/plugins/
 Then pin the binary's SHA-256 on the receiver's record. `checksums.txt`
 holds a line for each plugin binary,
 `wherry-plugin-<plugin>_<version>_<os>_<arch>`, beside the archive's; the
-binary in the archive has that SHA-256. With the `wherry operator` environment
-and the receiver's configuration, and the verified `checksums.txt`:
+binary in the archive has that SHA-256. In the working directory, with the
+verified `checksums.txt`, print it:
 
 ```sh
-sha256=$(awk -v name="wherry-plugin-${plugin}_${version}_${os}_${arch}" '$2 == name {print $1}' checksums.txt)
-wherry operator receiver apply nomad-1 -f nomad-1 --plugin-sha256 "$plugin=$sha256"
+awk -v name="wherry-plugin-${plugin}_${version}_${os}_${arch}" '$2 == name {print $1}' checksums.txt
 ```
 
-Give `--plugin-sha256` once for each plugin type the configuration names.
+Set it as the type's entry in the receiver configuration's `plugin_sha256`,
+which holds one for each plugin type the configuration names, and apply it:
+
+```sh
+wherry operator receiver apply nomad-1
+```
+
 The receiver drains and restarts as in
 [Change a receiver's configuration](#change-a-receiver-s-configuration), and
 starts each plugin only from a binary whose SHA-256 is the pin.
@@ -758,7 +801,7 @@ within the stop window.
 ## Revoke a host or receiver
 
 Prerequisites: the broker settings in [Prepare Kafka](#prepare-kafka), and
-the `wherry operator` environment. Run no other `wherry operator` command until the
+the operator's working directory. Run no other `wherry operator` command until the
 revocation completes: operator commands do not lock each other, and one that read
 `wherry.operator` before the revocation started can restore the principal's
 credential and ACLs.
@@ -806,7 +849,7 @@ custody, and lists what was exposed so that its credentials are rotated at
 their issuers.
 
 Prerequisites: the broker settings in [Prepare Kafka](#prepare-kafka), and
-the `wherry operator` environment. Run one `wherry operator` command at a time,
+the operator's working directory. Run one `wherry operator` command at a time,
 each to its end, from the suspension to the resume: operator commands do not
 lock each other, and one that read `wherry.operator` before another's record
 can undo it, restoring the task topic grants a suspension withdrew, the
@@ -974,8 +1017,11 @@ platform and on Kafka directly.
    principal named `wherry.rcv.<receiver>` or `wherry.tnt.<tenant>.<host>`;
    and the client quotas set on the `wherry.tnt.` principals. Keep the super
    user, `wherry.operator` and its ACLs.
-4. Set the deployment up again from [Create a pool](#create-a-pool), and
-   give each host and receiver its new bundle.
+4. Run [`wherry operator init`](#set-up-wherry-operator) again, which
+   creates `wherry.operator` and `wherry.receivers`, then set the deployment
+   up again from [Create a pool](#create-a-pool), applying the kept files in
+   `pools/` and `receivers/`, and give each host and receiver its new
+   bundle.
 
 ## Inputs and outputs
 

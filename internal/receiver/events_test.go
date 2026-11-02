@@ -137,7 +137,7 @@ func TestPoolEventsDropWhatRetentionDeleted(t *testing.T) {
 	repeated := records[len(records)-1].Offset
 	var offsets kadm.Offsets
 	offsets.Add(kadm.Offset{Topic: topic, Partition: 0, At: repeated})
-	deleted, err := kadm.NewClient(f.service.SuperUser).DeleteRecords(f.ctx, offsets)
+	deleted, err := kadm.NewClient(f.service.Operator).DeleteRecords(f.ctx, offsets)
 	if err == nil {
 		err = deleted.Error()
 	}

@@ -202,6 +202,8 @@ type ReceiverConfig struct {
 	// PluginSHA256 maps each plugin type to the lowercase hex SHA-256 its binary must have; the receiver refuses to
 	// start a plugin whose type has none.
 	PluginSHA256 map[string]string `json:"plugin_sha256"`
+	// Broker is the broker address the receiver's bundle names; it is not recorded.
+	Broker string `json:"-"`
 }
 
 // ProfileSettings configures one profile: the plugin that runs it, the agent it launches, the labels its
@@ -410,7 +412,7 @@ func ValidateConfig(config ReceiverConfig, terms Terms) error {
 		}
 		names[profile.Name] = true
 		if _, ok := config.PluginSHA256[profile.Plugin]; !ok {
-			return fmt.Errorf("plugin type %s has no pinned SHA-256; set it with receiver apply --plugin-sha256 %s=HEX", profile.Plugin, profile.Plugin)
+			return fmt.Errorf("plugin type %s has no pinned SHA-256; set plugin_sha256.%s in the receiver's file and run receiver apply", profile.Plugin, profile.Plugin)
 		}
 		if err := wire.ValidateLabels(profile.Labels); err != nil {
 			return err

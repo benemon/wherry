@@ -112,7 +112,7 @@ func newFixtureNoHost(t *testing.T, opts ...kfake.Opt) *fixture {
 	t.Cleanup(operatorClient.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	f := &fixture{ctx: ctx, cluster: cluster, service: &operator.Service{SuperUser: root, Operator: operatorClient, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10, LockCeilingMS: 60000}, receivers: map[string]*testReceiver{}, poolKeys: map[string]*ecdsa.PrivateKey{}, logs: &syncBuffer{}}
+	f := &fixture{ctx: ctx, cluster: cluster, service: &operator.Service{Operator: operatorClient, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10, LockCeilingMS: 60000}, receivers: map[string]*testReceiver{}, poolKeys: map[string]*ecdsa.PrivateKey{}, logs: &syncBuffer{}}
 	f.pool(t, "pool-a")
 	return f
 }
@@ -151,7 +151,7 @@ func (f *fixture) connect(t *testing.T, path string, extra ...kgo.Opt) (*kgo.Cli
 		t.Fatal(err)
 	}
 	// kfake's SCRAM server always offers 4096 iterations, so the 8192 that operator provisions never authenticates.
-	if _, err := kadm.NewClient(f.service.SuperUser).AlterUserSCRAMs(f.ctx, nil, []kadm.UpsertSCRAM{{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}}); err != nil {
+	if _, err := kadm.NewClient(f.service.Operator).AlterUserSCRAMs(f.ctx, nil, []kadm.UpsertSCRAM{{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}}); err != nil {
 		t.Fatal(err)
 	}
 	kafka, err := kgo.NewClient(append([]kgo.Opt{kgo.SeedBrokers(f.service.Broker), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()),
@@ -199,7 +199,7 @@ func (f *fixture) addReceiver(t *testing.T, id, pool string) *testReceiver {
 func (f *fixture) addReceiverConfig(t *testing.T, config operator.ReceiverConfig) *testReceiver {
 	t.Helper()
 	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := f.service.ReceiverAdd(f.ctx, config, bundle); err != nil {
+	if err := f.service.ReceiverAdd(f.ctx, config, f.service.Broker, bundle); err != nil {
 		t.Fatal(err)
 	}
 	kafka, _ := f.connect(t, bundle)
@@ -504,7 +504,7 @@ func TestNewHostParsesPrincipal(t *testing.T) {
 
 func (f *fixture) tasksEnd(t *testing.T, pool string) int {
 	t.Helper()
-	records, err := readTopic(f.ctx, f.service.SuperUser, operator.PoolTasksTopic(pool))
+	records, err := readTopic(f.ctx, f.service.Operator, operator.PoolTasksTopic(pool))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1266,6 +1266,41 @@ func TestConfigInputRoots(t *testing.T) {
 	}
 }
 
+// The host trusts the broker through its config's ca_file; without one, through ~/.config/wherry/ca.pem when that file
+// exists, and otherwise the system roots.
+func TestConfigCAFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	load := func(config string) string {
+		t.Helper()
+		if err := os.WriteFile(path, []byte("bundle: bundle.yaml\n"+config), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := LoadConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return loaded.CAFile
+	}
+	if got := load(""); got != "" {
+		t.Fatalf("ca_file %q without a setting or a default file; want none, for the system roots", got)
+	}
+	defaultCA := filepath.Join(home, ".config", "wherry", "ca.pem")
+	if err := os.MkdirAll(filepath.Dir(defaultCA), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(defaultCA, []byte("ca"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := load(""); got != defaultCA {
+		t.Fatalf("ca_file %q without a setting; want the default %s", got, defaultCA)
+	}
+	if got := load("ca_file: ~/private/kafka-ca.pem\n"); got != filepath.Join(home, "private", "kafka-ca.pem") {
+		t.Fatalf("ca_file %q; want the setting expanded", got)
+	}
+}
+
 // TestConfigWithoutHome loads a configuration that names every path, as a system service without HOME does.
 func TestConfigWithoutHome(t *testing.T) {
 	dir := t.TempDir()
@@ -1561,7 +1596,7 @@ func TestRegisterConcurrently(t *testing.T) {
 	}
 	wg.Wait()
 	owner := signed.HostOwner("tenant-a", "host-c")
-	keys, err := operator.ReadKeys(f.ctx, f.service.SuperUser, map[string]string{owner: operator.HostTopic("tenant-a", "host-c")})
+	keys, err := operator.ReadKeys(f.ctx, f.service.Operator, map[string]string{owner: operator.HostTopic("tenant-a", "host-c")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1964,7 +1999,7 @@ func TestFailedKeyReadFailsTheLoad(t *testing.T) {
 	for _, id := range []string{"receiver-a", "receiver-b", "receiver-c"} {
 		f.addReceiver(t, id, "pool-a").advertise(t, f.ctx, nil)
 	}
-	deleted, err := kadm.NewClient(f.service.SuperUser).DeleteTopics(f.ctx, operator.ReceiverTopic("receiver-b"))
+	deleted, err := kadm.NewClient(f.service.Operator).DeleteTopics(f.ctx, operator.ReceiverTopic("receiver-b"))
 	if err == nil {
 		err = deleted.Error()
 	}

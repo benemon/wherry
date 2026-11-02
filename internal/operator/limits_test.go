@@ -140,7 +140,7 @@ func setTopicRetention(t *testing.T, service *Service, topic string, value int64
 
 func setTopicConfig(t *testing.T, service *Service, topic, name, value string) {
 	t.Helper()
-	responses, err := kadm.NewClient(service.SuperUser).AlterTopicConfigs(context.Background(), []kadm.AlterConfig{{Op: kadm.SetConfig, Name: name, Value: &value}}, topic)
+	responses, err := kadm.NewClient(service.Operator).AlterTopicConfigs(context.Background(), []kadm.AlterConfig{{Op: kadm.SetConfig, Name: name, Value: &value}}, topic)
 	if err == nil {
 		err = responses[0].Err
 	}
@@ -205,7 +205,7 @@ func TestPoolApplyUpdateNeverLowersPoolTopicRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	cluster.ApplyRetention()
-	starts, err := kadm.NewClient(service.SuperUser).ListStartOffsets(ctx, topics...)
+	starts, err := kadm.NewClient(service.Operator).ListStartOffsets(ctx, topics...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +346,7 @@ func TestPoolApplyCreateRefusesAPartitionedTopicBeforeRecording(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	responses, err := kadm.NewClient(service.SuperUser).CreateTopics(ctx, 2, -1, nil, PoolEventsTopic("pool-a"))
+	responses, err := kadm.NewClient(service.Operator).CreateTopics(ctx, 2, -1, nil, PoolEventsTopic("pool-a"))
 	if err == nil {
 		err = responses.Error()
 	}
@@ -446,7 +446,7 @@ func TestProgressTopicRetentionIsNeverLowered(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "a.yaml")); err != nil {
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), service.Broker, filepath.Join(t.TempDir(), "a.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	progress := ReceiverProgressTopic("receiver-a")
@@ -457,7 +457,7 @@ func TestProgressTopicRetentionIsNeverLowered(t *testing.T) {
 	if got := topicRetention(t, service, progress); got != -1 {
 		t.Fatalf("%s retention.ms after pool apply = %d, want -1 kept", progress, got)
 	}
-	if err := service.ReceiverAdd(ctx, modelConfig("receiver-b", "pool-a"), filepath.Join(t.TempDir(), "b.yaml")); err != nil {
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-b", "pool-a"), service.Broker, filepath.Join(t.TempDir(), "b.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	if got := topicRetention(t, service, progress); got != -1 {
@@ -497,7 +497,7 @@ func TestPoolApplyCreateSetsThePoolTopicLayout(t *testing.T) {
 	cluster, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	responses, err := kadm.NewClient(service.SuperUser).AlterBrokerConfigs(ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "log.retention.bytes", Value: kadm.StringPtr("1")}})
+	responses, err := kadm.NewClient(service.Operator).AlterBrokerConfigs(ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "log.retention.bytes", Value: kadm.StringPtr("1")}})
 	if err == nil {
 		err = responses[0].Err
 	}
@@ -514,7 +514,7 @@ func TestPoolApplyCreateSetsThePoolTopicLayout(t *testing.T) {
 		}
 	}
 	cluster.ApplyRetention()
-	starts, err := kadm.NewClient(service.SuperUser).ListStartOffsets(ctx, topics...)
+	starts, err := kadm.NewClient(service.Operator).ListStartOffsets(ctx, topics...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -563,11 +563,11 @@ func TestPoolApplyUpdateEnforcesThePoolTopicLayout(t *testing.T) {
 func assertPoolTopicLayout(t *testing.T, service *Service, pool string) {
 	t.Helper()
 	topics := []string{PoolTasksTopic(pool), PoolEventsTopic(pool)}
-	details, err := kadm.NewClient(service.SuperUser).ListTopics(context.Background(), topics...)
+	details, err := kadm.NewClient(service.Operator).ListTopics(context.Background(), topics...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resources, err := kadm.NewClient(service.SuperUser).DescribeTopicConfigs(context.Background(), topics...)
+	resources, err := kadm.NewClient(service.Operator).DescribeTopicConfigs(context.Background(), topics...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -649,7 +649,7 @@ func TestPoolApplyUpdateRefusesTermsThatStrandALiveReceiver(t *testing.T) {
 	}
 	config := ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []ProfileSettings{{Name: "profile-codex", Plugin: "fake", Agent: "codex"}},
 		PluginSHA256: map[string]string{"fake": strings.Repeat("ab", 32)}}
-	if err := service.ReceiverAdd(ctx, config, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+	if err := service.ReceiverAdd(ctx, config, service.Broker, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	err := service.PoolApply(ctx, "pool-a", modelTerms(), false)
@@ -730,7 +730,7 @@ func TestCheckReportsRetentionDrift(t *testing.T) {
 
 func setTopicLimit(t *testing.T, service *Service, topic, value string) {
 	t.Helper()
-	responses, err := kadm.NewClient(service.SuperUser).AlterTopicConfigs(context.Background(), []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "max.message.bytes", Value: &value}}, topic)
+	responses, err := kadm.NewClient(service.Operator).AlterTopicConfigs(context.Background(), []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "max.message.bytes", Value: &value}}, topic)
 	if err == nil {
 		err = responses[0].Err
 	}
@@ -764,7 +764,7 @@ func TestPoolApplyCreateRecordsTheRecordLimit(t *testing.T) {
 		t.Fatalf("record limit %d; want the producer maximum", got)
 	}
 	message := "1000000"
-	responses, err := kadm.NewClient(service.SuperUser).AlterBrokerConfigs(ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "message.max.bytes", Value: &message}})
+	responses, err := kadm.NewClient(service.Operator).AlterBrokerConfigs(ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "message.max.bytes", Value: &message}})
 	if err == nil {
 		err = responses[0].Err
 	}
@@ -943,7 +943,7 @@ func TestCheckFailsOnAMissingTenantFeed(t *testing.T) {
 	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := kadm.NewClient(service.SuperUser).DeleteTopics(ctx, TenantTopic("tenant-a")); err != nil {
+	if _, err := kadm.NewClient(service.Operator).DeleteTopics(ctx, TenantTopic("tenant-a")); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.Check(ctx); err == nil || !strings.Contains(err.Error(), "describe topic wherry.tenant.tenant-a") {
@@ -1246,7 +1246,7 @@ func TestProgressTopicIsCompactedOnNewAndExistingTopics(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), service.Broker, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	retention, err := poolRetention(withDefaults(modelTerms()))

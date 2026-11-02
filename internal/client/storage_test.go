@@ -378,7 +378,7 @@ func recordLimitFixture(t *testing.T, stored bool) (*fixture, *uploadOracle, *te
 		t.Fatal(err)
 	}
 	limit := "100000"
-	if responses, err := kadm.NewClient(f.service.SuperUser).AlterTopicConfigs(f.ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "max.message.bytes", Value: &limit}}, operator.PoolTasksTopic("pool-r")); err != nil || responses[0].Err != nil {
+	if responses, err := kadm.NewClient(f.service.Operator).AlterTopicConfigs(f.ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "max.message.bytes", Value: &limit}}, operator.PoolTasksTopic("pool-r")); err != nil || responses[0].Err != nil {
 		t.Fatalf("alter topic: %v %v", err, responses)
 	}
 	if err := f.service.PoolApply(f.ctx, "pool-r", terms, false); err != nil {

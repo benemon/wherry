@@ -69,7 +69,7 @@ func TestRotateKeyRecordRotatesAtOnceAndHostsEncryptToTheNewKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("WHERRY_TEST_TOKEN", testToken)
-	kafka, err := kgo.NewClient(append(f.service.SuperUser.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
+	kafka, err := kgo.NewClient(append(f.service.Operator.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestRotateKeyRequestsAreOrderedByOffset(t *testing.T) {
 	request := func(stamped time.Time) int64 {
 		t.Helper()
 		record := &kgo.Record{Topic: operator.OperatorTopic, Key: []byte("rotate-key." + testPool), Value: must(t)(operator.EncodeRecord(operator.Record{Kind: "rotate-key", Pool: testPool})), Timestamp: stamped}
-		if err := f.service.SuperUser.ProduceSync(f.ctx, record).FirstErr(); err != nil {
+		if err := f.service.Operator.ProduceSync(f.ctx, record).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 		if err := f.receiver.refresh(f.ctx); err != nil {

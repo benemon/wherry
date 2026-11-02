@@ -39,11 +39,13 @@ const (
 	defaultPluginDir      = "/usr/local/libexec/wherry/plugins"
 )
 
-// receiverLocalConfig is the receiver's local configuration file. Credentials maps the name a profile's config gives
+// receiverLocalConfig is the receiver's local configuration file. CAFile holds the PEM certificates the receiver trusts
+// the broker with; without it, the system roots. Credentials maps the name a profile's config gives
 // its platform credential to the source of its value. DrainTimeout bounds how long held runs may finish after a stop
 // signal; it stays below the platform's stop window, which the receiver cannot read.
 type receiverLocalConfig struct {
 	Bundle       string                       `yaml:"bundle"`
+	CAFile       string                       `yaml:"ca_file"`
 	StateDir     string                       `yaml:"state_dir"`
 	PluginDir    string                       `yaml:"plugin_dir"`
 	MetricsAddr  string                       `yaml:"metrics_addr"`
@@ -71,7 +73,7 @@ func loadReceiverLocalConfig(path string) (receiverLocalConfig, error) {
 	if config.DrainTimeout < 0 {
 		return receiverLocalConfig{}, errors.New("config drain_timeout must not be negative")
 	}
-	for _, path := range []*string{&config.Bundle, &config.StateDir, &config.PluginDir} {
+	for _, path := range []*string{&config.Bundle, &config.CAFile, &config.StateDir, &config.PluginDir} {
 		if *path, err = client.ExpandHome(*path); err != nil {
 			return receiverLocalConfig{}, err
 		}
@@ -117,6 +119,12 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	var ca []byte
+	if config.CAFile != "" {
+		if ca, err = os.ReadFile(config.CAFile); err != nil {
+			return fmt.Errorf("ca_file: %w", err)
+		}
+	}
 	logger := log.New(stdout, "receiver: ", log.LstdFlags|log.LUTC)
 	registry := newRegistry()
 	if config.MetricsAddr != "" {
@@ -128,7 +136,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	}
 	plugins := &plugins{dir: config.PluginDir, credentials: config.Credentials, logger: logger, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
-	r, err := receiver.New(bundle, config.StateDir, *rotateKey, config.DrainTimeout, plugins.profile, logger, registry)
+	r, err := receiver.New(bundle, ca, config.StateDir, *rotateKey, config.DrainTimeout, plugins.profile, logger, registry)
 	if err != nil {
 		return err
 	}
@@ -203,7 +211,7 @@ func (p *plugins) profile(pool string, settings operator.ProfileSettings, plugin
 	if !ok {
 		checksum, err := hex.DecodeString(pluginSHA256)
 		if err != nil || len(checksum) != sha256.Size {
-			return receiver.Named{}, fmt.Errorf("plugin type %s has no pinned SHA-256; set it with receiver apply --plugin-sha256 %s=HEX", settings.Plugin, settings.Plugin)
+			return receiver.Named{}, fmt.Errorf("plugin type %s has no pinned SHA-256; set plugin_sha256.%s in the receiver's file and run receiver apply", settings.Plugin, settings.Plugin)
 		}
 		running, err = pluginsdk.Launch(settings.Plugin, func() (string, error) { return pluginPath(p.dir, settings.Plugin) }, checksum, p.logs)
 		if err != nil {

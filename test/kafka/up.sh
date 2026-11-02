@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Starts a single-node Kafka for the real-broker tests and writes their environment to DIR/env: a TLS listener on
-# 127.0.0.1:9093 with SCRAM-SHA-512 and the StandardAuthorizer (super user wherry-admin, operator wherry.operator
-# with the operator's ACLs on wherry.operator), and a plaintext listener on 127.0.0.1:9092 whose anonymous principal is
-# a super user. Usage: up.sh DIR. CONTAINER (docker by default) runs it; down: $CONTAINER rm -f wherry-kafka.
+# 127.0.0.1:9093 with SCRAM-SHA-512 and the StandardAuthorizer (super user wherry-admin; the fixtures delegate to
+# wherry.operator, with the password in operator-password, as wherry operator init does), and a plaintext listener on
+# 127.0.0.1:9092 whose anonymous principal is a super user. Usage: up.sh DIR. CONTAINER (docker by default) runs it;
+# down: $CONTAINER rm -f wherry-kafka.
 # ADVERTISED_IP (127.0.0.1 by default) replaces 127.0.0.1 in the listeners, the published ports and the certificate,
 # so a client in another network namespace, such as a Nomad bridge-mode task, can reach the broker. The plaintext
 # listener then accepts anyone who can reach that address as a super user: use it on a disposable CI runner only.
@@ -66,12 +67,11 @@ chmod 0644 "$dir/server.properties"
 "$container" rm -f wherry-kafka >/dev/null 2>&1 || true
 "$container" run -d --name wherry-kafka -p "$ip:9092:9092" -p "$ip:9093:9093" \
   -v "$dir/server.properties:/cfg/server.properties:ro" -v "$dir/server.pem:/certs/server.pem:ro" \
-  -e CLUSTER_ID="$cluster_id" -e ADMIN_PASSWORD="$(cat "$dir/admin-password")" -e OPERATOR_PASSWORD="$(cat "$dir/operator-password")" \
+  -e CLUSTER_ID="$cluster_id" -e ADMIN_PASSWORD="$(cat "$dir/admin-password")" \
   --entrypoint /bin/sh "$image" -c '
     /opt/kafka/bin/kafka-storage.sh format --standalone -t "$CLUSTER_ID" \
       -c /cfg/server.properties \
-      --add-scram "SCRAM-SHA-512=[name=wherry-admin,password=$ADMIN_PASSWORD]" \
-      --add-scram "SCRAM-SHA-512=[name=wherry.operator,password=$OPERATOR_PASSWORD]" >/dev/null &&
+      --add-scram "SCRAM-SHA-512=[name=wherry-admin,password=$ADMIN_PASSWORD]" >/dev/null &&
     exec /opt/kafka/bin/kafka-server-start.sh /cfg/server.properties' >/dev/null
 
 for _ in $(seq 1 60); do
@@ -79,9 +79,6 @@ for _ in $(seq 1 60); do
     >/dev/null 2>&1 && break
   sleep 2
 done
-"$container" exec wherry-kafka /opt/kafka/bin/kafka-acls.sh --bootstrap-server 127.0.0.1:9092 --add \
-  --allow-principal User:wherry.operator --operation Write --operation Read --operation Describe \
-  --topic wherry.operator >/dev/null
 
 cat > "$dir/env" <<EOF
 export WHERRY_KAFKA_TEST_BROKER=$ip:9092

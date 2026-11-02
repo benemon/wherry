@@ -175,7 +175,7 @@ func TestPluginLaunchesOnlyFromItsPin(t *testing.T) {
 	plugins := &plugins{dir: dir, logs: io.Discard, logger: discard, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	settings := operator.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}
-	if _, err := plugins.profile("build", settings, ""); err == nil || err.Error() != "plugin type fake has no pinned SHA-256; set it with receiver apply --plugin-sha256 fake=HEX" {
+	if _, err := plugins.profile("build", settings, ""); err == nil || err.Error() != "plugin type fake has no pinned SHA-256; set plugin_sha256.fake in the receiver's file and run receiver apply" {
 		t.Fatalf("unpinned plugin: %v; want refused naming the type and the flag", err)
 	}
 	other := strings.Repeat("0", 64)
@@ -235,27 +235,34 @@ func TestOneProcessPerPlugin(t *testing.T) {
 
 func TestReadBundleIsStrict(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nca: c\nextra: 1\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nextra: 1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := operator.ReadBundle(path); err == nil {
 		t.Fatal("accepted a bundle with an unknown field")
 	}
 	// The bundle holds only the receiver's Kafka identity; platform credentials come from the local configuration.
-	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nca: c\nplatform:\n  lab: token\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nplatform:\n  lab: token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := operator.ReadBundle(path); err == nil {
 		t.Fatal("accepted a bundle carrying platform credentials")
 	}
+	// Broker trust is local to each machine, so a bundle carries no CA.
 	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nca: c\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := operator.ReadBundle(path); err == nil {
+		t.Fatal("accepted a bundle carrying a CA")
+	}
+	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	bundle, err := operator.ReadBundle(path)
 	if err != nil || bundle.Principal != "wherry.rcv.r" {
 		t.Fatalf("bundle %#v err %v", bundle, err)
 	}
-	if err := os.WriteFile(path, []byte("broker: b\nca: c\npassword: p\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("broker: b\npassword: p\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := operator.ReadBundle(path); err == nil {
@@ -315,7 +322,7 @@ func writeLocalConfig(t *testing.T, content string) string {
 
 func TestReceiverLocalConfigExampleParses(t *testing.T) {
 	config, err := loadReceiverLocalConfig(filepath.Join("testdata", "example-receiver-config.yaml"))
-	want := receiverLocalConfig{Bundle: "/etc/wherry/receiver.bundle", StateDir: "/var/lib/wherry/state", PluginDir: defaultPluginDir, MetricsAddr: ":9464", DrainTimeout: 20 * time.Second,
+	want := receiverLocalConfig{Bundle: "/etc/wherry/receiver.bundle", CAFile: "/etc/wherry/kafka-ca.pem", StateDir: "/var/lib/wherry/state", PluginDir: defaultPluginDir, MetricsAddr: ":9464", DrainTimeout: 20 * time.Second,
 		Credentials: map[string]credential.Source{"nomad-token": {File: "/etc/wherry/nomad-token"}}}
 	if err != nil || !reflect.DeepEqual(config, want) {
 		t.Fatalf("example = %+v, %v; want %+v", config, err, want)

@@ -37,7 +37,7 @@ func (f fixture) executing(t *testing.T, ctx context.Context, record *kgo.Record
 	t.Helper()
 	admitted := f.admitted(t, record)
 	done := make(chan kgo.AckStatus, 1)
-	go func() { done <- f.receiver.execute(ctx, f.service.SuperUser, record, admitted, attempt) }()
+	go func() { done <- f.receiver.execute(ctx, f.service.Operator, record, admitted, attempt) }()
 	return done
 }
 
@@ -597,7 +597,7 @@ func (f fixture) advertiseAs(t *testing.T, receiver string, key ed25519.PrivateK
 func (f fixture) advertiseIn(t *testing.T, pool, receiver string, key ed25519.PrivateKey, at time.Time) {
 	t.Helper()
 	value := must(t)(wire.SignRecord(&wire.Advertisement{Receiver: receiver, Pool: pool, Offers: []wire.Offer{}, Capacity: 1, AtMS: at.UnixMilli()}, key))
-	if err := f.service.SuperUser.ProduceSync(f.ctx, &kgo.Record{Topic: operator.ReceiversTopic, Key: []byte(receiver), Value: value, Timestamp: at}).FirstErr(); err != nil {
+	if err := f.service.Operator.ProduceSync(f.ctx, &kgo.Record{Topic: operator.ReceiversTopic, Key: []byte(receiver), Value: value, Timestamp: at}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1495,7 +1495,7 @@ func TestHostOfflineAndANonCustodianRunsTheTask(t *testing.T) {
 	t.Setenv("WHERRY_TEST_TOKEN", testToken)
 	stateDir := filepath.Join(t.TempDir(), "host")
 	connect := func() *client.Host {
-		kafka, err := kgo.NewClient(append(f.service.SuperUser.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
+		kafka, err := kgo.NewClient(append(f.service.Operator.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1822,7 +1822,7 @@ func TestTheClaimCheckReadsABoundedAmountOfALongTrailingLog(t *testing.T) {
 	// Every fetch of the task topic returns one record batch, and each record above was produced alone, so reading the
 	// log from the claim's offset to its end takes a fetch per trailing record.
 	topic := operator.PoolTasksTopic(testPool)
-	details, err := kadm.NewClient(f.service.SuperUser).ListTopics(f.ctx, topic)
+	details, err := kadm.NewClient(f.service.Operator).ListTopics(f.ctx, topic)
 	if err != nil || details[topic].Err != nil {
 		t.Fatalf("list %s: %v %v", topic, err, details[topic].Err)
 	}
