@@ -751,15 +751,22 @@ them. It refuses, before it reads the broker, terms whose agent credentials
 break the [pool terms](configuration.md#pool-terms) rules, and a delivery limit above the lowest
 `group.share.max.delivery.count.limit` across the brokers, and terms whose
 [records do not fit the broker](configuration.md#record-limit). It refuses an
-existing pool with `pool exists; change its terms with pool update`. On new and
-existing topics it sets the tasks and events `retention.ms` to
-`start_by_limit` plus six hours plus one day unless it is already longer, their
+existing pool with `pool exists; change its terms with pool update`, unless the
+terms are those recorded: then it completes the pool, as after a `pool create`
+that failed once it recorded them. Before it records the terms it refuses a pool
+name that is not valid and an existing tasks or events topic with more than one
+partition; it creates the topics after it records the terms, which is when it
+checks the pool's names against every other recorded name. On new and
+existing topics it sets the tasks `retention.ms` to
+`start_by_limit` plus six hours plus one day unless it is already longer, and the
+events `retention.ms` to the tasks topic's unless it is already longer, their
 `message.timestamp.type` to `LogAppendTime`, their `cleanup.policy` to
 `delete` and their `retention.bytes` to `-1`, refuses either with more than
 one partition, and creates the progress topic
 of each live receiver in the pool, or sets an existing one's configuration,
-with the tasks topic's `retention.ms`. It fails when a topic configuration it
-sets is not applied within 10 seconds. It refuses a `start_by_limit` above
+with the tasks topic's `retention.ms` unless the progress topic's is already longer. It fails when a topic
+configuration it sets is not applied within 10 seconds, or when a describe of it
+still fails then, naming the describe's error. It refuses a `start_by_limit` above
 29 days and 18 hours, or one that with six hours added exceeds the
 `retention.ms` of the feed or transcript topic of a tenant entitled to the
 pool. For a pool with `storage` it refuses a `start_by_limit` that with six
@@ -922,7 +929,7 @@ it, creates the receiver's principal, key topic and progress topic,
 `wherry.receiver.<receiver>.progress`, grants its ACLs, and writes its
 bundle. It creates the progress topic of every other live receiver in the
 pool that lacks one, and sets the
-[progress topic configuration](design.md#topics-1) on each existing one. It
+[progress topic configuration](design.md#topics-1) on each existing one, never lowering its `retention.ms`. It
 refuses an existing receiver.
 `--plugin-sha256 TYPE=HEX`, given once per plugin type, pins the SHA-256 of
 that type's binary as lowercase hex: the line for the binary in the plugin
