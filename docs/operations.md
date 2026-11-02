@@ -177,7 +177,8 @@ apply it, before it records a longer limit.
 `pool create` and `pool update` set the retention of the pool's tasks and events topics, new and
 existing, to at least `start_by_limit` plus the six-hour maximum run time plus a
 one-day margin, their timestamp type to `LogAppendTime`, since a run's age
-runs from the broker's time, and their `segment.ms` to one hour, so
+runs from the broker's time, their `retention.bytes` to `-1` and
+`cleanup.policy` to `delete`, so only time deletes a record, and their `segment.ms` to one hour, so
 retention deletes a record within about an hour of its bound. The deadlines
 of replaced pool keys fall inside this retention
 ([Rotation](concepts.md#rotation)). The pool's snapshot topic is compacted
@@ -191,7 +192,9 @@ hours, so `pool create` refuses a limit above 29 days and 18 hours, and
 configuration topics stay forever. `wherry admin check` reports a topic whose
 retention drops below its bound, a pool topic whose timestamp type is not
 `LogAppendTime`, and a tasks or events topic without the hourly
-`segment.ms`.
+`segment.ms`, `cleanup.policy=delete` or `retention.bytes=-1`, or with more
+than one partition. `pool update` refuses a tasks or events topic with more
+than one partition; partitions cannot be removed, so recreate the pool's topics.
 
 A tenant transcript topic whose retention is shorter than its feed's loses an
 old run's reply and transcript before its result: the result then keeps the
@@ -933,7 +936,8 @@ pool's current terms, checks that every pool's largest records still fit the
 broker's record limit, reports a tenant feed or transcript topic whose
 `max.message.bytes` is below 2 MiB, reports topic retention below the pool's required
 bounds, including a receiver's progress topic that keeps less than its
-pool's tasks topic, checks each pool's tasks and events `segment.ms` and its
+pool's tasks topic, checks each pool's tasks and events `segment.ms`,
+`cleanup.policy`, `retention.bytes` and single partition and its
 snapshot topic's configuration and single partition, and confirms that every
 ACL the state calls for exists. It does not
 check a plugin profile's plugin or `config` section; at start the receiver

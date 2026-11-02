@@ -124,7 +124,11 @@ closes and compacts within an hour, and a pool's snapshot topic
 `wherry.pool.<pool>.custodian`, which it creates with
 `cleanup.policy=compact`. A pool's tasks and events topics have
 `segment.ms=3600000`, so retention deletes a record within an hour of its
-bound; `admin check` verifies it. A tenant feed and transcript topic also
+bound, and `retention.bytes=-1`, so no size limit, the broker's
+`log.retention.bytes` included, deletes one sooner; `admin check` verifies
+both, their `cleanup.policy=delete` and their single partition. Partitions
+cannot be removed, so `pool update` and `admin check` refuse a tasks or
+events topic with more than one; the remedy is to recreate the pool's topics. A tenant feed and transcript topic also
 have `max.message.bytes=2097152`, the 2 MiB a receiver batches, so a result
 naming 256 outputs fits.
 
@@ -151,7 +155,7 @@ at `-1`, and `wherry.receivers` remains a seven-day liveness topic.
 `wherry admin` leaves an existing topic's configuration as it is, except
 that every recording command sets the configuration above on
 `wherry.receivers`, `pool create` and `pool update` set the retention, never
-lowering it, timestamp type and `segment.ms` of the pool's tasks and events topics and
+lowering it, timestamp type, `cleanup.policy`, `retention.bytes` and `segment.ms` of the pool's tasks and events topics and
 the configuration of its snapshot topic, and `receiver add` and `pool create` set every
 configuration above on the progress topics of the pool's live receivers.
 `pool entitle`, `pool create` and `pool update` set `max.message.bytes` on

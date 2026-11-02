@@ -753,8 +753,10 @@ break the [pool terms](configuration.md#pool-terms) rules, and a delivery limit 
 [records do not fit the broker](configuration.md#record-limit). It refuses an
 existing pool with `pool exists; change its terms with pool update`. On new and
 existing topics it sets the tasks and events `retention.ms` to
-`start_by_limit` plus six hours plus one day unless it is already longer, and their
-`message.timestamp.type` to `LogAppendTime`, and creates the progress topic
+`start_by_limit` plus six hours plus one day unless it is already longer, their
+`message.timestamp.type` to `LogAppendTime`, their `cleanup.policy` to
+`delete` and their `retention.bytes` to `-1`, refuses either with more than
+one partition, and creates the progress topic
 of each live receiver in the pool, or sets an existing one's configuration,
 with the tasks topic's `retention.ms`. It fails when a topic configuration it
 sets is not applied within 10 seconds. It refuses a `start_by_limit` above
@@ -1023,6 +1025,8 @@ receiver configuration against its pool's terms, checks that every pool's
 [records still fit the broker](configuration.md#record-limit), checks that every
 tenant feed and transcript topic has a `max.message.bytes` of at least 2 MiB, checks topic retention and
 timestamp type against the [bounds](design.md#topics-1), checks that each
+pool's tasks and events topics have one partition, `cleanup.policy=delete`
+and `retention.bytes=-1`, checks that each
 live receiver's progress topic keeps records at least as long as its pool's
 tasks topic, and checks that every ACL the
 state calls for is present. It does not report ACLs beyond those, and does not check a

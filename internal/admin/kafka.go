@@ -201,10 +201,13 @@ func (service *Service) poolTopics(ctx context.Context, state State, pool string
 	if err := service.createTopics(ctx, strconv.FormatInt(retentionMS, 10), topics...); err != nil {
 		return err
 	}
+	if err := service.onePartition(ctx, topics...); err != nil {
+		return err
+	}
 	if err := service.configureTopicRetention(ctx, retentionMS, topics...); err != nil {
 		return err
 	}
-	if err := service.configureTopics(ctx, poolSegments, topics...); err != nil {
+	if err := service.configureTopics(ctx, poolConfigs, topics...); err != nil {
 		return err
 	}
 	return service.progressTopics(ctx, state, pool)
@@ -475,8 +478,9 @@ var receiversConfigs = map[string]string{
 	"max.compaction.lag.ms":  "3600000",
 }
 
-// poolSegments rolls a pool's task and events topics hourly, so retention deletes a record within an hour of its bound.
-var poolSegments = map[string]string{"segment.ms": "3600000"}
+// poolConfigs are a pool's tasks and events topic configs beyond retention.ms and the timestamp type: retention by time
+// alone, deleting a record within an hour of its bound as segments roll hourly.
+var poolConfigs = map[string]string{"cleanup.policy": "delete", "retention.bytes": "-1", "segment.ms": "3600000"}
 
 // custodianConfigs are a pool's snapshot topic configs: readers want the latest committed snapshot, which compaction
 // keeps under its one key forever.
@@ -803,14 +807,14 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 			return fmt.Errorf("topic %s message.timestamp.type is %s, want LogAppendTime", topic, types[topic])
 		}
 	}
-	for _, name := range slices.Sorted(maps.Keys(poolSegments)) {
+	for _, name := range slices.Sorted(maps.Keys(poolConfigs)) {
 		values, err := service.topicConfigs(ctx, name, poolTopics...)
 		if err != nil {
 			return err
 		}
 		for _, topic := range poolTopics {
-			if values[topic] != poolSegments[name] {
-				return fmt.Errorf("topic %s %s is %s, want %s", topic, name, values[topic], poolSegments[name])
+			if values[topic] != poolConfigs[name] {
+				return fmt.Errorf("topic %s %s is %s, want %s", topic, name, values[topic], poolConfigs[name])
 			}
 		}
 	}
@@ -829,15 +833,8 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 			}
 		}
 	}
-	// One partition is what gives the custodian group a single assignee and readers one order.
-	details, err := kadm.NewClient(service.Admin).ListTopics(ctx, custodianTopics...)
-	if err != nil {
+	if err := service.onePartition(ctx, slices.Concat(poolTopics, custodianTopics)...); err != nil {
 		return err
-	}
-	for _, topic := range custodianTopics {
-		if partitions := len(details[topic].Partitions); partitions != 1 {
-			return fmt.Errorf("topic %s has %d partitions, want 1", topic, partitions)
-		}
 	}
 	for pool, terms := range state.Pools {
 		bounds, err := poolRetention(terms)
@@ -863,6 +860,21 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 					return fmt.Errorf("topic %s retention.ms %d is below required %d", feed, retentions[feed], bounds.feed)
 				}
 			}
+		}
+	}
+	return nil
+}
+
+// onePartition refuses any of topics without exactly one partition. One partition is what gives the custodian group a
+// single assignee and readers one order; partitions cannot be removed, so a pool topic with more is recreated.
+func (service *Service) onePartition(ctx context.Context, topics ...string) error {
+	details, err := kadm.NewClient(service.Admin).ListTopics(ctx, topics...)
+	if err != nil {
+		return err
+	}
+	for _, topic := range topics {
+		if partitions := len(details[topic].Partitions); partitions != 1 {
+			return fmt.Errorf("topic %s has %d partitions, want 1", topic, partitions)
 		}
 	}
 	return nil

@@ -293,6 +293,102 @@ func TestPoolUpdateFailsOnRetentionNotApplied(t *testing.T) {
 	}
 }
 
+// pool create gives the tasks and events topics one partition and their own cleanup.policy=delete and
+// retention.bytes=-1, so a broker-wide size limit deletes none of a pool's records.
+func TestPoolCreateSetsThePoolTopicLayout(t *testing.T) {
+	cluster, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	responses, err := kadm.NewClient(service.Admin).AlterBrokerConfigs(ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "log.retention.bytes", Value: kadm.StringPtr("1")}})
+	if err == nil {
+		err = responses[0].Err
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	topics := []string{PoolTasksTopic("pool-a"), PoolEventsTopic("pool-a")}
+	for _, topic := range topics {
+		if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: topic, Value: []byte("run-a")}).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cluster.ApplyRetention()
+	starts, err := kadm.NewClient(service.Admin).ListStartOffsets(ctx, topics...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, topic := range topics {
+		if start, _ := starts.Lookup(topic, 0); start.Err != nil || start.Offset != 0 {
+			t.Fatalf("%s starts at %d, %v; want the record kept past the broker's log.retention.bytes", topic, start.Offset, start.Err)
+		}
+	}
+	assertPoolTopicLayout(t, service, "pool-a")
+}
+
+// pool update sets cleanup.policy=delete and retention.bytes=-1 on the tasks and events topics, and refuses, before it
+// records the terms, a pool topic with more than one partition.
+func TestPoolUpdateEnforcesThePoolTopicLayout(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	for _, topic := range []string{PoolTasksTopic("pool-a"), PoolEventsTopic("pool-a")} {
+		setTopicConfig(t, service, topic, "cleanup.policy", "compact")
+		setTopicConfig(t, service, topic, "retention.bytes", "1073741824")
+	}
+	if err := service.PoolUpdate(ctx, "pool-a", modelTerms(), false); err != nil {
+		t.Fatal(err)
+	}
+	assertPoolTopicLayout(t, service, "pool-a")
+	if err := service.Check(ctx); err != nil {
+		t.Fatalf("check after pool update = %v", err)
+	}
+	addPartition(t, service, PoolEventsTopic("pool-a"))
+	terms := modelTerms()
+	terms.DeliveryLimit = 4
+	err := service.PoolUpdate(ctx, "pool-a", terms, false)
+	if err == nil || err.Error() != "topic wherry.pool.pool-a.events has 2 partitions, want 1" {
+		t.Fatalf("pool update = %v; want the partitioned events topic refused", err)
+	}
+	if state, err := service.LoadState(ctx); err != nil || state.Pools["pool-a"].DeliveryLimit != modelTerms().DeliveryLimit {
+		t.Fatalf("pool-a terms %+v, %v; want the old terms", state.Pools["pool-a"], err)
+	}
+}
+
+// assertPoolTopicLayout fails unless pool's tasks and events topics have one partition and their own
+// cleanup.policy=delete and retention.bytes=-1.
+func assertPoolTopicLayout(t *testing.T, service *Service, pool string) {
+	t.Helper()
+	topics := []string{PoolTasksTopic(pool), PoolEventsTopic(pool)}
+	details, err := kadm.NewClient(service.Admin).ListTopics(context.Background(), topics...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources, err := kadm.NewClient(service.Admin).DescribeTopicConfigs(context.Background(), topics...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, resource := range resources {
+		if partitions := len(details[resource.Name].Partitions); partitions != 1 {
+			t.Fatalf("%s has %d partitions, want 1", resource.Name, partitions)
+		}
+		configs := map[string]kadm.Config{}
+		for _, config := range resource.Configs {
+			configs[config.Key] = config
+		}
+		for name, want := range map[string]string{"cleanup.policy": "delete", "retention.bytes": "-1"} {
+			if config := configs[name]; config.MaybeValue() != want || config.Source != kmsg.ConfigSourceDynamicTopicConfig {
+				t.Fatalf("%s %s = %q from %v; want %q set on the topic", resource.Name, name, config.MaybeValue(), config.Source, want)
+			}
+		}
+	}
+}
+
 func TestPoolCreateRefusesStartByLimitPastFeedRetention(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
