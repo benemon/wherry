@@ -60,7 +60,7 @@ var (
 	reconcileInterval = time.Second
 	// purgeDeadline bounds the Purge retries of a start failure.
 	purgeDeadline = 5 * time.Minute
-	// followRetryInterval separates the Follows of a run whose plugin link is lost.
+	// followRetryInterval separates the Follows and Lookups of a run whose log stream failed.
 	followRetryInterval = time.Second
 	// collectTimeout bounds a plugin's collection of a run's outputs, during which the claim is renewed.
 	collectTimeout = 2 * time.Minute
@@ -846,9 +846,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		}
 		return run.abandon(err)
 	}
-	// retryUntil bounds following again after a failed Follow or Lookup to one lock duration from the failure, after
-	// which another member may hold the task; zero while the stream holds, and reset by every line.
-	var retryUntil time.Time
+	// A failed Follow or Lookup is retried until the run passes task_ended_by.
 	var retry <-chan time.Time
 
 	progress := time.NewTicker(renewInterval)
@@ -862,13 +860,6 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 	for _, line := range held {
 		take(line)
-	}
-	budget := func() bool {
-		if retryUntil.IsZero() {
-			state, _, _ := r.snapshot()
-			retryUntil = time.Now().Add(state.Pools[r.config.Pool].LockDuration())
-		}
-		return time.Now().Before(retryUntil)
 	}
 	// lookupRetry makes the next retry a Lookup; final marks the Follow of an ended job, whose failure ends the run.
 	lookupRetry, final := false, false
@@ -889,13 +880,11 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		job, lookupErr := run.profile.Plugin.Lookup(lookupCtx, runID)
 		cancel()
 		switch {
-		case lookupErr != nil && budget():
+		case lookupErr != nil:
 			recovering("lookup failed")
 			lookupRetry, retry = true, time.After(followRetryInterval)
 			return 0, false
-		case lookupErr != nil:
-			r.logger.Printf("run %s: lookup in profile %s: %s", runID, run.profile.Name, logText(run.redactText, lookupErr))
-		case job.State == pluginsdk.JobRunning && budget():
+		case job.State == pluginsdk.JobRunning:
 			recovering("job running")
 			lookupRetry, retry = false, time.After(followRetryInterval)
 			return 0, false
@@ -927,7 +916,6 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	for {
 		select {
 		case line := <-lines:
-			retryUntil = time.Time{}
 			take(line)
 		case <-retry:
 			retry = nil
@@ -955,10 +943,9 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				return run.expired(ctx, &handle, pending)
 			case ctx.Err() != nil:
 				return shutdown()
-			case errors.Is(end.err, pluginsdk.ErrLinkLost) && (retryUntil.IsZero() || time.Now().Before(retryUntil)):
-				if retryUntil.IsZero() {
-					state, _, _ := r.snapshot()
-					retryUntil = time.Now().Add(state.Pools[r.config.Pool].LockDuration())
+			case errors.Is(end.err, pluginsdk.ErrLinkLost):
+				if !recoveries["link lost"] {
+					recoveries["link lost"] = true
 					r.logger.Printf("run %s: plugin link lost; following again from offset %d", runID, position)
 				}
 				retry = time.After(followRetryInterval)

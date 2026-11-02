@@ -978,33 +978,6 @@ func TestFollowLinkLossResumesFromOffset(t *testing.T) {
 	}
 }
 
-func TestFollowLinkLossFailsAfterOneLockDuration(t *testing.T) {
-	f := newFixture(t, noResultStream)
-	f.plugin.linkLost = 1 << 20
-	shortLock(f, 2*time.Second)
-	f.submit(t, f.host, nil)
-	done := make(chan error, 1)
-	started := time.Now()
-	go func() { done <- f.receiver.claimOne(f.ctx, f.ctx, func() {}) }()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(15 * time.Second):
-		t.Fatalf("a run whose plugin link stays lost kept following; logs:\n%s", f.logs.String())
-	}
-	if waited := time.Since(started); waited < 2*time.Second {
-		t.Fatalf("run failed %s after the loss, before one lock duration", waited)
-	}
-	if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != "log stream failed" {
-		t.Fatalf("terminal %s %q; want FAILED log stream failed", state, reason)
-	}
-	if _, _, follows, _ := f.plugin.counts(); follows < 2 {
-		t.Fatalf("followed %d times; want retries before failing", follows)
-	}
-}
-
 func TestFollowErrorResumesFromOffsetByJobState(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -1056,40 +1029,61 @@ func TestFollowErrorOnAnEndedJobFailsOnTheSecondFailure(t *testing.T) {
 	}
 }
 
-func TestFollowErrorFailsAfterOneLockDuration(t *testing.T) {
+// A broken stream is recovered until task_ended_by, however short the pool's lock duration, and the run then ends with
+// the end bound.
+func TestFollowFailureRetriesUntilTaskEndedBy(t *testing.T) {
 	for _, test := range []struct {
 		name      string
+		lostErr   error
 		lookupErr error
 	}{
-		{"job running", nil},
-		{"lookup failed", errors.New("lookup down")},
+		{"link lost", nil, nil},
+		{"job running", errors.New("stream reset"), nil},
+		{"lookup failed", errors.New("stream reset"), errors.New("lookup down")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, noResultStream)
-			f.plugin.linkLost, f.plugin.lostErr, f.plugin.job, f.plugin.lookupErr = 1<<20, errors.New("stream reset"), pluginsdk.JobRunning, test.lookupErr
-			shortLock(f, 2*time.Second)
-			f.submit(t, f.host, nil)
+			f.plugin.linkLost, f.plugin.lostErr, f.plugin.job, f.plugin.lookupErr = 1<<20, test.lostErr, pluginsdk.JobRunning, test.lookupErr
+			shortLock(f, time.Second)
+			endBy := time.Now().Add(4 * time.Second).Unix()
+			f.submit(t, f.host, func(task *wire.Submission) {
+				task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = endBy, endBy
+			})
 			done := make(chan error, 1)
-			started := time.Now()
 			go func() { done <- f.receiver.claimOne(f.ctx, f.ctx, func() {}) }()
 			select {
 			case err := <-done:
 				if err != nil {
 					t.Fatal(err)
 				}
-			case <-time.After(15 * time.Second):
-				t.Fatalf("a run whose follow keeps failing kept recovering; logs:\n%s", f.logs.String())
+			case <-time.After(20 * time.Second):
+				t.Fatalf("a run whose stream stays broken kept recovering past task_ended_by; logs:\n%s", f.logs.String())
 			}
-			if waited := time.Since(started); waited < 2*time.Second {
-				t.Fatalf("run failed %s after the failure, before one lock duration", waited)
+			if time.Now().Before(wire.PastBound(endBy)) {
+				t.Fatalf("run ended before task_ended_by; logs:\n%s", f.logs.String())
 			}
-			if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != "log stream failed" {
-				t.Fatalf("terminal %s %q; want FAILED log stream failed", state, reason)
+			if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != wire.NotEndedBy(endBy) {
+				t.Fatalf("terminal %s %q; want FAILED %q", state, reason, wire.NotEndedBy(endBy))
 			}
-			if _, lookups, _, _ := f.plugin.counts(); lookups < 2 {
-				t.Fatalf("looked up %d times; want retries before failing", lookups)
+			if _, lookups, follows, _ := f.plugin.counts(); follows+lookups < 4 {
+				t.Fatalf("followed %d times after %d lookups; want retries until task_ended_by", follows, lookups)
 			}
 		})
+	}
+}
+
+func TestFollowErrorRetriesAFailedLookup(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.plugin.linkLost, f.plugin.lostErr, f.plugin.job, f.plugin.lookupFailures = 1, errors.New("stream reset"), pluginsdk.JobRunning, 2
+	shortLock(f, time.Millisecond)
+	if task := runToTask(t, f); task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "done" {
+		t.Fatalf("task %#v after failed lookups; want the run completed; logs:\n%s", task.Status, f.logs.String())
+	}
+	f.plugin.mu.Lock()
+	froms, lookups := f.plugin.froms, f.plugin.lookups
+	f.plugin.mu.Unlock()
+	if first := int64(len(resultStream[0]) + 1); !slices.Equal(froms, []int64{0, first}) || lookups != 3 {
+		t.Fatalf("follows from %v after %d lookups; want 0, then the offset after the line taken, after three", froms, lookups)
 	}
 }
 
