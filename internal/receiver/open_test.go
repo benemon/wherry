@@ -1516,3 +1516,24 @@ func TestRedeliveryAfterAReleaseWithNoJobIsAFirstStart(t *testing.T) {
 		t.Fatalf("dispatches %d, lookups %d; want the job looked up and then dispatched", dispatches, lookups)
 	}
 }
+
+// An answer whose commit is unconfirmed leaves the custodian's producer in its transaction; the next pass aborts it and
+// answers the request.
+func TestNextPassAnswersAfterAnUnconfirmedAnswerCommit(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.quiet()
+	keyB := f.addPeer(t, "receiver-b", testPool)
+	record := f.submit(t, f.host, nil)
+	f.statusAs(t, record, "receiver-b", keyB, "claimed", 1)
+	digest := f.openAs(t, record, "receiver-b", keyB, 1)
+	previous := commitTransaction
+	t.Cleanup(func() { commitTransaction = previous })
+	commitTransaction = func(context.Context, *kgo.Client) error { return errors.New("commit outcome unknown") }
+	if err := f.receiver.serveOpens(f.ctx); err == nil {
+		t.Fatal("the pass with an unconfirmed commit returned no error")
+	}
+	commitTransaction = previous
+	if answer := f.answered(t, digest); answer != "wrap" {
+		t.Fatalf("request answered %q on the next pass, want a wrap; logs:\n%s", answer, f.logs.String())
+	}
+}

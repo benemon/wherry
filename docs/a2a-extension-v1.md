@@ -1121,8 +1121,9 @@ never releases its content key. With no key it waits for a holder's re-key
 wrap until the earlier of the request's append time plus 5 minutes and the
 open bound, then refuses `key unavailable`. Otherwise it commits an attempt
 wrap. Each answer is one transaction through the transactional ID
-`p.<pool>.custodian`, so a fenced custodian answers nothing; a commit whose
-outcome is unknown is read back from the pool's events.
+`p.<pool>.custodian`, so a fenced custodian answers nothing; a request whose
+answer's commit has an unknown outcome is answered again on a later pass only
+when the answer is not on the pool's events.
 
 ## Attempt wrap
 
@@ -1390,6 +1391,13 @@ redelivered run whose lookup does not answer is held and asked again, with or
 without a `started` event, until `task_ended_by` passes, when it ends
 `TASK_STATE_FAILED` with `not ended by task_ended_by (<RFC 3339 time>)` and its
 job and material in place ([Open request](#open-request)).
+
+A run whose commit has an unknown outcome gives its task back
+unacknowledged. The task's next holder acknowledges it without running when
+the commit's terminal status is on the pool's events, and runs it again
+otherwise, so an ambiguous commit costs one redelivery cycle of latency. The
+job of a run whose terminal committed is not released by its holder; it is left
+to the plugin's sweep.
 
 ## Git input
 

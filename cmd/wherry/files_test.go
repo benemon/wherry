@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -341,6 +342,57 @@ func TestMCPInputsStayInTheInputRoots(t *testing.T) {
 		if _, err := read(path, math.MaxInt64); err == nil {
 			t.Errorf("read %s (%s)", name, path)
 		}
+	}
+}
+
+// A directory swapped for a link out of the root after the input's path resolves is refused at the open.
+func TestMCPInputsStayInTheRootAfterResolution(t *testing.T) {
+	work, outside := t.TempDir(), t.TempDir()
+	for _, dir := range []string{work, outside} {
+		if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "sub", "data.csv"), []byte(dir), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := inputReader(inputOpener(work, busclient.Config{}))
+	previous := resolveInput
+	t.Cleanup(func() { resolveInput = previous })
+	resolveInput = func(path string) (string, error) {
+		resolved, err := previous(path)
+		if err == nil {
+			err = errors.Join(os.Rename(filepath.Join(work, "sub"), filepath.Join(work, "moved")), os.Symlink(filepath.Join(outside, "sub"), filepath.Join(work, "sub")))
+		}
+		return resolved, err
+	}
+	if part, err := read(filepath.Join(work, "sub", "data.csv"), math.MaxInt64); err == nil {
+		t.Fatalf("read %q through a link swapped in after resolution", part.Raw)
+	}
+}
+
+// os.OpenRoot follows a link in the root's own name: a root that is a link to a directory confines inputs to that
+// directory, named through the link or the directory.
+func TestMCPInputRootMayBeALink(t *testing.T) {
+	target, links := t.TempDir(), t.TempDir()
+	root := filepath.Join(links, "root")
+	if err := os.Symlink(target, root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "data.csv"), []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(links, "beside"), []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	read := inputReader(inputOpener(t.TempDir(), busclient.Config{InputRoots: []string{root}}))
+	for _, path := range []string{filepath.Join(root, "data.csv"), filepath.Join(target, "data.csv")} {
+		if part, err := read(path, math.MaxInt64); err != nil || string(part.Raw) != "content" {
+			t.Fatalf("read %s beneath a linked root: %+v, %v", path, part, err)
+		}
+	}
+	if _, err := read(filepath.Join(root, "..", "beside"), math.MaxInt64); err == nil {
+		t.Fatal("read beside the linked root")
 	}
 }
 

@@ -1356,9 +1356,9 @@ before any profile took it, has `profile="none"` in `wherry_runs_total` and
 | `wherry_claims_total` | counter | `tenant` | claimed tasks whose submission verifies |
 | `wherry_admissions_total` | counter | `tenant`, `profile` | tasks admitted, by the profile they were routed to |
 | `wherry_rejections_total` | counter | `tenant`, `reason` | rejections, by reason |
-| `wherry_runs_total` | counter | `tenant`, `profile`, `agent`, `model`, `state` | runs ended `completed`, `failed` or `canceled` |
+| `wherry_runs_total` | counter | `tenant`, `profile`, `agent`, `model`, `state` | runs ended `completed`, `failed` or `canceled`, except a run whose terminal's commit had an unknown outcome and committed, which no receiver counts |
 | `wherry_delivery_budget_exhausted_total` | counter | `tenant`, `profile` | runs ended `failed` with `delivery budget exhausted` |
-| `wherry_run_duration_seconds` | histogram | `tenant`, `profile`, `agent`, `model`, `state` | time from this attempt's claim to the run's terminal state; an adopted run counts the adopting attempt only |
+| `wherry_run_duration_seconds` | histogram | `tenant`, `profile`, `agent`, `model`, `state` | time from this attempt's claim to the run's terminal state; an adopted run counts the adopting attempt only, and a run whose terminal's commit had an unknown outcome and committed is not observed |
 | `wherry_queue_wait_seconds` | histogram | `tenant`, `profile` | time from submission to first claim |
 | `wherry_adoptions_total` | counter | `tenant`, `profile` | runs that adopted an earlier attempt's job |
 | `wherry_redeliveries_total` | counter | `tenant`, `profile` | runs executed on a redelivery |
@@ -1379,7 +1379,7 @@ before any profile took it, has `profile="none"` in `wherry_runs_total` and
 | `wherry_denials_total` | counter | `op` | Kafka authorisation errors, by the capability denied: `read`, `write`, `transactional ID`, `share group`, `membership` |
 | `wherry_renewal_failures_total` | counter | none | failed claim renewals |
 | `wherry_transaction_aborts_total` | counter | none | transactions aborted after a failed produce |
-| `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome, read back from the pool's events or, for the key custodian, its snapshot topic |
+| `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome: a run gives its task back for redelivery, an open request is answered again only when its answer is absent, and the key custodian reads back its snapshot topic |
 | `wherry_fenced_total` | counter | none | runs given up to a newer holder |
 | `wherry_custodian_takeovers_total` | counter | `reason` | snapshots this receiver published taking over its pool's key custody: `takeover`, `contested`; both start at 0 |
 | `wherry_runs_key_lost_total` | counter | none | runs this receiver ended with the wherry event `key-lost`; starts at 0 |
