@@ -969,6 +969,9 @@ func (service *Service) onePartition(ctx context.Context, absent bool, topics ..
 		if absent && topic.ErrorCode == kerr.UnknownTopicOrPartition.Code {
 			continue
 		}
+		if err := kerr.ErrorForCode(topic.ErrorCode); err != nil {
+			return fmt.Errorf("topic %s: %w", *topic.Topic, err)
+		}
 		if partitions := len(topic.Partitions); partitions != 1 {
 			return fmt.Errorf("topic %s has %d partitions, want 1", *topic.Topic, partitions)
 		}

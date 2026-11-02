@@ -362,6 +362,38 @@ func TestPoolApplyCreateRefusesAPartitionedTopicBeforeRecording(t *testing.T) {
 	}
 }
 
+// onePartition reports a metadata error other than an absent topic as that error, never as a count of partitions
+// (agb-r11i).
+func TestOnePartitionReportsAMetadataError(t *testing.T) {
+	cluster, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	var refused atomic.Bool
+	cluster.ControlKey(kmsg.Metadata.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		cluster.KeepControl()
+		metadata := request.(*kmsg.MetadataRequest)
+		events := func(topic kmsg.MetadataRequestTopic) bool {
+			return topic.Topic != nil && *topic.Topic == PoolEventsTopic("pool-a")
+		}
+		if !slices.ContainsFunc(metadata.Topics, events) || refused.Swap(true) {
+			return nil, nil, false
+		}
+		response := metadata.ResponseKind().(*kmsg.MetadataResponse)
+		for _, requested := range metadata.Topics {
+			topic := kmsg.NewMetadataResponseTopic()
+			topic.Topic, topic.ErrorCode = requested.Topic, kerr.UnknownTopicOrPartition.Code
+			if *requested.Topic == PoolEventsTopic("pool-a") {
+				topic.ErrorCode = kerr.TopicAuthorizationFailed.Code
+			}
+			response.Topics = append(response.Topics, topic)
+		}
+		return response, nil, true
+	})
+	err := service.onePartition(context.Background(), true, PoolTasksTopic("pool-a"), PoolEventsTopic("pool-a"))
+	if err == nil || !strings.HasPrefix(err.Error(), "topic wherry.pool.pool-a.events: TOPIC_AUTHORIZATION_FAILED") {
+		t.Fatalf("onePartition = %v; want the events topic's authorisation error", err)
+	}
+}
+
 // A pool apply whose topic creation fails after it records the pool is completed by pool apply with the same terms;
 // other terms then update the pool.
 func TestPoolApplyRetryCompletesTheTopics(t *testing.T) {
