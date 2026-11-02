@@ -94,7 +94,9 @@ type fakePlugin struct {
 	// lookupBlocks makes Lookup alone wait until its context ends, as a platform call that hangs.
 	lookupBlocks bool
 	lookups      int
-	lookupErr    error
+	// lookupErr fails every Lookup, or else the first lookupFailures of them.
+	lookupErr      error
+	lookupFailures int
 	// job is the state Lookup reports; jobProfile and jobAgent override the metadata it reports.
 	job                  pluginsdk.JobState
 	jobProfile, jobAgent string
@@ -203,6 +205,9 @@ func (f *fakePlugin) Lookup(ctx context.Context, runID string) (pluginsdk.Job, e
 	}
 	if f.lookupErr != nil {
 		return pluginsdk.Job{}, f.lookupErr
+	}
+	if f.lookups <= f.lookupFailures {
+		return pluginsdk.Job{}, errors.New("lookup down")
 	}
 	if err := ctx.Err(); err != nil {
 		return pluginsdk.Job{}, err
