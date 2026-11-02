@@ -410,7 +410,8 @@ run <id> lost its pool key before it started; resubmitted as run <id>
 The result, outputs and exit code are those of the last run followed, and
 the default outputs directory is that run's. `wait` refuses a chain of
 replacements that names a run twice. When the resubmission fails, for
-example on a suspended pool or a pool with no live key custodian, `wait`
+example on a suspended pool or a pool whose current snapshot is missing or
+not authorised, `wait`
 exits with status 1 and
 `wait <id>: run <id> lost its pool key and is resubmittable until <RFC 3339 time>; resubmitting it failed: <error>`.
 
@@ -816,7 +817,7 @@ their tasks are acknowledged as on an unsuspended pool. A suspension does
 not stop a running job or take back the credentials it holds: rotating them
 at their issuers does, and
 [`wherry admin receiver revoke`](#wherry-admin-receiver-revoke-receiver)
-stops a receiver. A key custodian that steps down while the pool is
+stops a receiver. A key custodian that drains while the pool is
 suspended does not scan the task topic or re-key any task. It keeps its
 pool keys to their deadlines and logs
 `custodian: hand over to <receiver>: pool <pool> is suspended; its re-key scan waits for resume; keeping the pool keys to their deadlines`.
@@ -1067,17 +1068,12 @@ The key custodian writes every snapshot through the transactional ID
 snapshot back before it marks the key published. When assigned, a receiver
 that the current snapshot names and that holds the snapshot's key continues
 with that key; any other generates a P-256 key, stores it, and publishes it
-with reason `bootstrap` when the topic holds no snapshot, `handover` when
-the previous custodian is another receiver whose latest advertisement is
-within 120 seconds and carries `stepping_down` with the `started_ms` of that
-advertisement and a `deadline_ms` after the receiver's clock, and
-`takeover` otherwise, including when the same receiver returns without
+with reason `bootstrap` when the topic holds no snapshot and `takeover`
+otherwise: after a drain, a crash, or the same receiver returning without
 its keys. A takeover logs `custodian: took over pool <pool>
 (WherryCustodianTakeover)` and counts in `wherry_custodian_takeovers_total`
 with reason `takeover` once, when its snapshot is first read back, also on a
-later pass when the commit landed but its read-back failed. A `handover`
-snapshot's write ends at the `deadline_ms`; a write the deadline ends is
-followed on the next pass by a `takeover`. The custodian rotates the key at the
+later pass when the commit landed but its read-back failed. The custodian rotates the key at the
 append time of the snapshot first read back naming it plus 24 hours plus a
 jitter under one hour derived from the pool and key ID, publishing a
 `rotation` snapshot, at once on a [`rotate-key`](#wherry-admin-pool-rotate-key-pool-suspect-key-kid) record whose
@@ -1102,12 +1098,10 @@ again.
 On `SIGINT`, `SIGTERM` or a configuration change, a receiver ends any custody
 pass in progress at once, closes its custodian group client and removes its
 static membership from the group, which hands the partition on at once. The key custodian with a
-`drain_timeout` over `0s` while another member of the pool has an
-advertisement within 120 seconds without `stepping_down` first advertises
-`stepping_down` with `deadline_ms` at its stop plus `drain_timeout`,
-waiting at most 2.5 seconds for the write, and after the removal waits until
-that deadline for another receiver's snapshot. Every step of the drain, the
-handover's reads, its re-key transaction and the key deletion included,
+`drain_timeout` over `0s` logs `custodian: stepping down in pool <pool>;
+waiting up to <timeout> for a successor` and after the removal waits until
+its stop plus `drain_timeout` for another receiver's snapshot. Every step of the drain, the
+re-key's reads, its transaction and the key deletion included,
 ends within `drain_timeout` plus 5 seconds of the stop; a read or write that
 bound ends keeps the keys. With a successor's snapshot, it
 reads the task topic to its last stable offset and the pool's events, writes
@@ -1118,12 +1112,11 @@ error keeps the keys to their deadlines. A task appended under its key after
 that read is not re-keyed: it fails key-lost before it starts, and its host
 resubmits it before its `task_started_by`. While its pool is suspended it
 does not scan the task topic and keeps its keys. With no successor's snapshot
-by the deadline, as soon as no other member of the pool has an
-advertisement within 120 seconds without `stepping_down`, or with no such
-member when the drain began, it logs `custodian: no successor in pool <pool>; keeping the pool
+by the deadline it logs `custodian: no successor in pool <pool>; keeping the pool
 keys to their deadlines` and exits with its keys, and its restart continues
-as custodian. With `drain_timeout` at `0s` it advertises no
-`stepping_down`, logs `custodian: leaving pool <pool> with no drain timeout;
+as custodian. A custodian with no other member to succeed it, in a
+one-receiver pool, a scale to zero or a whole-pool stop, waits out
+`drain_timeout`. With `drain_timeout` at `0s` it logs `custodian: leaving pool <pool> with no drain timeout;
 keeping the pool keys to their deadlines` and exits with its keys; its
 successor publishes a `takeover`.
 
@@ -1141,10 +1134,10 @@ counts from the receiver's first custody pass. A key the receiver generated
 and has not yet read back in a committed snapshot is marked published and
 kept current when the current snapshot names it. Any other such key's
 deadline is `start_by_limit` plus 7 hours after the current snapshot's
-append time. While the snapshot topic cannot be read to a last stable
-offset at its end, after a read error or behind an open transaction, the
-receiver keeps every key. It deletes a key at its deadline, and all of its
-keys at the end of a handover that re-keyed every task they open. Every
+append time. A custody pass reads the latest committed snapshot, also while
+another writer's transaction is open on the snapshot topic; after a read
+error the receiver keeps every key. It deletes a key at its deadline, and all of its
+keys at the end of a drain that re-keyed every task they open. Every
 other key stays in its state directory.
 
 It logs its own lines to standard output with the prefix `receiver: `;

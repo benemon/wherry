@@ -187,7 +187,7 @@ reason, or withholding re-key wraps is out of scope.
 | --- | --- |
 | Kafka operators and broker storage | ciphertext only, without a pool private key |
 | another tenant or pool | nothing: the platform's ACLs, TLS and SCRAM keep them apart, and only the pool's receivers can write its snapshot |
-| a compromised receiver that is not the key custodian | the credentials of the runs it claims; it can become custodian through the custodian group as an honest receiver would, which raises [WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover) |
+| a compromised receiver that is not the key custodian | the credentials of the runs it claims; it can become custodian through the custodian group as an honest receiver would, which raises [WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover); every custodian change raises it, a planned drain's included, so a takeover that no planned stop or crash explains is the sign |
 | the key custodian, or anyone who copies its keys | every retained envelope under those keys, without claiming |
 
 Daily [rotation](concepts.md#rotation) stops a silently copied key from
@@ -204,8 +204,8 @@ no attempt needs an answer from the submitting host. Custody in the pool:
 - keeps the envelope on the chosen pool's task topic alone;
 - gives a [weaker guarantee](concepts.md#lost-pool-keys) when the
   custodian's keys are lost: never-started tasks under them fail and run
-  only when their host resubmits them before their `task_started_by`, and
-  hosts refuse to submit between a custodian going silent and its
+  only when their host resubmits them before their `task_started_by`,
+  including tasks submitted between the custodian's crash and its
   successor's snapshot;
 - keeps each run's non-secret task content, and its redaction key, on the
   host, so the host can resubmit; the host keeps no credential value in

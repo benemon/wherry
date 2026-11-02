@@ -627,7 +627,7 @@ func (f fixture) newReceiver(t *testing.T, config admin.ReceiverConfig) (*Receiv
 		plugin.mu.Unlock()
 		return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: plugin, Exited: plugin.exited}, nil
 	}
-	return &Receiver{id: config.Receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), started: time.Now(), factory: factory, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry())}, logs
+	return &Receiver{id: config.Receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), factory: factory, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry())}, logs
 }
 
 func (f fixture) produce(t *testing.T, topic, key string, value []byte) *kgo.Record {
@@ -1665,7 +1665,7 @@ func TestStopDrainsWithinTheDrainTimeout(t *testing.T) {
 		endDelay, drain time.Duration
 		complete        bool
 	}{
-		"job ends inside the timeout": {3 * time.Second, 30 * time.Second, true},
+		"job ends inside the timeout": {3 * time.Second, 6 * time.Second, true},
 		"job outlasts the timeout":    {time.Minute, 2 * time.Second, false},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1712,15 +1712,13 @@ func hangCommits(t *testing.T) *atomic.Bool {
 	return &hang
 }
 
-// TestStopEndsWithinTheShutdownDeadline stops a custodian holding a run while a live peer has it wait for a successor
-// and no commit completes: the held run's final steps and the step-down all end by the one shutdown deadline, the drain
+// TestStopEndsWithinTheShutdownDeadline stops a custodian holding a run while it waits for a successor and no commit
+// completes: the held run's final steps and the step-down all end by the one shutdown deadline, the drain
 // timeout plus stepDownMargin after the stop.
 func TestStopEndsWithinTheShutdownDeadline(t *testing.T) {
 	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, endDelay: time.Minute}})
 	f.receiver.drainTimeout = 2 * time.Second
 	hang := hangCommits(t)
-	keyB := f.addPeer(t, "receiver-b", testPool)
-	f.advertiseAs(t, "receiver-b", keyB, time.Now())
 	done, stop := holdRun(t, f)
 	awaitActing(t, f, f.receiver)
 	hang.Store(true)

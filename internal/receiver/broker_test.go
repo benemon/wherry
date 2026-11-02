@@ -139,7 +139,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 			}
 			logs := &syncBuffer{}
 			plugin := &fakePlugin{stream: noResultStream, endDelay: time.Minute}
-			r := &Receiver{id: receiverID, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), started: time.Now(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+			r := &Receiver{id: receiverID, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 				factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
 					return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
 				}}
@@ -320,7 +320,7 @@ func TestDeliveryBudgetEndsATaskTwoMembersFailedOnRealBroker(t *testing.T) {
 		_, signing, _ := ed25519.GenerateKey(rand.Reader)
 		keys[id] = signed.KeyState{Current: signing.Public().(ed25519.PublicKey)}
 		logs, plugin := &syncBuffer{}, &fakePlugin{outcome: pluginsdk.OutcomeNothingCreated}
-		return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), started: time.Now(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+		return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 			factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
 				return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
 			}}, plugin, logs
@@ -443,7 +443,7 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	_, signing, _ := ed25519.GenerateKey(rand.Reader)
 	logs := &syncBuffer{}
 	plugin := &fakePlugin{stream: resultStream}
-	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), started: time.Now(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
 		}}
@@ -539,7 +539,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 		outputs = append(outputs, pluginsdk.Output{Name: strings.Repeat(fmt.Sprintf("x%0249d/", i), 2) + "over", Size: 1})
 	}
 	fake := &fakePlugin{stream: resultStream, outputs: outputs}
-	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), started: time.Now(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: fake}, nil
 		}}
@@ -633,7 +633,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	logs := &syncBuffer{}
 	patch := []byte("From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\n")
 	fake := &fakePlugin{stream: resultStream, outputs: []pluginsdk.Output{{Name: wire.GitPatch, Size: int64(len(patch)), Data: patch}}}
-	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), started: time.Now(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: fake}, nil
 		}}

@@ -12,7 +12,6 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -44,10 +43,8 @@ const (
 	// sessionTimeout is the custodian group's session timeout, also the window in which a second fence stands a
 	// contesting custodian down.
 	sessionTimeout = 45 * time.Second
-	// advertisementLive is how recent a receiver's advertisement is while the receiver is live.
-	advertisementLive = 120 * time.Second
-	// stepDownMargin is how long a drain may take beyond the drain timeout: half of it bounds the read of live members
-	// and the stepping_down advertisement; the leave of the custodian group and a handover end within the rest.
+	// stepDownMargin is how long a drain may take beyond the drain timeout, for the leave of the custodian group and the
+	// re-key.
 	stepDownMargin = 5 * time.Second
 )
 
@@ -112,16 +109,26 @@ func (r *Receiver) keepCustody(ctx, running context.Context) {
 	}
 	// The group only assigns custody: it is never polled and commits no offsets, so the offsets it fetches on assignment
 	// never decide the current snapshot; readCurrent scans the topic for it.
+	groupCtx, cancelGroup := context.WithCancel(context.Background())
+	defer cancelGroup()
 	group, err := r.newClient(kgo.ConsumerGroup(admin.CustodianGroup(r.config.Pool)), kgo.ConsumeTopics(topic), kgo.InstanceID(r.id),
 		kgo.SessionTimeout(sessionTimeout), kgo.DisableAutoCommit(), kgo.OnPartitionsAssigned(gained), kgo.OnPartitionsRevoked(lost), kgo.OnPartitionsLost(lost),
-		kgo.WithHooks(groupDenial{r}))
+		kgo.WithHooks(groupDenial{r}), kgo.WithContext(groupCtx))
 	if err != nil {
 		r.logger.Printf("custodian group: %v", err)
 		return
 	}
+	// Closing cancels the group client's context first. A JoinGroup in flight runs on that context, and the broker answers
+	// it only once every member rejoins or the rebalance timeout passes, which a group whose members stop together never
+	// does; Close waits for it. A static member's Close sends no leave either way.
+	closeGroup := func() {
+		cancelGroup()
+		group.Close()
+		group = nil
+	}
 	defer func() {
 		if group != nil {
-			group.Close()
+			closeGroup()
 		}
 	}()
 	defer r.assign(false)
@@ -137,8 +144,7 @@ func (r *Receiver) keepCustody(ctx, running context.Context) {
 	defer ticker.Stop()
 	for {
 		if group != nil && r.revoked() {
-			group.Close()
-			group = nil
+			closeGroup()
 			r.assign(false)
 		}
 		if err := r.tend(pass, time.Now()); err != nil && pass.Err() == nil {
@@ -155,8 +161,7 @@ func (r *Receiver) keepCustody(ctx, running context.Context) {
 		// A stop steps down also when running has ended with it; a receiver halted for a denial or a plugin's exit does
 		// not.
 		if ctx.Err() != nil && group != nil && !halted(running) {
-			r.stepDown(ctx, <-stopped, group)
-			group = nil
+			r.stepDown(ctx, <-stopped, closeGroup)
 		}
 		return
 	}
@@ -171,33 +176,19 @@ func (h groupDenial) OnGroupManageError(err error) {
 	}
 }
 
-// stepDown relinquishes the custodian group at a drain stopped at stopped, closing group and removing its static
-// membership; a custodian with a drain timeout and another live member hands its keys to a successor whose snapshot
-// commits within the drain timeout and otherwise keeps them to their deadlines.
-func (r *Receiver) stepDown(ctx context.Context, stopped time.Time, group *kgo.Client) {
-	// Every step, the handover included, ends within the drain timeout and stepDownMargin of the stop, whatever ctx.
+// stepDown relinquishes the custodian group at a drain stopped at stopped, closing the group client with closeGroup and
+// removing its static membership; a custodian with a drain timeout hands its keys to a successor whose snapshot commits within the drain
+// timeout and otherwise keeps them to their deadlines.
+func (r *Receiver) stepDown(ctx context.Context, stopped time.Time, closeGroup func()) {
+	// Every step, the re-key included, ends within the drain timeout and stepDownMargin of the stop, whatever ctx.
 	deadline := stopped.Add(r.drainTimeout)
 	bounded, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline.Add(stepDownMargin))
 	defer cancel()
 	r.custody.mu.Lock()
 	acting := r.custody.producer != nil
 	r.custody.mu.Unlock()
-	waiting := false
-	if acting && r.drainTimeout > 0 {
-		adCtx, cancel := context.WithTimeout(bounded, stepDownMargin/2)
-		live, err := r.peerLive(adCtx)
-		if waiting = err == nil && live; waiting {
-			r.mu.Lock()
-			r.steppingDown = &wire.SteppingDown{AtMS: stopped.UnixMilli(), StartedMS: r.started.UnixMilli(), DeadlineMS: deadline.UnixMilli()}
-			r.mu.Unlock()
-			if err := r.advertise(adCtx); err != nil {
-				r.logger.Printf("custodian: advertise stepping down: %v", err)
-			}
-		}
-		cancel()
-	}
 	// A closed static member keeps its assignment until the session timeout; removing it hands the partition on at once.
-	group.Close()
+	closeGroup()
 	r.assign(false)
 	left, err := kadm.NewClient(r.base).LeaveGroup(bounded, kadm.LeaveGroup(admin.CustodianGroup(r.config.Pool)).InstanceIDs(r.id))
 	if err == nil {
@@ -212,36 +203,21 @@ func (r *Receiver) stepDown(ctx context.Context, stopped time.Time, group *kgo.C
 	case r.drainTimeout == 0:
 		r.logger.Printf("custodian: leaving pool %s with no drain timeout; keeping the pool keys to their deadlines", r.config.Pool)
 		return
-	case waiting:
-		r.logger.Printf("custodian: stepping down in pool %s; waiting up to %s for a successor", r.config.Pool, r.drainTimeout)
-		// A successor counts a handover only for a snapshot committed before the advertised deadline.
-		waitCtx, cancel := context.WithDeadline(bounded, deadline)
-		defer cancel()
-		for waitCtx.Err() == nil {
-			latest, err := r.readCurrent(waitCtx)
-			if err == nil && latest.snapshot != nil && latest.snapshot.Custodian != r.id {
-				if err := r.handOver(bounded, latest.snapshot.Current); err != nil {
-					r.logger.Printf("custodian: hand over to %s: %v; keeping the pool keys to their deadlines", latest.snapshot.Custodian, err)
-				}
-				return
+	}
+	r.logger.Printf("custodian: stepping down in pool %s; waiting up to %s for a successor", r.config.Pool, r.drainTimeout)
+	waitCtx, cancelWait := context.WithDeadline(bounded, deadline)
+	defer cancelWait()
+	for waitCtx.Err() == nil {
+		latest, err := r.readCurrent(waitCtx)
+		if err == nil && latest.snapshot != nil && latest.snapshot.Custodian != r.id {
+			if err := r.handOver(bounded, latest.snapshot.Current); err != nil {
+				r.logger.Printf("custodian: hand over to %s: %v; keeping the pool keys to their deadlines", latest.snapshot.Custodian, err)
 			}
-			if live, err := r.peerLive(waitCtx); err == nil && !live {
-				break
-			}
-			sleep(waitCtx, custodyInterval)
+			return
 		}
+		sleep(waitCtx, custodyInterval)
 	}
 	r.logger.Printf("custodian: no successor in pool %s; keeping the pool keys to their deadlines", r.config.Pool)
-}
-
-// peerLive reports whether another member of the pool has a live advertisement without stepping_down: a draining
-// custodian is no successor.
-func (r *Receiver) peerLive(ctx context.Context) (bool, error) {
-	state, peers, _ := r.snapshot()
-	live, err := r.reader.ReadAdvertisements(ctx, state, peers, time.Now(), advertisementLive)
-	delete(live, r.id)
-	maps.DeleteFunc(live, func(_ string, advertisement wire.Advertisement) bool { return advertisement.SteppingDown != nil })
-	return len(live) > 0, err
 }
 
 // handOver writes, in one transaction, a re-key wrap to the successor's current key for every task the receiver's keys
@@ -348,24 +324,9 @@ type current struct {
 func (c current) names(r *Receiver) bool { return c.snapshot != nil && c.snapshot.Custodian == r.id }
 
 func (r *Receiver) readCurrent(ctx context.Context) (current, error) {
-	topic := admin.CustodianTopic(r.config.Pool)
-	listing, err := r.reader.Admin()
-	if err != nil {
-		return current{}, err
-	}
-	ends, err := admin.ListOffsets(ctx, listing.ListEndOffsets, topic)
+	records, err := r.reader.ReadFrom(ctx, admin.CustodianTopic(r.config.Pool), 0)
 	if err != nil {
 		return current{}, r.deny(err, capRead)
-	}
-	records, stable, err := r.reader.ReadFromWithEnd(ctx, topic, 0)
-	if err != nil {
-		return current{}, r.deny(err, capRead)
-	}
-	// A transaction open below the end holds the last stable offset: the snapshot it may commit would be current.
-	var end int64
-	ends.Each(func(listed kadm.ListedOffset) { end = listed.Offset })
-	if stable < end {
-		return current{}, errors.New("an open transaction holds the snapshot topic's last stable offset")
 	}
 	var latest current
 	for _, record := range records {
@@ -430,22 +391,14 @@ func (r *Receiver) tend(ctx context.Context, now time.Time) error {
 		return nil
 	}
 	if !latest.names(r) || keys[latest.snapshot.Current.KeyID] == nil {
-		reason, mintCtx := "takeover", ctx
+		reason := "takeover"
 		switch {
 		case latest.record == nil:
 			reason = "bootstrap"
 		case r.custody.contested:
 			reason = "contested"
-		default:
-			// A handover snapshot commits before the outgoing custodian's deadline or not at all.
-			if deadline, ok := r.handedOver(ctx, latest, now); ok {
-				var cancel context.CancelFunc
-				reason = "handover"
-				mintCtx, cancel = context.WithDeadline(ctx, deadline)
-				defer cancel()
-			}
 		}
-		return r.mint(mintCtx, keys, reason, latest, now)
+		return r.mint(ctx, keys, reason, latest, now)
 	}
 	if becoming {
 		r.logger.Printf("custodian: continuing as custodian of pool %s with key %s", r.config.Pool, latest.snapshot.Current.KeyID)
@@ -462,27 +415,6 @@ func (r *Receiver) tend(ctx context.Context, now time.Time) error {
 		return r.mint(ctx, keys, "rotation", latest, now)
 	}
 	return nil
-}
-
-// handedOver reports that latest's custodian, another receiver, hands custody on, and the deadline of its wait for a
-// successor: its latest advertisement is live at now and carries stepping_down set by the process that wrote it, with a
-// deadline after now. The same receiver back is a later process.
-func (r *Receiver) handedOver(ctx context.Context, latest current, now time.Time) (time.Time, bool) {
-	if latest.snapshot == nil || latest.snapshot.Custodian == r.id {
-		return time.Time{}, false
-	}
-	state, peers, _ := r.snapshot()
-	live, err := r.reader.ReadAdvertisements(ctx, state, peers, now, advertisementLive)
-	if err != nil {
-		r.logger.Printf("custodian: read advertisements: %v", err)
-		return time.Time{}, false
-	}
-	advertisement, ok := live[latest.snapshot.Custodian]
-	if !ok || advertisement.SteppingDown == nil || advertisement.SteppingDown.StartedMS != advertisement.StartedMS {
-		return time.Time{}, false
-	}
-	deadline := time.UnixMilli(advertisement.SteppingDown.DeadlineMS)
-	return deadline, now.Before(deadline)
 }
 
 // contest handles the custodian producer's fence while the group still assigns this receiver the partition: the first

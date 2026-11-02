@@ -50,7 +50,6 @@ func testRecords() map[string]Record {
 		"echo":                         &Echo{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: "run-a", Placement: placement, TaskHash: testHash, MessageID: "message-a"},
 		"advertisement":                &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{{Profile: "nomad", Agent: "claude"}}, Capacity: 2, AtMS: 1},
 		"advertisement without offers": &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{}, Capacity: 2, AtMS: 1},
-		"advertisement stepping down":  &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{}, Capacity: 2, AtMS: 2, StartedMS: 1, SteppingDown: &SteppingDown{AtMS: 2, StartedMS: 1, DeadlineMS: 3}},
 		"start failure":                &StartFailure{Wherry: testBinding(), Profile: "nomad", Agent: "claude", Class: "dispatch", TaskHash: testHash},
 		"output": &Output{ArtifactUpdate: TaskArtifactUpdateEvent{TaskID: "run-a", ContextID: "run-a", Append: true, LastChunk: true, Metadata: []byte(`{"index":1}`),
 			Artifact: Artifact{ArtifactID: "sub/Report.md", Name: "sub/Report.md", Parts: []Part{{Raw: StdBytes("x"), Filename: "Report.md", MediaType: OutputMediaType}}, Extensions: []string{ExtensionURI}}},
@@ -111,6 +110,31 @@ func TestRecordsIgnoreUnknownMembers(t *testing.T) {
 				t.Errorf("%s, %s: decoded %s, %v; want decodes %v", name, edit, reencoded, err, test.decodes)
 			}
 		}
+	}
+}
+
+// An advertisement from before the drain label was removed still decodes: its started_ms and stepping_down are
+// unknown members, ignored like any other.
+func TestAdvertisementIgnoresTheRemovedDrainLabel(t *testing.T) {
+	keys, _, receiver := testKeys(t)
+	payload := `{"v":1,"receiver":"receiver-a","pool":"pool-a","offers":[],"capacity":1,"in_flight":0,"at_ms":2,"started_ms":1,` +
+		`"stepping_down":{"at_ms":2,"started_ms":1,"deadline_ms":3}}`
+	options := new(jose.SignerOptions).WithType(jose.ContentType((*Advertisement)(nil).jwsType())).WithHeader("kid", "receiver-a/"+signed.KeyID(receiver.Public().(ed25519.PublicKey)))
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: receiver}, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jws, err := signer.Sign([]byte(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := jws.CompactSerialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var advertisement Advertisement
+	if err := ParseRecord([]byte(encoded), keys, &advertisement); err != nil || advertisement.AtMS != 2 || advertisement.Capacity != 1 {
+		t.Fatalf("advertisement %+v, %v; want it decoded with the drain label ignored", advertisement, err)
 	}
 }
 
@@ -231,16 +255,6 @@ func TestRecordValidation(t *testing.T) {
 		"echo without hash": func(r map[string]Record) Record {
 			value := r["echo"].(*Echo)
 			value.TaskHash = ""
-			return value
-		},
-		"advertisement stepping down without its process": func(r map[string]Record) Record {
-			value := r["advertisement stepping down"].(*Advertisement)
-			value.SteppingDown.StartedMS = 0
-			return value
-		},
-		"advertisement stepping down without a deadline after it": func(r map[string]Record) Record {
-			value := r["advertisement stepping down"].(*Advertisement)
-			value.SteppingDown.DeadlineMS = value.SteppingDown.AtMS
 			return value
 		},
 		"advertisement with a duplicate offer profile": func(r map[string]Record) Record {

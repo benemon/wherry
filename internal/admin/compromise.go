@@ -88,11 +88,8 @@ type RotateReport struct {
 }
 
 // snapshotWait bounds an admin command's wait for the snapshot acknowledging its record, and snapshotProgress separates
-// the lines reporting it; variables so tests can shorten them. advertisementLive is how recent a live receiver's
-// advertisement is.
+// the lines reporting it; variables so tests can shorten them.
 var snapshotWait, snapshotProgress = 5 * time.Minute, 10 * time.Second
-
-const advertisementLive = 120 * time.Second
 
 // awaitSnapshot waits up to snapshotWait for a current snapshot of pool that done accepts, writing waiting and the time
 // left to progress every snapshotProgress, and fails with timeout without one.

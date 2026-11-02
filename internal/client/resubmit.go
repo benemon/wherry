@@ -181,11 +181,7 @@ func (h *Host) resubmit(ctx context.Context, runID string, lost bool) (string, e
 	if err != nil {
 		return "", err
 	}
-	ads, err := h.reader.ReadAdvertisements(ctx, v.state, v.keys, now, liveness)
-	if err != nil {
-		return "", err
-	}
-	poolKey, err := h.poolKey(ctx, v, local.Pool, ads)
+	poolKey, err := h.poolKey(ctx, v, local.Pool)
 	if err != nil {
 		return "", err
 	}

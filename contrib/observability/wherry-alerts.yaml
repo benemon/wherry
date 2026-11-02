@@ -52,8 +52,8 @@ groups:
           description: A claimant whose open request no key custodian answers within 5 minutes and 120 seconds releases the task.
           runbook_url: https://benemon.github.io/wherry/runbooks#wherryopenrequestsunanswered
 
-      # A receiver counts each takeover or contested snapshot it publishes, by reason; a bootstrap, rotation or
-      # handover counts nothing.
+      # A receiver counts each takeover or contested snapshot it publishes, by reason; a bootstrap or rotation counts
+      # nothing. A planned drain's takeover counts too: the alert is also the signal of a compromised receiver taking custody.
       - alert: WherryCustodianTakeover
         expr: |
           sum by (job, instance, pool, reason) (increase(wherry_custodian_takeovers_total[15m])) > 0
@@ -61,7 +61,7 @@ groups:
           severity: warning
         annotations:
           summary: Receiver {{ $labels.instance }} published a {{ $labels.reason }} snapshot of pool {{ $labels.pool }}
-          description: A takeover follows a key custodian lost without a handover, whose never-started tasks fail key-lost; a contested snapshot follows another writer initialising the custodian's transactional ID.
+          description: A takeover follows every custodian change, a planned drain's included, and is also how a compromised receiver taking custody shows; tasks a lost custodian did not re-key fail key-lost before they start. A contested snapshot follows another writer initialising the custodian's transactional ID.
           runbook_url: https://benemon.github.io/wherry/runbooks#wherrycustodiantakeover
 
       # A receiver counts each run it ends with the wherry event key-lost, whatever the custody change before it.

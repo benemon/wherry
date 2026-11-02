@@ -43,7 +43,7 @@ var (
 	// ErrNoSnapshot and ErrCustodianUnavailable refuse a submission whose pool has no current key to wrap its envelope
 	// to.
 	ErrNoSnapshot           = errors.New("pool has no custodian snapshot")
-	ErrCustodianUnavailable = errors.New("pool's custodian is not live or is revoked")
+	ErrCustodianUnavailable = errors.New("pool's current snapshot is not authorised")
 )
 
 // errUndecodable wraps a local state file that does not decode.
@@ -335,7 +335,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		return SubmitResult{}, err
 	}
 	// Before any credential resolves or input uploads.
-	poolKey, err := h.poolKey(ctx, v, pool, ads)
+	poolKey, err := h.poolKey(ctx, v, pool)
 	if err != nil {
 		return SubmitResult{}, err
 	}
@@ -447,9 +447,9 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 }
 
 // poolKey returns the current key of pool: that of the latest committed record under the snapshot key on the pool's
-// snapshot topic, when its writer is the custodian it names and that custodian is live in ads and unrevoked. An earlier
-// record never stands in. A suspended pool has none.
-func (h *Host) poolKey(ctx context.Context, v view, pool string, ads map[string]wire.Advertisement) (*ecdsa.PublicKey, error) {
+// snapshot topic, when its writer is the custodian it names and that custodian is unrevoked. An earlier record never
+// stands in. A suspended pool has none.
+func (h *Host) poolKey(ctx context.Context, v view, pool string) (*ecdsa.PublicKey, error) {
 	if v.state.Suspended[pool] {
 		return nil, fmt.Errorf("pool %s is suspended; submit again once it is resumed", pool)
 	}
@@ -470,9 +470,6 @@ func (h *Host) poolKey(ctx context.Context, v view, pool string, ads map[string]
 	snapshot, err := admin.AuthorizeSnapshot(v.state, v.keys, latest.Value, pool)
 	if err != nil {
 		return nil, fmt.Errorf("%w: pool %s's current snapshot: %v", ErrCustodianUnavailable, pool, err)
-	}
-	if _, live := ads[snapshot.Custodian]; !live {
-		return nil, fmt.Errorf("%w: pool %s's custodian %s is not live; submit again once a successor has published a snapshot", ErrCustodianUnavailable, pool, snapshot.Custodian)
 	}
 	if snapshot.Reason == "takeover" || snapshot.Reason == "contested" {
 		h.logger.Printf("pool %s: custodian %s holds the pool key by %s (WherryCustodianTakeover)", pool, snapshot.Custodian, snapshot.Reason)

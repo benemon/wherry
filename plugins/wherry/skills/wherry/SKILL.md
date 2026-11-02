@@ -198,12 +198,10 @@ restart the server, since a harness keeps the old process running. `UNAVAILABLE`
 server's log, and the user can also run the same operation with the `wherry`
 CLI to see it. It includes `submit`'s refusals of a pool that takes no task
 now, whose CLI error says `pool <pool> is suspended; submit again once
-it is resumed`, `pool <pool> has no custodian yet; submit again once a
-receiver of the pool has published one` or `pool <pool>'s custodian
-<receiver> is not live; submit again once a successor has published a
-snapshot`. A suspended pool waits for its operator to resume it, so tell
-the user. For a missing or silent custodian, submit again after a few
-minutes. A resubmission refused the same way fails `wait`. `OUTPUTS_NOT_WRITTEN` means
+it is resumed` or `pool <pool> has no custodian yet; submit again once a
+receiver of the pool has published one`. A suspended pool waits for its
+operator to resume it, so tell the user. For a missing custodian, submit
+again after a few minutes. A resubmission refused the same way fails `wait`. `OUTPUTS_NOT_WRITTEN` means
 the result arrived but its outputs could not be written, downloaded or cleaned
 up; the message starts with the step that failed,
 and the MCP server's log holds the cause.

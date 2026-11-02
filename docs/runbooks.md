@@ -192,17 +192,25 @@ Then:
 ## WherryCustodianTakeover
 
 The custodian group assigns a pool's key custody to one receiver. A
-receiver that becomes custodian without the previous custodian's handover
-publishes a `takeover` snapshot with a new pool key; the previous
-custodian's tasks that never started then fail key-lost unless a receiver
-holding the previous key re-keys them, and their hosts resubmit them before
-their `task_started_by`. A custodian whose producer is fenced while the
+receiver that becomes custodian after another, whether the previous
+custodian drained in a planned stop, crashed or lost its state directory,
+publishes a `takeover` snapshot with a new pool key. A draining custodian
+re-keys its tasks to the new key; otherwise the previous custodian's tasks
+that never started fail key-lost unless a receiver holding the previous key
+re-keys them, and their hosts resubmit them before their
+`task_started_by`. A custodian whose producer is fenced while the
 group still assigns it the partition re-initialises its transactional ID
 and republishes its snapshot as `contested`; a second fence within the
 45-second session timeout stands it down until it is assigned again. The
 alert fires on any increase of `wherry_custodian_takeovers_total` within 15
-minutes, by `reason`, `takeover` or `contested`. A `bootstrap`, `rotation` or
-`handover` snapshot counts nothing.
+minutes, by `reason`, `takeover` or `contested`. A `bootstrap` or `rotation`
+snapshot counts nothing.
+
+Every custodian change raises it, a planned drain's included, so expect it
+at each planned stop of a custodian. It is not suppressed for drains because
+it is also the signal of a compromised receiver taking custody through the
+custodian group ([What the pool key protects](security.md#what-the-pool-key-protects)):
+a takeover no planned stop or crash explains is that.
 
 Confirm it:
 
@@ -221,11 +229,17 @@ Confirm it:
 
 Then:
 
+- For a takeover after a planned stop whose previous custodian logged
+  `custodian: re-keyed <n> tasks to pool key <id> and deleted <n> pool keys`,
+  nothing more is needed.
 - For a takeover after a crash or a lost state directory, nothing more is
   needed; the hosts of the lost tasks resubmit them when they next run.
-- For a takeover after a planned stop, raise `drain_timeout`, so that the
-  stopping custodian waits for a successor's snapshot and hands over, as in
+- For a takeover after a planned stop with no re-key, raise `drain_timeout`, so that the
+  stopping custodian waits for a successor's snapshot and re-keys its tasks, as in
   [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian).
+- For a takeover with no planned stop, crash or lost state directory before
+  it, treat the new custodian as suspect and revoke it with
+  `wherry admin receiver revoke`.
 - For a contested snapshot with no custodian change, find the writer that
   initialised `p.<pool>.custodian`: every member of the pool holds that
   transactional ID. Revoke a suspect receiver with
@@ -236,9 +250,9 @@ Then:
 A run whose envelope no holder of a pool key can open cannot start. A
 receiver ends such a run that never started `TASK_STATE_FAILED` with the
 wherry event `key-lost`, and counts it in `wherry_runs_key_lost_total`,
-whatever custody change came before: a takeover, a handover whose
-stepping-down custodian exited before re-keying, or a task appended under an
-old key after a drain's scan. Its host resubmits it before its
+whatever custody change came before: a takeover whose previous custodian
+did not re-key its tasks, a drain whose custodian exited before re-keying,
+or a task appended under an old key after a drain's scan. Its host resubmits it before its
 `task_started_by` ([Lost pool keys](concepts.md#lost-pool-keys)). A run
 whose job had started ends with the same message without `key-lost`, and
 counts nothing. The alert fires on any increase within 15 minutes.
@@ -249,7 +263,7 @@ Confirm it:
    `cannot be opened: the pool's custodian changed and its key was lost`.
 2. Read the receivers' logs for the custody change before it: a
    `custodian: took over pool <pool> (WherryCustodianTakeover)` line, or a
-   stepping-down custodian's
+   draining custodian's
    `custodian: hand over to <receiver>: <error>; keeping the pool keys to their deadlines`
    or `custodian: no successor in pool <pool>; keeping the pool keys to their deadlines`.
 
