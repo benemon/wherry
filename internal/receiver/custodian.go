@@ -109,16 +109,26 @@ func (r *Receiver) keepCustody(ctx, running context.Context) {
 	}
 	// The group only assigns custody: it is never polled and commits no offsets, so the offsets it fetches on assignment
 	// never decide the current snapshot; readCurrent scans the topic for it.
+	groupCtx, cancelGroup := context.WithCancel(context.Background())
+	defer cancelGroup()
 	group, err := r.newClient(kgo.ConsumerGroup(admin.CustodianGroup(r.config.Pool)), kgo.ConsumeTopics(topic), kgo.InstanceID(r.id),
 		kgo.SessionTimeout(sessionTimeout), kgo.DisableAutoCommit(), kgo.OnPartitionsAssigned(gained), kgo.OnPartitionsRevoked(lost), kgo.OnPartitionsLost(lost),
-		kgo.WithHooks(groupDenial{r}))
+		kgo.WithHooks(groupDenial{r}), kgo.WithContext(groupCtx))
 	if err != nil {
 		r.logger.Printf("custodian group: %v", err)
 		return
 	}
+	// Closing cancels the group client's context first. A JoinGroup in flight runs on that context, and the broker answers
+	// it only once every member rejoins or the rebalance timeout passes, which a group whose members stop together never
+	// does; Close waits for it. A static member's Close sends no leave either way.
+	closeGroup := func() {
+		cancelGroup()
+		group.Close()
+		group = nil
+	}
 	defer func() {
 		if group != nil {
-			group.Close()
+			closeGroup()
 		}
 	}()
 	defer r.assign(false)
@@ -134,8 +144,7 @@ func (r *Receiver) keepCustody(ctx, running context.Context) {
 	defer ticker.Stop()
 	for {
 		if group != nil && r.revoked() {
-			group.Close()
-			group = nil
+			closeGroup()
 			r.assign(false)
 		}
 		if err := r.tend(pass, time.Now()); err != nil && pass.Err() == nil {
@@ -152,8 +161,7 @@ func (r *Receiver) keepCustody(ctx, running context.Context) {
 		// A stop steps down also when running has ended with it; a receiver halted for a denial or a plugin's exit does
 		// not.
 		if ctx.Err() != nil && group != nil && !halted(running) {
-			r.stepDown(ctx, <-stopped, group)
-			group = nil
+			r.stepDown(ctx, <-stopped, closeGroup)
 		}
 		return
 	}
@@ -168,10 +176,10 @@ func (h groupDenial) OnGroupManageError(err error) {
 	}
 }
 
-// stepDown relinquishes the custodian group at a drain stopped at stopped, closing group and removing its static
-// membership; a custodian with a drain timeout hands its keys to a successor whose snapshot commits within the drain
+// stepDown relinquishes the custodian group at a drain stopped at stopped, closing the group client with closeGroup and
+// removing its static membership; a custodian with a drain timeout hands its keys to a successor whose snapshot commits within the drain
 // timeout and otherwise keeps them to their deadlines.
-func (r *Receiver) stepDown(ctx context.Context, stopped time.Time, group *kgo.Client) {
+func (r *Receiver) stepDown(ctx context.Context, stopped time.Time, closeGroup func()) {
 	// Every step, the re-key included, ends within the drain timeout and stepDownMargin of the stop, whatever ctx.
 	deadline := stopped.Add(r.drainTimeout)
 	bounded, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline.Add(stepDownMargin))
@@ -180,7 +188,7 @@ func (r *Receiver) stepDown(ctx context.Context, stopped time.Time, group *kgo.C
 	acting := r.custody.producer != nil
 	r.custody.mu.Unlock()
 	// A closed static member keeps its assignment until the session timeout; removing it hands the partition on at once.
-	group.Close()
+	closeGroup()
 	r.assign(false)
 	left, err := kadm.NewClient(r.base).LeaveGroup(bounded, kadm.LeaveGroup(admin.CustodianGroup(r.config.Pool)).InstanceIDs(r.id))
 	if err == nil {
