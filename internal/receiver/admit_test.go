@@ -1117,6 +1117,14 @@ func TestNonCanonicalRunNonceIsRejected(t *testing.T) {
 	}
 }
 
+// A mismatch is rejected before the scan of its run's submissions, so an unreadable scan does not release it.
+func TestRunIDMismatchIsRejectedWhenTheScanIsUnreadable(t *testing.T) {
+	f := newFixture(t, resultStream)
+	record := f.submit(t, f.tenantB(t), asTenantB)
+	f.failReadOnce(t, admin.PoolTasksTopic(testPool))
+	f.rejected(t, record, errMismatch)
+}
+
 // A mismatching task's redelivery is acknowledged without a second rejection.
 func TestRunIDMismatchIsRejectedOnce(t *testing.T) {
 	f := newFixture(t, resultStream)
@@ -1155,13 +1163,13 @@ func TestRunIDRejectionIsTheSameForEveryMember(t *testing.T) {
 	}
 }
 
-// failEventsReadOnce fails the next ListOffsets that names the pool's events, the first read of an admission.
-func (f fixture) failEventsReadOnce(t *testing.T) {
+// failReadOnce fails the next ListOffsets that names topic.
+func (f fixture) failReadOnce(t *testing.T, topic string) {
 	t.Helper()
 	failed := false
 	f.cluster.ControlKey(kmsg.ListOffsets.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
 		req := request.(*kmsg.ListOffsetsRequest)
-		if failed || !slices.ContainsFunc(req.Topics, func(topic kmsg.ListOffsetsRequestTopic) bool { return topic.Topic == admin.PoolEventsTopic(testPool) }) {
+		if failed || !slices.ContainsFunc(req.Topics, func(listed kmsg.ListOffsetsRequestTopic) bool { return listed.Topic == topic }) {
 			f.cluster.KeepControl()
 			return nil, nil, false
 		}
@@ -1203,7 +1211,7 @@ func TestUnreadableEventsReleaseACompletedRunWithoutASecondTerminal(t *testing.T
 	if status := f.execute(t, record, 1); status != kgo.AckAccept {
 		t.Fatalf("first delivery status %v, want accept", status)
 	}
-	f.failEventsReadOnce(t)
+	f.failReadOnce(t, admin.PoolEventsTopic(testPool))
 	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckRelease {
 		t.Fatalf("redelivery admitted=%v ack=%v, want release", admitted != nil, ack)
 	}
