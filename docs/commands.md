@@ -410,7 +410,8 @@ run <id> lost its pool key before it started; resubmitted as run <id>
 The result, outputs and exit code are those of the last run followed, and
 the default outputs directory is that run's. `wait` refuses a chain of
 replacements that names a run twice. When the resubmission fails, for
-example on a suspended pool or a pool with no live key custodian, `wait`
+example on a suspended pool or a pool whose current snapshot is missing or
+not authorised, `wait`
 exits with status 1 and
 `wait <id>: run <id> lost its pool key and is resubmittable until <RFC 3339 time>; resubmitting it failed: <error>`.
 

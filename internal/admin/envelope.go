@@ -11,8 +11,8 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 )
 
-// AuthorizeSnapshot accepts a snapshot of pool written by the custodian it names, a live member of the pool. Whether
-// the custodian is live by its advertisement is the caller's check.
+// AuthorizeSnapshot accepts a snapshot of pool written by the custodian it names, a live member of the pool. No caller
+// reads the custodian's advertisement as liveness: custody follows the custodian group's session.
 func AuthorizeSnapshot(state State, keys signed.Keys, encoded []byte, pool string) (wire.Snapshot, error) {
 	snapshot, err := wire.ParseSnapshot(encoded, keys)
 	if err != nil {
