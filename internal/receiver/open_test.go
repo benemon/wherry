@@ -117,7 +117,7 @@ func TestOpenRequestAsksForTheAttemptsKey(t *testing.T) {
 		t.Fatalf("open requests %d, want 1", len(requests))
 	}
 	request := requests[0]
-	if _, err := request.Key.Public(); err != nil || request.Run != "run-a" || request.Attempt != 1 || request.Receiver != testReceiver || request.TaskHash != wire.TaskHash(record.Value) {
+	if _, err := request.Key.Public(); err != nil || request.Run != testRun("run-a") || request.Attempt != 1 || request.Receiver != testReceiver || request.TaskHash != wire.TaskHash(record.Value) {
 		t.Fatalf("open request %#v", request)
 	}
 	if dispatches, credential, _ := f.dispatched(t); dispatches != 1 || string(credential) != testToken {
@@ -126,7 +126,7 @@ func TestOpenRequestAsksForTheAttemptsKey(t *testing.T) {
 	// The request is its own transaction on the run's key, after the claimed status.
 	events := f.records(t, admin.PoolEventsTopic(testPool))
 	claimed := slices.IndexFunc(events, func(record *kgo.Record) bool { return recordType(record.Value) == wire.StatusType })
-	if string(events[claimed+1].Key) != "run-a" || recordType(events[claimed+1].Value) != wire.OpenRequestType || oneTransaction(events[claimed:claimed+2]) {
+	if string(events[claimed+1].Key) != testRun("run-a") || recordType(events[claimed+1].Value) != wire.OpenRequestType || oneTransaction(events[claimed:claimed+2]) {
 		t.Fatal("the open request is not a transaction of its own after the claimed status")
 	}
 	for _, topic := range []string{admin.TenantTopic(testTenant), admin.HostTopic(testTenant, testHost)} {
@@ -229,7 +229,7 @@ func TestCancelDuringTheOpenWaitEndsTheTurn(t *testing.T) {
 	f.quiet()
 	done := f.executing(t, f.ctx, f.submit(t, f.host, nil), 1)
 	f.request(t, 1)
-	f.publishCancel(t, "run-a", 1, f.host, nil)
+	f.publishCancel(t, testRun("run-a"), 1, f.host, nil)
 	if status := <-done; status != kgo.AckAccept || f.lastTask(t).Status.State != wire.TaskStateCanceled {
 		t.Fatalf("ended %v with %s, want CANCELED", status, f.lastTask(t).Status.State)
 	}
@@ -249,11 +249,11 @@ func TestTamperedWrapIsIgnoredAndNeverLogged(t *testing.T) {
 	other := make([]byte, 32)
 	jwe := must(t)(signed.WrapContentKey(other, public))
 	wrap := &wire.AttemptWrap{Custodian: testReceiver, TaskHash: request.TaskHash, Request: wire.Digest(f.requestRecord(t, 1).Value), Receiver: testReceiver, Attempt: 1, JWE: string(jwe)}
-	f.produce(t, admin.PoolEventsTopic(testPool), "run-a", must(t)(wire.SignRecord(wrap, f.receiver.signing)))
+	f.produce(t, admin.PoolEventsTopic(testPool), testRun("run-a"), must(t)(wire.SignRecord(wrap, f.receiver.signing)))
 	if status := <-done; status != kgo.AckRelease {
 		t.Fatalf("a wrap of another key: ended %v, want the task released", status)
 	}
-	if logs := f.logs.String(); strings.Contains(logs, testToken) || !strings.Contains(logs, "run run-a: ignored an attempt wrap whose key does not open the envelope") {
+	if logs := f.logs.String(); strings.Contains(logs, testToken) || !strings.Contains(logs, "run "+testRun("run-a")+": ignored an attempt wrap whose key does not open the envelope") {
 		t.Fatalf("unexpected logs:\n%s", logs)
 	}
 	scraped(t, f.receiver, `wherry_ignored_wraps_total{pool="`+testPool+`"} 1`)
@@ -320,7 +320,7 @@ func TestCancelSeenWithTheWrapEndsTheTurn(t *testing.T) {
 	done := f.executing(t, f.ctx, record, 1)
 	request := f.request(t, 1)
 	// The receiver is inside a 10-second poll; the cancel is held before the wrap ends it.
-	f.publishCancel(t, "run-a", 1, f.host, nil)
+	f.publishCancel(t, testRun("run-a"), 1, f.host, nil)
 	f.wrapFor(t, record, request, wire.Digest(f.requestRecord(t, 1).Value), testReceiver, f.receiver.signing)
 	if status := <-done; status != kgo.AckAccept || f.lastTask(t).Status.State != wire.TaskStateCanceled {
 		t.Fatalf("ended %v with %s, want CANCELED", status, f.lastTask(t).Status.State)
@@ -337,7 +337,7 @@ func TestShortCredentialIsLoggedNotRedacted(t *testing.T) {
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept || f.lastTask(t).Status.State != wire.TaskStateCompleted {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
-	if !strings.Contains(f.logs.String(), "run run-a: credential "+credentialName+" too short to redact") {
+	if !strings.Contains(f.logs.String(), "run "+testRun("run-a")+": credential "+credentialName+" too short to redact") {
 		t.Fatalf("logs:\n%s", f.logs.String())
 	}
 	if first := f.chunks(t)[0].ArtifactUpdate.Artifact.Parts[0].Text; !strings.Contains(first, "checked: false") {
@@ -829,9 +829,9 @@ func TestClaimCheckRefusesARequestNotFromItsLiveClaimant(t *testing.T) {
 		record := f.submit(t, f.host, nil)
 		f.statusAs(t, record, "receiver-b", keyB, "claimed", 1)
 		attemptKey, _ := newAttemptKey()
-		forged := must(t)(signed.Sign(wire.OpenRequestType, "receiver-c", &wire.OpenRequest{V: 1, Run: "run-a", Attempt: 1, Receiver: "receiver-b",
+		forged := must(t)(signed.Sign(wire.OpenRequestType, "receiver-c", &wire.OpenRequest{V: 1, Run: testRun("run-a"), Attempt: 1, Receiver: "receiver-b",
 			TaskHash: wire.TaskHash(record.Value), Key: wire.NewAttemptKey(&attemptKey.PublicKey)}, keyC))
-		f.produce(t, admin.PoolEventsTopic(testPool), "run-a", forged)
+		f.produce(t, admin.PoolEventsTopic(testPool), testRun("run-a"), forged)
 		if answer := f.answered(t, wire.Digest(forged)); answer != wire.RefusedNotClaimant {
 			t.Fatalf("answer %q, want %q", answer, wire.RefusedNotClaimant)
 		}
@@ -900,7 +900,7 @@ func TestClaimDecisionOutlivesItsCustodian(t *testing.T) {
 	claim := f.statusAs(t, record, "receiver-c", keyC, "claimed", 2)
 	claimed := time.Now()
 	decision := &wire.ClaimDecision{Custodian: "receiver-d", Claim: wire.Digest(claim), Previous: "receiver-b", Reason: wire.ClaimLease, Advertisement: &wire.AdvertisedRef{AtMS: lapsed.UnixMilli()}, Served: true}
-	f.produce(t, admin.PoolEventsTopic(testPool), "run-a", must(t)(wire.SignRecord(decision, keyD)))
+	f.produce(t, admin.PoolEventsTopic(testPool), testRun("run-a"), must(t)(wire.SignRecord(decision, keyD)))
 	f.revoke(t, "receiver-d")
 	// The advertisement the decision used is gone: receiver-b now advertised within the lease of the claim.
 	f.advertiseAs(t, "receiver-b", keyB, claimed.Add(-time.Second))
@@ -925,7 +925,7 @@ func TestClaimDecisionOutlivesItsCustodianAcrossARestart(t *testing.T) {
 	f.advertiseAs(t, "receiver-b", keyB, live)
 	claim := f.statusAs(t, record, "receiver-c", keyC, "claimed", 2)
 	decision := must(t)(wire.SignRecord(&wire.ClaimDecision{Custodian: "receiver-d", Claim: wire.Digest(claim), Previous: "receiver-b", Reason: wire.ClaimLive, Advertisement: &wire.AdvertisedRef{AtMS: live.UnixMilli()}}, keyD))
-	f.produce(t, admin.PoolEventsTopic(testPool), "run-a", decision)
+	f.produce(t, admin.PoolEventsTopic(testPool), testRun("run-a"), decision)
 	f.revoke(t, "receiver-d")
 	// The advertisement the decision used is gone: receiver-b's latest advertisement before the claim lapsed.
 	f.advertiseAs(t, "receiver-b", keyB, live.Add(-claimantLease-time.Minute))
@@ -966,9 +966,9 @@ func TestClaimCheckBoundComesFromTheEvents(t *testing.T) {
 	f.quiet()
 	keyB := f.addPeer(t, "receiver-b", testPool)
 	startBy := time.Now().Add(time.Second).Unix()
-	bounded := func(run string) func(*wire.Submission) {
+	bounded := func(name string) func(*wire.Submission) {
 		return func(task *wire.Submission) {
-			task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run
+			named(task, name)
 			task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = startBy, startBy+60
 		}
 	}
@@ -991,7 +991,7 @@ func TestClaimCheckBoundComesFromTheEvents(t *testing.T) {
 // its host does not resubmit it.
 func TestInvalidEnvelopeIsRefusedBeforeAnyWrap(t *testing.T) {
 	for name, edit := range map[string]func(*signed.EnvelopeValues){
-		"run":             func(values *signed.EnvelopeValues) { values.Binding.Run = "run-other" },
+		"run":             func(values *signed.EnvelopeValues) { values.Binding.Run = testRun("run-other") },
 		"tenant":          func(values *signed.EnvelopeValues) { values.Binding.Tenant = "tenant-b" },
 		"pool":            func(values *signed.EnvelopeValues) { values.Binding.Pool = "pool-b" },
 		"task_started_by": func(values *signed.EnvelopeValues) { values.Binding.TaskStartedBy++ },
@@ -1240,13 +1240,13 @@ func TestAnAdopterRefusedOnceRequestsAgain(t *testing.T) {
 	a := f.peer(t, "receiver-x")
 	keyA := holding(t, a)
 	record = f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-b", "run-b", "run-b"
+		named(task, "run-b")
 		sealedTo(t, keyA)(task)
 	})
 	f.quiet()
 	done := f.executing(t, f.ctx, record, 2)
 	refusal := &wire.OpenRefusal{Custodian: testReceiver, Request: wire.Digest(f.requestRecord(t, 1).Value), Reason: wire.RefusedKeyUnavailable}
-	f.produce(t, admin.PoolEventsTopic(testPool), "run-b", must(t)(wire.SignRecord(refusal, f.receiver.signing)))
+	f.produce(t, admin.PoolEventsTopic(testPool), testRun("run-b"), must(t)(wire.SignRecord(refusal, f.receiver.signing)))
 	f.requestRecord(t, 2)
 	if err := a.serveOpens(f.ctx); err != nil {
 		t.Fatal(err)
@@ -1299,7 +1299,7 @@ func TestEachRefusalTakesItsTableAction(t *testing.T) {
 			f.quiet()
 			done := f.executing(t, f.ctx, f.submit(t, f.host, nil), 1)
 			refusal := &wire.OpenRefusal{Custodian: testReceiver, Request: wire.Digest(f.requestRecord(t, 1).Value), Reason: test.reason}
-			f.produce(t, admin.PoolEventsTopic(testPool), "run-a", must(t)(wire.SignRecord(refusal, f.receiver.signing)))
+			f.produce(t, admin.PoolEventsTopic(testPool), testRun("run-a"), must(t)(wire.SignRecord(refusal, f.receiver.signing)))
 			if status := <-done; status != test.ack {
 				t.Fatalf("status %v, want %v; logs:\n%s", status, test.ack, f.logs.String())
 			}
@@ -1346,7 +1346,7 @@ func TestAFailedReleasedCommitLeavesTheTaskUnacknowledged(t *testing.T) {
 	commits := 0
 	f.cluster.ControlKey(kmsg.EndTxn.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
 		req := request.(*kmsg.EndTxnRequest)
-		if req.TransactionalID != admin.TransactionalPrefix(testPool)+"run-a" || !req.Commit {
+		if req.TransactionalID != admin.TransactionalPrefix(testPool)+testRun("run-a") || !req.Commit {
 			f.cluster.KeepControl()
 			return nil, nil, false
 		}
@@ -1374,7 +1374,7 @@ func TestAdmissionActsOnTheEarliestAcceptedRecord(t *testing.T) {
 	_, other, _ := ed25519.GenerateKey(nil)
 	f.submit(t, other, nil)
 	record := f.submit(t, f.host, nil)
-	copied := f.produce(t, admin.PoolTasksTopic(testPool), "run-a", record.Value)
+	copied := f.produce(t, admin.PoolTasksTopic(testPool), testRun("run-a"), record.Value)
 	records := f.records(t, admin.PoolTasksTopic(testPool))
 	record.Offset, copied.Offset = records[1].Offset, records[2].Offset
 	if admitted, ack := f.receiver.admit(f.ctx, copied); admitted != nil || ack != kgo.AckAccept || len(f.eventStatuses(t)) != 0 {
@@ -1383,6 +1383,38 @@ func TestAdmissionActsOnTheEarliestAcceptedRecord(t *testing.T) {
 	if status := f.execute(t, record, 1); status != kgo.AckAccept {
 		t.Fatalf("the valid task ended %v; logs:\n%s", status, f.logs.String())
 	}
+}
+
+// Records under a run's key whose run ID their signer does not derive, from another tenant and from another host of the
+// run's tenant, never take the run: the task after them is admitted, opened by the custodian and re-keyed on drain.
+func TestMismatchingEarlierRecordsNeverWin(t *testing.T) {
+	submitted := func(t *testing.T) (fixture, *kgo.Record) {
+		f := newFixture(t, resultStream)
+		f.submit(t, f.tenantB(t), asTenantB)
+		f.submit(t, f.hostOf(t, testTenant, "host-b"), func(task *wire.Submission) { task.Wherry.Host = "host-b" })
+		record := f.submit(t, f.host, nil)
+		record.Offset = f.records(t, admin.PoolTasksTopic(testPool))[2].Offset
+		return f, record
+	}
+	t.Run("opened", func(t *testing.T) {
+		f, record := submitted(t)
+		if status := f.execute(t, record, 1); status != kgo.AckAccept {
+			t.Fatalf("the task ended %v; logs:\n%s", status, f.logs.String())
+		}
+	})
+	t.Run("re-keyed", func(t *testing.T) {
+		f, record := submitted(t)
+		successor, err := newAttemptKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.receiver.handOver(f.ctx, wire.PoolKey{KeyID: signed.KeyThumbprint(&successor.PublicKey), Key: jose.JSONWebKey{Key: &successor.PublicKey}}); err != nil {
+			t.Fatal(err)
+		}
+		if wraps := f.rekeys(t)[string(record.Key)]; len(wraps) != 1 || wraps[0].TaskHash != wire.TaskHash(record.Value) {
+			t.Fatalf("re-key wraps %+v, want one for the task", wraps)
+		}
+	})
 }
 
 // A run's earlier record that fails a structure or bound check at its append time never wins the run: the valid record
@@ -1414,7 +1446,7 @@ func TestAnInvalidEarlierRecordNeverWins(t *testing.T) {
 				edit(invalid)
 				f.seal(t, invalid)
 			}
-			f.produce(t, admin.PoolTasksTopic(testPool), "run-a", must(t)(wire.SignRecord(invalid, f.host)))
+			f.produce(t, admin.PoolTasksTopic(testPool), testRun("run-a"), must(t)(wire.SignRecord(invalid, f.host)))
 			record := f.submit(t, f.host, nil)
 			record.Offset = f.records(t, admin.PoolTasksTopic(testPool))[1].Offset
 			if status := f.execute(t, record, 1); status != kgo.AckAccept {

@@ -172,7 +172,8 @@ func (h *Host) resubmit(ctx context.Context, runID string, lost bool) (string, e
 			}
 		}
 		replacing(runID)
-		local.Replacement = wire.RandomID("run-")
+		local.ReplacementNonce = wire.RunNonce()
+		local.Replacement = wire.RunID(h.tenant, h.host, local.ReplacementNonce)
 		if err := h.writeRun(*local); err != nil {
 			return "", err
 		}
@@ -188,7 +189,8 @@ func (h *Host) resubmit(ctx context.Context, runID string, lost bool) (string, e
 	terms := v.state.Pools[local.Pool]
 	submission := *local.Task
 	submission.Message.TaskID, submission.Message.ContextID, submission.Message.MessageID = local.Replacement, local.Replacement, wire.RandomID("msg-")
-	submission.Wherry.Run, submission.Wherry.Replaces, submission.Wherry.S3InputRun = local.Replacement, runID, local.Task.Wherry.InputRun()
+	submission.Wherry.Run, submission.Wherry.RunNonce = local.Replacement, local.ReplacementNonce
+	submission.Wherry.Replaces, submission.Wherry.S3InputRun = runID, local.Task.Wherry.InputRun()
 	var store *minio.Client
 	if len(submission.Wherry.S3Inputs)+len(s3OutputNames(submission.Wherry.Outputs)) > 0 {
 		if store, err = h.bucket(ctx, local.Pool, terms.Storage); err != nil {

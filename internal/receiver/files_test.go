@@ -51,7 +51,7 @@ func (f fixture) submitPayload(t *testing.T, edit func(map[string]any)) *kgo.Rec
 	}
 	edit(named)
 	value := must(t)(signed.Sign("application/vnd.wherry.submission.v1+jws", signed.HostOwner(testTenant, testHost), named, f.host))
-	return f.produce(t, admin.PoolTasksTopic(testPool), "run-a", value)
+	return f.produce(t, admin.PoolTasksTopic(testPool), testRun("run-a"), value)
 }
 
 func (f fixture) lastRun() pluginsdk.Run {
@@ -797,7 +797,7 @@ func TestOutputsOfAJobThatWouldNotStopAreNotCollected(t *testing.T) {
 	f.plugin.outputs = []pluginsdk.Output{file("report.md", "r")}
 	run := testActiveRun(t, f, "run-unstopped", int64(testTerms().DeliveryLimit)-1)
 	run.expected = []wire.ExpectedOutput{{Name: "report.md"}, {Name: "notes.md"}}
-	if status := run.conclude(f.ctx, f.plugin.handle("run-unstopped"), nil, pluginsdk.Terminal{Started: true}); status != kgo.AckAccept {
+	if status := run.conclude(f.ctx, f.plugin.handle(testRun("run-unstopped")), nil, pluginsdk.Terminal{Started: true}); status != kgo.AckAccept {
 		t.Fatalf("status %v, want the run completed", status)
 	}
 	if task := f.lastTask(t); task.Status.State != wire.TaskStateCompleted || task.Status.Message.Parts[0].Text != "done" {

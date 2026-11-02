@@ -122,7 +122,7 @@ func TestCancelOfHeldRunAfterSelfRotation(t *testing.T) {
 	record := f.submit(t, f.host, nil)
 	f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
 	rotateSelf(t, &f)
-	f.publishCancel(t, "run-a", 1, f.host, nil)
+	f.publishCancel(t, testRun("run-a"), 1, f.host, nil)
 	admitted, _ := f.receiver.admit(f.ctx, record)
 	if admitted == nil || !admitted.cancelled {
 		t.Errorf("the redelivered run does not carry its cancel")
@@ -136,20 +136,20 @@ func TestCancelOfHeldRunAfterSelfRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.receiver.mu.Lock()
-	held := f.receiver.cancelled[runKey{testTenant, "run-a"}]
+	held := f.receiver.cancelled[runKey{testTenant, testRun("run-a")}]
 	f.receiver.mu.Unlock()
 	if !held {
 		t.Errorf("a held run's cancel is not seen")
 	}
 }
 
-// A held run ID stays bound to its tenant after the holder rotates, when the owner's submission is unreadable.
+// A held run ID stays bound to its signer after the holder rotates, when the owner's submission is unreadable.
 func TestRunIDOfAnotherTenantAfterHolderRotation(t *testing.T) {
 	for _, rotate := range []bool{false, true} {
 		t.Run(map[bool]string{false: "control", true: "rotated"}[rotate], func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			keyB := f.tenantB(t)
-			producer, err := f.receiver.newProducer("run-x")
+			producer, err := f.receiver.newProducer(testRun("run-x"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -164,12 +164,9 @@ func TestRunIDOfAnotherTenantAfterHolderRotation(t *testing.T) {
 			}
 			record := f.submit(t, keyB, func(task *wire.Submission) {
 				asTenantB(task)
-				task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-x", "run-x", "run-x"
+				named(task, "run-x")
 			})
-			admitted, _ := f.receiver.admit(f.ctx, record)
-			if admitted != nil {
-				t.Errorf("tenant-b was admitted under tenant-a's held run ID")
-			}
+			f.rejected(t, record, errMismatch)
 		})
 	}
 }
@@ -188,7 +185,7 @@ func TestRetiredKeyAfterRotationRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	admitted, ack := f.receiver.admit(f.ctx, record)
-	if len(events.statuses["run-a"]) != 0 || admitted != nil || ack != kgo.AckReject {
+	if len(events.statuses[testRun("run-a")]) != 0 || admitted != nil || ack != kgo.AckReject {
 		t.Errorf("a status signed by the retired key after the rotation counted")
 	}
 }

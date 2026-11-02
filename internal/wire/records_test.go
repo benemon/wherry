@@ -71,6 +71,13 @@ func testKeys(t *testing.T) (signed.Keys, ed25519.PrivateKey, ed25519.PrivateKey
 	}, host, receiver
 }
 
+// RunID hashes the tenant, host and nonce text with NUL separators and keeps 128 bits.
+func TestRunIDVector(t *testing.T) {
+	if got := RunID("tenant-a", "host-a", "ZrHrUw-3SKTyOPCMstQuRA"); got != "run-ffe954bd75cb624cd910511f55cc1f10" {
+		t.Fatalf("RunID = %s", got)
+	}
+}
+
 func TestRecordsIgnoreUnknownMembers(t *testing.T) {
 	keys, host, receiver := testKeys(t)
 	for name, record := range testRecords() {

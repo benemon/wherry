@@ -862,7 +862,7 @@ func TestPlannedDrainHandsOverToALiveSuccessor(t *testing.T) {
 		t.Fatalf("the drained custodian holds %s, want its keys deleted", describeKeys(keys))
 	}
 	rekeys := f.rekeys(t)
-	if len(rekeys) != 2 || len(rekeys["run-t"]) != 0 {
+	if len(rekeys) != 2 || len(rekeys[testRun("run-t")]) != 0 {
 		t.Fatalf("re-key wraps for %d runs, want the queued and the running task's alone", len(rekeys))
 	}
 	keys := heldKeys(t, successor)

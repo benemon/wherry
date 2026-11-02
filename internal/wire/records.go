@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	json "encoding/json/v2"
 	"errors"
@@ -87,6 +88,7 @@ type SubmissionBinding struct {
 	Host      string    `json:"host"`
 	Pool      string    `json:"pool"`
 	Run       string    `json:"run"`
+	RunNonce  string    `json:"run_nonce"`
 	Placement Placement `json:"placement"`
 	// TaskStartedBy bounds the agent job's start and TaskEndedBy the run's terminal state, each a JWT NumericDate:
 	// whole seconds since the epoch, UTC.
@@ -487,6 +489,29 @@ func RandomID(prefix string) string {
 	id := make([]byte, 16)
 	rand.Read(id) // never fails
 	return prefix + hex.EncodeToString(id)
+}
+
+// RunNonce is 16 random bytes in base64url without padding.
+func RunNonce() string {
+	nonce := make([]byte, 16)
+	rand.Read(nonce) // never fails
+	return base64.RawURLEncoding.EncodeToString(nonce)
+}
+
+// RunID is the run ID tenant's host derives from nonce.
+func RunID(tenant, host, nonce string) string {
+	sum := sha256.Sum256([]byte("wherry-run\x00" + tenant + "\x00" + host + "\x00" + nonce))
+	return "run-" + hex.EncodeToString(sum[:])[:32]
+}
+
+// CheckRunID confirms binding's run nonce is canonical and derives its run with its tenant and host.
+func CheckRunID(binding SubmissionBinding) error {
+	// The length check is needed: the decoder skips CR and LF.
+	nonce, err := base64.RawURLEncoding.Strict().DecodeString(binding.RunNonce)
+	if err != nil || len(binding.RunNonce) != 22 || len(nonce) != 16 || RunID(binding.Tenant, binding.Host, binding.RunNonce) != binding.Run {
+		return errors.New("run ID does not match its signer")
+	}
+	return nil
 }
 
 func validateIDs(values map[string]string) error {
