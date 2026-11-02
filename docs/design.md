@@ -129,8 +129,8 @@ closes and compacts within an hour, and a pool's snapshot topic
 bound, and `retention.bytes=-1`, so no size limit, the broker's
 `log.retention.bytes` included, deletes one sooner; `admin check` verifies
 both, their `cleanup.policy=delete` and their single partition. Partitions
-cannot be removed, so `pool update` and `admin check` refuse a tasks or
-events topic with more than one; the remedy is to recreate the pool's topics. A tenant feed and transcript topic also
+cannot be removed, so `pool create`, `pool update` and `admin check` refuse a
+tasks or events topic with more than one; the remedy is to recreate the pool's topics. A tenant feed and transcript topic also
 have `max.message.bytes=2097152`, the 2 MiB a receiver batches, so a result
 naming 256 outputs fits.
 
