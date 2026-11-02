@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"maps"
@@ -109,6 +110,9 @@ func (service *Service) PoolUpdate(ctx context.Context, pool string, terms Terms
 }
 
 func (service *Service) poolTerms(ctx context.Context, pool string, terms Terms, update, dryRun bool) error {
+	if err := validateNames(pool); err != nil {
+		return err
+	}
 	effective := withDefaults(terms)
 	if err := validateTerms(effective); err != nil {
 		return err
@@ -142,7 +146,8 @@ func (service *Service) poolTerms(ctx context.Context, pool string, terms Terms,
 	}
 	_, exists := current.Pools[pool]
 	switch {
-	case exists && !update:
+	// pool create with the recorded terms completes a create that failed after recording them.
+	case exists && !update && !sameTerms(current.Pools[pool], terms):
 		return errors.New("pool exists; change its terms with pool update")
 	case !exists && update:
 		return errors.New("no pool by that name")
@@ -171,12 +176,17 @@ func (service *Service) poolTerms(ctx context.Context, pool string, terms Terms,
 		if err := service.poolTopics(ctx, current, pool, retention.tasks); err != nil {
 			return err
 		}
-	}
-	record := Record{Kind: "pool", Pool: pool, Terms: &terms}
-	state, err := service.appendChecked(ctx, []byte("pool."+pool), record)
-	if err != nil {
+	} else if err := service.onePartition(ctx, true, PoolTasksTopic(pool), PoolEventsTopic(pool)); err != nil {
 		return err
 	}
+	state := current
+	if update || !exists {
+		record := Record{Kind: "pool", Pool: pool, Terms: &terms}
+		if state, err = service.appendChecked(ctx, []byte("pool."+pool), record); err != nil {
+			return err
+		}
+	}
+	// A new pool's topics are created only once CheckNames has accepted its record.
 	if !update {
 		if err := service.poolTopics(ctx, state, pool, retention.tasks); err != nil {
 			return err
@@ -201,7 +211,7 @@ func (service *Service) poolTopics(ctx context.Context, state State, pool string
 	if err := service.createTopics(ctx, strconv.FormatInt(retentionMS, 10), topics...); err != nil {
 		return err
 	}
-	if err := service.onePartition(ctx, topics...); err != nil {
+	if err := service.onePartition(ctx, false, topics...); err != nil {
 		return err
 	}
 	if err := service.configureTopicRetention(ctx, retentionMS, topics...); err != nil {
@@ -234,6 +244,15 @@ func strandedReceivers(state State, pool string, terms Terms) error {
 		return fmt.Errorf("pool terms would strand live receivers: %w", errors.Join(failures...))
 	}
 	return nil
+}
+
+// sameTerms reports whether terms are recorded's but for the record limit, which pool create reads from the broker.
+func sameTerms(recorded, terms Terms) bool {
+	terms = withDefaults(terms)
+	terms.RecordLimit = recorded.RecordLimit
+	a, errA := json.Marshal(recorded)
+	b, errB := json.Marshal(terms)
+	return errA == nil && errB == nil && bytes.Equal(a, b)
 }
 
 // ReceiverCheck makes ReceiverAdd's checks of config and returns it as the record would hold it, writing nothing.
@@ -513,11 +532,25 @@ func (service *Service) progressTopics(ctx context.Context, state State, pool st
 	if err != nil {
 		return err
 	}
-	configs := progressConfigs(retentions[PoolTasksTopic(pool)])
-	if err := service.createTopicsWith(ctx, configs, topics...); err != nil {
+	minimum := retentions[PoolTasksTopic(pool)]
+	if err := service.createTopicsWith(ctx, progressConfigs(minimum), topics...); err != nil {
 		return err
 	}
-	return service.configureTopics(ctx, configs, topics...)
+	current, err := service.topicRetentions(ctx, topics...)
+	if err != nil {
+		return err
+	}
+	// A progress topic's retention, like the tasks topic's, is never lowered.
+	for _, topic := range topics {
+		value := minimum
+		if retentionAtLeast(current[topic], minimum) {
+			value = current[topic]
+		}
+		if err := service.configureTopics(ctx, progressConfigs(value), topic); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 const retentionMarginMS = 24 * 60 * 60 * 1000
@@ -637,7 +670,8 @@ func (service *Service) propagating(ctx context.Context, topics []string) bool {
 }
 
 // configureTopicRetention sets each of topics' retention.ms to minimum unless it is already at least that: a run
-// submitted under longer terms needs the retention they derived.
+// submitted under longer terms needs the retention they derived. Each topic also ends at least at the one before it, as
+// a pool's events topic must keep a run's events as long as its tasks topic keeps the run.
 func (service *Service) configureTopicRetention(ctx context.Context, minimum int64, topics ...string) error {
 	retentions, err := service.topicRetentions(ctx, topics...)
 	if err != nil {
@@ -648,6 +682,7 @@ func (service *Service) configureTopicRetention(ctx context.Context, minimum int
 		if retentionAtLeast(retentions[topic], minimum) {
 			value = retentions[topic]
 		}
+		minimum = value
 		// Admission measures a run's age from the broker's timestamp of its submission.
 		if err := service.configureTopics(ctx, map[string]string{"retention.ms": strconv.FormatInt(value, 10), "message.timestamp.type": "LogAppendTime"}, topic); err != nil {
 			return err
@@ -676,8 +711,15 @@ func (service *Service) configureTopics(ctx context.Context, values map[string]s
 	// The controller accepts the change before each broker applies it from the metadata log, and a describe that broker
 	// answers meanwhile returns the old value.
 	deadline := time.Now().Add(topicWait)
-	for !service.configured(ctx, values, topics) {
+	for {
+		applied, err := service.configured(ctx, values, topics)
+		if applied {
+			return nil
+		}
 		if !time.Now().Before(deadline) {
+			if err != nil {
+				return fmt.Errorf("configure topics %s: %w", strings.Join(topics, ", "), err)
+			}
 			return fmt.Errorf("configure topics %s: not applied within %s", strings.Join(topics, ", "), topicWait)
 		}
 		select {
@@ -686,24 +728,22 @@ func (service *Service) configureTopics(ctx context.Context, values map[string]s
 		case <-time.After(listBackoff):
 		}
 	}
-	return nil
 }
 
-// configured reports whether a describe of topics shows each of values, or fails: a topic the describe cannot find
-// is reported by the caller's next read.
-func (service *Service) configured(ctx context.Context, values map[string]string, topics []string) bool {
+// configured reports whether a describe of topics shows each of values. A failed describe confirms nothing.
+func (service *Service) configured(ctx context.Context, values map[string]string, topics []string) (bool, error) {
 	for name, value := range values {
 		got, err := service.topicConfigs(ctx, name, topics...)
 		if err != nil {
-			return true
+			return false, err
 		}
 		for _, topic := range topics {
 			if got[topic] != value {
-				return false
+				return false, nil
 			}
 		}
 	}
-	return true
+	return true, nil
 }
 
 func (service *Service) topicRetentions(ctx context.Context, topics ...string) (map[string]int64, error) {
@@ -833,7 +873,7 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 			}
 		}
 	}
-	if err := service.onePartition(ctx, slices.Concat(poolTopics, custodianTopics)...); err != nil {
+	if err := service.onePartition(ctx, false, slices.Concat(poolTopics, custodianTopics)...); err != nil {
 		return err
 	}
 	for pool, terms := range state.Pools {
@@ -865,16 +905,27 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 	return nil
 }
 
-// onePartition refuses any of topics without exactly one partition. One partition is what gives the custodian group a
-// single assignee and readers one order; partitions cannot be removed, so a pool topic with more is recreated.
-func (service *Service) onePartition(ctx context.Context, topics ...string) error {
-	details, err := kadm.NewClient(service.Admin).ListTopics(ctx, topics...)
+// onePartition refuses any of topics without exactly one partition, passing one that does not exist if absent allows
+// it. One partition is what gives the custodian group a single assignee and readers one order; partitions cannot be
+// removed, so a pool topic with more is recreated.
+func (service *Service) onePartition(ctx context.Context, absent bool, topics ...string) error {
+	// kadm's ListTopics answers from metadata up to 5s old, which can predate a topic's creation.
+	request := kmsg.NewPtrMetadataRequest()
+	for _, topic := range topics {
+		requested := kmsg.NewMetadataRequestTopic()
+		requested.Topic = kmsg.StringPtr(topic)
+		request.Topics = append(request.Topics, requested)
+	}
+	response, err := request.RequestWith(ctx, service.Admin)
 	if err != nil {
 		return err
 	}
-	for _, topic := range topics {
-		if partitions := len(details[topic].Partitions); partitions != 1 {
-			return fmt.Errorf("topic %s has %d partitions, want 1", topic, partitions)
+	for _, topic := range response.Topics {
+		if absent && topic.ErrorCode == kerr.UnknownTopicOrPartition.Code {
+			continue
+		}
+		if partitions := len(topic.Partitions); partitions != 1 {
+			return fmt.Errorf("topic %s has %d partitions, want 1", *topic.Topic, partitions)
 		}
 	}
 	return nil
