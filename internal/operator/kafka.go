@@ -1275,16 +1275,17 @@ type bundleFile struct {
 	replace bool
 }
 
-// Tests replace these to fail a bundle's write, sync, close or rename.
+// Tests replace these to fail a bundle's write, sync, close, rename or removal.
 var (
 	writeFile  = (*os.File).Write
 	syncFile   = (*os.File).Sync
 	closeFile  = (*os.File).Close
 	renameFile = os.Rename
+	removeFile = os.Remove
 )
 
 // closeBundle syncs and closes a bundle and, with replace, renames it to its path. On failure it removes the file it
-// created, so a retry can create it.
+// created, so a retry can create it, and says so when it cannot: the file holds a password.
 func closeBundle(bundle *bundleFile, err *error) {
 	if *err == nil {
 		*err = syncFile(bundle.File)
@@ -1295,8 +1296,11 @@ func closeBundle(bundle *bundleFile, err *error) {
 	if *err == nil && bundle.replace {
 		*err = renameFile(bundle.Name(), bundle.path)
 	}
-	if *err != nil {
-		os.Remove(bundle.Name())
+	if *err == nil {
+		return
+	}
+	if removeErr := removeFile(bundle.Name()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		*err = fmt.Errorf("%w; %s holds the new password and could not be removed: %w", *err, bundle.Name(), removeErr)
 	}
 }
 

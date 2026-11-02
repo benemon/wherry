@@ -3,6 +3,7 @@ package operator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,6 +86,35 @@ func TestBundleWithoutForceRemovesItsFileOnFailure(t *testing.T) {
 			}
 			if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
 				t.Fatalf("bundle directory holds %v, %v; want nothing", entries, err)
+			}
+		})
+	}
+}
+
+// A bundle whose file cannot be removed after a failure says so, naming the file and not the password.
+func TestBundleReportsAFailedRemoval(t *testing.T) {
+	injected, unremoved := errors.New("injected"), errors.New("unremoved")
+	for _, replace := range []bool{false, true} {
+		t.Run(fmt.Sprintf("replace=%t", replace), func(t *testing.T) {
+			bundle, err := createBundle(filepath.Join(t.TempDir(), "host.bundle"), replace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func(write func(*os.File, []byte) (int, error), remove func(string) error) {
+				writeFile, removeFile = write, remove
+			}(writeFile, removeFile)
+			writeFile = func(file *os.File, encoded []byte) (int, error) {
+				file.Write(encoded)
+				return 0, injected
+			}
+			removeFile = func(string) error { return unremoved }
+			err = writeBundle(bundle, Bundle{Broker: "broker:9093", Principal: "tenant.tenant-a.host-a", Password: "secret-password"})
+			closeBundle(bundle, &err)
+			if !errors.Is(err, injected) || !errors.Is(err, unremoved) || !strings.Contains(err.Error(), bundle.Name()+" holds the new password and could not be removed") {
+				t.Fatalf("closeBundle = %v; want the failure and that %s could not be removed", err, bundle.Name())
+			}
+			if strings.Contains(err.Error(), "secret-password") {
+				t.Fatalf("closeBundle = %v; want no password", err)
 			}
 		})
 	}
