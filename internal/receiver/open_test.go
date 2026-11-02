@@ -1806,3 +1806,39 @@ func TestAnOlderClaimsRequestDoesNotBlockTheRekey(t *testing.T) {
 		t.Fatalf("re-key wraps %+v, want receiver-x's", rekeys)
 	}
 }
+
+// The claim check reads the run's task from the claim's offset with a bounded number of fetches, however long the log
+// that follows it: a claimed record early in the task topic, followed by many large records, is served in one read.
+func TestTheClaimCheckReadsABoundedAmountOfALongTrailingLog(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.quiet()
+	keyB := f.addPeer(t, "receiver-b", testPool)
+	record := f.submit(t, f.host, nil)
+	// Each trailing record fills most of a partition fetch, so reading the log to its end takes a fetch per record.
+	filler := bytes.Repeat([]byte("x"), 600<<10)
+	const trailing = 12
+	for range trailing {
+		f.produce(t, admin.PoolTasksTopic(testPool), testRun("run-filler"), filler)
+	}
+	f.statusAs(t, record, "receiver-b", keyB, "claimed", 1)
+	fetches, below := f.taskFetches(t, record.Offset)
+	if answer := f.answered(t, f.openAs(t, record, "receiver-b", keyB, 1)); answer != "wrap" || fetches.Load() == 0 || fetches.Load() > 2 || below.Load() != 0 {
+		t.Fatalf("answer %q after %d task fetches, %d from below the claim's offset; want served within 2 fetches of a %d-record trailing log",
+			answer, fetches.Load(), below.Load(), trailing)
+	}
+}
+
+// The run's task is the hash of its first status other than a rejection, whatever its kind: a run whose first status
+// is a non-claimed status of one hash refuses a later hash's claim at open and rejects its delivery as a duplicate.
+func TestTheRunsFirstNonRejectedStatusNamesItsTask(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.quiet()
+	keyB, keyC := f.addPeer(t, "receiver-b", testPool), f.addPeer(t, "receiver-c", testPool)
+	first, second := f.twoHashes(t)
+	f.statusAs(t, first, "receiver-b", keyB, "released", 1)
+	f.statusAs(t, second, "receiver-c", keyC, "claimed", 1)
+	if answer := f.answered(t, f.openAs(t, second, "receiver-c", keyC, 1)); answer != wire.RefusedNotClaimant {
+		t.Fatalf("the second hash answered %q, want %q; logs:\n%s", answer, wire.RefusedNotClaimant, f.logs.String())
+	}
+	f.rejected(t, second, "duplicate submission")
+}

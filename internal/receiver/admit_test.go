@@ -1588,3 +1588,42 @@ func TestCancelBetweenClaimAndRedelivery(t *testing.T) {
 		t.Fatal("the claimed record's redelivery is not cancelled")
 	}
 }
+
+// An agent outside the pool's terms is refused before a missing envelope: a task with neither names the agent.
+func TestAnAgentOutsideTheTermsIsRefusedBeforeAMissingEnvelope(t *testing.T) {
+	f := newFixture(t, resultStream)
+	task := testSubmission("run-a")
+	task.Wherry.Placement.Agent = "unknown-agent"
+	record := f.produce(t, admin.PoolTasksTopic(testPool), task.Wherry.Run, must(t)(wire.SignRecord(task, f.host)))
+	f.rejected(t, record, "agent is outside the pool terms")
+	if strings.Contains(f.logs.String(), "the task carries no envelope") {
+		t.Fatalf("rejected for its envelope, want its agent; logs:\n%s", f.logs.String())
+	}
+}
+
+// A cancelled run no member has claimed is still judged at its append time: a task whose bounds fail there is rejected
+// naming the bound, not admitted for cancellation.
+func TestACancelledUnclaimedTaskFailingAnAppendTimeBoundIsRejected(t *testing.T) {
+	f := newFixture(t, resultStream)
+	record := f.submit(t, f.host, func(task *wire.Submission) {
+		task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = time.Now().Add(time.Minute).Unix(), time.Now().Add(30*time.Second).Unix()
+	})
+	f.publishCancel(t, testRun("run-a"), 1, f.host, nil)
+	f.rejected(t, record, "task_ended_by is before task_started_by")
+}
+
+// A task no member has claimed whose task_started_by is past start_by_limit at its append time is rejected before the
+// offer is judged: with no offer satisfying its selector it is rejected, not given back.
+func TestStartByLimitAtTheAppendTimeIsJudgedBeforeTheOffer(t *testing.T) {
+	f := newFixture(t, resultStream)
+	startByLimit := time.Duration(admin.DefaultStartByLimitMS) * time.Millisecond
+	record := f.submit(t, f.host, func(task *wire.Submission) {
+		task.Wherry.Placement.Selector = []wire.Requirement{in("zone", "dc-none")}
+		task.Wherry.TaskStartedBy = time.Now().Add(startByLimit + time.Hour).Unix()
+		task.Wherry.TaskEndedBy = task.Wherry.TaskStartedBy
+	})
+	f.rejected(t, record, "task_started_by is past the pool's start_by_limit")
+	if strings.Contains(f.logs.String(), "no current offer") {
+		t.Fatalf("the offer was judged first; logs:\n%s", f.logs.String())
+	}
+}
