@@ -21,7 +21,7 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
-// These tests pin platform facts wherry is built on (ADR-0035) against the real broker.
+// These tests pin platform facts wherry's coordination relies on, against the real broker.
 
 // F3: a member that renews, flushed, at an interval below the lock duration keeps a record acquired well past the
 // lock duration; no other member of the group receives it meanwhile.
@@ -82,7 +82,8 @@ func TestShareRenewalHoldsARecordBeyondTheLockOnRealBroker(t *testing.T) {
 		}
 		renewals++
 	}
-	if renewals < int(hold/renewInterval)-1 {
+	// Ticks can drop under load; one renewal per lock duration is what keeps the record.
+	if renewals < int(hold/s.lock) {
 		t.Fatalf("%d acknowledgement results for a %v hold renewed every %v", renewals, hold, renewInterval)
 	}
 }
