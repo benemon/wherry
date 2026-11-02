@@ -94,7 +94,7 @@ func validResult() *Result {
 
 func validEcho() *Echo {
 	submission := validSubmission()
-	return &Echo{V: 1, Receiver: "receiver-1", Tenant: "tenant-1", Pool: "linux", Run: "run-1", Placement: submission.Wherry.Placement, TaskHash: wireHash, MessageID: "message-1"}
+	return &Echo{V: 1, Receiver: "receiver-1", Tenant: "tenant-1", Host: "host-1", Pool: "linux", Run: "run-1", Placement: submission.Wherry.Placement, TaskHash: wireHash, MessageID: "message-1"}
 }
 
 // recordJSON marshals value as signed.Sign does.

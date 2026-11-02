@@ -326,7 +326,7 @@ func (r *testReceiver) binding(task claimed, attempt int64) wire.ReceiverBinding
 
 func (r *testReceiver) echo(t *testing.T, task claimed) []byte {
 	binding := task.submission.Wherry
-	return r.sign(t, &wire.Echo{Receiver: r.id, Tenant: binding.Tenant, Pool: r.pool, Run: binding.Run, Placement: binding.Placement,
+	return r.sign(t, &wire.Echo{Receiver: r.id, Tenant: binding.Tenant, Host: binding.Host, Pool: r.pool, Run: binding.Run, RunNonce: binding.RunNonce, Placement: binding.Placement,
 		TaskHash: task.hash, MessageID: task.submission.Message.MessageID})
 }
 
@@ -1481,6 +1481,56 @@ func TestRejectionIsFoundThroughItsEcho(t *testing.T) {
 		if err != nil || awaited.Task != nil || awaited.Status.State != wire.TaskStateRejected {
 			t.Fatalf("%s: await %#v, %v; want REJECTED", name, awaited, err)
 		}
+	}
+}
+
+// A same-tenant task naming another host's run ID is rejected under that run, ahead of the genuine run's records; a host
+// with no record of the run binds it to the genuine echo, and the mismatch's signer still reads its rejection.
+func TestEchoOfAMismatchingTaskDoesNotBindTheRun(t *testing.T) {
+	f := newFixture(t)
+	f.pool(t, "pool-b")
+	genuineReceiver := f.addReceiver(t, "receiver-a", "pool-a")
+	genuineReceiver.advertise(t, f.ctx, nil)
+	mismatchReceiver := f.addReceiver(t, "receiver-b", "pool-b")
+	runID := f.submit(t, defaultSelector()).RunID
+	genuine := genuineReceiver.claim(t, f.ctx, runID)[0]
+	mismatch := genuine
+	mismatch.submission.Wherry.Host, mismatch.submission.Wherry.RunNonce, mismatch.hash = "host-b", wire.RunNonce(), strings.Repeat("b", 64)
+	reason := "run ID does not match its signer"
+	mismatchReceiver.feed(t, f.ctx, runID, mismatchReceiver.echo(t, mismatch), mismatchReceiver.status(t, mismatch, 1, "rejected-1", "rejected", wire.TaskStateRejected,
+		func(status *wire.RunStatus) {
+			status.StatusUpdate.Status.Message = &wire.Message{MessageID: "msg-reason", Role: wire.RoleAgent, Parts: []wire.Part{{Text: reason}}, Extensions: []string{wire.ExtensionURI}}
+		}))
+	genuineReceiver.feed(t, f.ctx, runID, genuineReceiver.echo(t, genuine), genuineReceiver.status(t, genuine, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil))
+
+	other := f.newHost(t, "host-c", t.TempDir())
+	status, err := other.Status(f.ctx, runID)
+	if err != nil || status.Pool != "pool-a" || status.Status.State != wire.TaskStateWorking {
+		t.Fatalf("status %+v, %v; want the genuine run WORKING in pool-a", status, err)
+	}
+	runs, err := other.Runs(f.ctx)
+	if err != nil || len(runs.Runs) != 1 || runs.Runs[0].Pool != "pool-a" || runs.Runs[0].Status.State != wire.TaskStateWorking {
+		t.Fatalf("runs %+v, %v; want the genuine run WORKING in pool-a", runs, err)
+	}
+	if err := other.Cleanup(f.ctx, runID); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "has not ended") {
+		t.Fatalf("cleanup: %v; want a refusal while the genuine run is active", err)
+	}
+	if _, err := other.Cancel(f.ctx, runID); err != nil {
+		t.Fatal(err)
+	}
+	for receiver, want := range map[*testReceiver]int{genuineReceiver: 1, mismatchReceiver: 0} {
+		if records, err := readTopic(f.ctx, receiver.kafka, admin.PoolEventsTopic(receiver.pool)); err != nil || len(records) != want {
+			t.Fatalf("%s events hold %d records, %v; want %d", receiver.pool, len(records), err, want)
+		}
+	}
+
+	signer := f.newHost(t, "host-b", t.TempDir())
+	if err := signer.writeRun(runRecord{Run: runID, Pool: "pool-b", Placement: mismatch.submission.Wherry.Placement, TaskHash: mismatch.hash}); err != nil {
+		t.Fatal(err)
+	}
+	status, err = signer.Status(f.ctx, runID)
+	if err != nil || status.Pool != "pool-b" || status.Status.State != wire.TaskStateRejected || status.Status.Message == nil || status.Status.Message.Parts[0].Text != reason {
+		t.Fatalf("signer's status %+v, %v; want REJECTED: %s", status, err, reason)
 	}
 }
 

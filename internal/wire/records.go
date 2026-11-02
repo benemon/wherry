@@ -286,8 +286,10 @@ type Echo struct {
 	V         int       `json:"v"`
 	Receiver  string    `json:"receiver"`
 	Tenant    string    `json:"tenant"`
+	Host      string    `json:"host"`
 	Pool      string    `json:"pool"`
 	Run       string    `json:"run"`
+	RunNonce  string    `json:"run_nonce"`
 	Placement Placement `json:"placement"`
 	TaskHash  string    `json:"task_hash"`
 	MessageID string    `json:"message_id"`
@@ -512,6 +514,11 @@ func CheckRunID(binding SubmissionBinding) error {
 		return errors.New("run ID does not match its signer")
 	}
 	return nil
+}
+
+// CheckEchoRunID is CheckRunID for the task echo names.
+func CheckEchoRunID(echo Echo) error {
+	return CheckRunID(SubmissionBinding{Tenant: echo.Tenant, Host: echo.Host, Run: echo.Run, RunNonce: echo.RunNonce})
 }
 
 func validateIDs(values map[string]string) error {
@@ -765,7 +772,7 @@ func (value *Result) validate() error {
 }
 
 func (value *Echo) validate() error {
-	if err := validateIDs(map[string]string{"receiver": value.Receiver, "tenant": value.Tenant, "pool": value.Pool, "run": value.Run, "message_id": value.MessageID}); err != nil {
+	if err := validateIDs(map[string]string{"receiver": value.Receiver, "tenant": value.Tenant, "host": value.Host, "pool": value.Pool, "run": value.Run, "message_id": value.MessageID}); err != nil {
 		return err
 	}
 	if !ValidHash(value.TaskHash) {

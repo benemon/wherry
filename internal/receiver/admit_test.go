@@ -956,7 +956,7 @@ func TestRejectionCarriesItsEcho(t *testing.T) {
 	if len(feed) != 2 || wire.ParseRecord(feed[0].Value, f.keys(), &echo) != nil || wire.ParseRecord(feed[1].Value, f.keys(), &rejected) != nil {
 		t.Fatalf("feed records %d, want the echo then the rejected status", len(feed))
 	}
-	if echo.Pool != testPool || echo.Run != testRun("run-a") || echo.TaskHash != wire.TaskHash(record.Value) || rejected.Wherry.Kind != "rejected" {
+	if echo.Pool != testPool || echo.Run != testRun("run-a") || echo.TaskHash != wire.TaskHash(record.Value) || wire.CheckEchoRunID(echo) != nil || rejected.Wherry.Kind != "rejected" {
 		t.Fatalf("echo %#v status %#v", echo, rejected.Wherry)
 	}
 	if feed[1].Offset != feed[0].Offset+1 || feed[1].ProducerID != feed[0].ProducerID {

@@ -47,7 +47,7 @@ func testRecords() map[string]Record {
 			{ArtifactID: TranscriptArtifact, Parts: []Part{{Data: []byte(`{}`), MediaType: ReferenceMediaType}}, Extensions: []string{ExtensionURI}},
 		}, History: []Message{testMessage("run-a")}},
 			Wherry: ResultBinding{ReceiverBinding: testBinding(), TaskHash: testHash}},
-		"echo":                         &Echo{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: "run-a", Placement: placement, TaskHash: testHash, MessageID: "message-a"},
+		"echo":                         &Echo{Receiver: "receiver-a", Tenant: "tenant-a", Host: "host-a", Pool: "pool-a", Run: "run-a", Placement: placement, TaskHash: testHash, MessageID: "message-a"},
 		"advertisement":                &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{{Profile: "nomad", Agent: "claude"}}, Capacity: 2, AtMS: 1},
 		"advertisement without offers": &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{}, Capacity: 2, AtMS: 1},
 		"start failure":                &StartFailure{Wherry: testBinding(), Profile: "nomad", Agent: "claude", Class: "dispatch", TaskHash: testHash},

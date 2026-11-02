@@ -416,8 +416,8 @@ func (r *Receiver) publishRejection(ctx context.Context, task *wire.Submission, 
 
 func (r *Receiver) echo(task *wire.Submission, hash string) *wire.Echo {
 	return &wire.Echo{
-		Receiver: r.id, Tenant: task.Wherry.Tenant, Pool: r.config.Pool, Run: task.Wherry.Run, Placement: task.Wherry.Placement,
-		TaskHash: hash, MessageID: task.Message.MessageID,
+		Receiver: r.id, Tenant: task.Wherry.Tenant, Host: task.Wherry.Host, Pool: r.config.Pool, Run: task.Wherry.Run,
+		RunNonce: task.Wherry.RunNonce, Placement: task.Wherry.Placement, TaskHash: hash, MessageID: task.Message.MessageID,
 	}
 }
 

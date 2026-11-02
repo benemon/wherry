@@ -964,7 +964,7 @@ func TestEndToEndWithFakePlugin(t *testing.T) {
 		var echo wire.Echo
 		if wire.ParseRecord(record.Value, f.keys(), &echo) == nil {
 			echoes++
-			if echo.Pool != testPool || echo.Run != testRun("run-a") || echo.MessageID != "msg-a" || echo.Placement.Agent != "claude" {
+			if echo.Pool != testPool || echo.Run != testRun("run-a") || echo.MessageID != "msg-a" || echo.Placement.Agent != "claude" || wire.CheckEchoRunID(echo) != nil {
 				t.Fatalf("echo %#v", echo)
 			}
 		}
