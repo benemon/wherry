@@ -63,6 +63,8 @@ share.coordinator.state.topic.min.isr=2
 default.replication.factor=3
 min.insync.replicas=2
 log.dirs=/tmp/kraft-logs
+# The retention pin (F17) needs retention to act within seconds, not the default five minutes.
+log.retention.check.interval.ms=5000
 EOF
   chmod 0644 "$dir/server-$node.properties"
 done
