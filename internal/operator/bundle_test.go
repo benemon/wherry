@@ -97,3 +97,18 @@ func TestReissueFailingAfterThePasswordChanges(t *testing.T) {
 		}
 	}
 }
+
+// host add --force refuses a host whose membership ended, writing no bundle.
+func TestHostAddForceRefusesAnEndedHost(t *testing.T) {
+	_, service, ctx := compromiseFixture(t)
+	if _, err := service.appendChecked(ctx, []byte("tenant-a.host-a"), Record{Kind: "end", Tenant: "tenant-a", Host: "host-a"}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "host.bundle")
+	if err := service.HostAdd(ctx, "tenant-a", "host-a", path, true); err == nil || err.Error() != "host cannot return after its membership end" {
+		t.Fatalf("host add --force of an ended host = %v; want it refused", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a refused host add wrote %s (%v)", path, err)
+	}
+}
