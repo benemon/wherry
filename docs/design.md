@@ -73,7 +73,9 @@ write it. Every other topic has `cleanup.policy=delete`.
 
 A pool's task and event topics and its receivers' progress topics keep
 records for its `start_by_limit` plus six hours plus a day, 4 days 6 hours
-by default. The tenant feed and transcript topic keep them for 30
+by default. An update to a shorter `start_by_limit` lowers none of them: they
+keep the longer terms' retention, with the events and progress topics at
+least at the tasks topic's. The tenant feed and transcript topic keep them for 30
 days and `wherry.receivers` for 7. The identity and configuration topics
 keep them forever, and so does a pool's snapshot topic.
 
@@ -124,7 +126,11 @@ closes and compacts within an hour, and a pool's snapshot topic
 `wherry.pool.<pool>.custodian`, which it creates with
 `cleanup.policy=compact`. A pool's tasks and events topics have
 `segment.ms=3600000`, so retention deletes a record within an hour of its
-bound; `admin check` verifies it. A tenant feed and transcript topic also
+bound, and `retention.bytes=-1`, so no size limit, the broker's
+`log.retention.bytes` included, deletes one sooner; `admin check` verifies
+both, their `cleanup.policy=delete` and their single partition. Partitions
+cannot be removed, so `pool create`, `pool update` and `admin check` refuse a
+tasks or events topic with more than one; the remedy is to recreate the pool's topics. A tenant feed and transcript topic also
 have `max.message.bytes=2097152`, the 2 MiB a receiver batches, so a result
 naming 256 outputs fits.
 
@@ -132,13 +138,13 @@ naming 256 outputs fits.
 | --- | --- | --- |
 | `wherry.admin` | any recording command | `-1` |
 | `wherry.receivers` | any recording command | `604800000` (7 days) |
-| `wherry.pool.<pool>.tasks` | `pool create` | `start_by_limit` plus 30 hours, in milliseconds; default `367200000` |
-| `wherry.pool.<pool>.events` | `pool create` | at least tasks; `pool create` sets the same value |
+| `wherry.pool.<pool>.tasks` | `pool create` | at least `start_by_limit` plus 30 hours, in milliseconds; default `367200000`; `pool update` never lowers it |
+| `wherry.pool.<pool>.events` | `pool create` | at least tasks; `pool create` and `pool update` raise it to tasks and never lower it |
 | `wherry.pool.<pool>.custodian` | `pool create` | `-1`, outside the pool retention bound |
 | `wherry.tenant.<tenant>` | `pool entitle`, `host add` | `2592000000` (30 days) |
 | `wherry.tenant.<tenant>.transcript` | `pool entitle`, `host add` | as the tenant feed, `2592000000` (30 days) |
 | `wherry.receiver.<receiver>` | `receiver add` | `-1` |
-| `wherry.receiver.<receiver>.progress` | `receiver add`, `pool create` | as the pool's tasks topic |
+| `wherry.receiver.<receiver>.progress` | `receiver add`, `pool create` | at least the pool's tasks topic; never lowered |
 | `wherry.host.<tenant>.<host>` | `host add` | `-1` |
 
 The tasks retention keeps `start_by_limit`, the six-hour maximum run time,
@@ -150,10 +156,10 @@ at `-1`, and `wherry.receivers` remains a seven-day liveness topic.
 
 `wherry admin` leaves an existing topic's configuration as it is, except
 that every recording command sets the configuration above on
-`wherry.receivers`, `pool create` and `pool update` set the retention,
-timestamp type and `segment.ms` of the pool's tasks and events topics and
-the configuration of its snapshot topic, and `receiver add` and `pool create` set every
-configuration above on the progress topics of the pool's live receivers.
+`wherry.receivers`, `pool create` and `pool update` set the retention, never
+lowering it, timestamp type, `cleanup.policy`, `retention.bytes` and `segment.ms` of the pool's tasks and events topics and
+the configuration of its snapshot topic, and `receiver add`, `pool create` and `pool update` set every
+configuration above on the progress topics of the pool's live receivers, never lowering their retention.
 `pool entitle`, `pool create` and `pool update` set `max.message.bytes` on
 existing tenant feeds and transcript topics. A
 tenant feed's or transcript topic's retention can be changed with Kafka's

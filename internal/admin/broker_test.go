@@ -441,6 +441,38 @@ func TestPoolUpdateReappliesTheShareGroupOnRealBroker(t *testing.T) {
 	groupTerms(t, service, pool, "3", "30000")
 }
 
+// pool update to a shorter start_by_limit leaves the pool topics at the longer terms' retention, which check accepts.
+func TestPoolUpdateKeepsTheLongerRetentionOnRealBroker(t *testing.T) {
+	if os.Getenv("WHERRY_TRUST_BROKER") == "" {
+		t.Skip("WHERRY_TRUST_BROKER is not set")
+	}
+	service, closeService := realService(t)
+	defer closeService()
+	ctx := context.Background()
+	terms := modelTerms()
+	terms.StartByLimitMS = Millis((10 * 24 * time.Hour).Milliseconds())
+	pool := fmt.Sprintf("retention-%d", time.Now().UnixNano())
+	if err := service.PoolCreate(ctx, pool, terms); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.PoolUpdate(ctx, pool, modelTerms(), false); err != nil {
+		t.Fatal(err)
+	}
+	want := int64(terms.StartByLimitMS) + MaxRunDurationMS + retentionMarginMS
+	retentions, err := service.topicRetentions(ctx, PoolTasksTopic(pool), PoolEventsTopic(pool))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for topic, got := range retentions {
+		if got != want {
+			t.Fatalf("%s retention.ms = %d, want %d, the 10-day terms' own", topic, got, want)
+		}
+	}
+	if err := service.Check(ctx); err != nil {
+		t.Fatalf("check = %v; want retention above the derived floor accepted", err)
+	}
+}
+
 // groupTerms fails unless DescribeConfigs reports limit and lock as the delivery limit and lock duration of pool's share
 // group within 30 seconds: a broker reports the group's configuration only once the alter reaches its metadata.
 func groupTerms(t *testing.T, service *Service, pool, limit, lock string) {

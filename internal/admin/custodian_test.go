@@ -130,7 +130,7 @@ func TestEndedMembersKeyTopicStaysReadable(t *testing.T) {
 }
 
 // Check reports a missing snapshot topic, a snapshot topic that is not compacted, and a task or events topic without
-// the hourly segment.ms.
+// the hourly segment.ms, with more than one partition, not deleting by time or with a finite retention.bytes.
 func TestCheckReportsSnapshotTopicAndSegmentDrift(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -150,14 +150,17 @@ func TestCheckReportsSnapshotTopicAndSegmentDrift(t *testing.T) {
 			setTopicConfig(t, service, CustodianTopic("pool-a"), "cleanup.policy", "delete")
 		}, CustodianTopic("pool-a") + " cleanup.policy"},
 		{"snapshot topic partitioned", func(t *testing.T, service *Service) {
-			responses, err := kadm.NewClient(service.Admin).CreatePartitions(context.Background(), 1, CustodianTopic("pool-a"))
-			if err == nil {
-				err = responses.Error()
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
+			addPartition(t, service, CustodianTopic("pool-a"))
 		}, CustodianTopic("pool-a") + " has 2 partitions"},
+		{"tasks topic partitioned", func(t *testing.T, service *Service) {
+			addPartition(t, service, PoolTasksTopic("pool-a"))
+		}, PoolTasksTopic("pool-a") + " has 2 partitions"},
+		{"events topic compacted", func(t *testing.T, service *Service) {
+			setTopicConfig(t, service, PoolEventsTopic("pool-a"), "cleanup.policy", "compact")
+		}, PoolEventsTopic("pool-a") + " cleanup.policy is compact, want delete"},
+		{"tasks retention.bytes finite", func(t *testing.T, service *Service) {
+			setTopicConfig(t, service, PoolTasksTopic("pool-a"), "retention.bytes", "1073741824")
+		}, PoolTasksTopic("pool-a") + " retention.bytes is 1073741824, want -1"},
 		{"tasks segment.ms unset", func(t *testing.T, service *Service) {
 			deleteTopicConfig(t, service, PoolTasksTopic("pool-a"), "segment.ms")
 		}, PoolTasksTopic("pool-a") + " segment.ms"},
@@ -302,5 +305,16 @@ func TestCheckEnvelope(t *testing.T) {
 		if err := CheckEnvelope(terms, task, v); err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Errorf("%s: check = %v, want %q", name, err, test.want)
 		}
+	}
+}
+
+func addPartition(t *testing.T, service *Service, topic string) {
+	t.Helper()
+	responses, err := kadm.NewClient(service.Admin).CreatePartitions(context.Background(), 1, topic)
+	if err == nil {
+		err = responses.Error()
+	}
+	if err != nil {
+		t.Fatal(err)
 	}
 }
