@@ -57,7 +57,9 @@ check-markers: ## Fail on tool-attribution markers in tracked files
 # The patterns are assembled from fragments, as in check-markers.
 check-names: ## Fail on the provisioning role's old names in tracked files
 	@p="wherry[ .]adm""in|WHERRY_TRUST_ADM""IN[A-Z_]*"; \
-	if hits=$$(git grep -n -w -E "$$p" -- . ':!*CHANGELOG*'); then \
+	q="#wherry-adm""in-|internal/adm""in"; \
+	hits=$$(git grep -n -w -E "$$p" -- . ':!*CHANGELOG*'; git grep -n -E "$$q" -- . ':!*CHANGELOG*'); \
+	if [ -n "$$hits" ]; then \
 		echo "$$hits"; echo "FAIL: old provisioning-role names in tracked files"; exit 1; \
 	fi; \
 	echo "no old provisioning-role names in tracked files"
