@@ -113,6 +113,31 @@ func TestRecordsIgnoreUnknownMembers(t *testing.T) {
 	}
 }
 
+// An advertisement from before the drain label was removed still decodes: its started_ms and stepping_down are
+// unknown members, ignored like any other.
+func TestAdvertisementIgnoresTheRemovedDrainLabel(t *testing.T) {
+	keys, _, receiver := testKeys(t)
+	payload := `{"v":1,"receiver":"receiver-a","pool":"pool-a","offers":[],"capacity":1,"in_flight":0,"at_ms":2,"started_ms":1,` +
+		`"stepping_down":{"at_ms":2,"started_ms":1,"deadline_ms":3}}`
+	options := new(jose.SignerOptions).WithType(jose.ContentType((*Advertisement)(nil).jwsType())).WithHeader("kid", "receiver-a/"+signed.KeyID(receiver.Public().(ed25519.PublicKey)))
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: receiver}, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jws, err := signer.Sign([]byte(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := jws.CompactSerialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var advertisement Advertisement
+	if err := ParseRecord([]byte(encoded), keys, &advertisement); err != nil || advertisement.AtMS != 2 || advertisement.Capacity != 1 {
+		t.Fatalf("advertisement %+v, %v; want it decoded with the drain label ignored", advertisement, err)
+	}
+}
+
 func TestRecordsRoundTrip(t *testing.T) {
 	keys, host, receiver := testKeys(t)
 	for name, record := range testRecords() {
