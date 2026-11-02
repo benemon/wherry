@@ -237,6 +237,8 @@ type StatusBinding struct {
 	Kind      string `json:"kind"`
 	TaskHash  string `json:"task_hash"`
 	LogOffset *int64 `json:"log_offset,omitzero"`
+	// TaskOffset is the claimed task record's offset on the pool's task topic, present exactly on a claimed status.
+	TaskOffset *int64 `json:"task_offset,omitzero"`
 	// TranscriptChunks is the number of transcript chunks the attempt wrote, on a terminal status.
 	TranscriptChunks int64 `json:"transcript_chunks,omitzero"`
 	// Event is EventKeyLost on a failed terminal status of a run whose envelope cannot be opened and whose job never
@@ -689,7 +691,8 @@ func (value *RunStatus) validate() error {
 		return err
 	}
 	if update.TaskID != binding.Run || update.ContextID != binding.Run || !ValidHash(binding.TaskHash) ||
-		binding.TranscriptChunks < 0 || binding.TranscriptChunks > 0 && binding.Kind != "terminal" {
+		binding.TranscriptChunks < 0 || binding.TranscriptChunks > 0 && binding.Kind != "terminal" ||
+		(binding.TaskOffset != nil) != (binding.Kind == "claimed") || binding.TaskOffset != nil && *binding.TaskOffset < 0 {
 		return errors.New("invalid status")
 	}
 	if err := validateTaskStatus(&update.Status); err != nil {

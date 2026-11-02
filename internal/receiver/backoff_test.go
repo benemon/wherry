@@ -193,6 +193,7 @@ func TestPoolEventsRefuseUnboundStatusesAndStartFailures(t *testing.T) {
 			record := f.submit(t, f.host, nil)
 			task := f.parse(t, record)
 			status := f.receiver.status(task, wire.TaskHash(record.Value), 1, "claimed", taskStatus(wire.TaskStateWorking, ""), nil)
+			status.Wherry.TaskOffset = &record.Offset
 			failure := &wire.StartFailure{Wherry: f.receiver.binding(task, 1), Profile: "nomad", Agent: "claude", Class: "dispatch", TaskHash: wire.TaskHash(record.Value)}
 			if mutate != nil {
 				mutate(&status.Wherry.ReceiverBinding)

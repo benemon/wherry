@@ -220,9 +220,10 @@ func (r *Receiver) stepDown(ctx context.Context, stopped time.Time, closeGroup f
 	r.logger.Printf("custodian: no successor in pool %s; keeping the pool keys to their deadlines", r.config.Pool)
 }
 
-// handOver writes, in one transaction, a re-key wrap to the successor's current key for every task the receiver's keys
-// open that is its run's earliest accepted, not terminal and not past its task_ended_by, from one read of the task topic
-// to its last stable offset, and then deletes the keys. Any error keeps them.
+// handOver writes, in one transaction, a re-key wrap to the successor's current key for every task hash the receiver's
+// keys open that is an admissible task of its run, its run's task when it has one, not terminal and not past its
+// task_ended_by, from one read of the task topic to its last stable offset, and then deletes the keys. Any error keeps
+// them.
 func (r *Receiver) handOver(ctx context.Context, current wire.PoolKey) error {
 	r.custody.mu.Lock()
 	defer r.custody.mu.Unlock()
@@ -242,25 +243,29 @@ func (r *Receiver) handOver(ctx context.Context, current wire.PoolKey) error {
 	if err != nil {
 		return err
 	}
-	earliest := r.earliestSubmissions(tasks)
+	state, _, hosts := r.snapshot()
 	var records []*kgo.Record
 	seen := map[string]bool{}
 	for _, record := range tasks {
-		run := string(record.Key)
-		if seen[run] {
+		run, hash := string(record.Key), wire.TaskHash(record.Value)
+		if first := events.task(run); seen[hash] || first != "" && first != hash || events.committedTerminal(run, hash) ||
+			slices.ContainsFunc(events.rekeys[hash], func(wrap wire.RekeyWrap) bool { return wrap.RecipientKID == current.KeyID }) {
 			continue
 		}
-		seen[run] = true
-		task := earliest[run]
-		if task == nil || events.committedTerminal(run, task.hash) || !time.Now().Before(wire.PastBound(task.record.Wherry.TaskEndedBy)) ||
-			slices.ContainsFunc(events.rekeys[task.hash], func(wrap wire.RekeyWrap) bool { return wrap.RecipientKID == current.KeyID }) {
+		submission, err := authorizeSubmission(state, hosts, record.Value, r.config.Pool)
+		if err != nil || submission.Wherry.Run != run || wire.CheckRunID(submission.Wherry) != nil {
 			continue
 		}
-		contentKey := r.contentKey(task.record, keys, events.rekeys[task.hash])
+		task := runSubmission{record: &submission, hash: hash, submitted: record.Timestamp}
+		if inadmissible(task, state.Pools[r.config.Pool]) != "" || !time.Now().Before(wire.PastBound(submission.Wherry.TaskEndedBy)) {
+			continue
+		}
+		seen[hash] = true
+		contentKey := r.contentKey(task.record, keys, events.rekeys[hash])
 		if contentKey == nil {
 			continue
 		}
-		rekey, err := r.rekeyRecord(run, task.hash, contentKey, current)
+		rekey, err := r.rekeyRecord(run, hash, contentKey, current)
 		if err != nil {
 			return err
 		}

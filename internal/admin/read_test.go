@@ -625,3 +625,87 @@ func TestMissingTopicShardErrorIsRetried(t *testing.T) {
 		}
 	}
 }
+
+// ReadAt reads one record of a long trailing log in one fetch, where reading to the end takes one per few records. kgo
+// sends its next fetch once a poll takes the last, which can be before the read stops consuming, so two are allowed.
+func TestReadAtOnALongTrailingLogMakesOneFetch(t *testing.T) {
+	cluster, client := readerClusterOf(t, nil, "topic-a")
+	ctx := context.Background()
+	for i := range 64 {
+		if err := client.ProduceSync(ctx, &kgo.Record{Topic: "topic-a", Value: bytes.Repeat([]byte{byte(i)}, 256)}).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var fetches atomic.Int32
+	cluster.ControlKey(int16(kmsg.Fetch), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		cluster.KeepControl()
+		// The reader consumes the topic alone; a fetch names it by ID.
+		for _, topic := range request.(*kmsg.FetchRequest).Topics {
+			if len(topic.Partitions) > 0 {
+				fetches.Add(1)
+			}
+		}
+		return nil, nil, false
+	})
+	small, err := kgo.NewClient(append(client.Opts(), kgo.FetchMaxPartitionBytes(1024))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer small.Close()
+	reader := NewReader(small)
+	defer reader.Close()
+	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	record, err := reader.ReadAt(readCtx, "topic-a", 3)
+	if err != nil || record == nil || record.Offset != 3 || record.Value[0] != 3 {
+		t.Fatalf("read %v, %v; want the record at offset 3", record, err)
+	}
+	t.Logf("%d fetches", fetches.Load())
+	if got := fetches.Load(); got > 2 {
+		t.Fatalf("%d fetches of the topic, want one", got)
+	}
+}
+
+// ReadAt below the log start, at or past its end and at a compacted gap returns no record at once.
+func TestReadAtOutsideTheLogOrAtAGapReturnsNone(t *testing.T) {
+	cluster := kfake.MustCluster()
+	t.Cleanup(cluster.Close)
+	for _, topic := range []string{"compacted", "trimmed"} {
+		if err := cluster.CreateTopic(topic, 1, map[string]string{"cleanup.policy": "compact,delete"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	client, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.FetchMaxWait(10*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(client.Close)
+	ctx := context.Background()
+	for _, topic := range []string{"compacted", "trimmed"} {
+		for _, key := range []string{"a", "b", "b", "c"} {
+			if err := client.ProduceSync(ctx, &kgo.Record{Topic: topic, Key: []byte(key), Value: []byte(key)}).FirstErr(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	cluster.Compact()
+	if err := cluster.DeleteRecords("trimmed", 0, 2); err != nil {
+		t.Fatal(err)
+	}
+	reader := NewReader(client)
+	defer reader.Close()
+	for _, read := range []struct {
+		topic  string
+		offset int64
+	}{{"compacted", 1}, {"trimmed", 0}, {"trimmed", 1}, {"trimmed", 4}, {"trimmed", 9}} {
+		readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		record, err := reader.ReadAt(readCtx, read.topic, read.offset)
+		cancel()
+		if err != nil || record != nil {
+			t.Fatalf("read %s at %d: %v, %v; want no record at once", read.topic, read.offset, record, err)
+		}
+	}
+	if record, err := reader.ReadAt(ctx, "trimmed", 3); err != nil || record == nil || string(record.Value) != "c" {
+		t.Fatalf("read trimmed at 3: %v, %v; want its last record", record, err)
+	}
+}

@@ -443,6 +443,10 @@ A `terminal` status's `wherry` object adds the attempt's chunk count:
 - `task_hash` is the hash of the run's submission.
 - `event_id` identifies the fact the status reports. Readers keep one
   status per event ID.
+- `task_offset` is the offset of the claimed submission on the pool's task
+  topic, whose one partition is 0, on `claimed` only, where it is required.
+  A status of another kind carrying it, or a `claimed` status without it,
+  fails validation.
 - `log_offset` is the agent output offset an adopter follows from, on
   `started` only. The transcript is published up to at least that offset.
   Later offsets go to the receiver's [progress](#progress) topic.
@@ -457,7 +461,7 @@ A `terminal` status's `wherry` object adds the attempt's chunk count:
 
 | `kind` | State | Written when | Extra |
 | --- | --- | --- | --- |
-| `claimed` | `TASK_STATE_WORKING` | the receiver admits the run | |
+| `claimed` | `TASK_STATE_WORKING` | the receiver admits the run | `task_offset` |
 | `started` | `TASK_STATE_WORKING` | the job has started | |
 | `rejected` | `TASK_STATE_REJECTED` | the receiver refuses the submission | the reason as message text |
 | `terminal` | `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED` or `TASK_STATE_CANCELED` | the run has ended | the agent's message from its [outcome file](configuration.md#agent-contract), or the reason as message text |
@@ -496,6 +500,8 @@ base64 does. The fixed texts are:
   `model not in the pool's terms`, `duplicate submission`,
   `the task carries no envelope`,
   `task_started_by is past the pool's start_by_limit`,
+  `task_started_by is before its append time`,
+  `task_ended_by is before task_started_by`,
   `not started by task_started_by (<RFC 3339 time>)`,
   `not ended by task_ended_by (<RFC 3339 time>)`,
   `task_ended_by is past task_started_by plus the 6h run cap`,
@@ -950,8 +956,6 @@ These releases are exempt:
 
 - a receiver that cannot read the pool's events at admission releases the
   task, since it cannot check for a committed terminal;
-- a receiver that cannot read the run's submissions at admission releases the
-  task, since it cannot tell which is the run's earliest accepted submission;
 - a receiver that is shutting down releases the task, since an adopter
   continues the run;
 - a denied receiver releases the task, since it cannot write;
@@ -1059,7 +1063,7 @@ pool's events in a transaction of its own, after the run's `claimed` status.
   its membership ended, for a record the broker appended before the
   `wherry.admin` record that ended it.
 - `key` is the attempt's P-256 public JWK of exactly `kty`, `crv`, `x` and
-  `y`. `task_hash` is the hash of the run's earliest accepted submission
+  `y`. `task_hash` is the hash of the run's task
   ([Admission](#admission)).
 - On a redelivery the receiver first asks its profiles' Lookup for the run's
   job. Absent is a first start. A job that never started is purged and
@@ -1091,15 +1095,21 @@ pool's events in a transaction of its own, after the run's `claimed` status.
 
 ### The claim check
 
-The custodian reads the pool's events and task topic to their last stable
-offsets, and answers each open request that no attempt wrap or refusal
-answers. It serves a request only when:
+The custodian reads the pool's events to their last stable offset, and
+answers each open request that no attempt wrap or refusal answers. It serves a
+request only when:
 
 1. it verifies as the live member of the pool it names; otherwise it refuses
    `not the current claimant`;
-2. its `task_hash` is that of the run's earliest accepted submission
-   (otherwise `not the current claimant`), and the run has no terminal status
-   and no cancel (otherwise `terminal`);
+2. the run has no terminal status and no cancel (otherwise `terminal`), its
+   `task_hash` is the run's task, and the submission at the `task_offset` of
+   the requester's `claimed` status, read with one fetch, is under the run's
+   Kafka key, passes the [signed-record checks](#signed-records), names the
+   run under a run ID its signer derives, has the request's `task_hash`, and
+   carries an `envelope` with bounds that hold at its append time as
+   [Admission](#admission) states; otherwise `not the current claimant`. It
+   checks rules 1 and 3 before this one, and reads the task topic for no
+   other request;
 3. the run's latest ownership status, `claimed` or `released`, is the
    requester's `claimed` for the request's `attempt`; otherwise
    `not the current claimant`;
@@ -1165,7 +1175,8 @@ An attempt wrap answers one open request with the run's content key.
 ## Re-key wrap
 
 A receiver holding a pool key that is not current, such as a former
-custodian, answers an open request for a task it can open, from the task's
+custodian, answers an open request that passes rules 1 to 3 of the
+[claim check](#the-claim-check), for a task it can open, from the task's
 submit wrap or a re-key wrap to a key it holds, with the content key wrapped
 straight to the current snapshot's key, unless a re-key wrap of the task to
 that key is on the pool's events. There are no chains. It writes the re-key
@@ -1341,46 +1352,53 @@ A receiver that claims a submission:
    when its Kafka key is not its `run`;
 3. rejects it with `run ID does not match its signer` when its `run_nonce`
    is missing or not canonical, or its `tenant`, `host` and `run_nonce` do
-   not derive its `run` ([Submission](#submission)), and acknowledges it and
-   writes nothing when it is a later copy, byte for byte, of the run's
-   earliest accepted submission: the earliest on the pool's task topic, read
-   to its last stable offset, that passes those checks and this one under its
-   run's Kafka key, carries an `envelope`, and whose bounds hold at its append
-   time: `task_started_by` not passed and within the pool's
-   `start_by_limit_ms`, and `task_ended_by` neither before `task_started_by`
-   nor more than six hours after it. The rejection names the signer's tenant
-   and task hash, so it binds to no other host's run;
-4. rejects it with `the task carries no envelope` when it has none, and when
-   its agent is outside the pool's terms; with
-   `model not in the pool's terms` when the agent has `models` and the
+   not derive its `run` ([Submission](#submission)). The rejection names the
+   signer's tenant and task hash, so it binds to no other host's run;
+4. rejects it with `duplicate submission` when the run's task is another
+   hash. The run's task is the `task_hash` of the run's first status on the
+   pool's events, in log order, that is not `rejected`, among the statuses of
+   live pool members: the first wins. Revoking the member that wrote that
+   status makes the next one first;
+5. acknowledges it and writes nothing when the latest `claimed` status with
+   its task hash names another `task_offset`: it is a copy, byte for byte, of
+   the claimed submission. A redelivery of the claimed submission itself goes
+   on;
+6. rejects it with `agent is outside the pool terms` when its agent is
+   outside the pool's terms; with `model not in the pool's terms` when the agent has `models` and the
    placement names no model or one outside the current `models`, or the
    agent has no `models` and the placement names one;
-5. rejects a run no pool member has claimed with
+7. rejects a run no pool member has claimed with
    `not started by task_started_by (<RFC 3339 time>)` or
    `not ended by task_ended_by (<RFC 3339 time>)` when that bound has
    passed;
-6. rejects a run no pool member has claimed with
+8. rejects a run no pool member has claimed when it fails a check judged at
+   its append time, which its delivery carries, naming the first that fails:
+   `the task carries no envelope` when it has none;
+   `task_started_by is before its append time`;
+   `task_started_by is past the pool's start_by_limit` when its
+   `task_started_by` falls more than `start_by_limit_ms` after its append
+   time; `task_ended_by is before task_started_by`; and
    `task_ended_by is past task_started_by plus the 6h run cap` when its
-   `task_ended_by` is more than six hours after its `task_started_by`;
-7. releases it when no ready plugin profile satisfies the placement, unless
+   `task_ended_by` is more than six hours after its `task_started_by`. Its
+   `rejected` status names no run's task (step 4), so a later submission of
+   the run that passes is admitted;
+9. releases it when no ready plugin profile satisfies the placement, unless
    a member has claimed the run and its `task_ended_by` has passed, or its
    `task_started_by` has passed with no `started` event;
-8. rejects a run no pool member has claimed with
-   `task_started_by is past the pool's start_by_limit` when its submission
-   reached the pool's task topic more than the pool's `start_by_limit_ms`
-   ago, or its `task_started_by` falls more than `start_by_limit_ms` after
-   that;
-9. rejects it with `duplicate submission` when it is not the run's earliest
-   accepted submission;
-10. rejects it when the host of the run's [git input](#git-input) is not
+10. rejects a run no pool member has claimed with
+    `task_started_by is past the pool's start_by_limit` when its submission
+    reached the pool's task topic more than the pool's `start_by_limit_ms`
+    ago;
+11. rejects it when the host of the run's [git input](#git-input) is not
     one of the pool's current VCS hosts, and with `pool <pool> has no
     storage for S3 inputs and outputs` when the run has S3 inputs or
     outputs and the pool's terms have no `storage`;
-11. rejects it with `unsupported message part` when a `url` part appears
+12. rejects it with `unsupported message part` when a `url` part appears
     in the message;
-12. writes the echo and the `claimed` status.
+13. writes the echo and the `claimed` status, its `task_offset` the
+    submission's offset.
 
-A run a cancel covers skips steps 5, 10 and 11, and ends `TASK_STATE_CANCELED`
+A run a cancel covers skips steps 7, 11 and 12, and ends `TASK_STATE_CANCELED`
 after its `claimed` status. A redelivered run that a member has claimed
 goes on to adoption past its bounds. When its `task_ended_by` has passed,
 the receiver stops the job it finds and ends the run `TASK_STATE_FAILED`
@@ -1670,6 +1688,9 @@ attribute to a host and run with a `rejected` [status](#status) in
 | a later submission of a run ID | rejected | `duplicate submission` |
 | the submission is older than the pool's `start_by_limit_ms`, or its `task_started_by` is later than `start_by_limit_ms` after it | rejected | `task_started_by is past the pool's start_by_limit` |
 | `task_ended_by` is more than six hours after `task_started_by` | rejected | `task_ended_by is past task_started_by plus the 6h run cap` |
+| the submission carries no envelope | rejected | `the task carries no envelope` |
+| `task_started_by` is before the submission's append time | rejected | `task_started_by is before its append time` |
+| `task_ended_by` is before `task_started_by` | rejected | `task_ended_by is before task_started_by` |
 | `task_started_by` or `task_ended_by` has passed | rejected | `not started by task_started_by (<RFC 3339 time>)`, `not ended by task_ended_by (<RFC 3339 time>)` |
 | a required credential of the agent is unsupplied | rejected | `the host does not supply a required credential of the agent` |
 | a task credential takes an agent credential's target | rejected | `a task credential takes the target of one of the agent's credentials` |

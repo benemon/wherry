@@ -358,16 +358,10 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 	if len(pending) == 0 {
 		return nil
 	}
-	tasks, err := r.reader.ReadFrom(ctx, admin.PoolTasksTopic(r.config.Pool), 0)
-	if err != nil {
-		r.deny(err, capRead)
-		return err
-	}
-	earliest := r.earliestSubmissions(tasks)
 	if !custodian {
-		return r.rekey(ctx, pending, events, earliest, keys, current)
+		return r.rekey(ctx, pending, events, keys, current)
 	}
-	check := &claimCheck{r: r, events: events, earliest: earliest, keys: keys, now: time.Now(), suspended: suspended}
+	check := &claimCheck{r: r, events: events, keys: keys, now: time.Now(), suspended: suspended}
 	for _, request := range pending {
 		records := check.decide(ctx, request)
 		if len(records) == 0 {
@@ -403,18 +397,23 @@ func (r *Receiver) acknowledgeSuspension(ctx context.Context, keys map[string]*p
 	return r.publish(ctx, keys, marks.Reason, keys[marks.Current.KeyID], marks, latest, time.Now())
 }
 
-// rekey writes, for each pending request's task that keys open, a re-key wrap of its content key to current, unless
-// one is on the events.
-func (r *Receiver) rekey(ctx context.Context, pending []openRequest, events poolEvents, earliest map[string]*runSubmission, keys map[string]*poolKey, current wire.PoolKey) error {
+// rekey writes, for each pending request whose claimed task the lookup finds and keys open, a re-key wrap of its content
+// key to current, unless one is on the events.
+func (r *Receiver) rekey(ctx context.Context, pending []openRequest, events poolEvents, keys map[string]*poolKey, current wire.PoolKey) error {
 	done := map[string]bool{}
 	for _, request := range pending {
 		if request.request == nil || done[request.request.TaskHash] {
 			continue
 		}
 		hash := request.request.TaskHash
-		done[hash] = true
-		task := earliest[request.request.Run]
-		if task == nil || task.hash != hash || slices.ContainsFunc(events.rekeys[hash], func(wrap wire.RekeyWrap) bool { return wrap.RecipientKID == current.KeyID }) {
+		if slices.ContainsFunc(events.rekeys[hash], func(wrap wire.RekeyWrap) bool { return wrap.RecipientKID == current.KeyID }) {
+			continue
+		}
+		_, task, _, err := r.lookup(ctx, events, request.request)
+		if err != nil {
+			return err
+		}
+		if task == nil {
 			continue
 		}
 		contentKey := r.contentKey(task.record, keys, events.rekeys[hash])
@@ -428,6 +427,7 @@ func (r *Receiver) rekey(ctx context.Context, pending []openRequest, events pool
 		if err := r.admissionCommit(ctx, record); err != nil {
 			return fmt.Errorf("re-key run %s: %w", request.request.Run, err)
 		}
+		done[hash] = true
 		r.logger.Printf("run %s: re-keyed its content key to pool key %s", request.request.Run, current.KeyID)
 	}
 	return nil
@@ -472,7 +472,6 @@ func (r *Receiver) contentKey(task *wire.Submission, keys map[string]*poolKey, r
 type claimCheck struct {
 	r         *Receiver
 	events    poolEvents
-	earliest  map[string]*runSubmission
 	keys      map[string]*poolKey
 	now       time.Time
 	suspended bool
@@ -500,35 +499,16 @@ func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Reco
 		r.logger.Printf("custodian: refused an open request for run %s: %s", opened.record.Key, reason)
 		return answer(&wire.OpenRefusal{Custodian: r.id, Request: opened.digest, Reason: reason})
 	}
-	// Rule 1: the request verifies as the live pool member it names.
 	request := opened.request
-	if state, _, _ := r.snapshot(); request == nil || !poolMember(state, r.config.Pool, request.Receiver) {
-		return refuse(wire.RefusedNotClaimant)
+	owners, task, reason, err := r.lookup(ctx, c.events, request)
+	switch {
+	case err != nil:
+		r.logger.Printf("custodian: read run %s's task: %v", opened.record.Key, err)
+		return nil
+	case reason != "":
+		return refuse(reason)
 	}
-	// Rule 2: the run's earliest accepted task, not terminal or cancelled, within its open bound.
-	task := c.earliest[request.Run]
-	if task == nil || task.hash != request.TaskHash {
-		return refuse(wire.RefusedNotClaimant)
-	}
-	binding := task.record.Wherry
-	if c.events.committedTerminal(request.Run, task.hash) || r.cancelledRun(ctx, c.events, request.Run, binding.Tenant) {
-		return refuse(wire.RefusedTerminal)
-	}
-	// Rule 3: the latest ownership event is the requester's claim for its attempt.
-	var owners []int
-	for i, status := range c.events.statuses[request.Run] {
-		if status.Wherry.TaskHash == task.hash && (status.Wherry.Kind == "claimed" || status.Wherry.Kind == "released") {
-			owners = append(owners, i)
-		}
-	}
-	statuses := c.events.statuses[request.Run]
-	if len(owners) == 0 {
-		return refuse(wire.RefusedNotClaimant)
-	}
-	claim := statuses[owners[len(owners)-1]]
-	if claim.Wherry.Kind != "claimed" || claim.Wherry.Receiver != request.Receiver || claim.Wherry.Attempt != request.Attempt {
-		return refuse(wire.RefusedNotClaimant)
-	}
+	binding, statuses := task.record.Wherry, c.events.statuses[request.Run]
 	adopting := slices.ContainsFunc(statuses, func(status wire.RunStatus) bool {
 		return status.Wherry.TaskHash == task.hash && status.Wherry.Kind == "adopting" && status.Wherry.Receiver == request.Receiver && status.Wherry.Attempt == request.Attempt
 	})
@@ -584,6 +564,57 @@ func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Reco
 		c.changed = decision.Reason
 	}
 	return answer(&wire.AttemptWrap{Custodian: r.id, TaskHash: task.hash, Request: opened.digest, Receiver: request.Receiver, Attempt: request.Attempt, JWE: string(jwe)})
+}
+
+// lookup applies rules 1 and 3 and the terminal or cancelled refusal to request, then rule 2: the claim's task offset
+// holds the run's task. It returns the indexes of the run's ownership events of the task, the claim last, and the task,
+// or the refusal; an error leaves the request unanswered.
+func (r *Receiver) lookup(ctx context.Context, events poolEvents, request *wire.OpenRequest) ([]int, *runSubmission, string, error) {
+	// Rule 1: the request verifies as the live pool member it names.
+	if state, _, _ := r.snapshot(); request == nil || !poolMember(state, r.config.Pool, request.Receiver) {
+		return nil, nil, wire.RefusedNotClaimant, nil
+	}
+	// Rule 3: the latest ownership event is the requester's claim for its attempt.
+	statuses := events.statuses[request.Run]
+	var owners []int
+	for i, status := range statuses {
+		if status.Wherry.TaskHash == request.TaskHash && (status.Wherry.Kind == "claimed" || status.Wherry.Kind == "released") {
+			owners = append(owners, i)
+		}
+	}
+	if len(owners) == 0 {
+		return nil, nil, wire.RefusedNotClaimant, nil
+	}
+	claim := statuses[owners[len(owners)-1]]
+	if claim.Wherry.Kind != "claimed" || claim.Wherry.Receiver != request.Receiver || claim.Wherry.Attempt != request.Attempt {
+		return nil, nil, wire.RefusedNotClaimant, nil
+	}
+	if events.committedTerminal(request.Run, request.TaskHash) || r.cancelledRun(ctx, events, request.Run, claim.Wherry.Tenant) {
+		return nil, nil, wire.RefusedTerminal, nil
+	}
+	// Rule 2: the record at the claim's task offset is the run's task, an authorised host's under the run's key and
+	// derived ID, its bounds holding at its append time.
+	if events.task(request.Run) != request.TaskHash {
+		return nil, nil, wire.RefusedNotClaimant, nil
+	}
+	record, err := r.reader.ReadAt(ctx, admin.PoolTasksTopic(r.config.Pool), *claim.Wherry.TaskOffset)
+	if err != nil {
+		r.deny(err, capRead)
+		return nil, nil, "", err
+	}
+	if record == nil || string(record.Key) != request.Run || wire.TaskHash(record.Value) != request.TaskHash {
+		return nil, nil, wire.RefusedNotClaimant, nil
+	}
+	state, _, hosts := r.snapshot()
+	submission, err := authorizeSubmission(state, hosts, record.Value, r.config.Pool)
+	if err != nil || submission.Wherry.Run != request.Run || wire.CheckRunID(submission.Wherry) != nil {
+		return nil, nil, wire.RefusedNotClaimant, nil
+	}
+	task := &runSubmission{record: &submission, hash: request.TaskHash, submitted: record.Timestamp}
+	if inadmissible(*task, state.Pools[r.config.Pool]) != "" {
+		return nil, nil, wire.RefusedNotClaimant, nil
+	}
+	return owners, task, "", nil
 }
 
 // poolMember reports that receiver is a live member of pool.

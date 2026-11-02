@@ -42,6 +42,8 @@ type read struct {
 	// start and end are the highest log start and last stable offsets listed for the topic, start raised by those its
 	// fetches report.
 	start, end int64
+	// once ends the read at its first fetch of the partition.
+	once bool
 }
 
 // NewReader returns a Reader that lists offsets and reads through a client built from client's options. client must be
@@ -99,16 +101,34 @@ func (r *Reader) ReadFromWithEnd(ctx context.Context, topic string, offset int64
 // ReadRange is ReadFromWithEnd that also returns the log start offset in effect at the read's last fetch, or listed
 // before the read when it fetched nothing: retention can move it past the listing between the two.
 func (r *Reader) ReadRange(ctx context.Context, topic string, offset int64) ([]*kgo.Record, int64, int64, error) {
-	reads, err := r.readFrom(ctx, map[string]int64{topic: offset})
+	reads, err := r.readFrom(ctx, map[string]int64{topic: offset}, false)
 	if err != nil {
 		return nil, 0, 0, err
 	}
 	return reads[topic].records, reads[topic].start, reads[topic].end, reads[topic].err
 }
 
+// ReadAt reads the record at offset in topic's partition 0 with one fetch; nil when the log holds none there.
+func (r *Reader) ReadAt(ctx context.Context, topic string, offset int64) (*kgo.Record, error) {
+	reads, err := r.readFrom(ctx, map[string]int64{topic: offset}, true)
+	if err != nil {
+		return nil, err
+	}
+	read := reads[topic]
+	if read.err != nil || len(read.records) == 0 {
+		return nil, read.err
+	}
+	// A gap at offset, or the log start passing it before the fetch, makes the first record a later one.
+	if record := read.records[0]; record.Topic == topic && record.Partition == 0 && record.Offset == offset {
+		return record, nil
+	}
+	return nil, nil
+}
+
 // readFrom reads each topic as ReadFrom does from its offset, listing their offsets in one request of each kind and
-// fetching them together. A topic's own failure is its read's error; the error returned fails every topic.
-func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64) (map[string]*read, error) {
+// fetching them together, or with once as ReadAt does. A topic's own failure is its read's error; the error returned
+// fails every topic.
+func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64, once bool) (map[string]*read, error) {
 	reads := map[string]*read{}
 	if len(offsets) == 0 {
 		// kadm lists every topic when it is given none.
@@ -147,7 +167,7 @@ func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64) (map[st
 		}
 	}
 	for topic, offset := range offsets {
-		current := &read{remaining: map[int32]int64{}, partitions: map[int32]kgo.Offset{}, done: make(chan struct{})}
+		current := &read{remaining: map[int32]int64{}, partitions: map[int32]kgo.Offset{}, done: make(chan struct{}), once: once}
 		reads[topic] = current
 		for partition, end := range ends[topic] {
 			start, ok := starts.Lookup(topic, partition)
@@ -155,6 +175,9 @@ func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64) (map[st
 				break
 			}
 			current.start, current.end = max(current.start, start.Offset), max(current.end, end.Offset)
+			if once && (partition != 0 || offset < start.Offset) {
+				continue
+			}
 			if ok && max(start.Offset, offset) < end.Offset {
 				current.remaining[partition] = end.Offset
 				current.partitions[partition] = kgo.NewOffset().At(max(start.Offset, offset))
@@ -351,7 +374,7 @@ func (r *Reader) fetch(ctx context.Context) {
 				delete(current.remaining, partition.Partition)
 			}
 		}
-		if len(partition.Records) == 0 && partition.LastStableOffset >= end {
+		if len(partition.Records) == 0 && partition.LastStableOffset >= end || current.once {
 			delete(current.remaining, partition.Partition)
 		}
 		if len(current.remaining) == 0 {
@@ -402,7 +425,7 @@ func (r *Reader) ReadKeys(ctx context.Context, topics map[string]string) (signed
 	for _, topic := range topics {
 		offsets[topic] = 0
 	}
-	reads, err := r.readFrom(ctx, offsets)
+	reads, err := r.readFrom(ctx, offsets, false)
 	if err != nil {
 		return nil, err
 	}

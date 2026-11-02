@@ -288,6 +288,7 @@ func (f *fixture) submit(t *testing.T, selector []wire.Requirement) SubmitResult
 type claimed struct {
 	submission wire.Submission
 	hash       string
+	offset     int64
 }
 
 // claim reads the tasks for runID from the pool's task topic as receiver r and authorises them against the host keys
@@ -314,7 +315,7 @@ func (r *testReceiver) claim(t *testing.T, ctx context.Context, runID string) []
 		}
 		if submission.Wherry.Run == runID {
 			sum := sha256.Sum256(record.Value)
-			tasks = append(tasks, claimed{submission, hex.EncodeToString(sum[:])})
+			tasks = append(tasks, claimed{submission, hex.EncodeToString(sum[:]), record.Offset})
 		}
 	}
 	return tasks
@@ -336,6 +337,9 @@ func (r *testReceiver) status(t *testing.T, task claimed, attempt int64, eventID
 	status := &wire.RunStatus{
 		StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: run, ContextID: run, Status: wire.TaskStatus{State: state, Timestamp: time.Now().UTC().Format(time.RFC3339)}},
 		Wherry:       wire.StatusBinding{ReceiverBinding: r.binding(task, attempt), EventID: eventID, Kind: kind, TaskHash: task.hash},
+	}
+	if kind == "claimed" {
+		status.Wherry.TaskOffset = &task.offset
 	}
 	if mutate != nil {
 		mutate(status)

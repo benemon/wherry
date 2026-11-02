@@ -869,6 +869,27 @@ func (events poolEvents) committedTerminal(run, taskHash string) bool {
 	})
 }
 
+// task is the run's task hash: that of its first status other than a rejection, or empty when it has none.
+func (events poolEvents) task(run string) string {
+	for _, status := range events.statuses[run] {
+		if status.Wherry.Kind != "rejected" {
+			return status.Wherry.TaskHash
+		}
+	}
+	return ""
+}
+
+// claim is the latest claimed status of hash in run, or nil.
+func (events poolEvents) claim(run, hash string) *wire.RunStatus {
+	statuses := events.statuses[run]
+	for i := len(statuses) - 1; i >= 0; i-- {
+		if statuses[i].Wherry.Kind == "claimed" && statuses[i].Wherry.TaskHash == hash {
+			return &statuses[i]
+		}
+	}
+	return nil
+}
+
 // failedHere reports a start failure for the task record hash, which binds the failure to its run's tenant.
 func failedHere(failures []wire.StartFailure, hash string) bool {
 	return slices.ContainsFunc(failures, func(failure wire.StartFailure) bool { return failure.TaskHash == hash })

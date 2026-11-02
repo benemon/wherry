@@ -1475,15 +1475,17 @@ func TestTaskAppendedAfterTheDrainScanIsResubmittedOnce(t *testing.T) {
 	}
 }
 
-// A handover verifies each run's task records up to its earliest accepted one, once for the pass: runs submitted twice
-// cost one verification each.
+// A handover verifies the records of each run's task alone, each hash once for the pass: a copy of the task and a second
+// hash under the run cost nothing.
 func TestHandoverVerifiesEachTaskRecordOnce(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.quiet()
 	const runs = 5
 	for i := range runs {
 		run := fmt.Sprintf("run-%d", i)
-		f.turn(t, run, 1)
+		record := f.turn(t, run, 1)
+		f.produce(t, admin.PoolTasksTopic(testPool), string(record.Key), record.Value)
+		f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
 		f.turn(t, run, 2)
 	}
 	var verifications atomic.Int64
@@ -1503,8 +1505,50 @@ func TestHandoverVerifiesEachTaskRecordOnce(t *testing.T) {
 	if rekeys := f.rekeys(t); len(rekeys) != runs {
 		t.Fatalf("re-key wraps for %d runs, want %d", len(rekeys), runs)
 	}
-	t.Logf("%d verifications for %d runs over %d task records", verifications.Load(), runs, 2*runs)
+	t.Logf("%d verifications for %d runs over %d task records", verifications.Load(), runs, 3*runs)
 	if got := verifications.Load(); got != runs {
-		t.Fatalf("%d verifications for %d runs over %d task records, want one per run", got, runs, 2*runs)
+		t.Fatalf("%d verifications for %d runs over %d task records, want one per run", got, runs, 3*runs)
+	}
+}
+
+// A drain re-keys each live hash once, a copy of it included: a run's task when it has one and each admissible hash of a
+// run with none, never a terminal, expired or already re-keyed task.
+func TestDrainRekeysEachLiveHashOnce(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.quiet()
+	successor, err := newAttemptKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := wire.PoolKey{KeyID: signed.KeyThumbprint(&successor.PublicKey), Key: jose.JSONWebKey{Key: &successor.PublicKey}}
+	expired := f.submit(t, f.host, func(task *wire.Submission) {
+		named(task, "run-expired")
+		task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = time.Now().Unix()+1, time.Now().Unix()+1
+	})
+	live := f.turn(t, "run-live", 1)
+	f.produce(t, admin.PoolTasksTopic(testPool), string(live.Key), live.Value)
+	f.publishStatus(t, live, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
+	f.turn(t, "run-live", 2)
+	f.turn(t, "run-open", 1)
+	f.turn(t, "run-open", 2)
+	f.publishStatus(t, f.turn(t, "run-done", 1), testReceiver, f.receiver.signing, "terminal", wire.TaskStateCompleted, nil)
+	moved := f.turn(t, "run-moved", 1)
+	rekey, err := f.receiver.rekeyRecord(string(moved.Key), wire.TaskHash(moved.Value), f.contentKey(t, moved), current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.produce(t, rekey.Topic, string(rekey.Key), rekey.Value)
+	passed(f.parse(t, expired).Wherry.TaskEndedBy)
+	if err := f.receiver.handOver(f.ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	rekeys := f.rekeys(t)
+	for run, want := range map[string]int{testRun("run-live"): 1, testRun("run-open"): 2, testRun("run-done"): 0, testRun("run-moved"): 1, testRun("run-expired"): 0} {
+		if len(rekeys[run]) != want {
+			t.Fatalf("run %s re-key wraps %+v, want %d", run, rekeys[run], want)
+		}
+	}
+	if wraps := rekeys[testRun("run-live")]; wraps[0].TaskHash != wire.TaskHash(live.Value) {
+		t.Fatalf("run-live re-keyed %s, want its task", wraps[0].TaskHash)
 	}
 }

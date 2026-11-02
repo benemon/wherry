@@ -26,6 +26,7 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
 	jose "github.com/go-jose/go-jose/v4"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -541,13 +542,27 @@ func TestOpenWaitListsAgainOnlyOnARetriablePartitionError(t *testing.T) {
 // openAs writes, signed by key, receiver's open request for attempt of the task record and returns its digest.
 func (f fixture) openAs(t *testing.T, record *kgo.Record, receiver string, key ed25519.PrivateKey, attempt int64) string {
 	t.Helper()
+	return f.requestOf(t, string(record.Key), wire.TaskHash(record.Value), receiver, key, attempt)
+}
+
+// requestOf writes, signed by key, receiver's open request for attempt of run's task hash and returns its digest.
+func (f fixture) requestOf(t *testing.T, run, hash, receiver string, key ed25519.PrivateKey, attempt int64) string {
+	t.Helper()
 	attemptKey, err := newAttemptKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	value := must(t)(wire.SignRecord(&wire.OpenRequest{Run: string(record.Key), Attempt: attempt, Receiver: receiver, TaskHash: wire.TaskHash(record.Value), Key: wire.NewAttemptKey(&attemptKey.PublicKey)}, key))
-	f.produce(t, admin.PoolEventsTopic(testPool), string(record.Key), value)
+	value := must(t)(wire.SignRecord(&wire.OpenRequest{Run: run, Attempt: attempt, Receiver: receiver, TaskHash: hash, Key: wire.NewAttemptKey(&attemptKey.PublicKey)}, key))
+	f.produce(t, admin.PoolEventsTopic(testPool), run, value)
 	return wire.Digest(value)
+}
+
+// claimOf writes, signed by key, receiver's claimed status for attempt of run's task hash at offset.
+func (f fixture) claimOf(t *testing.T, run, hash string, offset int64, receiver string, key ed25519.PrivateKey, attempt int64) {
+	t.Helper()
+	status := f.receiver.status(&wire.Submission{Wherry: wire.SubmissionBinding{Tenant: testTenant, Run: run}}, hash, attempt, "claimed", taskStatus(wire.TaskStateWorking, ""), nil)
+	status.Wherry.Receiver, status.Wherry.TaskOffset = receiver, &offset
+	f.produce(t, admin.PoolEventsTopic(testPool), run, must(t)(wire.SignRecord(status, key)))
 }
 
 // statusAs writes, signed by key, receiver's status of kind for attempt of the task record and returns its value.
@@ -555,6 +570,9 @@ func (f fixture) statusAs(t *testing.T, record *kgo.Record, receiver string, key
 	t.Helper()
 	status := f.receiver.status(f.parse(t, record), wire.TaskHash(record.Value), attempt, kind, taskStatus(wire.TaskStateWorking, ""), nil)
 	status.Wherry.Receiver = receiver
+	if kind == "claimed" {
+		status.Wherry.TaskOffset = &record.Offset
+	}
 	value := must(t)(wire.SignRecord(status, key))
 	f.produce(t, admin.PoolEventsTopic(testPool), string(record.Key), value)
 	return value
@@ -787,15 +805,12 @@ func servesAClaimAfterThePreviousHolderEnded(t *testing.T, unread bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	check := &claimCheck{r: f.receiver, events: events, earliest: f.receiver.earliestSubmissions(f.records(t, admin.PoolTasksTopic(testPool))), keys: keys, now: time.Now()}
+	check := &claimCheck{r: f.receiver, events: events, keys: keys, now: time.Now()}
 	request := slices.IndexFunc(events.requests, func(request openRequest) bool { return request.digest == digest })
-	// A cancelled context fails the advertisement read.
-	ctx, cancel := context.WithCancel(f.ctx)
 	if unread {
-		cancel()
+		f.failReadOnce(t, admin.ReceiversTopic)
 	}
-	defer cancel()
-	answer := check.decide(ctx, events.requests[request])
+	answer := check.decide(f.ctx, events.requests[request])
 	var decision wire.ClaimDecision
 	var wrap wire.AttemptWrap
 	if len(answer) != 2 || wire.ParseStrict(answer[0].Value, f.keys(), time.Now(), &decision) != nil || wire.ParseStrict(answer[1].Value, f.keys(), time.Now(), &wrap) != nil {
@@ -853,7 +868,7 @@ func TestClaimCheckRefusesARequestNotFromItsLiveClaimant(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		check := &claimCheck{r: f.receiver, events: events, earliest: f.receiver.earliestSubmissions(f.records(t, admin.PoolTasksTopic(testPool))), keys: keys, now: time.Now()}
+		check := &claimCheck{r: f.receiver, events: events, keys: keys, now: time.Now()}
 		request := slices.IndexFunc(events.requests, func(request openRequest) bool { return request.digest == digest })
 		answer := check.decide(f.ctx, events.requests[request])
 		var refusal wire.OpenRefusal
@@ -1367,24 +1382,6 @@ func TestAFailedReleasedCommitLeavesTheTaskUnacknowledged(t *testing.T) {
 	}
 }
 
-// Receivers act only on a run's earliest accepted task record: a record under the run's key that does not verify does
-// not take the run, and a later copy of the accepted record is acknowledged without a claim.
-func TestAdmissionActsOnTheEarliestAcceptedRecord(t *testing.T) {
-	f := newFixture(t, resultStream)
-	_, other, _ := ed25519.GenerateKey(nil)
-	f.submit(t, other, nil)
-	record := f.submit(t, f.host, nil)
-	copied := f.produce(t, admin.PoolTasksTopic(testPool), testRun("run-a"), record.Value)
-	records := f.records(t, admin.PoolTasksTopic(testPool))
-	record.Offset, copied.Offset = records[1].Offset, records[2].Offset
-	if admitted, ack := f.receiver.admit(f.ctx, copied); admitted != nil || ack != kgo.AckAccept || len(f.eventStatuses(t)) != 0 {
-		t.Fatalf("a later copy admitted %v with %v and %d statuses written", admitted, ack, len(f.eventStatuses(t)))
-	}
-	if status := f.execute(t, record, 1); status != kgo.AckAccept {
-		t.Fatalf("the valid task ended %v; logs:\n%s", status, f.logs.String())
-	}
-}
-
 // Records under a run's key whose run ID their signer does not derive, from another tenant and from another host of the
 // run's tenant, never take the run: the task after them is admitted, opened by the custodian and re-keyed on drain.
 func TestMismatchingEarlierRecordsNeverWin(t *testing.T) {
@@ -1417,39 +1414,47 @@ func TestMismatchingEarlierRecordsNeverWin(t *testing.T) {
 	})
 }
 
-// A run's earlier record that fails a structure or bound check at its append time never wins the run: the valid record
-// after it runs.
-func TestAnInvalidEarlierRecordNeverWins(t *testing.T) {
+// A run's earlier record rejected at admission never becomes the run's task: rejected statuses name none, and the
+// valid record after it runs.
+func TestARejectedHashIsNeverTheRunsTask(t *testing.T) {
 	now := time.Now()
 	runCap := int64(admin.MaxRunDurationMS / 1000)
-	for name, edit := range map[string]func(*wire.Submission){
-		"past task_started_by at its append": func(task *wire.Submission) {
+	for name, test := range map[string]struct {
+		edit   func(*wire.Submission)
+		reason string
+		// appended moves the record's append time.
+		appended time.Duration
+	}{
+		"past task_started_by at its append": {func(task *wire.Submission) {
 			task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = now.Add(-time.Minute).Unix(), now.Add(time.Minute).Unix()
-		},
-		"task_ended_by before task_started_by": func(task *wire.Submission) {
+		}, "not started by task_started_by", 0},
+		"appended after task_started_by": {func(task *wire.Submission) {
+			task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = now.Add(time.Minute).Unix(), now.Add(2*time.Minute).Unix()
+		}, "task_started_by is before its append time", 2 * time.Minute},
+		"task_ended_by before task_started_by": {func(task *wire.Submission) {
 			task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = now.Add(time.Minute).Unix(), now.Add(30*time.Second).Unix()
-		},
-		"past the run cap": func(task *wire.Submission) {
+		}, "task_ended_by is before task_started_by", 0},
+		"past the run cap": {func(task *wire.Submission) {
 			task.Wherry.TaskStartedBy = now.Add(time.Minute).Unix()
 			task.Wherry.TaskEndedBy = task.Wherry.TaskStartedBy + runCap + 1
-		},
-		"past the start_by_limit": func(task *wire.Submission) {
+		}, "task_ended_by is past task_started_by plus the 6h run cap", 0},
+		"past the start_by_limit": {func(task *wire.Submission) {
 			task.Wherry.TaskStartedBy = now.Add(time.Duration(admin.DefaultStartByLimitMS)*time.Millisecond + time.Hour).Unix()
 			task.Wherry.TaskEndedBy = task.Wherry.TaskStartedBy
-		},
-		"no envelope": nil,
+		}, "task_started_by is past the pool's start_by_limit", 0},
+		"no envelope": {nil, "the task carries no envelope", 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			invalid := testSubmission("run-a")
-			if edit != nil {
-				edit(invalid)
+			if test.edit != nil {
+				test.edit(invalid)
 				f.seal(t, invalid)
 			}
-			f.produce(t, admin.PoolTasksTopic(testPool), testRun("run-a"), must(t)(wire.SignRecord(invalid, f.host)))
-			record := f.submit(t, f.host, nil)
-			record.Offset = f.records(t, admin.PoolTasksTopic(testPool))[1].Offset
-			if status := f.execute(t, record, 1); status != kgo.AckAccept {
+			record := f.produce(t, admin.PoolTasksTopic(testPool), testRun("run-a"), must(t)(wire.SignRecord(invalid, f.host)))
+			record.Timestamp = record.Timestamp.Add(test.appended)
+			f.rejected(t, record, test.reason)
+			if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
 				t.Fatalf("the valid task ended %v; logs:\n%s", status, f.logs.String())
 			}
 		})
@@ -1568,4 +1573,292 @@ func TestNextPassAnswersAfterAnUnconfirmedAnswerCommit(t *testing.T) {
 	if answer := f.answered(t, digest); answer != "wrap" {
 		t.Fatalf("request answered %q on the next pass, want a wrap; logs:\n%s", answer, f.logs.String())
 	}
+}
+
+// twoHashes submits two tasks under one run, different in their message ID.
+func (f fixture) twoHashes(t *testing.T) (*kgo.Record, *kgo.Record) {
+	t.Helper()
+	return f.submit(t, f.host, nil), f.submit(t, f.host, func(task *wire.Submission) { task.Message.MessageID = "msg-b" })
+}
+
+// Only the run's first task opens: of two hashes claimed under one run, by different receivers or by one receiver's
+// different attempts, or the second claimed after the first opened, the second is refused at open and its redelivery
+// rejected.
+func TestOnlyTheRunsFirstTaskOpens(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		second        string
+		attempt       int64
+		openFirstOnce bool
+	}{
+		{"different receivers", "receiver-c", 1, false},
+		{"one receiver's different attempts", "receiver-b", 2, false},
+		{"second claimed after the first opened", "receiver-c", 1, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			f.quiet()
+			keys := map[string]ed25519.PrivateKey{"receiver-b": f.addPeer(t, "receiver-b", testPool), "receiver-c": f.addPeer(t, "receiver-c", testPool)}
+			first, second := f.twoHashes(t)
+			f.statusAs(t, first, "receiver-b", keys["receiver-b"], "claimed", 1)
+			if test.openFirstOnce {
+				if answer := f.answered(t, f.openAs(t, first, "receiver-b", keys["receiver-b"], 1)); answer != "wrap" {
+					t.Fatalf("the first hash answered %q, want served", answer)
+				}
+			}
+			f.statusAs(t, second, test.second, keys[test.second], "claimed", test.attempt)
+			if answer := f.answered(t, f.openAs(t, second, test.second, keys[test.second], test.attempt)); answer != wire.RefusedNotClaimant {
+				t.Fatalf("the second hash answered %q, want %q", answer, wire.RefusedNotClaimant)
+			}
+			if !test.openFirstOnce {
+				if answer := f.answered(t, f.openAs(t, first, "receiver-b", keys["receiver-b"], 1)); answer != "wrap" {
+					t.Fatalf("the first hash answered %q, want served", answer)
+				}
+			}
+			f.rejected(t, second, "duplicate submission")
+		})
+	}
+}
+
+// A hash that is the run's first task stays its task after a later rejected status of it.
+func TestTheRunsFirstTaskStaysFirstOnceRejected(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.quiet()
+	keyB, keyC := f.addPeer(t, "receiver-b", testPool), f.addPeer(t, "receiver-c", testPool)
+	first, second := f.twoHashes(t)
+	f.statusAs(t, first, "receiver-b", keyB, "claimed", 1)
+	f.publishStatus(t, first, testReceiver, f.receiver.signing, "rejected", wire.TaskStateRejected, nil)
+	f.statusAs(t, second, "receiver-c", keyC, "claimed", 1)
+	if answer := f.answered(t, f.openAs(t, second, "receiver-c", keyC, 1)); answer != wire.RefusedNotClaimant {
+		t.Fatalf("the second hash answered %q, want %q", answer, wire.RefusedNotClaimant)
+	}
+}
+
+// Pins the accepted residual: the fold holds live members' statuses alone, so revoking the member whose claim was the
+// run's first task makes the next hash its task, and that hash opens.
+func TestRevokingTheFirstClaimantMakesTheNextHashTheRunsTask(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.quiet()
+	keyB, keyC := f.addPeer(t, "receiver-b", testPool), f.addPeer(t, "receiver-c", testPool)
+	first, second := f.twoHashes(t)
+	f.statusAs(t, first, "receiver-b", keyB, "claimed", 1)
+	f.statusAs(t, second, "receiver-c", keyC, "claimed", 1)
+	if answer := f.answered(t, f.openAs(t, second, "receiver-c", keyC, 1)); answer != wire.RefusedNotClaimant {
+		t.Fatalf("the second hash answered %q before the revocation, want %q", answer, wire.RefusedNotClaimant)
+	}
+	f.revoke(t, "receiver-b")
+	if answer := f.answered(t, f.openAs(t, second, "receiver-c", keyC, 1)); answer != "wrap" {
+		t.Fatalf("the second hash answered %q after the revocation, want served", answer)
+	}
+}
+
+// The custodian serves a claim only when the record at its task offset is the run's task: present, under the run's key,
+// an authorised host's for the run under its derived ID, of the claim's hash, its bounds holding at its append time.
+func TestClaimCheckRefusesAClaimWhoseOffsetHoldsNoTaskOfTheRun(t *testing.T) {
+	startByLimit := time.Duration(admin.DefaultStartByLimitMS) * time.Millisecond
+	for name, test := range map[string]struct {
+		place  func(t *testing.T, f fixture) (run, hash string, offset int64)
+		answer string
+	}{
+		"control": {func(t *testing.T, f fixture) (string, string, int64) {
+			record := f.submit(t, f.host, nil)
+			return string(record.Key), wire.TaskHash(record.Value), record.Offset
+		}, "wrap"},
+		"no record at the offset": {func(t *testing.T, f fixture) (string, string, int64) {
+			record := f.submit(t, f.host, nil)
+			return string(record.Key), wire.TaskHash(record.Value), record.Offset + 5
+		}, wire.RefusedNotClaimant},
+		"a record under another key": {func(t *testing.T, f fixture) (string, string, int64) {
+			task := testSubmission("run-a")
+			f.seal(t, task)
+			record := f.produce(t, admin.PoolTasksTopic(testPool), testRun("run-b"), must(t)(wire.SignRecord(task, f.host)))
+			return testRun("run-a"), wire.TaskHash(record.Value), record.Offset
+		}, wire.RefusedNotClaimant},
+		"a binding run unequal to the key": {func(t *testing.T, f fixture) (string, string, int64) {
+			task := testSubmission("run-b")
+			f.seal(t, task)
+			record := f.produce(t, admin.PoolTasksTopic(testPool), testRun("run-a"), must(t)(wire.SignRecord(task, f.host)))
+			return testRun("run-a"), wire.TaskHash(record.Value), record.Offset
+		}, wire.RefusedNotClaimant},
+		"another hash": {func(t *testing.T, f fixture) (string, string, int64) {
+			record, other := f.twoHashes(t)
+			return string(record.Key), wire.TaskHash(other.Value), record.Offset
+		}, wire.RefusedNotClaimant},
+		"an unauthorised record": {func(t *testing.T, f fixture) (string, string, int64) {
+			_, unknown, _ := ed25519.GenerateKey(nil)
+			record := f.submit(t, unknown, nil)
+			return string(record.Key), wire.TaskHash(record.Value), record.Offset
+		}, wire.RefusedNotClaimant},
+		"a mismatching derived ID": {func(t *testing.T, f fixture) (string, string, int64) {
+			record := f.submit(t, f.host, func(task *wire.Submission) {
+				run := testRun("run-other")
+				task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run
+			})
+			return string(record.Key), wire.TaskHash(record.Value), record.Offset
+		}, wire.RefusedNotClaimant},
+		"bounds failing at its append time": {func(t *testing.T, f fixture) (string, string, int64) {
+			record := f.submit(t, f.host, func(task *wire.Submission) {
+				task.Wherry.TaskStartedBy = time.Now().Add(startByLimit + time.Hour).Unix()
+				task.Wherry.TaskEndedBy = task.Wherry.TaskStartedBy
+			})
+			return string(record.Key), wire.TaskHash(record.Value), record.Offset
+		}, wire.RefusedNotClaimant},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			f.quiet()
+			keyB := f.addPeer(t, "receiver-b", testPool)
+			run, hash, offset := test.place(t, f)
+			f.claimOf(t, run, hash, offset, "receiver-b", keyB, 1)
+			if answer := f.answered(t, f.requestOf(t, run, hash, "receiver-b", keyB, 1)); answer != test.answer {
+				t.Fatalf("answer %q, want %q; logs:\n%s", answer, test.answer, f.logs.String())
+			}
+		})
+	}
+}
+
+// A request from a receiver that is not a live pool member is refused before the task topic is read.
+func TestANonMembersRequestReadsNoTask(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.quiet()
+	keyB := f.addPeer(t, "receiver-b", testPool)
+	record := f.submit(t, f.host, nil)
+	f.statusAs(t, record, "receiver-b", keyB, "claimed", 1)
+	digest := f.openAs(t, record, "receiver-b", keyB, 1)
+	events, err := f.receiver.readEvents(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.revoke(t, "receiver-b")
+	fetches, _ := f.taskFetches(t, 0)
+	request := slices.IndexFunc(events.requests, func(request openRequest) bool { return request.digest == digest })
+	check := &claimCheck{r: f.receiver, events: events, now: time.Now()}
+	var refusal wire.OpenRefusal
+	if answer := check.decide(f.ctx, events.requests[request]); len(answer) != 1 || wire.ParseStrict(answer[0].Value, f.keys(), time.Now(), &refusal) != nil ||
+		refusal.Reason != wire.RefusedNotClaimant || fetches.Load() != 0 {
+		t.Fatalf("refusal %+v after %d task fetches, want %q and none", refusal, fetches.Load(), wire.RefusedNotClaimant)
+	}
+}
+
+// A claim forged with the offset of a rejected task is refused terminal.
+func TestAClaimOfARejectedTaskIsRefusedTerminal(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.quiet()
+	keyB := f.addPeer(t, "receiver-b", testPool)
+	record := f.submit(t, f.host, nil)
+	f.publishStatus(t, record, testReceiver, f.receiver.signing, "rejected", wire.TaskStateRejected, nil)
+	f.statusAs(t, record, "receiver-b", keyB, "claimed", 1)
+	if answer := f.answered(t, f.openAs(t, record, "receiver-b", keyB, 1)); answer != wire.RefusedTerminal {
+		t.Fatalf("answer %q, want %q", answer, wire.RefusedTerminal)
+	}
+}
+
+// Documents the accepted residual at ADR-0033's threat boundary: a live pool member that forges a claim naming a real
+// task's offset and hash, never delivered to it, is served; an ended member or another pool's is refused.
+func TestAForgedClaimIsServedToALivePoolMemberAlone(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		answer string
+	}{{"live member", "wrap"}, {"ended member", wire.RefusedNotClaimant}, {"another pool's member", wire.RefusedNotClaimant}} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			f.quiet()
+			pool := testPool
+			if test.name == "another pool's member" {
+				if err := f.service.PoolCreate(f.ctx, "pool-b", testTerms()); err != nil {
+					t.Fatal(err)
+				}
+				pool = "pool-b"
+			}
+			keyB := f.addPeer(t, "receiver-b", pool)
+			record := f.submit(t, f.host, nil)
+			f.claimOf(t, string(record.Key), wire.TaskHash(record.Value), record.Offset, "receiver-b", keyB, 1)
+			digest := f.openAs(t, record, "receiver-b", keyB, 1)
+			if test.name == "ended member" {
+				f.revoke(t, "receiver-b")
+			}
+			if answer := f.answered(t, digest); answer != test.answer {
+				t.Fatalf("answer %q, want %q", answer, test.answer)
+			}
+		})
+	}
+}
+
+// A former key holder re-keys a task from its live claim's request though an older claim's request, which fails rule
+// 3, comes first in the same pass.
+func TestAnOlderClaimsRequestDoesNotBlockTheRekey(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.quiet()
+	a := f.peer(t, "receiver-x")
+	keyA := holding(t, a)
+	keyB := f.addPeer(t, "receiver-b", testPool)
+	if err := a.refresh(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	record := f.submit(t, f.host, sealedTo(t, keyA))
+	f.statusAs(t, record, "receiver-b", keyB, "claimed", 1)
+	f.openAs(t, record, "receiver-b", keyB, 1)
+	f.statusAs(t, record, "receiver-b", keyB, "claimed", 2)
+	f.openAs(t, record, "receiver-b", keyB, 2)
+	if err := a.serveOpens(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rekeys := f.rekeys(t)[string(record.Key)]; len(rekeys) != 1 || rekeys[0].Holder != "receiver-x" {
+		t.Fatalf("re-key wraps %+v, want receiver-x's", rekeys)
+	}
+}
+
+// The claim check reads the run's task from the claim's offset with a bounded number of fetches, however long the log
+// that follows it: a claimed record early in the task topic, followed by many records, is served in one fetch.
+func TestTheClaimCheckReadsABoundedAmountOfALongTrailingLog(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.quiet()
+	keyB := f.addPeer(t, "receiver-b", testPool)
+	record := f.submit(t, f.host, nil)
+	const trailing = 20
+	for range trailing {
+		f.produce(t, admin.PoolTasksTopic(testPool), testRun("run-filler"), []byte("filler"))
+	}
+	// Every fetch of the task topic returns one record batch, and each record above was produced alone, so reading the
+	// log from the claim's offset to its end takes a fetch per trailing record.
+	topic := admin.PoolTasksTopic(testPool)
+	details, err := kadm.NewClient(f.service.Admin).ListTopics(f.ctx, topic)
+	if err != nil || details[topic].Err != nil {
+		t.Fatalf("list %s: %v %v", topic, err, details[topic].Err)
+	}
+	f.cluster.ControlKey(kmsg.Fetch.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		f.cluster.KeepControl()
+		fetch := request.(*kmsg.FetchRequest)
+		for i, fetched := range fetch.Topics {
+			if fetched.Topic != topic && fetched.TopicID != details[topic].ID {
+				continue
+			}
+			fetch.MaxBytes = 1
+			for j := range fetched.Partitions {
+				fetch.Topics[i].Partitions[j].PartitionMaxBytes = 1
+			}
+		}
+		return nil, nil, false
+	})
+	f.statusAs(t, record, "receiver-b", keyB, "claimed", 1)
+	fetches, below := f.taskFetches(t, record.Offset)
+	if answer := f.answered(t, f.openAs(t, record, "receiver-b", keyB, 1)); answer != "wrap" || fetches.Load() != 1 || below.Load() != 0 {
+		t.Fatalf("answer %q after %d task fetches, %d from below the claim's offset; want served in one fetch of a %d-record trailing log",
+			answer, fetches.Load(), below.Load(), trailing)
+	}
+}
+
+// The run's task is the hash of its first status other than a rejection, whatever its kind: a run whose first status
+// is a non-claimed status of one hash refuses a later hash's claim at open and rejects its delivery as a duplicate.
+func TestTheRunsFirstNonRejectedStatusNamesItsTask(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.quiet()
+	keyB, keyC := f.addPeer(t, "receiver-b", testPool), f.addPeer(t, "receiver-c", testPool)
+	first, second := f.twoHashes(t)
+	f.statusAs(t, first, "receiver-b", keyB, "released", 1)
+	f.statusAs(t, second, "receiver-c", keyC, "claimed", 1)
+	if answer := f.answered(t, f.openAs(t, second, "receiver-c", keyC, 1)); answer != wire.RefusedNotClaimant {
+		t.Fatalf("the second hash answered %q, want %q; logs:\n%s", answer, wire.RefusedNotClaimant, f.logs.String())
+	}
+	f.rejected(t, second, "duplicate submission")
 }
