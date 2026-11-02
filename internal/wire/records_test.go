@@ -180,6 +180,21 @@ func TestRecordSignedByAnotherOwnerIsRejected(t *testing.T) {
 	}
 }
 
+// A claimed status's task offset 0 is the first record's position, not an absent one.
+func TestClaimedStatusCarriesTaskOffsetZero(t *testing.T) {
+	keys, _, receiver := testKeys(t)
+	status := testRecords()["status"].(*RunStatus)
+	status.Wherry.Kind, status.Wherry.TaskOffset = "claimed", new(int64(0))
+	encoded, err := SignRecord(status, receiver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded RunStatus
+	if err := ParseRecord(encoded, keys, &decoded); err != nil || decoded.Wherry.TaskOffset == nil || *decoded.Wherry.TaskOffset != 0 {
+		t.Fatalf("decoded task offset %v, %v; want 0", decoded.Wherry.TaskOffset, err)
+	}
+}
+
 func TestRecordTypesAreNotInterchangeable(t *testing.T) {
 	keys, _, receiver := testKeys(t)
 	encoded, err := SignRecord(testRecords()["status"], receiver)
@@ -227,6 +242,21 @@ func TestRecordValidation(t *testing.T) {
 		"status for another run": func(r map[string]Record) Record {
 			value := r["status"].(*RunStatus)
 			value.StatusUpdate.TaskID = "run-b"
+			return value
+		},
+		"claimed status without its task offset": func(r map[string]Record) Record {
+			value := r["status"].(*RunStatus)
+			value.Wherry.Kind = "claimed"
+			return value
+		},
+		"started status with a task offset": func(r map[string]Record) Record {
+			value := r["status"].(*RunStatus)
+			value.Wherry.TaskOffset = new(int64(0))
+			return value
+		},
+		"claimed status at a negative task offset": func(r map[string]Record) Record {
+			value := r["status"].(*RunStatus)
+			value.Wherry.Kind, value.Wherry.TaskOffset = "claimed", new(int64(-1))
 			return value
 		},
 		"status attempt 0": func(r map[string]Record) Record {

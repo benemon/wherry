@@ -259,19 +259,16 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	if err := wire.CheckRunID(task.Wherry); err != nil {
 		return reject(err.Error())
 	}
-	all, err := r.readSubmissions(ctx, run)
-	if err != nil {
-		r.logger.Printf("read run %s submissions: %v", run, err)
-		return nil, kgo.AckRelease
+	if first := events.task(run); first != "" && first != hash {
+		return reject("duplicate submission")
+	}
+	// A copy of the claimed record, byte for byte at another offset, is acknowledged without a claim before anything is
+	// written under the run's key.
+	if claim := events.claim(run, hash); claim != nil && *claim.Wherry.TaskOffset != record.Offset {
+		return nil, kgo.AckAccept
 	}
 	state, _, _ := r.snapshot()
 	terms := state.Pools[r.config.Pool]
-	// Receivers act only on a run's earliest accepted task record; a later copy of it, byte for byte, is acknowledged
-	// without a claim before anything is written under the run's key.
-	winner := slices.IndexFunc(all, func(submission runSubmission) bool { return admissible(submission, terms) })
-	if winner >= 0 && all[winner].hash == hash && all[winner].offset != record.Offset {
-		return nil, kgo.AckAccept
-	}
 	if task.Wherry.Envelope == "" {
 		return reject("the task carries no envelope")
 	}
@@ -322,14 +319,8 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		r.metrics.startFailures.WithLabelValues("none", "offer-unavailable").Inc()
 		return giveBack()
 	}
-	if own := slices.IndexFunc(all, func(submission runSubmission) bool { return submission.offset == record.Offset }); !claimed && own >= 0 {
-		maximum := terms.StartByLimit()
-		if time.Since(all[own].submitted) > maximum || task.Wherry.TaskStartedBy > all[own].submitted.Add(maximum).Unix() {
-			return reject("task_started_by is past the pool's start_by_limit")
-		}
-	}
-	if winner < 0 || all[winner].hash != hash {
-		return reject("duplicate submission")
+	if maximum := terms.StartByLimit(); !claimed && (time.Since(record.Timestamp) > maximum || task.Wherry.TaskStartedBy > record.Timestamp.Add(maximum).Unix()) {
+		return reject("task_started_by is past the pool's start_by_limit")
 	}
 	history := []wire.Message{task.Message}
 	admitted := &admission{task: &task, taskHash: hash, profile: profile, history: history, cancelled: cancelled}
@@ -480,60 +471,8 @@ func (r *Receiver) startFailure(task *wire.Submission, hash string, attempt int6
 type runSubmission struct {
 	record *wire.Submission
 	hash   string
-	// submitted is the broker's LogAppendTime for the task record, and offset its offset.
+	// submitted is the broker's LogAppendTime for the task record.
 	submitted time.Time
-	offset    int64
-}
-
-// readSubmissions reads the run's authorised submissions from the pool's task topic in log order.
-func (r *Receiver) readSubmissions(ctx context.Context, run string) ([]runSubmission, error) {
-	ctx, cancel := context.WithTimeout(ctx, readTimeout)
-	defer cancel()
-	records, err := r.reader.ReadFrom(ctx, admin.PoolTasksTopic(r.config.Pool), 0)
-	if err != nil {
-		r.deny(err, capRead)
-		return nil, err
-	}
-	return r.submissions(records, run), nil
-}
-
-// submissions are the run's submissions among records in log order: each verified as an authorised host's, with the
-// run as its Kafka key and derived run ID.
-func (r *Receiver) submissions(records []*kgo.Record, run string) []runSubmission {
-	state, _, hosts := r.snapshot()
-	var result []runSubmission
-	for _, record := range records {
-		if string(record.Key) != run {
-			continue
-		}
-		submission, err := authorizeSubmission(state, hosts, record.Value, r.config.Pool)
-		if err == nil && submission.Wherry.Run == run && wire.CheckRunID(submission.Wherry) == nil {
-			result = append(result, runSubmission{record: &submission, hash: wire.TaskHash(record.Value), submitted: record.Timestamp, offset: record.Offset})
-		}
-	}
-	return result
-}
-
-// earliestSubmissions maps each run among records to its earliest accepted task record, verifying no record of a run
-// after that one.
-func (r *Receiver) earliestSubmissions(records []*kgo.Record) map[string]*runSubmission {
-	state, _, hosts := r.snapshot()
-	earliest := map[string]*runSubmission{}
-	for _, record := range records {
-		run := string(record.Key)
-		if earliest[run] != nil {
-			continue
-		}
-		submission, err := authorizeSubmission(state, hosts, record.Value, r.config.Pool)
-		if err != nil || submission.Wherry.Run != run || wire.CheckRunID(submission.Wherry) != nil {
-			continue
-		}
-		candidate := runSubmission{record: &submission, hash: wire.TaskHash(record.Value), submitted: record.Timestamp, offset: record.Offset}
-		if admissible(candidate, state.Pools[r.config.Pool]) {
-			earliest[run] = &candidate
-		}
-	}
-	return earliest
 }
 
 // admissible reports a submission that carries an envelope and whose bounds hold at its append time under terms.
@@ -633,7 +572,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		}
 	}()
 
-	if err := run.commit(ctx, append([]*kgo.Record{run.feed(r.echo(task, admitted.taskHash))}, run.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...)...); err != nil {
+	if err := run.commit(ctx, append([]*kgo.Record{run.feed(r.echo(task, admitted.taskHash))}, run.claimRecords(record.Offset)...)...); err != nil {
 		return run.abandon(err)
 	}
 	// A claim given back to the pool is released first, so the next claimant is served without waiting out this one.
@@ -1979,6 +1918,13 @@ func (run *activeRun) redactStatus(status wire.TaskStatus) wire.TaskStatus {
 // statusRecords dual-writes a status to the pool's events and the tenant's feed.
 func (run *activeRun) statusRecords(kind string, status wire.TaskStatus, offset *int64, metadata jsontext.Value) []*kgo.Record {
 	return run.receiver.statusRecords(run.task, run.status(kind, status, offset, metadata))
+}
+
+// claimRecords are the run's claimed status records, naming the task record's offset.
+func (run *activeRun) claimRecords(offset int64) []*kgo.Record {
+	value := run.status("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)
+	value.Wherry.TaskOffset = &offset
+	return run.receiver.statusRecords(run.task, value)
 }
 
 // terminal is the terminal status records, counting the attempt's committed chunks and pending's, or the empty last

@@ -759,6 +759,9 @@ func (f fixture) publishStatus(t *testing.T, record *kgo.Record, receiver string
 	t.Helper()
 	status := f.receiver.status(f.parse(t, record), wire.TaskHash(record.Value), 1, kind, taskStatus(state, ""), nil)
 	status.Wherry.Receiver = receiver
+	if kind == "claimed" {
+		status.Wherry.TaskOffset = &record.Offset
+	}
 	if mutate != nil {
 		mutate(status)
 	}

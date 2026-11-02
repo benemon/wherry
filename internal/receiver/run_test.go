@@ -36,14 +36,19 @@ import (
 // testActiveRun is a run of name's submitted first turn with the receiver's transactional producer.
 func testActiveRun(t *testing.T, f fixture, name string, attempt int64) *activeRun {
 	t.Helper()
-	producer, err := f.receiver.newProducer(testRun(name))
+	return f.holderOf(t, f.submit(t, f.host, func(task *wire.Submission) {
+		named(task, name)
+	}), attempt)
+}
+
+// holderOf is an active run of record's task for attempt, its producer initialised under the run's transactional ID.
+func (f fixture) holderOf(t *testing.T, record *kgo.Record, attempt int64) *activeRun {
+	t.Helper()
+	producer, err := f.receiver.newProducer(string(record.Key))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(producer.Close)
-	record := f.submit(t, f.host, func(task *wire.Submission) {
-		named(task, name)
-	})
 	task := f.parse(t, record)
 	return &activeRun{receiver: f.receiver, producer: producer, task: task, taskHash: wire.TaskHash(record.Value), history: []wire.Message{task.Message}, attempt: attempt, profile: f.receiver.profiles[0], redactionKey: testRedactionKey}
 }
@@ -566,7 +571,22 @@ func (f fixture) holding(t *testing.T, task *wire.Submission, hash, receiver str
 	t.Helper()
 	status := f.receiver.status(task, hash, 1, kind, taskStatus(wire.TaskStateWorking, ""), offset)
 	status.Wherry.Receiver = receiver
+	if kind == "claimed" {
+		status.Wherry.TaskOffset = new(int64)
+	}
 	f.produce(t, admin.PoolEventsTopic(testPool), task.Wherry.Run, must(t)(wire.SignRecord(status, key)))
+}
+
+// taskOffset is the offset of the task record hashing to hash on the pool's task topic.
+func (f fixture) taskOffset(t *testing.T, hash string) int64 {
+	t.Helper()
+	for _, record := range f.records(t, admin.PoolTasksTopic(testPool)) {
+		if wire.TaskHash(record.Value) == hash {
+			return record.Offset
+		}
+	}
+	t.Fatalf("no task record hashing to %s", hash)
+	return 0
 }
 
 // progressRecord encodes attempt 1's progress of a testTenant run at offset; mutate edits it first.
@@ -850,14 +870,14 @@ func TestLastOffsetSkipsOnlyAnEndedHoldersTopicDenial(t *testing.T) {
 func TestFencedProducerStopsRunWrites(t *testing.T) {
 	f := newFixture(t, resultStream)
 	zombie := testActiveRun(t, f, "run-fence", 1)
-	if err := zombie.commit(f.ctx, zombie.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...); err != nil {
+	if err := zombie.commit(f.ctx, zombie.claimRecords(f.taskOffset(t, zombie.taskHash))...); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(admin.TransactionalPrefix(testPool)+testRun("run-fence"), "p."+testPool+".") {
 		t.Fatal("transactional ID is outside the pool's prefix")
 	}
 	adopter := testActiveRun(t, f, "run-fence", 2)
-	if err := adopter.commit(f.ctx, adopter.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...); err != nil {
+	if err := adopter.commit(f.ctx, adopter.claimRecords(f.taskOffset(t, adopter.taskHash))...); err != nil {
 		t.Fatal(err)
 	}
 	err := zombie.commit(f.ctx, zombie.progress(42))
@@ -876,11 +896,11 @@ func TestFencedProducerStopsRunWrites(t *testing.T) {
 func TestFencedStartFailureLeavesTheJob(t *testing.T) {
 	f := newFixture(t, resultStream)
 	zombie := testActiveRun(t, f, "run-fence", 1)
-	if err := zombie.commit(f.ctx, zombie.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...); err != nil {
+	if err := zombie.commit(f.ctx, zombie.claimRecords(f.taskOffset(t, zombie.taskHash))...); err != nil {
 		t.Fatal(err)
 	}
 	adopter := testActiveRun(t, f, "run-fence", 2)
-	if err := adopter.commit(f.ctx, adopter.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...); err != nil {
+	if err := adopter.commit(f.ctx, adopter.claimRecords(f.taskOffset(t, adopter.taskHash))...); err != nil {
 		t.Fatal(err)
 	}
 	if status := zombie.startFailure(f.ctx, "dispatch", "profile nomad created no job"); status != 0 {
@@ -1755,7 +1775,7 @@ func (f fixture) adoptedOnce(t *testing.T) {
 func TestAdmissionWritesDoNotFenceTheRunsHolder(t *testing.T) {
 	f := newFixture(t, resultStream)
 	holder := testActiveRun(t, f, "run-a", 1)
-	if err := holder.commit(f.ctx, holder.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...); err != nil {
+	if err := holder.commit(f.ctx, holder.claimRecords(f.taskOffset(t, holder.taskHash))...); err != nil {
 		t.Fatal(err)
 	}
 	// A duplicate of the held turn is rejected while the holder runs.

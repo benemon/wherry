@@ -241,6 +241,7 @@ func (b *bus) sign(t *testing.T, record wire.Record) []byte {
 type task struct {
 	submission wire.Submission
 	hash       string
+	offset     int64
 }
 
 // tasks reads and authorises runID's turns from pool-a's task topic as receiver-a does.
@@ -266,7 +267,7 @@ func (b *bus) tasks(t *testing.T, runID string) []task {
 		}
 		if submission.Wherry.Run == runID {
 			sum := sha256.Sum256(record.Value)
-			tasks = append(tasks, task{submission, hex.EncodeToString(sum[:])})
+			tasks = append(tasks, task{submission, hex.EncodeToString(sum[:]), record.Offset})
 		}
 	}
 	return tasks
@@ -284,8 +285,12 @@ func (b *bus) echo(t *testing.T, task task) []byte {
 
 func (b *bus) status(t *testing.T, task task, eventID, kind string, status wire.TaskStatus) []byte {
 	run := task.submission.Wherry.Run
-	return b.sign(t, &wire.RunStatus{StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: run, ContextID: run, Status: status},
-		Wherry: wire.StatusBinding{ReceiverBinding: b.binding(task), EventID: eventID, Kind: kind, TaskHash: task.hash}})
+	value := &wire.RunStatus{StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: run, ContextID: run, Status: status},
+		Wherry: wire.StatusBinding{ReceiverBinding: b.binding(task), EventID: eventID, Kind: kind, TaskHash: task.hash}}
+	if kind == "claimed" {
+		value.Wherry.TaskOffset = &task.offset
+	}
+	return b.sign(t, value)
 }
 
 func (b *bus) result(t *testing.T, task task, parts []wire.Part) []byte {
