@@ -850,7 +850,11 @@ func TestDecodeRecordToleratesUnknownMembers(t *testing.T) {
 		t.Fatal(err)
 	}
 	extra := append([]byte(`{"later_member":true,`), encoded[1:]...)
-	state, err := load([]rawRecord{{Offset: 0, Value: extra}})
+	tenant, err := EncodeRecord(Record{Kind: "tenant", Tenant: "tenant-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := load([]rawRecord{{Offset: 0, Value: tenant}, {Offset: 1, Value: extra}})
 	if err != nil || state.Hosts[TenantPrincipal("tenant-a", "host-a")].Name != "host-a" {
 		t.Fatalf("unknown member at v1: %v, %v; want it folded", state.Hosts, err)
 	}
