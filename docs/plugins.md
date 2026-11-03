@@ -5,10 +5,9 @@ support for one kind of platform, which the receiver starts from its plugin
 directory and talks to over the plugin protocol. A receiver runs each task
 on a plugin profile, a named, configured use of a plugin with its agent, labels
 and runtime, and one plugin process serves every one of its profiles in the
-receiver's [configuration](configuration.md#receiver-configuration). The
-[plugins reference](commands.md#plugins) specifies what a receiver expects
-of a plugin, and the protocol is the Go module in
-[`pluginsdk`](https://github.com/benemon/wherry/tree/main/pluginsdk).
+receiver's [configuration](configuration.md#receiver-configuration).
+[Plugin protocol](plugin-protocol.md) specifies what a plugin implements,
+and [Plugins](commands.md#plugins) what a receiver does with it.
 
 The plugins live in
 [wherry-plugins](https://github.com/benemon/wherry-plugins), each with its
@@ -45,10 +44,8 @@ instructions.
 
 ### systemd
 
-A local configuration and a service unit for the receiver, a slice for the
-agents' units, and a tmpfiles entry for the credential mount point. The
-[systemd plugin's README](https://github.com/benemon/wherry-plugins/tree/main/systemd#run-the-receiver-as-a-systemd-service)
-covers installing them.
+[Run the receiver as a systemd service](https://github.com/benemon/wherry-plugins/tree/main/systemd#run-the-receiver-as-a-systemd-service)
+describes these files and installs them.
 
 A systemd receiver adopts only the jobs on its own host. In a pool with
 receivers on several hosts, a task whose holder is lost, the latest receiver
@@ -76,16 +73,8 @@ receiver a pool of its own.
 
 ### Kubernetes
 
-A receiver image, its local configuration, and a Kustomize directory with the
-Deployment, service account, Role, state claim, runs claim and metrics Service,
-applied with `kubectl apply -k`, on Kubernetes and OpenShift alike. The
-directory makes the Secret from the receiver's bundle and the ConfigMap from
-`config.yaml`. The receiver pod and every agent pod mount the runs claim, so the
-cluster needs a storage class that provisions ReadWriteMany claims, such as
-CephFS, NFS, EFS or Azure Files. An agent pod runs the agent's image alone, the
-plugin's config has no `helper_image`, and an upgrade is an image change. The
-[Kubernetes plugin's README](https://github.com/benemon/wherry-plugins/tree/main/kubernetes#run-the-receiver-in-the-cluster)
-covers building the image and deploying it.
+[Run the receiver in the cluster](https://github.com/benemon/wherry-plugins/tree/main/kubernetes#run-the-receiver-in-the-cluster)
+describes these files, on Kubernetes and OpenShift alike, and deploys them.
 
 `config.yaml`:
 
@@ -109,10 +98,8 @@ covers building the image and deploying it.
 
 ### Nomad
 
-A receiver image with the Nomad plugin, its local configuration, and a job
-that renders the bundle and `config.yaml` from a Nomad Variable. The
-[Nomad plugin's README](https://github.com/benemon/wherry-plugins/tree/main/nomad#run-the-receiver-in-a-container)
-covers building and running it.
+[Run the receiver in Nomad](https://github.com/benemon/wherry-plugins/tree/main/nomad#run-the-receiver-in-nomad)
+describes these files and runs them.
 
 `config.yaml`:
 

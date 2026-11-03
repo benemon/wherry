@@ -140,7 +140,7 @@ the pending transcript of each run still held and releases its task for
 adoption, leaving the job running. The stop fixes one deadline,
 `drain_timeout` plus 5 seconds after the signal: each held run's commit, its
 `released` status and the acknowledgement to the broker, and the key
-custodian's [drain](commands.md#wherry-receiver-run), its re-key
+custodian's [drain](design.md#key-custody), its re-key
 included, all end by it. A run whose commit does not complete by then is
 left unacknowledged, and the broker returns its task when its acquisition
 lock expires.
@@ -882,36 +882,22 @@ of an output name starts with a dot.
 
 A run has two bounds, each a whole second since the epoch in UTC (a JWT
 NumericDate): `task_started_by`, by which its agent job must start, and
-`task_ended_by`, by which it must reach a terminal state. The receiver's
-clock decides both. A bound fails only when that clock is past its second,
-so a job that starts at `task_started_by`, or a terminal state at
-`task_ended_by`, meets it. A run's time is also capped at six hours after
-`task_started_by`. `submit` refuses a `task_ended_by` later than that, and a
-receiver rejects such a run no pool member has claimed with
-`task_ended_by is past task_started_by plus the 6h run cap`.
+`task_ended_by`, by which it must reach a terminal state. `wherry submit`
+and the MCP `submit` tool take them as `--start-by` and `--end-by`, or
+`start_by` and `end_by`, an RFC 3339 time or a Go duration from now, `10m`
+and `2h` by default.
 
-A job starts when the plugin reports it running, at which the receiver
-publishes the run's `started` event. A receiver rejects a run no pool member
-has claimed with `not started by task_started_by (<RFC 3339 time>)` or
-`not ended by task_ended_by (<RFC 3339 time>)` once that bound has passed.
-A claimed run whose job has not started by `task_started_by`, while it waits
-for its envelope to open or for the platform to place its job, ends `TASK_STATE_FAILED`
-with `not started by task_started_by (<RFC 3339 time>)`, and the receiver
-purges any job the run has. A job that has started runs on past
-`task_started_by`. A redelivered run that a member has claimed is not
-rejected: the receiver adopts its job when it finds one, and dispatches the
-run again when it finds none and `task_started_by` has not passed. Past
-`task_ended_by`, the receiver stops any job it finds and ends the run
-`TASK_STATE_FAILED` with `not ended by task_ended_by (<RFC 3339 time>)`.
+A run's time is capped at six hours after `task_started_by`. Before they
+publish, `submit` and the MCP tool refuse a `task_ended_by` later than that,
+and a `task_started_by` later than the pool's `start_by_limit` from now with
+`task_started_by is past the pool's start_by_limit`, the MCP tool with
+`INVALID_ARGUMENT`. Every run ends within six hours after `start_by_limit`.
 
-A receiver measures a run's age from the broker's append time of its
-submission. It rejects a run no pool member has claimed with
-`task_started_by is past the pool's start_by_limit` when that time is more
-than `start_by_limit` ago, or when the run's `task_started_by` falls more
-than `start_by_limit` after it. A redelivered run that a member has claimed
-skips both checks. `wherry submit` and the MCP `submit` tool refuse, before
-publishing, a `task_started_by` later than `start_by_limit` from now with the
-same text, the MCP tool with `INVALID_ARGUMENT`.
+The receiver's clock decides both bounds, and a bound fails only when that
+clock is past its second. [Admission](a2a-extension-v1.md#admission) gives
+the receiver's checks and the texts a run ends with, and
+[Open request](a2a-extension-v1.md#open-request) the bounds of a claimed
+run.
 
 ## Environment variables
 

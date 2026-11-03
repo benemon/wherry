@@ -2,89 +2,6 @@
 
 URI: `https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md`
 
-**Change note, 2026-11-01 (custody coordination):** edited in place at
-version 1. An [advertisement](#advertisement) no longer carries
-`started_ms` or `stepping_down`, and a
-[custodian snapshot](#custodian-snapshot)'s `reason` is no longer
-`handover`: every custodian change publishes `takeover` or `contested`.
-A snapshot with reason `handover` is refused, as snapshots are decoded
-strictly; that is the change's one incompatibility. An earlier
-advertisement's `started_ms` or `stepping_down` is an unknown member,
-ignored as on any record, and has no effect. A host no longer refuses to
-submit when the current snapshot's custodian has no live advertisement:
-advertisements place tasks and custody follows the custodian group's
-session.
-
-**Change note, 2026-11-01 (pool key):** edited in place at version 1. A
-pool's key custodian replaces the seal exchange: the seal request a
-receiver wrote to the tenant feed and the seal its host answered with are
-removed, with the seal request's `expiry_at_ms`. A submission carries
-its credentials, presigned S3 URLs and redaction key in an `envelope`, with
-its content key in a submit `wrap` to the pool's current key
-([Submission](#submission)). A claimant writes an
-[open request](#open-request). The custodian answers it after the
-[claim check](#the-claim-check) with an [attempt wrap](#attempt-wrap) or an
-[open refusal](#open-refusal), in one transaction with a
-[claim decision](#claim-decision). A receiver holding a replaced pool key
-writes a [re-key wrap](#re-key-wrap) to the current key. The custodian
-publishes a [custodian snapshot](#custodian-snapshot) on the pool's
-`wherry.pool.<pool>.custodian` topic. A [resubmission](#resubmission)
-carries `replaces` and `s3_input_run`. Statuses add the kinds
-`released`, `adopting` and `reconciling`, and a `terminal` status the
-wherry event `key-lost`.
-
-**Change note, 2026-10-29 (A2A conformance):** edited in place at version 1.
-A run that ends for want of a credential ends `TASK_STATE_FAILED` with a
-[`credential` data part](#the-credential-data-part) for each credential,
-when its seal goes unanswered and when its agent reports
-`TASK_STATE_AUTH_REQUIRED`. wherry no longer treats
-`TASK_STATE_AUTH_REQUIRED` as terminal. A submission's message has `role`
-`ROLE_USER`. An output chunk's artifact has `name`, and its part
-`filename` and `mediaType`. Content a record does not carry, an input in a
-result's history or a transcript line over 512 KiB, is a
-[reference part](#reference-parts) in place of a `url` part
-`unstored:input` or `unstored:oversize`. Every run's transcript ends with a
-`lastChunk` chunk, an empty one when no line is left for the terminal
-transaction. The result's reply keeps the part type of the agent's outcome
-message, `data` or text, with no test for JSON. The agent contract states
-that an outcome message's other parts are dropped. The extension reserves
-the bare `metadata` keys wherry writes. New sections: [Binding](#binding),
-which maps A2A's operations and errors to records, and
-[Agent Card](#agent-card). A result's `artifacts` keep the `result`
-artifact and add a [reference artifact](#reference-artifacts) for each
-output it returns, its reply chunks and its transcript, so `result` and
-`transcript` are reserved output names. Tenant feeds and transcript topics
-take records of up to 2 MiB.
-
-**Change note, 2026-10-29:** edited in place at version 1. A reply over
-64 KiB once redacted travels as [reply chunks](#the-reply), output chunks with
-`artifactId` `.wherry/reply`, up to the pool's `reply_limit`. The result text
-and the status text carry its first 64 KiB, the result's metadata lists it as
-`reply`, and `[redacted text over 65536 bytes]` no longer replaces either. The
-outcome file is bounded by the pool's `output_limit`. A host reserves
-`reply.txt` among a run's outputs.
-
-**Change note, 2026-10-27:** edited in place at version 1. The term adapter
-is retired in favour of plugin, and the output reason `not streamed by the
-adapter` is renamed `not streamed by the plugin`.
-
-**Change note, 2026-10-27:** edited in place at version 1. Chunks and
-output chunks move from the tenant feed to the tenant's transcript topic,
-`wherry.tenant.<tenant>.transcript`, and a `terminal` status carries
-`transcript_chunks`. The `heartbeat` status kind is removed: a receiver
-records each held run's committed transcript offset as a
-[progress](#progress) record on its own progress topic,
-`wherry.receiver.<receiver>.progress`, and an adopter resumes from the
-highest of the run's `started` offsets and progress records.
-
-**Change note, 2026-10-25:** edited in place at version 1. The configured
-unit a run is routed to is a plugin profile, a named, configured use of a plugin.
-The member `adapter` of advertisement offers, start failures and result
-metadata is renamed `profile`. The receiver configuration on
-`wherry.operator` holds `profiles` in place of `adapters`, each with `plugin`
-in place of `type` and no `platform`. Messages that named the adapter name
-the profile.
-
 Hosts and receivers exchange A2A tasks over Kafka with no server between
 them. wherry is a partial custom A2A protocol binding over Kafka: it
 provides some of A2A's operations, as records ([Binding](#binding)). This
@@ -1267,38 +1184,62 @@ the [claim check](#the-claim-check).
 ## Redaction
 
 Before it signs any transcript chunk, output chunk, result text or status
-message of the attempt, the receiver replaces every occurrence of each
-credential value its envelope delivered, task credentials and presigned URLs
-included, and of each URL's `X-Amz-Signature` value alone, with the value's
-marker: `[redacted:`, 16 base64url characters and `]`, 27 bytes. The characters
-are the first 96 bits of the HMAC-SHA256, under the run's redaction key, of
-`wherry-redaction-v1` followed by the value's name: the credential's name, or
-`s3-inputs/<name>` or `s3-outputs/<name>` for a URL and its signature. Every
-form of a value takes the same marker, and every attempt of the run the same
-markers. No marker maps to a credential name without the run's redaction key. When
-a form of any delivered value occurs within a marker, that marker is `[*]`
-instead, so a replacement cannot publish another value. The data passes through
-the replacement in pieces of 64 KiB. It replaces two forms of each value: its
-bytes without trailing CR and LF, since a credential file usually ends in a
-newline that transcripts and outputs drop, and those bytes escaped as a JSON
-string, as a transcript line carries them. The value's own bytes contain the
-first form, so its redaction leaves only the line ending. It redacts an output
-file whole before it splits it into chunks and computes its hash and size. In
-result metadata it replaces within JSON string values only, so the metadata
-stays valid. The marker can be longer than a value, so the limits hold for the
-redacted bytes: an output whose redacted form is over the pool's `output_limit`,
-or would take the run's outputs over it, is listed as `exceeds output limit`; a
-transcript line whose redacted form is over 512 KiB becomes a
-[reference part](#reference-parts) with that form's hash and size; a reply whose redacted
-form is over 64 KiB travels as its preview and [reply chunks](#the-reply), both
-cut from the redacted form; and a credential name whose
-redacted form is over 64 KiB is replaced by `[redacted text over 65536 bytes]`. A value shorter than 8 bytes once trimmed is not redacted; the
-receiver logs `credential <name> too short to redact` once for the attempt. A
-value in any other encoding, such as base64, is not replaced. An adopted attempt
-redacts the values of its own open of the envelope. Each form is replaced once, longest
-first, and a marker can join the bytes beside it into a value that was not there
-before: when a value starts with a marker's tail, such as `]`, and the rest of
-it follows a replaced value, the published text holds that value whole.
+message of the attempt, the receiver replaces values with markers.
+
+What it replaces:
+
+- every occurrence of each credential value its envelope delivered, task
+  credentials and presigned URLs included, and of each URL's
+  `X-Amz-Signature` value alone;
+- two forms of each value: its bytes without trailing CR and LF, since a
+  credential file usually ends in a newline that transcripts and outputs
+  drop, and those bytes escaped as a JSON string, as a transcript line
+  carries them. The value's own bytes contain the first form, so its
+  redaction leaves only the line ending.
+
+What it does not replace:
+
+- a value shorter than 8 bytes once trimmed. The receiver logs
+  `credential <name> too short to redact` once for the attempt;
+- a value in any other encoding, such as base64.
+
+The marker:
+
+- is `[redacted:`, 16 base64url characters and `]`, 27 bytes. The characters
+  are the first 96 bits of the HMAC-SHA256, under the run's redaction key,
+  of `wherry-redaction-v1` followed by the value's name: the credential's
+  name, or `s3-inputs/<name>` or `s3-outputs/<name>` for a URL and its
+  signature;
+- is the same for every form of a value, and every attempt of the run uses
+  the same markers. No marker maps to a credential name without the run's
+  redaction key;
+- is `[*]` when a form of any delivered value occurs within it, so a
+  replacement cannot publish another value.
+
+How it replaces:
+
+- The data passes through the replacement in pieces of 64 KiB.
+- Each form is replaced once, longest first. A marker can join the bytes
+  beside it into a value that was not there before: when a value starts
+  with a marker's tail, such as `]`, and the rest of it follows a replaced
+  value, the published text holds that value whole.
+- An output file is redacted whole before the receiver splits it into
+  chunks and computes its hash and size.
+- In result metadata it replaces within JSON string values only, so the
+  metadata stays valid.
+- An adopted attempt redacts the values of its own open of the envelope.
+
+The marker can be longer than a value, so the limits hold for the redacted
+bytes:
+
+- an output whose redacted form is over the pool's `output_limit`, or would
+  take the run's outputs over it, is listed as `exceeds output limit`;
+- a transcript line whose redacted form is over 512 KiB becomes a
+  [reference part](#reference-parts) with that form's hash and size;
+- a reply whose redacted form is over 64 KiB travels as its preview and
+  [reply chunks](#the-reply), both cut from the redacted form;
+- a credential name whose redacted form is over 64 KiB is replaced by
+  `[redacted text over 65536 bytes]`.
 
 ## Operator records
 

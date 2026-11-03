@@ -66,8 +66,9 @@ func TestQuickstartFiles(t *testing.T) {
 	documented(t, "quickstart.md", "quickstart/build-terms.yaml", "quickstart/nomad-1.yaml", "quickstart/receiver-config.yaml", "quickstart/host-config.yaml")
 }
 
-// TestQuickstartMissingSourceError finds in the quickstart, the configuration reference and operations the line the receiver prints
-// exits with for a platform credential with no source, as receiver.Run wraps the profile's error.
+// TestQuickstartMissingSourceError finds in the quickstart, the configuration reference and operations, as a code block
+// of its own or of a numbered step, the line the receiver exits with for a platform credential with no source, as
+// receiver.Run wraps the profile's error.
 func TestQuickstartMissingSourceError(t *testing.T) {
 	config, err := readReceiverConfig(quickstart("nomad-1.yaml"), false)
 	if err != nil {
@@ -84,7 +85,7 @@ func TestQuickstartMissingSourceError(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(doc), "```\n"+line+"```\n") {
+		if block := "```\n" + line + "```\n"; !strings.Contains(string(doc), block) && !strings.Contains(string(doc), inStep(block)) {
 			t.Errorf("docs/%s has no code block holding %q", page, line)
 		}
 	}

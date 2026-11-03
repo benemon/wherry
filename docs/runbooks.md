@@ -4,7 +4,7 @@ One section per rule of the shipped Prometheus alert rules. Each rule's
 `runbook_url` links its section. The rules and the Grafana dashboard live in
 [`contrib/observability`](https://github.com/benemon/wherry/tree/main/contrib/observability);
 [Metrics](operations.md#metrics) says how to scrape a receiver and load them,
-and [Metrics](commands.md#metrics) lists every family.
+and [Metrics reference](metrics.md) lists every family.
 
 Each section says what the alert means, how to confirm it, and what to do.
 The receiver logs to standard output, one line per event, each prefixed
@@ -20,9 +20,7 @@ commands run on a host of a tenant entitled to the pool, with its
 [client configuration](configuration.md#client-configuration), except
 `wherry operator` commands, which run in the
 [operator working directory](operations.md#set-up-wherry-operator) and
-connect as `wherry.operator`. When every one of them fails to log in, an
-interrupted `wherry operator init` left `operator.password` behind the
-broker's: run `init` again with the Kafka super user.
+connect as `wherry.operator`.
 
 ## WherryReceiverNotAdvertising
 
@@ -239,21 +237,13 @@ Confirm it:
 
 Then:
 
-- For a takeover after a planned stop whose previous custodian logged
-  `custodian: re-keyed <n> tasks to pool key <id> and deleted <n> pool keys`,
-  nothing more is needed.
-- For a takeover after a crash or a lost state directory, nothing more is
-  needed; the hosts of the lost tasks resubmit them when they next run.
-- For a takeover after a planned stop with no re-key, raise `drain_timeout`, so that the
-  stopping custodian waits for a successor's snapshot and re-keys its tasks, as in
-  [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian).
-- For a takeover with no planned stop, crash or lost state directory before
-  it, treat the new custodian as suspect and revoke it with
-  `wherry operator receiver remove`.
-- For a contested snapshot with no custodian change, find the writer that
-  initialised `p.<pool>.custodian`: every member of the pool holds that
-  transactional ID. Revoke a suspect receiver with
-  `wherry operator receiver remove`.
+| Cause | Action |
+| --- | --- |
+| a planned stop whose previous custodian logged `custodian: re-keyed <n> tasks to pool key <id> and deleted <n> pool keys` | none |
+| a crash or a lost state directory | none: the hosts of the lost tasks resubmit them when they next run |
+| a planned stop with no re-key | raise `drain_timeout`, so that the stopping custodian waits for a successor's snapshot and re-keys its tasks, as in [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian) |
+| no planned stop, crash or lost state directory before the takeover | treat the new custodian as suspect and revoke it with `wherry operator receiver remove` |
+| a `contested` snapshot with no custodian change | find the writer that initialised `p.<pool>.custodian`, which every member of the pool can; revoke a suspect receiver with `wherry operator receiver remove` |
 
 ## WherryRunsKeyLost
 

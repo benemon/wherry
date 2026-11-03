@@ -273,7 +273,7 @@ the key outlives every task wrapped to it, and the deadline falls inside the
 pool topics' [retention](operations.md#retention). A receiver holding a
 replaced key answers an open request for a task under that key with a
 re-key wrap to the current key, which the custodian then opens.
-[`wherry receiver run`](commands.md#wherry-receiver-run) states the
+[Key custody](design.md#key-custody) states the
 deadlines a receiver sets after a crash.
 
 ### Planned drain and re-key

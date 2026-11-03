@@ -31,6 +31,8 @@ const sidebar = [
         items: [
           { text: 'Commands', link: '/commands' },
           { text: 'MCP tools', link: '/mcp' },
+          { text: 'Metrics', link: '/metrics' },
+          { text: 'Plugin protocol', link: '/plugin-protocol' },
           { text: 'The wherry A2A extension', link: '/a2a-extension-v1' },
         ],
       },

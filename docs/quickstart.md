@@ -568,26 +568,6 @@ wherry operator receiver show nomad-1
 It prints the record, the same YAML `--dry-run` printed in
 [Receiver step 2](#_2-check-the-receiver-configuration).
 
-On `laptop`, once it is set up as in [Host](#host), `wherry host receivers`
-lists the receiver as the tenant sees it:
-
-```sh
-wherry host receivers
-```
-
-```
-receiver=nomad-1 pool=build capacity=2 in_flight=0 advertisement_age=4s status=live
-  profile=container plugin=nomad agent=claude ready=true labels=isolation=container inline_limit=45056 credentials=claude-oauth-token:env=CLAUDE_CODE_OAUTH_TOKEN
-  profile=host plugin=nomad agent=claude ready=true labels=isolation=host inline_limit=45056 credentials=claude-oauth-token:env=CLAUDE_CODE_OAUTH_TOKEN
-```
-
-`advertisement_age` is the age of the receiver's latest advertisement, and
-`status=live` holds while it is within 120 seconds. `ready=true` means the
-receiver offers the plugin profile. `inline_limit` is the most inline input
-bytes the Nomad plugin delivers. `credentials` lists the agent's credentials
-from the pool terms, each with its target. One `laptop` has no source for
-shows as `claude-oauth-token:env=CLAUDE_CODE_OAUTH_TOKEN(missing)`.
-
 ## Host
 
 ### 1. Add the host
@@ -680,8 +660,27 @@ invalid input: auth required: credential claude-oauth-token is not in this host'
 
 Run `wherry host init` again, without the bundle, to give it a source. A
 re-run keeps every entry and asks only for what is missing, such as the
-credentials of a pool `acme` is entitled to later. `wherry host receivers`
-now lists `nomad-1` as [Receiver step 9](#_9-check-the-receiver) shows.
+credentials of a pool `acme` is entitled to later.
+
+On `laptop`, `wherry host receivers` lists the receiver as the tenant sees
+it:
+
+```sh
+wherry host receivers
+```
+
+```
+receiver=nomad-1 pool=build capacity=2 in_flight=0 advertisement_age=4s status=live
+  profile=container plugin=nomad agent=claude ready=true labels=isolation=container inline_limit=45056 credentials=claude-oauth-token:env=CLAUDE_CODE_OAUTH_TOKEN
+  profile=host plugin=nomad agent=claude ready=true labels=isolation=host inline_limit=45056 credentials=claude-oauth-token:env=CLAUDE_CODE_OAUTH_TOKEN
+```
+
+`advertisement_age` is the age of the receiver's latest advertisement, and
+`status=live` holds while it is within 120 seconds. `ready=true` means the
+receiver offers the plugin profile. `inline_limit` is the most inline input
+bytes the Nomad plugin delivers. `credentials` lists the agent's credentials
+from the pool terms, each with its target. One `laptop` has no source for
+shows as `claude-oauth-token:env=CLAUDE_CODE_OAUTH_TOKEN(missing)`.
 
 ### 4. Connect a harness
 
