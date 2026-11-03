@@ -55,17 +55,18 @@ func (service *Service) PoolSuspendAcknowledged(ctx context.Context, pool string
 	return fmt.Sprintf("pool %s is "+effect, pool, recorded), nil
 }
 
-// poolSuspend appends pool's suspend or resume record, reconciles the ACLs and returns the record's offset.
+// poolSuspend appends pool's suspend or resume record, converges Kafka on wherry.operator and returns the record's
+// offset.
 func (service *Service) poolSuspend(ctx context.Context, pool string, suspend bool) (int64, error) {
 	kind := "resume"
 	if suspend {
 		kind = "suspend"
 	}
-	state, recorded, err := service.appendRecord(ctx, []byte(kind+"."+pool), Record{Kind: kind, Pool: pool})
+	_, recorded, err := service.appendRecord(ctx, []byte(kind+"."+pool), Record{Kind: kind, Pool: pool})
 	if err != nil {
 		return 0, err
 	}
-	return recorded, service.reconcileACLs(ctx, state)
+	return recorded, service.converge(ctx)
 }
 
 // SuspectTask is a retained task record whose submit wrap is to a suspect key: names only, never a value.
@@ -149,6 +150,9 @@ func (service *Service) PoolRotateKey(ctx context.Context, pool string, suspects
 	}
 	_, requested, err := service.appendRecord(ctx, []byte("rotate-key."+pool), Record{Kind: "rotate-key", Pool: pool})
 	if err != nil {
+		return RotateReport{}, err
+	}
+	if err := service.converge(ctx); err != nil {
 		return RotateReport{}, err
 	}
 	err = awaitSnapshot(ctx, reader, state, pool, progress, func(current wire.Snapshot) bool { return current.RotatedFor >= requested },

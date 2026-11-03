@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
-	"slices"
+	"strings"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
+// reconcileACLs creates the grants state calls for and deletes none: only converge, from the latest records, deletes.
 func (service *Service) reconcileACLs(ctx context.Context, state State) error {
 	client := kadm.NewClient(service.Operator)
 	for _, acl := range ACLs(state) {
@@ -31,29 +32,105 @@ func (service *Service) reconcileACLs(ctx context.Context, state State) error {
 	if err := service.verifyACLs(ctx, ACLs(state)); err != nil {
 		return fmt.Errorf("ACL plan incomplete after re-read: %w", err)
 	}
-	// A suspended pool's task-topic WRITE grants go by filters naming each principal, so no other grant is touched.
-	for pool := range state.Suspended {
-		resumed := state
-		resumed.Suspended = maps.Clone(state.Suspended)
-		delete(resumed.Suspended, pool)
-		for _, acl := range ACLs(resumed) {
-			if acl.ResourceType != "topic" || acl.Resource != PoolTasksTopic(pool) {
+	return nil
+}
+
+// converge makes Kafka match wherry.operator as read to its end, not as the command loaded it: a concurrent command's
+// record may have ended a principal or suspended a pool since.
+func (service *Service) converge(ctx context.Context) error {
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return err
+	}
+	if err := service.reconcileACLs(ctx, state); err != nil {
+		return err
+	}
+	return service.withdraw(ctx, state)
+}
+
+// withdraw deletes each grant of wherry's tenant and receiver principals on wherry's topics, groups and transactional
+// IDs that state does not call for, and the SCRAM credentials of each principal whose membership state has ended. It
+// touches no other grant or credential: wherry.operator's are operator init's and the rest are not wherry's.
+func (service *Service) withdraw(ctx context.Context, state State) error {
+	type grant struct {
+		principal, resourceType, resource string
+		prefix                            bool
+		operation                         string
+	}
+	wanted := map[grant]bool{}
+	for _, acl := range ACLs(state) {
+		for _, operation := range acl.Operations {
+			wanted[grant{acl.Principal, acl.ResourceType, acl.Resource, acl.Prefix, operation}] = true
+		}
+	}
+	client := kadm.NewClient(service.Operator)
+	results, err := client.DescribeACLs(ctx, kadm.NewACLs().AnyResource().Allow().AllowHosts().Operations(kadm.OpAny).ResourcePatternType(kadm.ACLPatternAny))
+	if err != nil {
+		return err
+	}
+	for _, result := range results {
+		if result.Err != nil {
+			return result.Err
+		}
+		for _, described := range result.Described {
+			principal, _ := strings.CutPrefix(described.Principal, "User:")
+			resourceType := managed(described)
+			if resourceType == "" || described.Host == "*" && wanted[grant{principal, resourceType, described.Name, described.Pattern == kadm.ACLPatternPrefixed, described.Operation.String()}] {
 				continue
 			}
-			acl.Operations = slices.DeleteFunc(slices.Clone(acl.Operations), func(operation string) bool { return operation != "WRITE" })
-			if len(acl.Operations) == 0 {
-				continue
-			}
-			builder, err := aclBuilder(acl)
-			if err != nil {
-				return err
+			builder := kadm.NewACLs().Allow(described.Principal).AllowHosts(described.Host).Operations(described.Operation).ResourcePatternType(described.Pattern)
+			switch resourceType {
+			case "topic":
+				builder.Topics(described.Name)
+			case "group":
+				builder.Groups(described.Name)
+			default:
+				builder.TransactionalIDs(described.Name)
 			}
 			if err := service.deleteACLs(ctx, builder); err != nil {
-				return fmt.Errorf("withdraw suspended pool %s's task topic ACLs: %w", pool, err)
+				return fmt.Errorf("withdraw %s %s on %s: %w", principal, described.Operation, described.Name, err)
 			}
 		}
 	}
+	users, err := client.DescribeUserSCRAMs(ctx)
+	if err != nil {
+		return err
+	}
+	for user, described := range users {
+		if !state.Ended[user] || described.Err != nil {
+			continue
+		}
+		var deletions []kadm.DeleteSCRAM
+		for _, info := range described.CredInfos {
+			deletions = append(deletions, kadm.DeleteSCRAM{User: user, Mechanism: info.Mechanism})
+		}
+		altered, err := client.AlterUserSCRAMs(ctx, deletions, nil)
+		if err != nil {
+			return err
+		}
+		if err := altered.Error(); err != nil {
+			return fmt.Errorf("delete %s's SCRAM credential: %w", user, err)
+		}
+	}
 	return nil
+}
+
+// managed is described's resource type as ACL names it when described is a grant of a wherry.tnt or wherry.rcv
+// principal on a wherry topic, pool group or pool transactional ID, and "" otherwise.
+func managed(described kadm.DescribedACL) string {
+	principal, user := strings.CutPrefix(described.Principal, "User:")
+	if !user || !strings.HasPrefix(principal, "wherry.tnt.") && !strings.HasPrefix(principal, ReceiverPrincipal("")) {
+		return ""
+	}
+	switch {
+	case described.Type == kmsg.ACLResourceTypeTopic && strings.HasPrefix(described.Name, "wherry."):
+		return "topic"
+	case described.Type == kmsg.ACLResourceTypeGroup && strings.HasPrefix(described.Name, PoolGroup("")):
+		return "group"
+	case described.Type == kmsg.ACLResourceTypeTransactionalId && strings.HasPrefix(described.Name, "p."):
+		return "transactional"
+	}
+	return ""
 }
 
 func (service *Service) verifyACLs(ctx context.Context, acls []ACL) error {

@@ -132,7 +132,14 @@ func (service *Service) revoke(ctx context.Context, end Record, principal string
 	}) {
 		return result
 	}
-	if !run(6, "record membership end", func() error { _, err := service.appendChecked(ctx, []byte("end."+principal), end); return err }) {
+	// A stale concurrent command can restore a grant or credential after steps 2 and 4; the pass after the end record
+	// deletes it again.
+	if !run(6, "record membership end", func() error {
+		if _, err := service.appendChecked(ctx, []byte("end."+principal), end); err != nil {
+			return err
+		}
+		return service.converge(ctx)
+	}) {
 		return result
 	}
 	result.Complete = true
