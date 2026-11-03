@@ -52,7 +52,7 @@ One `wherry` binary with four roles:
   `status`, `events`, `logs` and `cancel` are shortcuts for these `wherry host`
   commands. `wherry host mcp` serves `receivers` and these six as MCP tools of
   the same name; see
-  [Harness integration](operations.md#harness-integration).
+  [Harness integration](operations-hosts.md#harness-integration).
 - **Receiver:** `wherry receiver run` claims its pool's tasks and runs each one
   as a job on one of its profiles, through a plugin, such as
   the Nomad plugin from

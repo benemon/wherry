@@ -8,16 +8,16 @@ import (
 	"testing"
 )
 
-// The Strimzi ignored-users pattern docs/operations.md gives matches every principal wherry creates through the Admin
+// The Strimzi ignored-users pattern docs/operations-operator.md gives matches every principal wherry creates through the Admin
 // API, and no other.
 func TestStrimziIgnoredUsersPattern(t *testing.T) {
-	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "operations.md"))
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "operations-operator.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, section, ok := strings.Cut(string(doc), "\n### Strimzi\n")
 	if !ok {
-		t.Fatal("docs/operations.md has no Strimzi section")
+		t.Fatal("docs/operations-operator.md has no Strimzi section")
 	}
 	_, block, ok := strings.Cut(section, "```\n")
 	if !ok {

@@ -21,7 +21,7 @@ func quickstart(name string) string {
 
 // TestQuickstartFiles reads each file the quickstart writes with the reader that reads it in use, checks the receiver
 // configuration against the pool terms, and checks that each credential the pool terms and the receiver configuration
-// name has a source in the host's and the receiver's configuration. docs/quickstart.md holds each file whole.
+// name has a source in the host's and the receiver's configuration. docs/quickstart-production.md holds each file whole.
 func TestQuickstartFiles(t *testing.T) {
 	terms, err := readPoolConfig(quickstart("build-terms.yaml"), false)
 	if err != nil {
@@ -63,7 +63,7 @@ func TestQuickstartFiles(t *testing.T) {
 			t.Errorf("profile %s's credential has no source in the receiver's local configuration", profile.Name)
 		}
 	}
-	documented(t, "quickstart.md", "quickstart/build-terms.yaml", "quickstart/nomad-1.yaml", "quickstart/receiver-config.yaml", "quickstart/host-config.yaml")
+	documented(t, "quickstart-production.md", "quickstart/build-terms.yaml", "quickstart/nomad-1.yaml", "quickstart/receiver-config.yaml", "quickstart/host-config.yaml")
 }
 
 // TestQuickstartMissingSourceError finds in the quickstart, the configuration reference and operations, as a code block
@@ -80,7 +80,7 @@ func TestQuickstartMissingSourceError(t *testing.T) {
 		t.Fatal("configured a profile whose credential has no source")
 	}
 	line := "profile " + config.Profiles[0].Name + ": " + err.Error() + "\n"
-	for _, page := range []string{"quickstart.md", "configuration.md", "operations.md"} {
+	for _, page := range []string{"quickstart-production.md", "configuration-receiver.md", "operations-receivers.md"} {
 		doc, err := os.ReadFile(filepath.Join("..", "..", "docs", page))
 		if err != nil {
 			t.Fatal(err)
@@ -92,7 +92,7 @@ func TestQuickstartMissingSourceError(t *testing.T) {
 }
 
 // TestQuickstartOperatorOutput runs the quickstart's wherry operator commands, pool apply aside, on its files and finds what receiver
-// apply --dry-run and receiver show print, the same YAML, in docs/quickstart.md as one YAML code block.
+// apply --dry-run and receiver show print, the same YAML, in docs/quickstart-production.md as one YAML code block.
 func TestQuickstartOperatorOutput(t *testing.T) {
 	receiverFile, err := filepath.Abs(quickstart("nomad-1.yaml"))
 	if err != nil {
@@ -103,7 +103,7 @@ func TestQuickstartOperatorOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "quickstart.md"))
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "quickstart-production.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,6 +136,6 @@ func TestQuickstartOperatorOutput(t *testing.T) {
 		t.Fatalf("show printed\n%s\nwant what the dry run printed\n%s", shown, dryRun)
 	}
 	if count := strings.Count(string(doc), "```yaml\n"+dryRun+"```\n"); count != 1 {
-		t.Errorf("docs/quickstart.md holds what receiver apply --dry-run and receiver show print in %d code blocks, want 1:\n%s", count, dryRun)
+		t.Errorf("docs/quickstart-production.md holds what receiver apply --dry-run and receiver show print in %d code blocks, want 1:\n%s", count, dryRun)
 	}
 }

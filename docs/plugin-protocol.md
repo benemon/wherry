@@ -31,7 +31,7 @@ messages up to 64 MiB.
 A plugin inherits the receiver's environment. Configure carries each
 profile's name, pool, agent and merged `config` section, less the
 `credential` key, and the value of the profile's
-[platform credential](configuration.md#platform-credentials) when it names
+[platform credential](configuration-receiver.md#platform-credentials) when it names
 one. It carries no agent credential. A plugin checks the profile's `config`
 section in Configure, within 30 seconds.
 
@@ -55,7 +55,7 @@ that cannot deliver an input reports it.
 A plugin gives each agent the `git` environment that
 [Git input](a2a-extension-v1.md#git-input) specifies, through
 `pluginsdk.AgentEnvironment` and `pluginsdk.AgentUnset`.
-[Git repositories](operations.md#git-repositories) states its limits.
+[Git repositories](operations-hosts.md#git-repositories) states its limits.
 
 Once the job ends the receiver stops it and asks the plugin to collect its
 outputs, which arrive over the link in pieces of at most 1 MiB. The plugin

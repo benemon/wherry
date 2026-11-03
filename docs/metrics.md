@@ -1,7 +1,7 @@
 # Metrics reference
 
 The families a receiver serves at `/metrics` when its local configuration
-sets `metrics_addr`. [Metrics](operations.md#metrics) says how to scrape a
+sets `metrics_addr`. [Metrics](operations-receivers.md#metrics) says how to scrape a
 receiver and load the shipped dashboard and alert rules, and
 [`wherry receiver run`](commands.md#metrics) how the receiver serves them.
 

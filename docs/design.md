@@ -20,7 +20,7 @@ Kafka already meets:
 
 The cost is a Kafka cluster to operate: version 4.3, with share groups, a
 SCRAM listener and an authoriser, as
-[Prepare Kafka](operations.md#prepare-kafka) lists. An organisation that
+[Prepare Kafka](operations-operator.md#prepare-kafka) lists. An organisation that
 already runs Kafka adds topics and principals to it.
 
 ## Topics
@@ -326,7 +326,7 @@ suspension make a pass after their last record.
 A pass during which `wherry.operator` grew may have applied older records
 over a newer command's, so the command makes another, up to five. Once a
 command has written a record, it makes these passes on every return, failed
-or not. [Concurrent operator commands](operations.md#concurrent-operator-commands)
+or not. [Concurrent operator commands](operations-operator.md#concurrent-operator-commands)
 states what this guarantees.
 
 A receiver’s own revocation withdraws every grant and its credential. Tenant and entitlement ends preserve receiver access to retained run resources: feed and transcript writes and public host key reads, derived from current pool membership. Tenant topics are created only by `tenant add`.

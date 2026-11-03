@@ -272,7 +272,7 @@ the append time of the snapshot that replaced it plus the pool's
 `start_by_limit` plus 7 hours, the six-hour run cap and an hour's margin. A
 task's `task_started_by` is within `start_by_limit` of its submission, so
 the key outlives every task wrapped to it, and the deadline falls inside the
-pool topics' [retention](operations.md#retention). A receiver holding a
+pool topics' [retention](operations-operator.md#retention). A receiver holding a
 replaced key answers an open request for a task under that key with a
 re-key wrap to the current key, which the custodian then opens.
 [Key custody](design.md#key-custody) states the
@@ -292,7 +292,7 @@ terminal and not past its `task_ended_by`, once for each task hash, and deletes
 its pool keys. Every step of the drain ends
 within `drain_timeout` plus 5 seconds of the stop, so the stop fits the
 platform's kill window as
-[Drain timeout and the stop window](configuration.md#drain-timeout-and-the-stop-window)
+[Drain timeout and the stop window](configuration-receiver.md#drain-timeout-and-the-stop-window)
 describes.
 
 A task appended under the draining custodian's key after its re-key
@@ -309,7 +309,7 @@ or a whole-pool stop, it waits out `drain_timeout` within the stop window and
 then exits with its keys, and its restart continues as custodian.
 Permanently removing a pool's only receiver loses its keys. A former custodian that stays up answers open
 requests for tasks under its keys with re-key wraps until their deadlines.
-[Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian)
+[Stop a pool's key custodian](operations-operator.md#stop-a-pool-s-key-custodian)
 gives the procedure.
 
 ### Lost pool keys
@@ -380,7 +380,7 @@ credential a running job holds: rotating the credential at its issuer does,
 and revoking a receiver stops it. The custodian keeps rotating its key, and
 `rotate-key` runs only on a suspended pool. `wherry operator pool resume`
 restores the grants, and queued tasks run.
-[Respond to a compromised receiver or pool key](operations.md#respond-to-a-compromised-receiver-or-pool-key)
+[Respond to a compromised receiver or pool key](operations-operator.md#respond-to-a-compromised-receiver-or-pool-key)
 gives the procedure.
 
 ## Cancellation
@@ -442,7 +442,7 @@ A revoked principal does not return. A host or receiver that comes back is
 provisioned under a new name, with a new principal and key topic.
 
 A compromised key calls for revocation. A
-[key rotation](operations.md#rotate-a-key) keeps the retired key
+[key rotation](operations-hosts.md#rotate-a-key) keeps the retired key
 verifying the owner's feed and transcript records from before the
 rotation.
 

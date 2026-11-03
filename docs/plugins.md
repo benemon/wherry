@@ -5,7 +5,7 @@ support for one kind of platform, which the receiver starts from its plugin
 directory and talks to over the plugin protocol. A receiver runs each task
 on a plugin profile, a named, configured use of a plugin with its agent, labels
 and runtime, and one plugin process serves every one of its profiles in the
-receiver's [configuration](configuration.md#receiver-configuration).
+receiver's [configuration](configuration-receiver.md#receiver-configuration).
 [Plugin protocol](plugin-protocol.md) specifies what a plugin implements,
 and [Plugins](commands.md#plugins) what a receiver does with it.
 
@@ -38,7 +38,7 @@ gives the settings for each driver.
 ## Running a receiver
 
 The [receiver examples](https://github.com/benemon/wherry-plugins/tree/main/examples) in wherry-plugins show ways to
-run a receiver with its plugins. [Run a receiver](operations.md#run-a-receiver)
+run a receiver with its plugins. [Run a receiver](operations-receivers.md#run-a-receiver)
 lists what every receiver needs, and each plugin's README gives the full
 instructions.
 

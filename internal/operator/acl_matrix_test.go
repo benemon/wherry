@@ -121,16 +121,16 @@ func TestACLMatrix(t *testing.T) {
 	}
 }
 
-// operations.md's STRIMZI_IGNORED_USERS_PATTERN matches every principal wherry creates and no other user.
+// operations-operator.md's STRIMZI_IGNORED_USERS_PATTERN matches every principal wherry creates and no other user.
 func TestStrimziIgnoredUsersPatternCoversThePrincipals(t *testing.T) {
-	page, err := os.ReadFile("../../docs/operations.md")
+	page, err := os.ReadFile("../../docs/operations-operator.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, after, _ := bytes.Cut(page, []byte("STRIMZI_IGNORED_USERS_PATTERN"))
 	block := regexp.MustCompile("(?m)^```[a-z]*\n(.+)\n```$").FindSubmatch(after)
 	if block == nil {
-		t.Fatal("docs/operations.md has no code block after STRIMZI_IGNORED_USERS_PATTERN")
+		t.Fatal("docs/operations-operator.md has no code block after STRIMZI_IGNORED_USERS_PATTERN")
 	}
 	pattern, err := regexp.Compile(string(block[1]))
 	if err != nil {

@@ -1,12 +1,4 @@
-# Quickstart
-
-This guide runs wherry two ways. [Try it on one machine](#try-it-on-one-machine)
-runs a whole deployment on one machine with `wherry dev`. The operator path
-then sets up one deployment across machines and runs a first task on it, in
-three parts: the [operator's](#operator), the [receiver's](#receiver) and
-the [host's](#host). That deployment is pool `build`, tenant `acme` with
-host `laptop`, and receiver `nomad-1` running agent `claude` on a Nomad
-cluster. [Key concepts](concepts.md) explains the parts involved.
+# Quickstart: production
 
 ## Install wherry
 
@@ -55,104 +47,6 @@ gh attestation verify "$archive" -R benemon/wherry
 
 Install wherry on the operator's machine before the operator's steps.
 
-## Try it on one machine
-
-To try wherry or develop against it before the operator's steps,
-`wherry dev` runs a whole deployment on one machine: a Nomad dev agent, a
-single-broker Kafka with TLS and SCRAM, pool `dev`, tenant `dev` with host
-`dev`, and receiver `dev-1`. Its agents run under Nomad's `raw_exec`
-driver as you, so a harness uses your own login. Nothing in it is fit for
-production: Nomad's ACLs are off and every agent runs with your rights.
-[Dev commands](commands.md#dev-commands) describes each command.
-
-### Prerequisites
-
-- Linux or macOS, `amd64` or `arm64`, with wherry installed as
-  [Install wherry](#install-wherry) shows.
-- Docker or Podman that answers `docker version` or `podman version`. On
-  macOS, Podman runs through `podman machine`.
-- An agent harness on `PATH`, `claude`, `codex` or `gemini`, logged in.
-  Without one, `--agent mock` runs the built-in mock agent alone.
-- Ports 4646, 4647, 4648 and 9093 free on 127.0.0.1, and 18080 with
-  storage.
-- 1536 MB of memory for Kafka, which its Nomad job reserves, and the
-  memory the agents use. Storage reserves 2048 MB more.
-
-### 1. Acquire
-
-```sh
-wherry dev init
-```
-
-`init` downloads Nomad 2.1.1, the newest nomad plugin release whose plugin
-protocol this wherry speaks, and Kafka's image, checks their signatures and checksums, and records them in the
-instance's manifest. It asks for the default agent when it finds more than
-one harness, and `--agent NAME` chooses it. `--storage-enabled` adds S3
-storage on 127.0.0.1:18080, a ceph-aio job whose data lives in the
-container and goes with `down`.
-
-### 2. Start
-
-```sh
-wherry dev up
-```
-
-`up` downloads nothing. It starts the environment, runs the mock agent
-once, and prints:
-
-```
-ready: instance default (nomad 2.1.1, kafka 1a2b3c4d5e6f, plugin nomad/v0.1.0-rc.18, wherry v0.1.0-rc.27)
-config: /home/me/.config/wherry/config.yaml
-submit: wherry submit --prompt "..."
-claude: claude mcp add wherry-default -- wherry host mcp
-```
-
-For the `default` instance, `up` writes the host's config, bundle and key at
-the standard host paths, where every host command reads them, so the
-commands below take no flags. When a host file `up` did not create is
-already there, or `WHERRY_CONFIG` is set, `up` writes the host inside the
-instance and prints `export WHERRY_CONFIG=<path>`
-([`wherry dev up`](commands.md#wherry-dev-up)). The `claude:` line
-registers the MCP server with Claude Code, so a session submits through the
-`wherry-default` tools. `up` copies
-`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CODEX_API_KEY` (or
-`OPENAI_API_KEY`) and `GEMINI_API_KEY` from its environment into the host's
-credential files when they are set, and Nomad keeps them out of the agents'
-environment, so they reach an agent only through its run.
-`--agent-image NAME=IMAGE` runs agent `NAME` in a container image, such as
-one [`agent.Containerfile`](https://github.com/benemon/wherry/blob/main/docs/agent.Containerfile)
-builds.
-
-### 3. Submit
-
-```sh
-wherry submit --prompt "List the files in your input directory."
-```
-
-`submit` prints `run_id=run-<id> pool=dev`. Each harness runs its own
-default model. `wherry submit` is a [shortcut](commands.md#shortcuts) for
-`wherry host submit`, as `wherry wait` is for `wherry host wait`.
-
-### 4. Wait
-
-```sh
-wherry wait run-<id>
-```
-
-`wait` prints the agent's message once the run ends. `wherry logs run-<id>`
-prints its transcript.
-
-### 5. Stop
-
-```sh
-wherry dev down
-```
-
-`down` stops everything, deletes the environment's data and credentials,
-and removes the host files `up` created at the standard paths. Once the
-instance is down, `wherry dev down --reset` deletes the downloads in its
-cache. It refuses while the instance is up.
-
 ## Operator
 
 Each step names the machine it runs on:
@@ -200,17 +94,17 @@ its source on the machine that resolves it.
   describes, pushed where the Nomad clients pull from, here
   `registry.example.com/wherry-receiver:<version>`.
 - A Claude Code OAuth token, which `claude setup-token` prints, on `laptop`.
-- An agent that meets the [agent contract](configuration.md#agent-contract),
+- An agent that meets the [agent contract](configuration-receiver.md#agent-contract),
   here Claude Code in the image and on the `agents-host` nodes.
 
 ### 1. Prepare Kafka
 
 On the Kafka cluster, enable share groups, a TLS listener with
 SCRAM-SHA-512, an authoriser, and the settings
-[Prepare Kafka](operations.md#prepare-kafka) lists, and create the Kafka
+[Prepare Kafka](operations-operator.md#prepare-kafka) lists, and create the Kafka
 super user's SCRAM credential, here `kafka-admin`. This step happens once per
 cluster. On a Strimzi cluster, set the User Operator's ignored-users pattern
-before `operator init`, as [Strimzi](operations.md#strimzi) shows, so that it
+before `operator init`, as [Strimzi](operations-operator.md#strimzi) shows, so that it
 keeps the principals wherry creates.
 
 On the operator's machine, put the super user's password in
@@ -244,7 +138,7 @@ reaches. A receiver can name another in its file.
 
 ### 3. Write the pool terms
 
-In the working directory, write the [pool terms](configuration.md#pool-terms)
+In the working directory, write the [pool terms](configuration-operator.md#pool-terms)
 to `pools/build.yaml`:
 
 ```yaml
@@ -267,7 +161,7 @@ configuration gives `claude-oauth-token` a source in
 [Host step 3](#_3-initialise-the-host), and a host without one has
 `wherry submit` refuse the task.
 
-[Create a pool](operations.md#create-a-pool) explains `delivery_limit`,
+[Create a pool](operations-operator.md#create-a-pool) explains `delivery_limit`,
 `lock_duration` and the other fields.
 
 ### 4. Create the pool
@@ -322,7 +216,7 @@ docker run --rm --entrypoint sha256sum registry.example.com/wherry-receiver:<ver
 ```
 
 In the working directory, write the
-[receiver configuration](configuration.md#receiver-configuration) to
+[receiver configuration](configuration-receiver.md#receiver-configuration) to
 `receivers/nomad-1.yaml`, with that SHA-256 as the pin (shown here as
 `0123…`):
 
@@ -373,14 +267,14 @@ profiles share. It names no `address`, so the plugin reaches Nomad through
 the task API socket the receiver's job sets as `NOMAD_ADDR`. The
 [Nomad plugin's settings](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
 list every key. `image: null` removes the inherited `image` from profile
-`host`, as [Plugin profile merge](configuration.md#plugin-profile-merge)
+`host`, as [Plugin profile merge](configuration-receiver.md#plugin-profile-merge)
 describes. Both profiles launch `claude`, which takes `claude-oauth-token`
 at the target the pool terms give it. A task with no selector runs on
 `container`, the first in routing order, and `--selector isolation=host`
 runs on `host`.
 
 `credential: nomad-token` names a [platform
-credential](configuration.md#platform-credentials). The name is the link to
+credential](configuration-receiver.md#platform-credentials). The name is the link to
 the receiver's job: its local configuration gives `nomad-token` a source in
 [Receiver step 5](#_5-write-the-receiver-s-local-configuration). A receiver
 without one fails to configure the plugin profile, and exits with:
@@ -390,7 +284,7 @@ profile container: credential "nomad-token" has no source in the receiver's conf
 ```
 
 The same configuration also works as a
-[directory](configuration.md#receiver-configuration-directory) with one file
+[directory](configuration-receiver.md#receiver-configuration-directory) with one file
 for the receiver, one for the plugin and one for each plugin profile, given
 with `-f` naming the directory. Without a file, on a terminal,
 `receiver apply` asks for the pool, the plugin, its pin and config, the
@@ -488,7 +382,7 @@ nomad volume create examples/nomad/wherry-receiver.volume.hcl
 ### 5. Write the receiver's local configuration
 
 In the wherry-plugins checkout, write the [receiver local
-configuration](configuration.md#receiver-local-configuration) to
+configuration](configuration-receiver.md#receiver-local-configuration) to
 `config.yaml`, from `examples/nomad/config.yaml`. The job renders it at
 `/local/config.yaml` and runs `wherry receiver run --config-file
 /local/config.yaml`:
@@ -513,7 +407,7 @@ credentials:
 - `plugin_dir` is where the image installs the plugin.
 - `drain_timeout` stays at least 10 seconds below the job's `kill_timeout`,
   30 seconds, since a stop takes up to `drain_timeout` plus 5 seconds
-  ([Drain timeout and the stop window](configuration.md#drain-timeout-and-the-stop-window)).
+  ([Drain timeout and the stop window](configuration-receiver.md#drain-timeout-and-the-stop-window)).
 - `credentials` gives the platform credential `nomad-token`, which the
   receiver configuration names in
   [Receiver step 1](#_1-write-the-receiver-configuration), its source:
@@ -564,10 +458,10 @@ receiver: <time> configured: pool=build profiles=2 capacity=2
 ```
 
 A configuration change ends the process, and Nomad restarts it.
-[Run a receiver](operations.md#run-a-receiver) lists what every receiver
+[Run a receiver](operations-receivers.md#run-a-receiver) lists what every receiver
 needs. To upgrade the receiver image later, record the new image's pin
 with `receiver apply`, then run the job with the new image, as
-[Install plugins](operations.md#install-plugins) describes.
+[Install plugins](operations-receivers.md#install-plugins) describes.
 
 ### 9. Check the receiver
 
@@ -634,7 +528,7 @@ wrote /home/me/.config/wherry/config.yaml
 ```
 
 `host init` copies the bundle to `bundle.yaml` in the host's
-[configuration directory](configuration.md#client-configuration),
+[configuration directory](configuration-host.md#client-configuration),
 `~/.config/wherry/` here, mode 0600 in a directory of mode 0700. It creates
 `host.key` there, registers it on the host's key topic, and prints its key
 ID, its RFC 7638 thumbprint in base64url. On a terminal, it asks for a CA file when its configuration names
@@ -644,7 +538,7 @@ whose certificate the system's roots trust. It then reads the terms of every poo
 take that the configuration lacks: here `claude-oauth-token`, which the pool
 terms name in [Operator step 3](#_3-write-the-pool-terms). It writes
 `config.yaml` there, the [client
-configuration](configuration.md#client-configuration) every host command
+configuration](configuration-host.md#client-configuration) every host command
 reads, with the source's reference, never the token:
 
 ```yaml
@@ -710,7 +604,7 @@ claude plugin install wherry@wherry
 Run `/reload-plugins` in the session, then ask for the `receivers` tool,
 which lists `nomad-1`. The plugin's server reads
 `~/.config/wherry/config.yaml`.
-[Harness integration](operations.md#harness-integration) covers other
+[Harness integration](operations-hosts.md#harness-integration) covers other
 harnesses and a configuration at another path.
 
 ### 5. Submit a task

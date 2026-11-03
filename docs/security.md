@@ -14,7 +14,7 @@ that tenant's own credential. Every credential has a **source** on the
 host and a **target** in the agent. The pool's terms list each agent's
 credentials, each with its target: an environment variable or a file in
 the directory `WHERRY_CREDENTIALS_DIR` names, and whether the agent
-requires it. The host's [client configuration](configuration.md#client-configuration)
+requires it. The host's [client configuration](configuration-host.md#client-configuration)
 maps each credential name to one [source](#credential-sources). A task can
 also declare **task credentials**: credentials of the host, such as a
 deploy key, that the agent gets at the target the task's parent chooses.
@@ -175,7 +175,7 @@ admission: a malformed first task can win its run and then fail at open with
 - **Size.** An envelope is at most 64 KiB, and the signed task with its
   envelope must fit the pool's record limit; `submit` measures the actual
   record. `pool apply` sizes the pool against a task with a maximum
-  envelope ([Size a pool against the broker](operations.md#size-a-pool-against-the-broker)).
+  envelope ([Size a pool against the broker](operations-operator.md#size-a-pool-against-the-broker)).
 - **Time on the broker.** The pool's tasks and events topics keep records for
   `start_by_limit` plus six hours plus a day, or longer after `pool apply`
   shortens `start_by_limit`, since it never lowers their retention, and roll a segment every hour,
@@ -232,7 +232,7 @@ no attempt needs an answer from the submitting host. Custody in the pool:
 ## Run credentialed tasks
 
 Prerequisites: a host with its
-[client configuration](configuration.md#client-configuration), entitled to a
+[client configuration](configuration-host.md#client-configuration), entitled to a
 pool whose terms list the agent's credentials.
 
 1. Map each credential the agent takes, and each task credential, to a
@@ -274,7 +274,7 @@ it: it delivers whatever value the host's source for the credential's name
 resolves, and does not know which key that is.
 
 The pool's terms name each agent's credentials, and a host's
-[client configuration](configuration.md#client-configuration) maps each
+[client configuration](configuration-host.md#client-configuration) maps each
 name to one source for every pool. A credential name used by one pool alone
 gives that pool its own source on every host. Each tenant's runs use that
 tenant's credential, so each tenant entitled to the pool holds its own key
@@ -282,7 +282,7 @@ for it.
 
 ### Give a pool's agents a dedicated credential
 
-Prerequisites: the [operator working directory](operations.md#set-up-wherry-operator),
+Prerequisites: the [operator working directory](operations-operator.md#set-up-wherry-operator),
 the pool's terms in `pools/<pool>.yaml`, and, for each tenant entitled to the pool, a model
 provider account that issues and revokes API keys, such as per-project or
 per-workspace keys.
@@ -305,7 +305,7 @@ per-workspace keys.
 
 4. Name the credential in the pool's terms, at the target the agent reads
    it from, and record the terms as in
-   [Change a pool's terms](operations.md#change-a-pool-s-terms):
+   [Change a pool's terms](operations-operator.md#change-a-pool-s-terms):
 
    ```yaml
    agents:
@@ -351,7 +351,7 @@ Prerequisites: the tenant's account at the model provider.
    resolves, `submit` refuses runs that deliver the credential.
 
 When a receiver is revoked, rotate each credential it could open, as in
-[Revoke a host or receiver](operations.md#revoke-a-host-or-receiver).
+[Revoke a host or receiver](operations-operator.md#revoke-a-host-or-receiver).
 
 A revoked or denied receiver leaves the jobs it held running for adoption,
 as [Revocation](concepts.md#revocation) describes.
@@ -424,7 +424,7 @@ A receiver takes the credential a plugin authenticates to its platform
 with, such as a Nomad token, from a source on the receiver's host. A
 plugin profile's `config` names the credential with `credential: <name>`, and the
 `credentials` of the receiver's [local
-configuration](configuration.md#receiver-local-configuration) map the name
+configuration](configuration-receiver.md#receiver-local-configuration) map the name
 to a `file`, `env` or `command` source. The receiver resolves it with the
 host's implementation and under the host's rules: the same file mode rule,
 the same 60-second command timeout with standard error discarded, and
@@ -433,7 +433,7 @@ receiver's environment. The receiver trims a trailing CR and LF from the
 value and passes it to the plugin when it configures the profile, at start
 and after a configuration change.
 
-[Platform credentials](configuration.md#platform-credentials) states what
+[Platform credentials](configuration-receiver.md#platform-credentials) states what
 `wherry.operator` and the bundle hold of it. A rotated platform token takes
 effect on the receiver's next start without a new bundle.
 
@@ -445,7 +445,7 @@ longest matching prefix, as git's `credential.<url>` settings do. The entry's
 credential joins the task as a task credential the agent gets as the file
 `git-credential` in `WHERRY_CREDENTIALS_DIR`, and the contents of its
 `host_key` file become the git input's host key. A remote no entry matches
-clones without a credential. The pool's [`vcs`](configuration.md#pool-terms) hosts still
+clones without a credential. The pool's [`vcs`](configuration-operator.md#pool-terms) hosts still
 decide which hosts a remote may name.
 
 The `url` prefix is the credential's scope: every task cloning under it
@@ -462,7 +462,7 @@ fails names the credential and the cause:
 `read storage credential <name>: its environment variable is unset or empty`.
 The credential never leaves the host: receivers and agents get only the URLs it presigns.
 Scope it to `wherry/<tenant>/` in each pool's bucket
-([Operations](operations.md#s3-storage)).
+([Operations](operations-hosts.md#s3-storage)).
 
 ## The Kafka super user
 
@@ -475,7 +475,7 @@ password, nor the path of its password file, to any file. Every other
 user's password can stay with the Kafka administrator after setup, and a
 re-run of `init` to rotate `wherry.operator`'s password needs it again.
 On Strimzi, the User Operator must ignore the principals wherry creates, as
-[Strimzi](operations.md#strimzi) shows.
+[Strimzi](operations-operator.md#strimzi) shows.
 
 ### The operator principal
 
@@ -502,7 +502,7 @@ rotates with a re-run of `init`.
 
 ### The operator working directory
 
-The operator's [working directory](configuration.md#operator-working-directory)
+The operator's [working directory](configuration-operator.md#operator-working-directory)
 holds `operator.password` and every bundle `tenant host add` and `receiver apply`
 write, so it holds the Kafka password of every principal wherry made. Keep it
 on the operator's machine, readable by the operator alone: `bundles/` is
@@ -517,7 +517,7 @@ A bundle carries the broker address, the principal and its password, and no
 CA. Every host, receiver and the operator trusts the broker through the
 system's trusted roots, or through the CA file its own configuration names:
 `ca_file` in the host's or receiver's configuration (the host also looks for
-`ca.pem` in its [configuration directory](configuration.md#client-configuration),
+`ca.pem` in its [configuration directory](configuration-host.md#client-configuration),
 by default `~/.config/wherry/ca.pem`) and in `operator.yaml`. `wherry host init`
 asks for the CA only on a terminal, so a host without one has its CA file in
 place before `host init` connects. The Kafka platform issues

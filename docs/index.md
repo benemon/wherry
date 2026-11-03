@@ -71,7 +71,7 @@ agent's own harness follow every run's status, events and transcript.
 A coding agent delegates through the same tools whatever runs the work.
 The MCP server fits any harness, the agent that runs the task is
 unmodified, and everything platform-specific stays in a plugin.
-[Harness integration](operations.md#harness-integration) shows the setup.
+[Harness integration](operations-hosts.md#harness-integration) shows the setup.
 
 ### Trace every run from request to result
 
@@ -89,6 +89,6 @@ production, an operator runs a Kafka 4.3 cluster
 with share groups, SCRAM over TLS and an authoriser, creates pools and
 grants access with `wherry operator`, and runs receivers with the plugins
 for the target platforms. A coding agent's harness talks to wherry
-through the `wherry` CLI or its MCP server. [Prepare Kafka](operations.md#prepare-kafka)
+through the `wherry` CLI or its MCP server. [Prepare Kafka](operations-operator.md#prepare-kafka)
 lists the cluster settings, [Why Kafka](design.md#why-kafka) explains the
-choice, and the [Quickstart](quickstart.md) runs a first task both ways.
+choice, and the [Quickstart](quickstart-production.md) runs a first task both ways.

@@ -35,7 +35,7 @@ defaults, `10m` and `2h`.
   as `--input`, `--credential` and `--output` take them;
   `storage` is `s3` or absent, and `s3` is `:s3`. An input must resolve, through any
   symbolic links, to a regular file beneath one of the
-  [`input_roots`](configuration.md#client-configuration), and opens through that
+  [`input_roots`](configuration-host.md#client-configuration), and opens through that
   root, so a link that leads out of it, even one that appears after the path
   resolves, is refused. An input root is matched by its path with symbolic links
   resolved when the server starts; an input that spells a root in different case,
