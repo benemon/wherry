@@ -35,14 +35,7 @@ For a host:
    It prints `old_key_id=<id> new_key_id=<id>`. It refuses while a run the
    host submitted has not ended, and names the run.
 
-For a receiver, restart it once with `--rotate-key`:
-
-```sh
-wherry receiver run --rotate-key
-```
-
-It rotates `signing.key` before it claims anything and logs
-`rotated key: old=<id> new=<id>`. Start it without the flag afterwards.
+For receiver keys, follow [Receiver key rotation](operations-receivers.md#rotate-a-receiver-key).
 
 A rotation writes the new key beside the old one, as `<host_key>.next` or
 `signing.key.next`, before it publishes anything. When a rotation stops

@@ -287,3 +287,19 @@ first, then stop the old receiver as above. A pool's only receiver waits out
 so removing it without a successor loses them. Stopping a whole pool at once,
 or scaling it to zero, has its custodian wait out `drain_timeout` the same way,
 within the stop window.
+
+## Rotate a receiver key
+
+For a receiver, restart it once with `--rotate-key`:
+
+```sh
+wherry receiver run --rotate-key
+```
+
+It rotates `signing.key` before it claims anything and logs
+`rotated key: old=<id> new=<id>`. Start it without the flag afterwards.
+
+Keep `signing.key.next` if a rotation is interrupted.
+The next start reconciles it against the key topic.
+Removing it after publication loses the new key.
+For a suspected compromise, [revoke the receiver](operations-operator.md#revoke-a-host-or-receiver).
