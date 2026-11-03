@@ -21,23 +21,23 @@ import (
 
 	"github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
-	"github.com/benemon/wherry/internal/kafkatest"
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
 	"github.com/twmb/franz-go/pkg/kadm"
-	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
-	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 // brokerPool is a pool of its own on the plaintext broker named by WHERRY_KAFKA_TEST_BROKER, with one receiver, one
-// host and its tenant. That broker has no authoriser, so the operator records are written with operator.EncodeRecord rather
-// than operator.Service.
+// host and its tenant, provisioned by operator.Service as the super user that listener's anonymous principal is. The
+// broker's wherry.operator is shared with the later packages' tests, whose operator check reads every object this
+// records: each needs the topic configs and ACLs the operator gives it.
 type brokerPool struct {
 	opts                         []kgo.Opt
 	kafka                        *kgo.Client
+	service                      *operator.Service
 	receiver, pool, tenant, host string
 }
 
@@ -51,33 +51,22 @@ func newBrokerPool(t *testing.T, ctx context.Context, address string) brokerPool
 	t.Cleanup(kafka.Close)
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	b := brokerPool{opts: opts, kafka: kafka, receiver: "receiver-" + suffix, pool: "pool-" + suffix, tenant: "tenant-" + suffix, host: "host-" + suffix}
-	b.createTopics(t, ctx, operator.OperatorTopic, operator.ReceiversTopic, operator.PoolTasksTopic(b.pool), operator.PoolEventsTopic(b.pool), operator.TenantTopic(b.tenant), operator.TenantTranscriptTopic(b.tenant), operator.HostTopic(b.tenant, b.host), operator.ReceiverTopic(b.receiver), operator.ReceiverProgressTopic(b.receiver), operator.CustodianTopic(b.pool))
-	terms := testTerms()
-	config := testConfig(b.receiver)
-	config.Pool = b.pool
-	for _, record := range []operator.Record{
-		{Kind: "pool", Pool: b.pool, Terms: &terms},
-		{Kind: "host", Tenant: b.tenant, Host: b.host},
-		{Kind: "entitlement", Tenant: b.tenant, Pool: b.pool},
-		{Kind: "receiver", Pool: b.pool, Receiver: b.receiver, Config: &config},
-	} {
-		encoded, err := operator.EncodeRecord(record)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.OperatorTopic, Value: encoded}).FirstErr(); err != nil {
-			t.Fatal(err)
-		}
+	b.service = &operator.Service{Operator: kafka, Broker: address}
+	b.applyTerms(t, ctx, testTerms())
+	if err := b.service.TenantAdd(ctx, b.tenant, b.pool); err != nil {
+		t.Fatal(err)
 	}
+	if err := b.service.HostAdd(ctx, b.tenant, b.host, filepath.Join(t.TempDir(), "host.bundle"), false); err != nil {
+		t.Fatal(err)
+	}
+	b.member(t, ctx, b.receiver)
 	return b
 }
 
-func (b brokerPool) createTopics(t *testing.T, ctx context.Context, topics ...string) {
+// applyTerms applies terms to the pool as pool apply does.
+func (b brokerPool) applyTerms(t *testing.T, ctx context.Context, terms operator.Terms) {
 	t.Helper()
-	if _, err := kadm.NewClient(b.kafka).CreateTopics(ctx, 1, -1, nil, topics...); err != nil {
-		t.Fatal(err)
-	}
-	if err := kafkatest.Led(ctx, b.kafka, topics...); err != nil {
+	if err := b.service.PoolApply(ctx, b.pool, terms, false); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -230,16 +219,12 @@ func (b brokerPool) seal(t *testing.T, ctx context.Context, submission *wire.Sub
 	}
 }
 
-// configure writes the receiver's configuration record with capacity.
+// configure records the receiver's configuration with capacity.
 func (b brokerPool) configure(t *testing.T, ctx context.Context, capacity int64) {
 	t.Helper()
 	config := testConfig(b.receiver)
 	config.Pool, config.Capacity = b.pool, capacity
-	encoded, err := operator.EncodeRecord(operator.Record{Kind: "receiver", Pool: b.pool, Receiver: b.receiver, Config: &config})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.OperatorTopic, Value: encoded}).FirstErr(); err != nil {
+	if _, err := b.service.ReceiverUpdate(ctx, config, false); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -249,41 +234,15 @@ func (b brokerPool) deliveryLimit(t *testing.T, ctx context.Context, limit int32
 	t.Helper()
 	terms := testTerms()
 	terms.DeliveryLimit = limit
-	encoded, err := operator.EncodeRecord(operator.Record{Kind: "pool", Pool: b.pool, Terms: &terms})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.OperatorTopic, Value: encoded}).FirstErr(); err != nil {
-		t.Fatal(err)
-	}
-	value := fmt.Sprint(limit)
-	config := kmsg.NewIncrementalAlterConfigsRequestResourceConfig()
-	config.Name, config.Value, config.Op = "share.delivery.count.limit", &value, kmsg.IncrementalAlterConfigOpSet
-	resource := kmsg.NewIncrementalAlterConfigsRequestResource()
-	resource.ResourceType, resource.ResourceName = kmsg.ConfigResourceTypeGroupConfig, operator.PoolGroup(b.pool)
-	resource.Configs = []kmsg.IncrementalAlterConfigsRequestResourceConfig{config}
-	request := kmsg.NewPtrIncrementalAlterConfigsRequest()
-	request.Resources = []kmsg.IncrementalAlterConfigsRequestResource{resource}
-	response, err := request.RequestWith(ctx, b.kafka)
-	if err == nil {
-		err = kerr.ErrorForCode(response.Resources[0].ErrorCode)
-	}
-	if err != nil {
-		t.Fatalf("set the share group's delivery limit: %v", err)
-	}
+	b.applyTerms(t, ctx, terms)
 }
 
-// member adds receiver id to the pool with its topics and configuration record.
+// member adds receiver id to the pool as receiver apply does.
 func (b brokerPool) member(t *testing.T, ctx context.Context, id string) {
 	t.Helper()
-	b.createTopics(t, ctx, operator.ReceiverTopic(id), operator.ReceiverProgressTopic(id))
 	config := testConfig(id)
 	config.Pool = b.pool
-	encoded, err := operator.EncodeRecord(operator.Record{Kind: "receiver", Pool: b.pool, Receiver: id, Config: &config})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.OperatorTopic, Value: encoded}).FirstErr(); err != nil {
+	if err := b.service.ReceiverAdd(ctx, config, b.service.Broker, filepath.Join(t.TempDir(), id+".bundle")); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -490,14 +449,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	b := newBrokerPool(t, ctx, address)
-	terms := testTerms()
-	encoded, err := operator.EncodeRecord(operator.Record{Kind: "pool", Pool: b.pool, Terms: &terms})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.OperatorTopic, Value: encoded}).FirstErr(); err != nil {
-		t.Fatal(err)
-	}
+	b.applyTerms(t, ctx, testTerms())
 	input := make([]byte, 480<<10)
 	rand.Read(input)
 	dir := t.TempDir()
@@ -590,14 +542,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	b := newBrokerPool(t, ctx, address)
-	terms := vcsTerms("git.example.test")
-	encoded, err := operator.EncodeRecord(operator.Record{Kind: "pool", Pool: b.pool, Terms: &terms})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.OperatorTopic, Value: encoded}).FirstErr(); err != nil {
-		t.Fatal(err)
-	}
+	b.applyTerms(t, ctx, vcsTerms("git.example.test"))
 	dir := t.TempDir()
 	credentialFile, deployKey := filepath.Join(dir, credentialName), filepath.Join(dir, "deploy-key")
 	if err := os.WriteFile(credentialFile, []byte(testToken), 0o600); err != nil {
@@ -692,5 +637,33 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	}
 	if strings.Contains(prompt+logs.String()+hostLogs.String(), deployValue) {
 		t.Fatalf("prompt or logs carry the deploy key")
+	}
+}
+
+// The real-broker fixture provisions objects operator check accepts, as the tests sharing that broker's wherry.operator
+// and running check after this package need.
+func TestBrokerPoolPassesOperatorCheck(t *testing.T) {
+	cluster := kfake.MustCluster()
+	t.Cleanup(cluster.Close)
+	ctx := t.Context()
+	admin, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(admin.Close)
+	// kfake reports no share-group ceilings until they are set.
+	var alters []kadm.AlterConfig
+	for name, value := range map[string]string{"group.share.max.delivery.count.limit": "10", "group.share.max.record.lock.duration.ms": "60000"} {
+		alters = append(alters, kadm.AlterConfig{Op: kadm.SetConfig, Name: name, Value: &value})
+	}
+	if responses, err := kadm.NewClient(admin).AlterBrokerConfigs(ctx, alters); err != nil || responses[0].Err != nil {
+		t.Fatal(err, responses)
+	}
+	b := newBrokerPool(t, ctx, cluster.ListenAddrs()[0])
+	b.configure(t, ctx, 6)
+	b.deliveryLimit(t, ctx, 4)
+	b.member(t, ctx, b.receiver+"-b")
+	if err := b.service.Check(ctx); err != nil {
+		t.Fatalf("operator check after the fixture = %v", err)
 	}
 }
