@@ -193,17 +193,19 @@ func inDir(dir, path string) string {
 	return filepath.Join(dir, path)
 }
 
-// bundlePath is the bundle file of name under dir's bundles/kind, creating the directories mode 0700: bundles hold
-// passwords.
-func bundlePath(dir, kind, name string) (string, error) {
-	if !wire.ValidName(name) {
-		return "", fmt.Errorf("%q is not a valid name", name)
+// bundlePath is the bundle file under dir's bundles/kind named by names, the last the file's, each a directory but the
+// last, creating the directories mode 0700: bundles hold passwords.
+func bundlePath(dir, kind string, names ...string) (string, error) {
+	for _, name := range names {
+		if !wire.ValidName(name) {
+			return "", fmt.Errorf("%q is not a valid name", name)
+		}
 	}
-	path := filepath.Join(dir, "bundles", kind)
+	path := filepath.Join(append([]string{dir, "bundles", kind}, names[:len(names)-1]...)...)
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return "", err
 	}
-	return filepath.Join(path, name+".bundle"), nil
+	return filepath.Join(path, names[len(names)-1]+".bundle"), nil
 }
 
 // rebroker rewrites the bundle at path with its password when it names a broker other than broker.

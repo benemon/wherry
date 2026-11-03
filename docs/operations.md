@@ -291,7 +291,7 @@ Prerequisites: the working directory
    wherry operator host add laptop --tenant acme
    ```
 
-3. Hand the bundle, `bundles/hosts/laptop.bundle`, to the host's user over
+3. Hand the bundle, `bundles/hosts/acme/laptop.bundle`, to the host's user over
    a channel you trust. It holds the host's Kafka password. When the
    broker's certificate chains to a private CA, the host also needs that
    CA's certificate, at `~/.config/wherry/ca.pem` or the `ca_file` its

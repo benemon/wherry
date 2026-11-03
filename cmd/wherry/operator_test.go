@@ -522,19 +522,19 @@ func TestReceiverApplyForceReissuesTheIdentity(t *testing.T) {
 	}
 }
 
-// host add writes the host's bundle under bundles/hosts, refuses an existing host without --force, and with --force
-// replaces its bundle with one holding a new password; the old bundle stops working. A host of the same name in another
-// tenant is refused rather than overwriting the bundle.
+// host add writes the host's bundle under bundles/hosts/<tenant>, refuses an existing host without --force, and with
+// --force replaces its bundle with one holding a new password; the old bundle stops working. A host of the same name in
+// another tenant has a bundle of its own, which neither its add nor its --force touches the first's.
 func TestHostAddForceReissuesTheIdentity(t *testing.T) {
 	service := operatorEnv(t)
-	bundle := filepath.Join("bundles", "hosts", "host-a.bundle")
+	bundle := filepath.Join("bundles", "hosts", "tenant-a", "host-a.bundle")
 	add := func(tenant string, options ...string) error {
 		return runOperator(append([]string{"host", "add", "host-a", "--tenant", tenant}, options...), io.Discard, io.Discard)
 	}
 	if err := add("tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	for path, mode := range map[string]os.FileMode{"bundles": 0o700, filepath.Join("bundles", "hosts"): 0o700, bundle: 0o600} {
+	for path, mode := range map[string]os.FileMode{"bundles": 0o700, filepath.Join("bundles", "hosts"): 0o700, filepath.Dir(bundle): 0o700, bundle: 0o600} {
 		if info, err := os.Stat(path); err != nil || info.Mode().Perm() != mode {
 			t.Fatalf("%s: %v, %v; want mode %v", path, info, err, mode)
 		}
@@ -599,7 +599,23 @@ func TestHostAddForceReissuesTheIdentity(t *testing.T) {
 	if !bundleWorks(t, service, bundle, true) {
 		t.Fatal("the broker refused the bundle host add --force wrote")
 	}
-	if err := add("tenant-b"); err == nil || !errors.Is(err, os.ErrExist) {
-		t.Fatalf("host add of host-a in another tenant = %v; want it refused over the existing bundle", err)
+	first, err := os.ReadFile(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join("bundles", "hosts", "tenant-b", "host-a.bundle")
+	for _, options := range [][]string{nil, {"--force"}} {
+		if err := add("tenant-b", options...); err != nil {
+			t.Fatalf("host add of host-a in another tenant %v = %v", options, err)
+		}
+		if !bundleWorks(t, service, other, true) {
+			t.Fatalf("the broker refused the other tenant's bundle host add %v wrote", options)
+		}
+		if after, err := os.ReadFile(bundle); err != nil || !bytes.Equal(after, first) {
+			t.Fatalf("host add of host-a in another tenant %v changed %s: %v", options, bundle, err)
+		}
+	}
+	if !bundleWorks(t, service, bundle, false) {
+		t.Fatal("the broker refused the first tenant's bundle after the other tenant's host add")
 	}
 }

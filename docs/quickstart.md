@@ -644,7 +644,7 @@ wherry operator host add laptop --tenant acme
 
 `host add` records host `laptop` of tenant `acme`, creates its Kafka
 principal and key topic, and writes its bundle,
-`bundles/hosts/laptop.bundle`, mode 0600. Hand the bundle to `laptop`'s user
+`bundles/hosts/acme/laptop.bundle`, mode 0600. Hand the bundle to `laptop`'s user
 over a channel you trust; it holds the host's Kafka password. On `laptop`,
 put it where the host configuration names it, and the broker's CA
 certificate at `~/.config/wherry/ca.pem`, where the host looks for one when

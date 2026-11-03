@@ -146,10 +146,10 @@ file to correct and apply again. With neither and no terminal it refuses,
 naming the fields the file must give.
 
 `host add` and `receiver apply` write bundles under the working directory's
-`bundles/`, mode 0700: `bundles/hosts/<host>.bundle` and
-`bundles/receivers/<receiver>.bundle`, mode 0600. A bundle holds the broker
-address, the principal and its password, and no CA. `host add` refuses a host
-that exists unless given `--force`. `receiver apply` of a receiver that exists
+`bundles/`: `bundles/hosts/<tenant>/<host>.bundle` and
+`bundles/receivers/<receiver>.bundle`, mode 0600, in directories mode 0700. A
+bundle holds the broker address, the principal and its password, and no CA.
+`host add` refuses a host that exists unless given `--force`. `receiver apply` of a receiver that exists
 updates its configuration. Without `--force`, a command never replaces a
 bundle: before it changes anything in Kafka it creates the bundle file,
 failing when a file is there, and writes the bundle into it at the end. A
@@ -394,14 +394,13 @@ wherry operator host add HOST --tenant TENANT [--force]
 
 Records the host, creates its principal, its key topic and the tenant
 feed and transcript topic, the latter two with `max.message.bytes` 2 MiB, grants its ACLs, applies its quotas, and writes
-its bundle to `bundles/hosts/<host>.bundle`, naming the broker in
+its bundle to `bundles/hosts/<tenant>/<host>.bundle`, naming the broker in
 `operator.yaml`. It refuses a host that exists, and an existing bundle file,
 unless given [`--force`](#operator-commands). For a host that exists,
 `--force` reissues its identity alone: it records nothing, and sets no topic,
 ACL or quota. A host whose membership ended is refused. Host names are unique
-within a tenant, and bundle files are named by host alone, so a host of
-another tenant's host's name is refused while that bundle is in the working
-directory.
+within a tenant; hosts of the same name in other tenants have bundles of
+their own.
 
 ### `wherry operator receiver apply RECEIVER`
 

@@ -161,7 +161,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		if len(pos) != 3 || options["tenant"] == "" {
 			return errors.New("usage: wherry operator host add HOST --tenant TENANT [--force]")
 		}
-		bundle, err := bundlePath(dir, "hosts", pos[2])
+		bundle, err := bundlePath(dir, "hosts", options["tenant"], pos[2])
 		if err != nil {
 			return err
 		}

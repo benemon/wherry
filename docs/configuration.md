@@ -189,7 +189,8 @@ operator command takes `--dir DIR`, the current directory by default.
   pools/<pool>.yaml          pool terms, kept; pool apply reads them
   receivers/<receiver>.yaml  receiver configurations, kept; receiver apply reads them
   bundles/                   mode 0700
-    hosts/<host>.bundle      mode 0600
+    hosts/<tenant>/          mode 0700
+      <host>.bundle          mode 0600
     receivers/<receiver>.bundle  mode 0600
   .gitignore                 operator init appends operator.password and bundles/
 ```
