@@ -858,9 +858,10 @@ restored.
    ends in ` error=<cause>`. Check what that step depends on (the broker
    connection, the broker settings), then run the command again. It starts
    again from step 1 and continues from the revoking record the failed run
-   left. Once that record is written, the principal holds no ACL meanwhile;
-   a run that failed in step 1 before writing it left the principal as it
-   was. Step 3 already retries for up to 2 minutes while a
+   left. A run that reached step 2 deleted every grant of the principal; a
+   stale command can restore wherry-managed grants, which the next pass
+   deletes again. A run that failed before step 2 may have left the
+   principal's grants, and the run again deletes them. Step 3 already retries for up to 2 minutes while a
    broker still authorises the principal.
 
 3. For a receiver, rotate at its source each credential of the runs it
