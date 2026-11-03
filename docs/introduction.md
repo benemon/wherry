@@ -63,6 +63,5 @@ One `wherry` binary with four roles:
   Nomad dev agent, a single-broker Kafka and one receiver, for trying wherry
   and developing against it.
 
-Submissions, statuses, transcript chunks and results are A2A v1.0 objects;
-[the wherry A2A extension](a2a-extension-v1.md) specifies every
-record.
+Submissions, statuses, transcript chunks and results are A2A v1.0 objects.
+[The wherry A2A extension](a2a-extension-v1.md) specifies every record.

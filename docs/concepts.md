@@ -248,9 +248,9 @@ A receiver assigned the partition that the current snapshot already names,
 and that still holds the snapshot's key, continues with that key. Every
 `takeover` and `contested` snapshot raises
 [WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover), and hosts
-log it: every custodian change, a planned drain's included, raises the
-alert, so a receiver taking custody that should not have is never silent. The group coordinates honest receivers; it does not authenticate
-custody against a malicious member of the pool
+log it. Every custodian change raises the alert, a planned drain's included.
+The group coordinates honest receivers. It does not authenticate custody
+against a malicious member of the pool
 ([What the pool key protects](security.md#what-the-pool-key-protects)).
 
 ### Rotation
@@ -432,10 +432,9 @@ same host: the receiver restarted under the same receiver ID adopts its
 jobs, but a member on another host that claims a task starts a second job
 once the [claim check](a2a-extension-v1.md#the-claim-check) no longer counts
 the exited receiver a live claimant, as after a receiver crash. The
-systemd plugin recommends a pool per receiver for this reason. Stopping the
-jobs would bind only an honest receiver; a compromised one ignores it, so
-leaving them for adoption removes no protection. Revocation still ends the
-receiver's access.
+systemd plugin recommends a pool per receiver for this reason. The
+receiver leaves the jobs for adoption: stopping them would bind only an
+honest receiver, and a compromised one would ignore it.
 
 A revoked principal does not return. A host or receiver that comes back is
 provisioned under a new name, with a new principal and key topic.

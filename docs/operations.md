@@ -32,8 +32,9 @@ principals and group configurations; the cluster itself is prepared once.
 - **`transaction.max.timeout.ms`** is short enough to wait out:
   revocation waits at least the longest of it,
   `connections.max.reauth.ms` and
-  `group.share.max.record.lock.duration.ms`. Kafka's default makes each
-  revocation wait that long.
+  `group.share.max.record.lock.duration.ms`. See Kafka's
+  [`transaction.max.timeout.ms`](https://kafka.apache.org/documentation/#brokerconfigs_transaction.max.timeout.ms)
+  for its default.
 - **One SCRAM principal** exists: the Kafka super user. `wherry operator
   init` creates `wherry.operator` and grants it its ACLs.
 
@@ -236,7 +237,7 @@ Prerequisites: the working directory and the pool's new terms in
 Receivers reject a task still unclaimed `start_by_limit` after its
 submission, and a task whose `task_started_by` is later, with
 `task_started_by is past the pool's start_by_limit`; `wherry submit`
-refuses such a `task_started_by` before it publishes. Every run therefore ends
+refuses such a `task_started_by` before it publishes. Every run ends
 within six hours after `start_by_limit`. A longer limit keeps prompts on
 the broker longer. Lowering `start_by_limit` leaves the pool topics'
 retention where it is, so runs submitted under the longer limit keep their
@@ -365,16 +366,8 @@ the host is offline until its user puts the new bundle in place.
 A receiver runs a pool's tasks on the plugin profiles of its
 [receiver configuration](configuration.md#receiver-configuration);
 [Placement](concepts.md#placement) says how a task reaches one.
-On a host-local platform such as systemd, a receiver adopts only the jobs on
-its own host, so a pool with receivers on several hosts can run a task twice
-after a receiver is lost: once the lease of the task's holder, the latest
-receiver the key custodian served the task to that has not since released
-it, lapses 120 seconds after the holder's last advertisement, or once its
-membership ends, a receiver on another host starts the task again while the
-first job may still run. Give each host-local receiver a
-pool of its own, as the
-[systemd plugin's README](https://github.com/benemon/wherry-plugins/tree/main/systemd#run-the-receiver-as-a-systemd-service)
-says.
+Give a host-local receiver, such as a systemd one, a pool of its own, as
+[systemd](plugins.md#systemd) explains.
 [Quickstart: Receiver](quickstart.md#receiver) walks through adding and
 starting receiver `nomad-1`, with every file it writes.
 
@@ -1294,12 +1287,12 @@ and [systemd](https://github.com/benemon/wherry-plugins/tree/main/systemd#agent-
 The CA and proxy settings stay yours: `GIT_SSL_CAINFO`, `SSL_CERT_FILE`,
 `HTTPS_PROXY` and the like reach `git` as the image or platform sets them.
 
-Start the agent's harness in a directory above the checkout. Claude Code in print mode skips the workspace trust prompt and runs the
-hooks and MCP servers of the project it starts in, so a harness started in a
-cloned repository runs that repository's hooks with the agent's credential in
-reach. Started above the checkout, it reads the repository's files without
-loading its project settings, including after the agent changes directory in
-a shell. The start directory is the plugin profile's to set: on Nomad, a runtime
+Start the agent's harness in a directory above the checkout. A harness
+loads the project settings of the directory it starts in: Claude Code in
+print mode runs that project's hooks and MCP servers without a trust prompt
+([Claude Code settings](https://docs.anthropic.com/en/docs/claude-code/settings)).
+A harness started in a cloned repository would run its hooks with the
+agent's credential in reach. The start directory is the plugin profile's to set: on Nomad, a runtime
 command such as `cd /local && exec claude ...` starts the harness in the task
 directory, and the clone lands below it.
 
@@ -1473,8 +1466,9 @@ configuration, bundle, host key and credential files readable by the
 harness user.
 
 1. Install the plugin. In Claude Code, add this repository as a
-   marketplace, install the plugin from it, then run `/reload-plugins` in
-   the session:
+   marketplace and install the plugin from it, as
+   [Claude Code's plugin documentation](https://docs.anthropic.com/en/docs/claude-code/plugins)
+   describes:
 
    ```sh
    claude plugin marketplace add benemon/wherry
@@ -1482,7 +1476,7 @@ harness user.
    ```
 
    Another harness installs `plugins/wherry` through its own plugin
-   mechanism, then restarts its session.
+   mechanism.
 2. Check the connection with the `receivers` tool, which lists the
    receivers the tenant may use.
 

@@ -39,9 +39,8 @@ Every command but `version` and the shortcuts runs under its role's word:
 - A failed command prints `wherry: <error>` on standard error and exits
   with status 1. `wait` has its own [exit codes](#exit-codes).
 - Durations use Go syntax, such as `90s`, `45m` or `720h`, and must be
-  positive. `host remove` and `receiver remove` refuse a `--wait` of zero or
-  less before they revoke anything. They compute the minimum wait from the
-  broker's timeouts; `--wait` can lengthen it but not shorten it.
+  positive. [`receiver remove`](#wherry-operator-receiver-remove-receiver)
+  gives the rules for `--wait`.
 - `cancel`, `wait`, `status`, `events` and `logs` print
   `skipped N unverifiable records` on standard error when N records of the
   run fail verification.
@@ -548,8 +547,10 @@ up to 2 minutes, and retries a refused login within the same 2 minutes. It
 fails at once when the probe returns any other error. Step 5 waits the largest of
 `connections.max.reauth.ms`, `group.share.max.record.lock.duration.ms` and
 `transaction.max.timeout.ms` across the brokers, and fails when one of them
-is unbounded. `--wait DURATION` lengthens that wait and must be positive;
-step 5 refuses a duration below it and names the minimum.
+is unbounded. `--wait DURATION` lengthens that wait and cannot shorten it.
+The command refuses a `--wait` of zero or less before it revokes anything,
+and step 1 refuses a duration below the minimum, naming it, before it
+records anything.
 
 ### `wherry operator check`
 
@@ -662,13 +663,18 @@ its stop plus `drain_timeout` for another receiver's snapshot. Every step of the
 re-key's reads, its transaction and the key deletion included,
 ends within `drain_timeout` plus 5 seconds of the stop; a read or write that
 bound ends keeps the keys. With a successor's snapshot, it
-reads the task topic to its last stable offset and the pool's events, writes
-in one transaction a re-key wrap to the successor's current key, once for each
-task hash, for every task its keys open that is an authorised host's under its
-run's Kafka key and derived run ID, whose bounds hold at its append time, that
-is its run's task when the run has one, and that is not terminal, not past its
-`task_ended_by` and not already re-keyed to that key, and then deletes its
-pool keys. A read or write
+reads the task topic to its last stable offset and the pool's events. It
+re-keys every task that meets all of these:
+
+- its keys open it;
+- an authorised host wrote it under its run's Kafka key and derived run ID;
+- its bounds hold at its append time;
+- it is its run's task when the run has one;
+- it is not terminal, not past its `task_ended_by` and not already re-keyed
+  to the successor's current key.
+
+It writes the re-key wraps to that key, one for each task hash, in one
+transaction, and then deletes its pool keys. A read or write
 error keeps the keys to their deadlines. A task appended under its key after
 that read is not re-keyed: it fails key-lost before it starts, and its host
 resubmits it before its `task_started_by`. While its pool is suspended it
@@ -1491,12 +1497,11 @@ step fails with `step <name>: <cause>`, with two exceptions: a `preflight`
 refusal of `up` is the whole error, and the `host` step of `down` prints no
 name.
 
-`dev` is one developer's tool, and two of its limits follow from that.
 Commands run at once on one instance are not serialized: run one at a
-time. And `XDG_DATA_HOME`, or `HOME` without it, must be the same for `up`
-and `down`, since it locates the instance and its record of the host files
-`up` created; `XDG_CONFIG_HOME` may change, since the
-record holds absolute paths.
+time. `XDG_DATA_HOME`, or `HOME` without it, must be the same for `up` and
+`down`, since it locates the instance and its record of the host files `up`
+created. `XDG_CONFIG_HOME` may change, since the record holds absolute
+paths.
 
 ### `wherry dev init`
 

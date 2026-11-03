@@ -46,16 +46,21 @@ still has no source. It asks for the CA only on a terminal, so without one a
 broker under a private CA needs `ca.pem` in the configuration directory, or
 `ca_file` in the file, before `host init` runs.
 
-`state_dir` holds `runs/<run>.json` for each run this host submitted,
-readable by its owner alone, with the run's submission without its envelope
-and wrap, kept to [resubmit](concepts.md#lost-pool-keys) the run if its key
-is lost, and `redaction_key`, the run's redaction key, made when this host
-submits the run; a replacement's record also holds its signed bytes,
-envelope included. It holds no credential value in the clear. It also holds `runs/<run>/outputs/` for the outputs
-`wait` writes by default, and `resubmit/<run>.json.lock`, which every
-process sharing the directory holds while it resubmits that run. `submit`
-writes the run's record before it publishes the task, and removes it only
-when publishing fails.
+`state_dir` holds:
+
+- `runs/<run>.json` for each run this host submitted, readable by its owner
+  alone: the run's submission
+  without its envelope and wrap, kept to
+  [resubmit](concepts.md#lost-pool-keys) the run if its key is lost, and
+  `redaction_key`, the run's redaction key, made when this host submits the
+  run. A replacement's record also holds its signed bytes, envelope
+  included. No record holds a credential value in the clear.
+- `runs/<run>/outputs/`, where `wait` writes the run's outputs by default.
+- `resubmit/<run>.json.lock`, which every process sharing the directory
+  holds while it resubmits that run.
+
+`submit` writes the run's record before it publishes the task, and removes
+it only when publishing fails.
 
 ### Client configuration example
 
@@ -138,7 +143,7 @@ adoption, leaving the job running. The stop fixes one deadline,
 custodian's [drain](commands.md#wherry-receiver-run), its re-key
 included, all end by it. A run whose commit does not complete by then is
 left unacknowledged, and the broker returns its task when its acquisition
-lock expires. A stop therefore takes at most `drain_timeout` plus 5 seconds.
+lock expires.
 The receiver cannot read the window, so `drain_timeout` plus 5 seconds stays
 a few seconds below it: `20s` ends a stop within 25 seconds, inside
 Kubernetes' default 30-second window. At `0s` the
@@ -441,9 +446,12 @@ both forms.
 ### Record limit
 
 A record limit is the lower of what the record's producer batches and what
-the topic the record goes to takes: its `max.message.bytes` when the topic
-sets one, and otherwise the lowest `message.max.bytes` across the brokers.
-Submissions go to the pool's tasks topic, from a host that batches at most
+the topic the record goes to takes, which Kafka's
+[`max.message.bytes`](https://kafka.apache.org/documentation/#topicconfigs_max.message.bytes)
+sets. wherry reads the topic's own setting, else the lowest
+`message.max.bytes` across the brokers. Submissions go to the pool's tasks
+topic from a host, which batches at most
+[franz-go's default](https://pkg.go.dev/github.com/twmb/franz-go/pkg/kgo#ProducerBatchMaxBytes),
 1000012 bytes. Receiver records go to the feeds and transcript topics of
 the tenants entitled to the pool, from a receiver that batches at most
 2 MiB (2097152 bytes), the `max.message.bytes` wherry sets on every tenant
@@ -903,8 +911,7 @@ than `start_by_limit` ago, or when the run's `task_started_by` falls more
 than `start_by_limit` after it. A redelivered run that a member has claimed
 skips both checks. `wherry submit` and the MCP `submit` tool refuse, before
 publishing, a `task_started_by` later than `start_by_limit` from now with the
-same text, the MCP tool with `INVALID_ARGUMENT`. Every run therefore ends
-within six hours after `start_by_limit`.
+same text, the MCP tool with `INVALID_ARGUMENT`.
 
 ## Environment variables
 

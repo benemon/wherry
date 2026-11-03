@@ -91,7 +91,7 @@ func TestQuickstartMissingSourceError(t *testing.T) {
 }
 
 // TestQuickstartOperatorOutput runs the quickstart's wherry operator commands, pool apply aside, on its files and finds what receiver
-// apply --dry-run and receiver show print in docs/quickstart.md, as two YAML code blocks.
+// apply --dry-run and receiver show print, the same YAML, in docs/quickstart.md as one YAML code block.
 func TestQuickstartOperatorOutput(t *testing.T) {
 	receiverFile, err := filepath.Abs(quickstart("nomad-1.yaml"))
 	if err != nil {
@@ -133,7 +133,7 @@ func TestQuickstartOperatorOutput(t *testing.T) {
 	if shown != dryRun {
 		t.Fatalf("show printed\n%s\nwant what the dry run printed\n%s", shown, dryRun)
 	}
-	if count := strings.Count(string(doc), "```yaml\n"+dryRun+"```\n"); count != 2 {
-		t.Errorf("docs/quickstart.md holds what receiver apply --dry-run and receiver show print in %d code blocks, want 2:\n%s", count, dryRun)
+	if count := strings.Count(string(doc), "```yaml\n"+dryRun+"```\n"); count != 1 {
+		t.Errorf("docs/quickstart.md holds what receiver apply --dry-run and receiver show print in %d code blocks, want 1:\n%s", count, dryRun)
 	}
 }

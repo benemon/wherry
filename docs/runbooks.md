@@ -213,14 +213,14 @@ group still assigns it the partition re-initialises its transactional ID
 and republishes its snapshot as `contested`; a second fence within the
 45-second session timeout stands it down until it is assigned again. The
 alert fires on any increase of `wherry_custodian_takeovers_total` within 15
-minutes, by `reason`, `takeover` or `contested`. A `bootstrap` or `rotation`
-snapshot counts nothing.
+minutes, by `reason`, `takeover` or `contested`. `bootstrap` and `rotation`
+snapshots do not count.
 
 Every custodian change raises it, a planned drain's included, so expect it
-at each planned stop of a custodian. It is not suppressed for drains because
-it is also the signal of a compromised receiver taking custody through the
-custodian group ([What the pool key protects](security.md#what-the-pool-key-protects)):
-a takeover no planned stop or crash explains is that.
+at each planned stop of a custodian. It also signals a compromised receiver
+taking custody through the custodian group
+([What the pool key protects](security.md#what-the-pool-key-protects)).
+Treat a takeover that no planned stop or crash explains as a compromise.
 
 Confirm it:
 

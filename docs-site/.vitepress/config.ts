@@ -27,7 +27,7 @@ const sidebar = [
       { text: 'Runbooks', link: '/runbooks' },
       { text: 'Plugins', link: '/plugins' },
       {
-        text: 'APIs',
+        text: 'Reference',
         items: [
           { text: 'Commands', link: '/commands' },
           { text: 'MCP tools', link: '/mcp' },

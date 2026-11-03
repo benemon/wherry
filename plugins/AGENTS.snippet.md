@@ -19,11 +19,11 @@ clones itself.
    `--git REMOTE@REF` for a repository the agent clones (its host must be one of
    the pool's VCS hosts), and `--git-changes patch` to get its commits back as
    `changes.patch` (`git am` it). The clone's credential and an `ssh` remote's
-   host key come from the `git` entries of your wherry configuration. Add `--input FILE` for each file the
-   agent needs (inputs that would take the task over the broker's record limit
-   or a matching profile's limit go through S3 when the pool and host have
-   storage; otherwise submit refuses before publishing),
-   `--credential NAME:file=FILE` or `--credential NAME:env=VAR` for each
+   host key come from the `git` entries of your wherry configuration. Add
+   `--input FILE` for each file the agent needs. Inputs over the broker's
+   record limit or a matching profile's limit go through S3 when the pool
+   and host have storage, and otherwise submit refuses before publishing.
+   Add `--credential NAME:file=FILE` or `--credential NAME:env=VAR` for each
    configured credential it needs as a file or an environment variable, and `--output NAME[:required]` for each file you want back. Where the
    pool has storage and your configuration a storage credential for it,
    `--input FILE:s3` sends a larger file (5 GiB at most) through the pool's

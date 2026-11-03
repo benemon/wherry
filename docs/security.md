@@ -130,9 +130,8 @@ otherwise refuses it with the reason the
 
 The custodian serves a new claimant once the previous holder has
 released the task or gone silent, and refuses it with `two live claimants`
-while the previous holder is live. It records each decision on a claim durably and reuses it, and it
-opens the envelope and checks its binding before it wraps the content key,
-so a spliced envelope never releases its key.
+while the previous holder is live. It records each decision on a claim
+durably and reuses it.
 
 A refused claimant acts on the reason:
 
@@ -205,7 +204,7 @@ reason, or withholding re-key wraps is out of scope.
 | --- | --- |
 | Kafka operators and broker storage | ciphertext only, without a pool private key |
 | another tenant or pool | nothing: the platform's ACLs, TLS and SCRAM keep them apart, and only the pool's receivers and `wherry.operator` can write its snapshot |
-| a compromised receiver that is not the key custodian | the credentials of the runs it claims; it can become custodian through the custodian group as an honest receiver would, which raises [WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover); every custodian change raises it, a planned drain's included, so a takeover that no planned stop or crash explains is the sign |
+| a compromised receiver that is not the key custodian | the credentials of the runs it claims; it can become custodian through the custodian group as an honest receiver would, which raises [WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover), as every custodian change does |
 | the key custodian, or anyone who copies its keys | every retained envelope under those keys, without claiming |
 
 Daily [rotation](concepts.md#rotation) stops a silently copied key from
@@ -508,9 +507,9 @@ that is missing.
 
 `Alter` on the cluster lets its holder grant itself any ACL, so
 `wherry.operator` is close to the super user in effect: whoever holds
-`operator.password` can take over the cluster. The gain is that the super
-user's credential is neither kept nor used after setup, and that
-`wherry.operator`'s password rotates with a re-run of `init`.
+`operator.password` can take over the cluster. The super user's credential
+is neither kept nor used after setup, and `wherry.operator`'s password
+rotates with a re-run of `init`.
 
 ### The operator working directory
 

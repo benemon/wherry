@@ -76,7 +76,7 @@ run when their variables are set and skip otherwise:
   tests and the S3 leg of the round-trip test.
 
 `test/kafka/up.sh DIR` starts one Kafka 4.3 container serving both brokers
-and writes their variables to `DIR/env`; CI runs these tests against it:
+and writes their variables to `DIR/env`. CI runs these tests against it:
 
 ```sh
 test/kafka/up.sh /tmp/wherry-kafka && . /tmp/wherry-kafka/env
@@ -87,7 +87,7 @@ The packages share the broker's `wherry.operator`, so they run one at a time.
 
 `test/s3/up.sh DIR` starts [ceph-aio](https://github.com/benemon/ceph-aio), a
 single-node Ceph with RGW, creates a user with generated keys and writes the S3
-variables to `DIR/env`; CI runs the S3 tests against it:
+variables to `DIR/env`. CI runs the S3 tests against it:
 
 ```sh
 test/s3/up.sh /tmp/wherry-s3 && . /tmp/wherry-s3/env

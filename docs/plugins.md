@@ -22,15 +22,8 @@ permissions:
 
 ## Why Nomad
 
-Nomad is the primary platform for receivers because one Nomad cluster
-runs many kinds of workload. Each Nomad
-[task driver](https://developer.hashicorp.com/nomad/docs/deploy/task-driver) runs a
-different kind: containers through Docker or Podman, an isolated process
-on the host through `exec`, a plain host process through `raw_exec`, a
-virtual machine through QEMU, and further kinds through community driver
-plugins. A cluster's clients can themselves be bare-metal hosts, virtual
-machines or cloud instances. Nomad places each job on a client whose driver
-is healthy, within the node pool and datacenters the job names.
+One Nomad cluster runs many kinds of workload, each through a
+[task driver](https://developer.hashicorp.com/nomad/docs/deploy/task-driver).
 
 A plugin profile of the Nomad plugin names one driver and its configuration, and
 the receiver's configuration can hold several profiles of the Nomad

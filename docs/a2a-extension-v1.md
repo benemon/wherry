@@ -103,12 +103,10 @@ not. [Key concepts](concepts.md) explains the roles this document names, and
   duplicate names. A member added after wherry 1.0 states, beside it, what a
   reader that ignores it does.
 - Every payload has `v`, the payload version, which is `1`. Readers reject
-  any other version; a reader reports an [operator record](#operator-records)
-  with a higher version as written by a later release.
+  any other version, as [Operator records](#operator-records) details.
 - A2A objects use the
   [proto3 JSON mapping](https://protobuf.dev/programming-guides/json/) of
   the A2A v1.0 schema. wherry writes `bytes` as padded standard base64.
-  Readers accept standard or URL-safe base64, padded or not.
 - Every `TaskStatus` has `timestamp`, an RFC 3339 time. Receivers write it
   in UTC with milliseconds.
 - This extension reserves the bare `metadata` keys wherry writes: in a
@@ -1085,14 +1083,14 @@ pool's events in a transaction of its own, after the run's `claimed` status.
   time plus 5 minutes and 120 seconds and the open bound passes. The open
   bound is `task_started_by` for a first start and `task_ended_by` for an
   adoption. With no answer it commits `released` and returns the task to the
-  pool, so the delivery budget bounds the cycle; at the open bound the run
+  pool, and the delivery budget bounds the cycle. At the open bound the run
   ends past its bound.
 - An adopter publishes nothing of the job until it opens. It holds the job's
   lines, at most 4 MiB, dropping the oldest, and logs how many it dropped and
-  the offset its transcript resumes at; the first chunk's `seq` shows the gap.
+  the offset its transcript resumes at. The first chunk's `seq` shows the gap.
 - The private key lives only in the receiver's memory and is gone once the
   wait ends. A redelivered or adopted attempt makes a new key and a new
-  request; a wrap answering an earlier request does not open for it.
+  request. A wrap answering an earlier request does not open for it.
 - A receiver giving back a claim it holds commits `released` before it
   returns the task to the pool. When `released` does not commit, it leaves
   the task unacknowledged, and the share group returns it when its
@@ -1137,16 +1135,16 @@ request only when:
    `released` ends only its own receiver's claim.
 
 The custodian decides rule 6 once for each claim and commits that decision as
-a [claim decision](#claim-decision) in the transaction of its answer; a later
+a [claim decision](#claim-decision) in the transaction of its answer. A later
 request for the same claim takes that decision. It then recovers the content
 key from the submit wrap or a [re-key wrap](#re-key-wrap) to a key it holds,
 opens the envelope and checks it against the task as [Submission](#submission)
-states; a check that fails refuses `envelope invalid`, so a spliced envelope
+states. A check that fails refuses `envelope invalid`, and a spliced envelope
 never releases its content key. With no key it waits for a holder's re-key
 wrap until the earlier of the request's append time plus 5 minutes and the
 open bound, then refuses `key unavailable`. Otherwise it commits an attempt
 wrap. Each answer is one transaction through the transactional ID
-`p.<pool>.custodian`, so a fenced custodian answers nothing; a request whose
+`p.<pool>.custodian`, and a fenced custodian answers nothing. A request whose
 answer's commit has an unknown outcome is answered again on a later pass only
 when the answer is not on the pool's events.
 
@@ -1294,9 +1292,7 @@ transcript line whose redacted form is over 512 KiB becomes a
 [reference part](#reference-parts) with that form's hash and size; a reply whose redacted
 form is over 64 KiB travels as its preview and [reply chunks](#the-reply), both
 cut from the redacted form; and a credential name whose
-redacted form is over 64 KiB is replaced by `[redacted text over 65536 bytes]`. A result whose agent fields are 16 KiB of
-8-byte values, each replaced by its 27-byte marker, still fits a default
-producer batch. A value shorter than 8 bytes once trimmed is not redacted; the
+redacted form is over 64 KiB is replaced by `[redacted text over 65536 bytes]`. A value shorter than 8 bytes once trimmed is not redacted; the
 receiver logs `credential <name> too short to redact` once for the attempt. A
 value in any other encoding, such as base64, is not replaced. An adopted attempt
 redacts the values of its own open of the envelope. Each form is replaced once, longest
@@ -1438,9 +1434,9 @@ job and material in place ([Open request](#open-request)).
 A run whose commit has an unknown outcome gives its task back
 unacknowledged. The task's next holder acknowledges it without running when
 the commit's terminal status is on the pool's events, and runs it again
-otherwise, so an ambiguous commit costs one redelivery cycle of latency. The
-job of a run whose terminal committed is not released by its holder; it is left
-to the plugin's sweep.
+otherwise: an ambiguous commit costs one redelivery cycle of latency. The
+holder does not release the job of a run whose terminal committed. The
+plugin's sweep removes it.
 
 ## Git input
 
@@ -1664,8 +1660,7 @@ a receiver acts on the cancel keeps the state it ended in.
 
 ## Binding
 
-wherry is a partial custom A2A protocol binding over Kafka, as A2A section 12
-allows. Its binding URI, which an `AgentInterface`'s `protocolBinding` would
+A2A section 12 allows a partial custom binding. wherry's binding URI, which an `AgentInterface`'s `protocolBinding` would
 name, is:
 
 ```
@@ -1719,13 +1714,10 @@ attribute to a host and run with a `rejected` [status](#status) in
 | the record's Kafka key is not its `run` | dropped | none |
 | the run already has a terminal status with the submission's task hash | acknowledged, nothing written | none |
 
-A receiver drops a record it cannot verify because a status names a tenant,
-run and task hash taken from the record: writing one for an unverified record
-would let any principal that can write the tasks topic place statuses on a
-tenant's feed. A record that fails to decode, or decodes to an invalid
-payload, names no run a status could bind to. A dropped submission's host
-learns nothing from the pool and sees its run stay submitted until its
-`task_started_by` passes. A submission whose run already ended is a redelivery, and
+A receiver writes no status for a record it cannot verify, since a status
+names the tenant, run and task hash the record gives. A dropped
+submission's host learns nothing from the pool and sees its run stay
+submitted until its `task_started_by` passes. A submission whose run already ended is a redelivery, and
 the run's terminal status already answers it.
 
 A run that ends after admission ends `TASK_STATE_FAILED` or
@@ -1739,18 +1731,14 @@ ignored.
   is keyed by its run ID, so a run's records on one topic arrive in the order
   they were written. Records on different topics have no order between them.
 - A run's statuses and results carry `attempt`, the share-group delivery
-  count. Readers order them by `attempt`, and an earlier attempt's records do
-  not change the outcome of a later one.
+  count, and readers order them by it ([Status](#status)).
 - A run's transcript orders by `seq`, the line's offset in the agent's
   output. An adopted attempt can repeat a `seq`; a reader
   takes the latest attempt's lines ([Chunk](#chunk)).
 - The end transaction commits the run's last chunks, its output chunks and
-  reply chunks, its result and its `terminal` status together, across the
-  tenant feed, the transcript topic and the pool's events. A reader sees each
-  topic's commit separately, so a host that reads the `terminal` status reads
-  the transcript topic to its high watermark before it reports the
-  transcript or the outputs complete ([Status](#status)). The last chunk has
-  `lastChunk` true.
+  reply chunks, its result and its `terminal` status together.
+  [Status](#status) gives how a host reads them across topics. The last
+  chunk has `lastChunk` true.
 
 ## Agent Card
 
