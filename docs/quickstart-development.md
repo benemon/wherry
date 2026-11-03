@@ -16,9 +16,8 @@ Install wherry with [Homebrew](https://brew.sh/), on macOS or Linux:
 brew install benemon/tap/wherry
 ```
 
-The `benemon/tap` formula installs the release archive for the machine's OS
-and architecture, and Homebrew checks the archive against the SHA-256 the
-formula names. Every release updates the formula.
+Homebrew installs the archive for your operating system and architecture.
+It checks the archive against the formula's SHA-256.
 
 ## Start your instance
 
@@ -32,7 +31,7 @@ production: Nomad's ACLs are off and every agent runs with your rights.
 ### What your machine needs
 
 - Linux or macOS, `amd64` or `arm64`, with wherry installed as
-  [Install wherry](quickstart-production.md#install-wherry) shows.
+  [Install wherry](#install-wherry) shows.
 - Docker or Podman that answers `docker version` or `podman version`. On
   macOS, Podman runs through `podman machine`.
 - An agent harness on `PATH`, `claude`, `codex` or `gemini`, logged in.

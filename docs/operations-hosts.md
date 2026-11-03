@@ -421,4 +421,3 @@ can send to remote agents; list only directories meant for that.
 - Other harnesses take `mcp.json` and `skills/wherry` directly.
 
 `plugins/AGENTS.snippet.md` covers harnesses without skills, using the CLI.
-

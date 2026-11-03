@@ -287,4 +287,3 @@ first, then stop the old receiver as above. A pool's only receiver waits out
 so removing it without a successor loses them. Stopping a whole pool at once,
 or scaling it to zero, has its custodian wait out `drain_timeout` the same way,
 within the stop window.
-

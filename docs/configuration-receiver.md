@@ -488,4 +488,3 @@ clock is past its second. [Admission](a2a-extension-v1.md#admission) gives
 the receiver's checks and the texts a run ends with, and
 [Open request](a2a-extension-v1.md#open-request) the bounds of a claimed
 run.
-

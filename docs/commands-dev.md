@@ -201,4 +201,3 @@ cannot read the manifest, which may record host files: it names the
 standard paths to check by hand before you remove the manifest. The
 images stay in the runtime's store. Remove `wherry-dev/kafka:<id12>`, and
 `wherry-dev/ceph-aio:<id12>` with storage, with the runtime.
-

@@ -102,8 +102,7 @@ without `vcs` accepts no git input.
 `storage.endpoint` is `https://` and a lowercase host name, optionally with
 a `:port` of 1 to 65535, 443 when absent, and nothing else: no path, user information or
 query. It may be `http://` only when its host is the literal `127.0.0.1` or
-`[::1]`, optionally with a `:port`, 80 when absent: storage on the same machine,
-as `wherry dev` runs it. A name that resolves to loopback, such as `localhost`,
+`[::1]`, optionally with a `:port`, 80 when absent. A name that resolves to loopback, such as `localhost`,
 still requires `https://`. wherry speaks the endpoint's scheme to it, and the
 receiver refuses a presigned URL with any other scheme, host or port. `storage.bucket` is 3 to 63
 lowercase letters, digits, dots and hyphens, starting and ending with a
