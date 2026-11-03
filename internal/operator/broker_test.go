@@ -226,7 +226,7 @@ func TestRealBrokerFixture(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := f.service.verifyACLs(ctx, state); err != nil {
+		if err := f.service.verifyACLs(ctx, ACLs(state)); err != nil {
 			t.Fatal(err)
 		}
 		expectReadable(t, f.connect(t, ReceiverPrincipal(f.receiverB)), PoolEventsTopic(f.poolB))

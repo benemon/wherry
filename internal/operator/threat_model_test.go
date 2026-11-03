@@ -693,8 +693,30 @@ func kfakeService(t *testing.T) (*kfake.Cluster, *Service, func()) {
 	if err := operator.Ping(context.Background()); err != nil {
 		t.Fatalf("operator ping: %v", err)
 	}
+	grantOperator(t, root)
 	service := &Service{Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10, LockCeilingMS: 60000}
 	return cluster, service, func() { operator.Close(); root.Close(); cluster.Close() }
+}
+
+// grantOperator grants wherry.operator OperatorACLs as operator init does, which operator check requires even of a super
+// user.
+func grantOperator(t *testing.T, root *kgo.Client) {
+	t.Helper()
+	for _, acl := range OperatorACLs {
+		builder, err := aclBuilder(acl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		results, err := kadm.NewClient(root).CreateACLs(context.Background(), builder)
+		if err == nil {
+			for _, result := range results {
+				err = errors.Join(err, result.Err)
+			}
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // realService connects to the disposable broker as wherry.operator once it is delegated the provisioning ACLs, as

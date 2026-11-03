@@ -28,7 +28,7 @@ func (service *Service) reconcileACLs(ctx context.Context, state State) error {
 			}
 		}
 	}
-	if err := service.verifyACLs(ctx, state); err != nil {
+	if err := service.verifyACLs(ctx, ACLs(state)); err != nil {
 		return fmt.Errorf("ACL plan incomplete after re-read: %w", err)
 	}
 	// A suspended pool's task-topic WRITE grants go by filters naming each principal, so no other grant is touched.
@@ -56,9 +56,9 @@ func (service *Service) reconcileACLs(ctx context.Context, state State) error {
 	return nil
 }
 
-func (service *Service) verifyACLs(ctx context.Context, state State) error {
+func (service *Service) verifyACLs(ctx context.Context, acls []ACL) error {
 	client := kadm.NewClient(service.Operator)
-	for _, acl := range ACLs(state) {
+	for _, acl := range acls {
 		builder, err := aclBuilder(acl)
 		if err != nil {
 			return err

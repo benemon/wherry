@@ -470,6 +470,7 @@ re-run of `init` to rotate `wherry.operator`'s password needs it again.
 Kafka implies `Describe` by `Read`, `Write` and `Alter`, and
 `DescribeConfigs` by `AlterConfigs`, so four of these grants add nothing to
 the others; `init` grants them so the table states what each command uses.
+`operator check` reports any of the other seven that is missing.
 
 `Alter` on the cluster lets its holder grant itself any ACL, so
 `wherry.operator` is close to the super user in effect: whoever holds

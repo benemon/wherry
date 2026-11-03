@@ -659,6 +659,10 @@ func TestBrokerPoolPassesOperatorCheck(t *testing.T) {
 	if responses, err := kadm.NewClient(admin).AlterBrokerConfigs(ctx, alters); err != nil || responses[0].Err != nil {
 		t.Fatal(err, responses)
 	}
+	// The real broker's wherry.operator holds these grants from the tests that delegate to it.
+	if err := operator.Delegate(ctx, admin, "operator-password"); err != nil {
+		t.Fatal(err)
+	}
 	b := newBrokerPool(t, ctx, cluster.ListenAddrs()[0])
 	b.configure(t, ctx, 6)
 	b.deliveryLimit(t, ctx, 4)

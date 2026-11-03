@@ -531,7 +531,7 @@ func (service *Service) Check(ctx context.Context) error {
 	if err := service.checkFeedLimits(ctx, state); err != nil {
 		return err
 	}
-	return service.verifyACLs(ctx, state)
+	return service.verifyACLs(ctx, append(ACLs(state), operatorChecked()...))
 }
 
 func (service *Service) LoadState(ctx context.Context) (State, error) {
