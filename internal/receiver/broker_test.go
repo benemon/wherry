@@ -735,7 +735,7 @@ func TestHeldRunFinishesAfterEntitlementEndOnRealBroker(t *testing.T) {
 	}
 	defer producer.Close()
 	run := &activeRun{receiver: r, producer: producer, task: task, taskHash: wire.Digest([]byte("held-task")), attempt: 1, history: []wire.Message{task.Message}, redactionKey: testRedactionKey}
-	if err := r.transact(ctx, producer, run.statusRecords("started", wire.TaskStatus{State: wire.TaskStateWorking}, nil, nil)...); err != nil {
+	if err := r.transact(ctx, producer, run.statusRecords("started", taskStatus(wire.TaskStateWorking, ""), nil, nil)...); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.service.TenantPoolRemove(ctx, b.tenant, b.pool); err != nil {
@@ -743,7 +743,7 @@ func TestHeldRunFinishesAfterEntitlementEndOnRealBroker(t *testing.T) {
 	}
 	halted := make(chan error, 1)
 	r.halt = func(err error) { halted <- err }
-	if ack := run.end(ctx, wire.TaskStatus{State: wire.TaskStateCompleted}, "done", nil, kgo.AckAccept); ack != kgo.AckAccept {
+	if ack := run.end(ctx, taskStatus(wire.TaskStateCompleted, ""), "done", nil, kgo.AckAccept); ack != kgo.AckAccept {
 		t.Fatalf("held run ack=%v", ack)
 	}
 	if err := r.refresh(ctx); err != nil {
