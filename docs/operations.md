@@ -1,7 +1,7 @@
 # Operations
 
 Before a tenant can submit, an operator prepares the Kafka cluster,
-creates a pool with its terms, entitles the tenant, adds its hosts, and
+creates a pool with its terms, creates the tenant, entitles it, adds its hosts, and
 adds and runs at least one receiver. Later the operator reconfigures
 receivers, revokes access and recovers from faults. This guide covers each
 task. [Key concepts](concepts.md) explains the model,
@@ -92,6 +92,8 @@ broker's: run `init` again with the Kafka super user.
 
 ### Concurrent operator commands
 
+Do not run two operator commands at once. Concurrent operator commands are not supported.
+
 Operator commands do not lock each other. Each one that changes Kafka, except `operator init`, ends
 by converging Kafka on the records of `wherry.operator` as read to its end,
 not on the ones it read when it started
@@ -104,7 +106,7 @@ on `wherry.operator` when its last pass ended. A command still running can
 change Kafka after that, but its own passes then follow. A command that
 fails before it writes a record writes nothing to `wherry.operator`. Topics,
 a new host's or receiver's credential, or a new receiver's grants it made
-first stay, the grants until the next command's pass. A `host add --force`
+first stay, the grants until the next command's pass. A `tenant host add --force`
 or receiver reissue that a revocation overtakes refuses with `cannot return
 after its membership end` and writes no bundle. A command's pass deletes the
 grants a concurrent command adding a receiver makes before its record. That

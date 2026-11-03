@@ -163,12 +163,12 @@ func TestOperatorArgsRejectsUnknownOptions(t *testing.T) {
 	for _, args := range [][]string{
 		{"pool", "apply", "pool-a", "--terms", "pool.yaml"},
 		{"receiver", "apply", "receiver-a", "--config", "receiver.yaml"},
-		{"host", "add", "host-a", "--tenant", "tenant-a", "--bundle", "host.yaml"},
+		{"tenant", "host", "add", "tenant-a", "host-a", "--bundle", "host.yaml"},
 		{"pool", "apply", "pool-a", "--tenant", "tenant-a"},
 		{"receiver", "apply", "receiver-a", "--platform-credential-file", "nomad=token"},
 		{"receiver", "apply", "receiver-a", "--pool", "pool-a"},
 		{"receiver", "apply", "receiver-a", "--plugin-sha256", "nomad=" + fakeSHA256},
-		{"host", "add", "host-a", "--tenant", "tenant-a", "--bundle-file", "host.bundle"},
+		{"tenant", "host", "add", "tenant-a", "host-a", "--bundle-file", "host.bundle"},
 		{"pool", "apply", "pool-a", "--super-user", "admin"},
 	} {
 		_, _, err := operatorArgs(args)

@@ -373,7 +373,7 @@ func TestHostInitWithoutAnEntitlement(t *testing.T) {
 	if _, err := operator.ReadBundle(filepath.Join(h.dir, "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(prompts, "entitled to no pool yet; run wherry host init again once the operator entitles it to one") {
+	if !strings.Contains(prompts, "entitled to no pool yet; run wherry host init again once the operator runs tenant pool add") {
 		t.Fatalf("init printed\n%s\nwant it told to run again once entitled", prompts)
 	}
 }

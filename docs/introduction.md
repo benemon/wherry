@@ -37,7 +37,7 @@ One `wherry` binary with four roles:
 
 - **Operator:** `wherry operator init` delegates provisioning from the Kafka
   super user to the `wherry.operator` principal. `wherry operator` then
-  creates pools and their terms, entitles tenants, adds hosts and receivers
+  creates pools and their terms, creates and entitles tenants, adds hosts and receivers
   with their Kafka principals, ACLs and bundles, records receiver configurations, revokes access, suspends and
   resumes pools and rotates their keys, and checks the result against the
   broker.
