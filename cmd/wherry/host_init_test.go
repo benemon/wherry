@@ -43,6 +43,9 @@ func newInitHost(t *testing.T, pools map[string]operator.Terms) initHost {
 	}
 	dir := filepath.Join(home, ".config", "wherry")
 	h := initHost{ctx: ctx, service: service, bundle: filepath.Join(t.TempDir(), "host-a.bundle"), dir: dir, config: filepath.Join(dir, "config.yaml")}
+	if err := service.TenantAdd(ctx, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
 	for pool, terms := range pools {
 		h.entitle(t, pool, terms)
 	}
@@ -64,7 +67,7 @@ func (h initHost) entitle(t *testing.T, pool string, terms operator.Terms) {
 	if err := h.service.PoolApply(h.ctx, pool, terms, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.service.TenantAdd(h.ctx, "tenant-a", pool); err != nil {
+	if err := h.service.TenantPoolAdd(h.ctx, "tenant-a", pool); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -269,9 +269,8 @@ the broker's record limit bounds what a pool can carry. The Kafka cluster
 must allow a topic `max.message.bytes` of 2 MiB (2097152): every tenant
 feed and transcript topic has it, and receivers batch up to it. A result
 names each output the run returned, so the largest result is a
-1259677-byte record batch, over a broker's default limit. `tenant host add` and
-`tenant pool add` create a tenant's feed and transcript topic at 2 MiB, and
-`tenant pool add` and `pool apply` set existing ones to it. A
+1259677-byte record batch, over a broker's default limit. `tenant add` creates a tenant's feed and transcript topic at 2 MiB, and
+`pool apply` sets existing ones to it. A
 cluster policy that refuses the setting fails the command, and
 `wherry operator check` reports a tenant topic below 2 MiB.
 

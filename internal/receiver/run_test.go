@@ -699,7 +699,10 @@ func TestAdoptedRunEndsFromTheOutcomeFile(t *testing.T) {
 
 func TestLastOffsetIgnoresMismatchedStatus(t *testing.T) {
 	f := newFixture(t, resultStream)
-	if err := f.service.TenantAdd(f.ctx, "tenant-b", testPool); err != nil {
+	if err := f.service.TenantAdd(f.ctx, "tenant-b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.TenantPoolAdd(f.ctx, "tenant-b", testPool); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.receiver.refresh(f.ctx); err != nil {
@@ -1747,7 +1750,7 @@ func TestRestartedReceiverAdoptsTheJobADeniedOneLeft(t *testing.T) {
 		t.Fatal("Run returned no error after a denial")
 	}
 	f.quiet()
-	if err := f.service.TenantAdd(f.ctx, testTenant, testPool); err != nil { // reconciles the ACLs
+	if err := f.service.TenantPoolAdd(f.ctx, testTenant, testPool); err != nil { // reconciles the ACLs
 		t.Fatal(err)
 	}
 	f.plugin.mu.Lock()

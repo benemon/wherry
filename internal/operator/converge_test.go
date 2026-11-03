@@ -88,10 +88,10 @@ func removeUndoesAStaleHostAddForce(t *testing.T, service *Service, pool, tenant
 	if err := service.PoolApply(ctx, pool, modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, tenant, host, filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, tenant, host, filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.TenantAdd(ctx, tenant, pool); err != nil {
+	if err := entitleFixture(t, service, ctx, tenant, pool); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := service.LoadState(ctx)
@@ -142,7 +142,7 @@ func TestNextCommandWithdrawsARemovedReceiversRestoredGrants(t *testing.T) {
 		}
 		return service.reconcileACLs(ctx, loaded)
 	})
-	if err := service.HostAdd(ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
 		t.Fatal(err)
 	}
 	if count, err := principalACLs(ctx, service, ReceiverPrincipal("receiver-a")); err != nil || count != 0 {
@@ -211,9 +211,9 @@ func TestConvergeTouchesOnlyWhatWherryManages(t *testing.T) {
 	commands := []func() error{
 		func() error { return service.PoolApply(ctx, "pool-a", modelTerms(), false) },
 		func() error {
-			return service.HostAdd(ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false)
+			return hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false)
 		},
-		func() error { return service.TenantAdd(ctx, "tenant-a", "pool-a") },
+		func() error { return entitleFixture(t, service, ctx, "tenant-a", "pool-a") },
 		func() error {
 			return service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), service.Broker, filepath.Join(t.TempDir(), "receiver.yaml"))
 		},
@@ -257,10 +257,10 @@ func TestSuspensionReassertsItsDeletionAfterItsRecord(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
+	if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := service.LoadState(ctx)
@@ -317,10 +317,10 @@ func entitledHost(t *testing.T, service *Service) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
+	if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -343,7 +343,7 @@ func TestAPassDuringWhichTheLogMovedRepeats(t *testing.T) {
 	ctx := context.Background()
 	entitledHost(t, service)
 	duringPass(t, func() error { return service.PoolSuspend(ctx, "pool-a", true) })
-	if err := service.HostAdd(ctx, "tenant-b", "host-b", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, "tenant-b", "host-b", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
 		t.Fatal(err)
 	}
 	withdrawn(t, service, ACL{TenantPrincipal("tenant-a", "host-a"), "topic", PoolTasksTopic("pool-a"), false, []string{"WRITE"}})
@@ -388,7 +388,7 @@ func TestStaleReissueRefusesAndWritesNoBundle(t *testing.T) {
 		return nil
 	})
 	dir := t.TempDir()
-	err := service.HostAdd(ctx, "tenant-a", "host-a", filepath.Join(dir, "host.yaml"), true)
+	err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(dir, "host.yaml"), true)
 	if err == nil || !strings.Contains(err.Error(), "cannot return after its membership end") {
 		t.Fatalf("stale reissue = %v, want a refusal", err)
 	}

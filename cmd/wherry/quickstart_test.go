@@ -119,7 +119,8 @@ func TestQuickstartOperatorOutput(t *testing.T) {
 	if err := service.PoolApply(context.Background(), "build", terms, false); err != nil {
 		t.Fatal(err)
 	}
-	wherry("pool", "entitle", "build", "--tenant", "acme")
+	wherry("tenant", "add", "acme")
+	wherry("tenant", "pool", "add", "acme", "build")
 	// The quickstart keeps the receiver's file in the working directory, where apply finds it.
 	if err := os.Mkdir("receivers", 0o755); err != nil {
 		t.Fatal(err)
@@ -130,7 +131,7 @@ func TestQuickstartOperatorOutput(t *testing.T) {
 	dryRun := wherry("receiver", "apply", "nomad-1", "--dry-run")
 	wherry("receiver", "apply", "nomad-1")
 	shown := wherry("receiver", "show", "nomad-1")
-	wherry("host", "add", "laptop", "--tenant", "acme")
+	wherry("tenant", "host", "add", "acme", "laptop")
 	if shown != dryRun {
 		t.Fatalf("show printed\n%s\nwant what the dry run printed\n%s", shown, dryRun)
 	}

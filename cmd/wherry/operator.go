@@ -44,6 +44,9 @@ var operatorUsage = map[string]string{
 
 func runOperator(args []string, stdout, stderr io.Writer) error {
 	pos, options, err := operatorArgs(args)
+	if len(pos) > 0 && operatorUsage[operatorCommand(pos)] == "" {
+		return errors.New("unknown operator command")
+	}
 	if errors.Is(err, flag.ErrHelp) {
 		fmt.Fprintln(stderr, cmp.Or(operatorUsage[operatorCommand(pos)], operatorUsage[""]))
 	}

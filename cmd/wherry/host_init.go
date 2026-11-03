@@ -108,7 +108,7 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 	}
 	fmt.Fprintln(stdout, keyID)
 	if len(pools) == 0 {
-		fmt.Fprintln(prompts, "this host's tenant is entitled to no pool yet; run wherry host init again once the operator entitles it to one")
+		fmt.Fprintln(prompts, "this host's tenant is entitled to no pool yet; run wherry host init again once the operator runs tenant pool add")
 		return nil
 	}
 	changed = false

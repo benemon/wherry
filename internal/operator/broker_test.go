@@ -296,8 +296,8 @@ func provision(t *testing.T) *fixture {
 	}
 	must(service.PoolApply(ctx, f.poolA, terms, false))
 	must(service.PoolApply(ctx, f.poolB, terms, false))
-	must(service.TenantAdd(ctx, f.tenantA, f.poolA))
-	must(service.TenantAdd(ctx, f.tenantB, f.poolB))
+	must(entitleFixture(t, service, ctx, f.tenantA, f.poolA))
+	must(entitleFixture(t, service, ctx, f.tenantB, f.poolB))
 	for _, receiver := range [][2]string{{f.receiverA, f.poolA}, {f.receiverB, f.poolB}} {
 		path := filepath.Join(dir, receiver[0])
 		must(service.ReceiverAdd(ctx, modelConfig(receiver[0], receiver[1]), service.Broker, path))
@@ -305,7 +305,7 @@ func provision(t *testing.T) *fixture {
 	}
 	for _, host := range [][2]string{{f.tenantA, f.hostA1}, {f.tenantA, f.hostA2}, {f.tenantB, f.hostB1}} {
 		path := filepath.Join(dir, host[0]+"."+host[1])
-		must(service.HostAdd(ctx, host[0], host[1], path, false))
+		must(hostFixture(t, service, ctx, host[0], host[1], path, false))
 		f.bundles[TenantPrincipal(host[0], host[1])] = readBundle(t, path)
 	}
 	must(kafkatest.Led(ctx, service.Operator, PoolTasksTopic(f.poolA), PoolEventsTopic(f.poolA), PoolTasksTopic(f.poolB), PoolEventsTopic(f.poolB),

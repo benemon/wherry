@@ -705,7 +705,10 @@ func TestCancelSinceLastReadStopsDispatch(t *testing.T) {
 
 func TestCancelMustBeHostSignedForTheRunsTenant(t *testing.T) {
 	f := newFixture(t, resultStream)
-	if err := f.service.TenantAdd(f.ctx, "tenant-b", testPool); err != nil {
+	if err := f.service.TenantAdd(f.ctx, "tenant-b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.TenantPoolAdd(f.ctx, "tenant-b", testPool); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.service.HostAdd(f.ctx, "tenant-b", "host-b", t.TempDir()+"/host-b.yaml", false); err != nil {
@@ -1019,7 +1022,10 @@ func TestAdmitReleasesAtTheBudgetFail(t *testing.T) {
 // tenantB entitles tenant-b to the pool with a registered host and returns that host's key.
 func (f fixture) tenantB(t *testing.T) ed25519.PrivateKey {
 	t.Helper()
-	if err := f.service.TenantAdd(f.ctx, "tenant-b", testPool); err != nil {
+	if err := f.service.TenantAdd(f.ctx, "tenant-b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.TenantPoolAdd(f.ctx, "tenant-b", testPool); err != nil {
 		t.Fatal(err)
 	}
 	return f.hostOf(t, "tenant-b", "host-b")
@@ -1049,7 +1055,10 @@ const errMismatch = "run ID does not match its signer"
 // A run ID that a nonce derives for tenant-a's host does not derive for tenant-b's host of the same name.
 func TestRunIDOfAnotherTenantIsRejected(t *testing.T) {
 	f := newFixture(t, resultStream)
-	if err := f.service.TenantAdd(f.ctx, "tenant-b", testPool); err != nil {
+	if err := f.service.TenantAdd(f.ctx, "tenant-b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.TenantPoolAdd(f.ctx, "tenant-b", testPool); err != nil {
 		t.Fatal(err)
 	}
 	keyB := f.hostOf(t, "tenant-b", testHost)
@@ -1627,5 +1636,37 @@ func TestStartByLimitAtTheAppendTimeIsJudgedBeforeTheOffer(t *testing.T) {
 	f.rejected(t, record, "task_started_by is past the pool's start_by_limit")
 	if strings.Contains(f.logs.String(), "no current offer") {
 		t.Fatalf("the offer was judged first; logs:\n%s", f.logs.String())
+	}
+}
+
+func TestEndedEntitlementRejectsUnclaimedAndRedeliveredTasks(t *testing.T) {
+	f := newFixture(t, resultStream)
+	record := f.submit(t, f.host, nil)
+	// Claim before removal; its delivery after removal must still fail admission.
+	if admitted, _ := f.receiver.admit(f.ctx, record); admitted == nil {
+		t.Fatal("initial admission failed")
+	}
+	if err := f.service.TenantPoolRemove(f.ctx, testTenant, testPool); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.receiver.refresh(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	beforeEvents := len(f.records(t, operator.PoolEventsTopic(testPool)))
+	beforeFeed := len(f.records(t, operator.TenantTopic(testTenant)))
+	for _, attempt := range []int{1, 2} {
+		if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckReject {
+			t.Fatalf("delivery %d admitted=%v ack=%v", attempt, admitted != nil, ack)
+		}
+	}
+	if len(f.records(t, operator.PoolEventsTopic(testPool))) != beforeEvents || len(f.records(t, operator.TenantTopic(testTenant))) != beforeFeed {
+		t.Fatal("rejected delivery wrote records")
+	}
+	state, err := f.service.LoadState(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Entitlements) != 0 {
+		t.Fatalf("entitlement keys remain: %v", state.Entitlements)
 	}
 }

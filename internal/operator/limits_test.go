@@ -689,7 +689,7 @@ func TestPoolApplyUpdateRefusesStartByLimitPastAnEntitledFeed(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
+	if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
 	setTopicRetention(t, service, TenantTopic("tenant-a"), 280799999)
@@ -740,7 +740,7 @@ func TestTenantAddRefusesAFeedBelowThePoolsStartByLimit(t *testing.T) {
 	if err := service.createTopics(ctx, "280799999", TenantTopic("tenant-a")); err != nil {
 		t.Fatal(err)
 	}
-	err := service.TenantAdd(ctx, "tenant-a", "pool-a")
+	err := entitleFixture(t, service, ctx, "tenant-a", "pool-a")
 	if err == nil || err.Error() != "topic wherry.tenant.tenant-a retention.ms 280799999 is below required 280800000" {
 		t.Fatalf("tenant add = %v", err)
 	}
@@ -781,7 +781,7 @@ func TestCheckReportsRetentionDrift(t *testing.T) {
 			if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 				t.Fatal(err)
 			}
-			if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
+			if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err != nil {
 				t.Fatal(err)
 			}
 			test.mutate(t, service)
@@ -842,7 +842,7 @@ func TestPoolApplyCreateRecordsTheRecordLimit(t *testing.T) {
 	if got := recorded(); got != 600000 {
 		t.Fatalf("record limit %d; want the task topic's max.message.bytes", got)
 	}
-	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
+	if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
 	// A tenant feed's own max.message.bytes overrides the brokers', so the largest result fits a feed above them.
@@ -899,18 +899,18 @@ func TestTenantFeedsTakeTheFeedRecordLimit(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
 		t.Fatal(err)
 	}
 	atLimit("host add", feeds("tenant-a")...)
 	if err := service.createTopics(ctx, strconv.Itoa(tenantRetentionMS), feeds("tenant-b")...); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.TenantAdd(ctx, "tenant-b", "pool-a"); err != nil {
+	if err := entitleFixture(t, service, ctx, "tenant-b", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
 	atLimit("pool entitle on existing feeds", feeds("tenant-b")...)
-	if err := service.TenantAdd(ctx, "tenant-c", "pool-a"); err != nil {
+	if err := entitleFixture(t, service, ctx, "tenant-c", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
 	atLimit("pool entitle", feeds("tenant-c")...)
@@ -952,7 +952,7 @@ func TestCheckReportsLimitsTheBrokerNoLongerCarries(t *testing.T) {
 	if err != nil || len(records) != 1 || strings.Contains(string(records[0].Value), "output_limit") {
 		t.Fatalf("pool record %v, %v; want one without an output limit", records, err)
 	}
-	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
+	if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.Check(ctx); err != nil {
@@ -989,7 +989,7 @@ func TestTenantAddRefusesAFeedThePoolDoesNotFit(t *testing.T) {
 		}
 		return response, nil, true
 	})
-	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err == nil || !strings.HasSuffix(err.Error(), "not applied within 10s") {
+	if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err == nil || !strings.HasSuffix(err.Error(), "not applied within 10s") {
 		t.Fatalf("tenant add = %v; want the tenant feed's limit unapplied", err)
 	}
 	if state, err := service.LoadState(ctx); err != nil || len(state.Entitlements) != 0 {
@@ -1004,7 +1004,7 @@ func TestCheckFailsOnAMissingTenantFeed(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
+	if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := kadm.NewClient(service.Operator).DeleteTopics(ctx, TenantTopic("tenant-a")); err != nil {
@@ -1597,7 +1597,7 @@ func TestTenantAddWaitsForItsFeedsToReachEveryBroker(t *testing.T) {
 				return response, nil, true
 			})
 			start := time.Now()
-			err := service.TenantAdd(ctx, "tenant-a", "pool-a")
+			err := entitleFixture(t, service, ctx, "tenant-a", "pool-a")
 			if test.want == "" && err != nil || test.want != "" && (err == nil || !strings.HasPrefix(err.Error(), test.want) || time.Since(start) < topicWait) {
 				t.Fatalf("tenant add = %v after %v; want %q", err, time.Since(start), test.want)
 			}

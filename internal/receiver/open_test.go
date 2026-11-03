@@ -1862,3 +1862,34 @@ func TestTheRunsFirstNonRejectedStatusNamesItsTask(t *testing.T) {
 	}
 	f.rejected(t, second, "duplicate submission")
 }
+
+func TestWaitingRunReleasesWhenEntitlementEnds(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.quiet()
+	record := f.submit(t, f.host, nil)
+	done := f.executing(t, f.ctx, record, 1)
+	f.request(t, 1)
+	if err := f.service.TenantPoolRemove(f.ctx, testTenant, testPool); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.receiver.refresh(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.receiver.serveOpens(f.ctx)
+	if ack := <-done; ack != kgo.AckRelease {
+		t.Fatalf("ack=%v; logs=%s", ack, f.logs.String())
+	}
+	if n, _, _ := f.dispatched(t); n != 0 {
+		t.Fatalf("dispatched %d runs", n)
+	}
+	before := len(f.records(t, operator.PoolEventsTopic(testPool)))
+	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckReject {
+		t.Fatalf("redelivery admitted=%v ack=%v", admitted != nil, ack)
+	}
+	if len(f.records(t, operator.PoolEventsTopic(testPool))) != before {
+		t.Fatal("redelivery wrote records")
+	}
+	if err := f.receiver.refresh(f.ctx); err != nil {
+		t.Fatalf("receiver stopped: %v", err)
+	}
+}

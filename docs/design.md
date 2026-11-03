@@ -252,7 +252,7 @@ that every recording command sets the configuration above on
 lowering it, timestamp type, `cleanup.policy`, `retention.bytes` and `segment.ms` of the pool's tasks and events topics and
 the configuration of its snapshot topic, and `receiver apply` and `pool apply` set every
 configuration above on the progress topics of the pool's live receivers, never lowering their retention.
-`tenant pool add` and `pool apply` set `max.message.bytes` on
+`tenant add` and `pool apply` set `max.message.bytes` on
 existing tenant feeds and transcript topics. A
 tenant feed's or transcript topic's retention can be changed with Kafka's
 own tools. `pool apply` and `tenant pool add` refuse terms that need more than

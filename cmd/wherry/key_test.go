@@ -42,7 +42,8 @@ func newKeyHost(t *testing.T) keyHost {
 	bundle := filepath.Join(dir, "host.yaml")
 	for _, step := range []func() error{
 		func() error { return service.PoolApply(ctx, "pool-a", terms, false) },
-		func() error { return service.TenantAdd(ctx, "tenant-a", "pool-a") },
+		func() error { return service.TenantAdd(ctx, "tenant-a") },
+		func() error { return service.TenantPoolAdd(ctx, "tenant-a", "pool-a") },
 		func() error { return service.HostAdd(ctx, "tenant-a", "host-a", bundle, false) },
 	} {
 		if err := step(); err != nil {

@@ -156,10 +156,10 @@ func TestHostAddAppliesPoolQuotasOnRealBroker(t *testing.T) {
 	if err := service.PoolApply(ctx, pool, terms, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.TenantAdd(ctx, tenant, pool); err != nil {
+	if err := entitleFixture(t, service, ctx, tenant, pool); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, tenant, host, filepath.Join(t.TempDir(), "bundle"), false); err != nil {
+	if err := hostFixture(t, service, ctx, tenant, host, filepath.Join(t.TempDir(), "bundle"), false); err != nil {
 		t.Fatal(err)
 	}
 	// A broker describes the quotas only once the alter reaches its metadata.
