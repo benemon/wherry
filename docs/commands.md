@@ -1544,13 +1544,13 @@ returns once a run of the mock agent completes. Its steps:
    receiver's `config.yaml` names the instance CA as `ca_file`.
 9. `host` writes the host's `config.yaml`, bundle and key, and registers
    the key. For instance `default`, unless `WHERRY_CONFIG` is set, they go
-   at the standard [host paths](configuration.md#client-configuration), its
-   state in `$XDG_STATE_HOME/wherry`, by default `~/.local/state/wherry`.
-   `up` creates each file exclusively, and the state directory with
-   `mkdir`, so it never replaces anything there. `cache/manifest.json`
-   records each path, the directories resolved through symlinks, with the
-   file's SHA-256 before `up` creates it, and its device and inode after.
-   If the config, bundle, key or state is already there, or appears while
+   at the standard [host paths](configuration.md#client-configuration);
+   the config names `env/host/state` as `state_dir`, so dev writes no state
+   at the standard state path. `up` creates each file exclusively, so it
+   never replaces anything there. `cache/manifest.json` records each path,
+   its directory resolved through symlinks, with the file's SHA-256 before
+   `up` creates it, and its device and inode after.
+   If the config, bundle or key is already there, or appears while
    `up` creates them, `up` removes what it created there and, as for every
    other instance and with `WHERRY_CONFIG` set, writes them in
    `env/host/`. The config names the instance CA as `ca_file`, and the dev
@@ -1603,10 +1603,10 @@ Its steps, each run after a failed one:
 6. `host` removes each file the manifest records `up` creating at the
    standard host paths while it is still that file: a regular file, not a
    symlink, with the recorded device, inode and SHA-256, in a directory
-   that still resolves to the recorded one. It removes the state directory
-   only when `up` created it and `down` removed every recorded file. So a
-   stale default never shadows a real host's, and a real host's file stays.
-   Anything else, a missing file included, it leaves and names:
+   that still resolves to the recorded one. So a stale default never
+   shadows a real host's, and a real host's file stays. Anything else, a
+   missing file or one whose device and inode a crash kept `up` from
+   recording included, it leaves and names:
    `left <path>: <reason>`. One window remains: a file replaced between
    this check and its removal is removed, since the operating system
    offers no removal conditional on identity.

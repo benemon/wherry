@@ -53,12 +53,9 @@ type devManifest struct {
 	EnvDenylist []string `json:"env_denylist"`
 }
 
-// devHostFiles are what up created at the standard host paths, by their resolved paths: each file, and the state
-// directory.
+// devHostFiles are the files up created at the standard host paths, by their resolved paths.
 type devHostFiles struct {
-	Files    map[string]devHostFile `json:"files"`
-	StateDir string                 `json:"state_dir,omitzero"`
-	State    devHostFile            `json:"state,omitzero"`
+	Files map[string]devHostFile `json:"files"`
 }
 
 // devHostFile is a file's SHA-256 as up created it, and the device and inode it created it as.
@@ -228,7 +225,8 @@ func (images *devAgentImages) Set(value string) error {
 func readManifest(instance devInstance) (*devManifest, error) {
 	path := instance.cache("manifest.json")
 	encoded, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+	// A dangling symlink reads as not existing, but may stand in for a manifest that records host files.
+	if _, lerr := os.Lstat(path); errors.Is(err, os.ErrNotExist) && errors.Is(lerr, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {

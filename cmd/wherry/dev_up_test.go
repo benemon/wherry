@@ -9,11 +9,11 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
@@ -64,10 +64,15 @@ func devProvision(t *testing.T, instance devInstance) (string, string) {
 	return ready.String(), config
 }
 
-// standardHostPaths are the default instance's host files at the standard paths and its state directory.
+// standardHostPaths are the default instance's host files at the standard paths and the standard state directory, which
+// dev never writes.
 func standardHostPaths(t *testing.T) ([]string, string) {
 	t.Helper()
-	config, state, err := standardHostDirs()
+	config, err := busclient.ConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := busclient.StateDir()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,10 +135,16 @@ func TestDevUpWritesTheStandardHostPaths(t *testing.T) {
 			if config != files[0] {
 				t.Fatalf("config at %s; want the standard path %s", config, files[0])
 			}
-			for _, path := range append(slices.Clone(files), state) {
+			for _, path := range files {
 				if _, err := os.Stat(path); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if _, err := os.Lstat(state); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("up wrote the standard state directory %s: %v", state, err)
+			}
+			if loaded, err := busclient.LoadConfig(config); err != nil || loaded.StateDir != instance.env("host", "state") {
+				t.Errorf("state_dir %q, %v; want the instance's %s", loaded.StateDir, err, instance.env("host", "state"))
 			}
 			for _, want := range []string{"submit: wherry submit --prompt \"...\"\n", "claude: claude mcp add wherry-default -- wherry host mcp\n"} {
 				if !strings.Contains(ready, want) {
@@ -155,11 +166,11 @@ func TestDevUpWritesTheStandardHostPaths(t *testing.T) {
 	}
 }
 
-// A host file changed after up wrote it may be a real host's: down leaves it, and the state, and removes the rest.
+// A host file changed after up wrote it may be a real host's: down leaves it and removes the rest.
 func TestDevDownLeavesAChangedHostFile(t *testing.T) {
 	instance := devFixture(t)
 	devProvision(t, instance)
-	files, state := standardHostPaths(t)
+	files, _ := standardHostPaths(t)
 	changed := []byte("bundle: /elsewhere/bundle.yaml\n")
 	if err := os.WriteFile(files[0], changed, 0o600); err != nil {
 		t.Fatal(err)
@@ -178,9 +189,6 @@ func TestDevDownLeavesAChangedHostFile(t *testing.T) {
 		if _, err := os.Stat(path); err == nil {
 			t.Errorf("down left %s, unchanged since up wrote it", path)
 		}
-	}
-	if _, err := os.Stat(state); err != nil {
-		t.Errorf("down removed the state beside a changed config: %v", err)
 	}
 	if manifest, err := readManifest(instance); err != nil || manifest.HostFiles != nil {
 		t.Fatalf("manifest after down: %+v, %v; want no host files recorded", manifest, err)
@@ -234,11 +242,8 @@ func TestDevUpOtherInstanceKeepsItsHost(t *testing.T) {
 	if config != instance.env("host", "config.yaml") {
 		t.Fatalf("config at %s; want it inside the instance", config)
 	}
-	configDir, state, err := standardHostDirs()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, dir := range []string{configDir, state} {
+	files, state := standardHostPaths(t)
+	for _, dir := range []string{filepath.Dir(files[0]), state} {
 		if entries, err := os.ReadDir(dir); !errors.Is(err, os.ErrNotExist) || len(entries) != 0 {
 			t.Errorf("instance other wrote %s: %v, %v", dir, entries, err)
 		}
@@ -283,8 +288,8 @@ func TestDevUpFallsBackWhenAHostConfigAppears(t *testing.T) {
 	}
 }
 
-// A recorded file replaced by another file or a symlink with the same bytes is not the one up created: down leaves it,
-// names it, and leaves the state.
+// A recorded file replaced by another file or a symlink with the same bytes is not the one up created: down leaves it
+// and names it.
 func TestDevDownLeavesAReplacedHostFile(t *testing.T) {
 	for name, replace := range map[string]func(t *testing.T, path string){
 		"file": func(t *testing.T, path string) {
@@ -312,7 +317,7 @@ func TestDevDownLeavesAReplacedHostFile(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			instance := devFixture(t)
 			devProvision(t, instance)
-			files, state := standardHostPaths(t)
+			files, _ := standardHostPaths(t)
 			replace(t, files[1])
 			_, stderr, err := runCapture("dev", "down")
 			if err != nil {
@@ -324,38 +329,15 @@ func TestDevDownLeavesAReplacedHostFile(t *testing.T) {
 			if !strings.Contains(stderr, "left "+files[1]) {
 				t.Errorf("down said\n%s\nwant it to name the file it left", stderr)
 			}
-			if _, err := os.Stat(state); err != nil {
-				t.Errorf("down removed the state beside a replaced file: %v", err)
-			}
 		})
 	}
 }
 
-// A recorded file gone after up is not one down removed: down leaves the state, and what another host added there.
-func TestDevDownKeepsStateBesideAMissingHostFile(t *testing.T) {
+// A key whose device and inode a crash kept up from recording is not shown to be up's by its bytes: down leaves it,
+// names it, and removes the files up recorded.
+func TestDevDownLeavesAKeyCreatedBeforeACrash(t *testing.T) {
 	instance := devFixture(t)
-	devProvision(t, instance)
-	files, state := standardHostPaths(t)
-	if err := os.Remove(files[0]); err != nil {
-		t.Fatal(err)
-	}
-	other := filepath.Join(state, "other")
-	if err := os.WriteFile(other, []byte("a real host's state"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := runCapture("dev", "down"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(other); err != nil {
-		t.Fatalf("down removed state beside a missing config: %v", err)
-	}
-}
-
-// up records the key's path and SHA-256 before it creates it, so down removes a key whose identity a crash kept up from
-// recording.
-func TestDevDownRemovesAKeyCreatedBeforeACrash(t *testing.T) {
-	instance := devFixture(t)
-	files, state := standardHostPaths(t)
+	files, _ := standardHostPaths(t)
 	crash := errors.New("crash")
 	devHostStep = func(path string) {
 		if path == files[2] {
@@ -374,10 +356,14 @@ func TestDevDownRemovesAKeyCreatedBeforeACrash(t *testing.T) {
 	if _, err := os.Stat(files[2]); err != nil {
 		t.Fatal(err)
 	}
-	if _, stderr, err := runCapture("dev", "down"); err != nil {
+	_, stderr, err := runCapture("dev", "down")
+	if err != nil {
 		t.Fatal(err, stderr)
 	}
-	for _, path := range append(files, state) {
+	if _, err := os.Lstat(files[2]); err != nil || !strings.Contains(stderr, "left "+files[2]) {
+		t.Errorf("key after down: %v; down said\n%s\nwant it left and named", err, stderr)
+	}
+	for _, path := range files[:2] {
 		if _, err := os.Lstat(path); err == nil {
 			t.Errorf("down left %s", path)
 		}
@@ -413,6 +399,18 @@ func TestDevOlderManifestIsRefused(t *testing.T) {
 		t.Fatalf("down --reset on a version 1 manifest: %v; want it refused, naming %s", err, files[0])
 	}
 	if _, err := os.Stat(instance.cache("manifest.json")); err != nil {
+		t.Fatalf("down --reset removed a manifest it cannot read: %v", err)
+	}
+	if err := os.Remove(instance.cache("manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "gone.json"), instance.cache("manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runCapture("dev", "down", "--reset"); err == nil || !strings.Contains(err.Error(), files[0]) {
+		t.Fatalf("down --reset on a dangling manifest symlink: %v; want it refused, naming %s", err, files[0])
+	}
+	if _, err := os.Lstat(instance.cache("manifest.json")); err != nil {
 		t.Fatalf("down --reset removed a manifest it cannot read: %v", err)
 	}
 }

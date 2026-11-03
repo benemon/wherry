@@ -97,7 +97,7 @@ claude: claude mcp add wherry-default -- wherry host mcp
 
 `up` writes the host's config, bundle and key at the standard host paths,
 where every host command reads them, so the commands below take no flags.
-If a host config, bundle, key or state that `up` did not create is already
+If a host config, bundle or key that `up` did not create is already
 there, or `WHERRY_CONFIG` is set, `up` leaves them and writes the host
 inside the instance, and prints `export WHERRY_CONFIG=<path>` for its config
 ([`wherry dev up`](commands.md#wherry-dev-up)). The `claude:` line
