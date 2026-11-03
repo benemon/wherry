@@ -1,7 +1,8 @@
-bundle: /etc/wherry/nomad-1.bundle
-ca_file: /etc/wherry/kafka-ca.pem
-state_dir: /var/lib/wherry
+bundle: /secrets/receiver.bundle
+ca_file: /secrets/kafka-ca.pem
+state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
+drain_timeout: 20s
 credentials:
   nomad-token:
-    file: /etc/wherry/nomad-token
+    env: NOMAD_TOKEN

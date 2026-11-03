@@ -790,7 +790,7 @@ default, such as the Nomad plugin's `NOMAD_TOKEN`.
 
 Sources stay on the receiver's host. `wherry.operator`, which every principal
 reads, records the credential's name alone, and the receiver's bundle holds
-its Kafka identity alone. The [Quickstart](quickstart.md#_7-write-the-receiver-s-local-configuration)
+its Kafka identity alone. The [Quickstart](quickstart.md#_5-write-the-receiver-s-local-configuration)
 writes a local configuration with a source for each platform credential its
 receiver configuration names.
 
