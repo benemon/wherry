@@ -872,7 +872,7 @@ func TestPlannedDrainHandsOverToALiveSuccessor(t *testing.T) {
 			t.Fatalf("run %s: re-key wraps %+v, want one the successor's key opens", record.Key, wraps)
 		}
 	}
-	if got := scrapedValue(t, successor, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"}`); got != 1 {
+	if got := awaitScraped(t, successor, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"}`, 1); got != 1 {
 		t.Fatalf("takeovers = %v after a drain, want 1", got)
 	}
 	for _, record := range append(f.records(t, operator.ReceiversTopic), records...) {
@@ -903,7 +903,7 @@ func TestDrainWithNoTimeoutLeavesForATakeover(t *testing.T) {
 	if len(f.rekeys(t)) != 0 {
 		t.Fatal("re-key wraps written with no drain timeout")
 	}
-	if got := scrapedValue(t, successor, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"}`); got != 1 {
+	if got := awaitScraped(t, successor, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"}`, 1); got != 1 {
 		t.Fatalf("takeovers = %v at the successor, want 1", got)
 	}
 }
