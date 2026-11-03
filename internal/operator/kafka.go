@@ -183,22 +183,23 @@ func (service *Service) PoolApply(ctx context.Context, pool string, terms Terms,
 			return err
 		}
 	}
-	// A new pool's topics are created only once CheckNames has accepted its record.
-	if !update {
-		if err := service.poolTopics(ctx, state, pool, retention.tasks); err != nil {
+	// Once the record is appended, a failure still converges.
+	err = func() error {
+		// A new pool's topics are created only once CheckNames has accepted its record.
+		if !update {
+			if err := service.poolTopics(ctx, state, pool, retention.tasks); err != nil {
+				return err
+			}
+		}
+		if err := service.createTopicsWith(ctx, custodianConfigs, CustodianTopic(pool)); err != nil {
 			return err
 		}
-	}
-	if err := service.createTopicsWith(ctx, custodianConfigs, CustodianTopic(pool)); err != nil {
-		return err
-	}
-	if err := service.configureTopics(ctx, custodianConfigs, CustodianTopic(pool)); err != nil {
-		return err
-	}
-	if err := service.configureGroup(ctx, pool, effective); err != nil {
-		return err
-	}
-	return service.converge(ctx)
+		if err := service.configureTopics(ctx, custodianConfigs, CustodianTopic(pool)); err != nil {
+			return err
+		}
+		return service.configureGroup(ctx, pool, effective)
+	}()
+	return errors.Join(err, service.converge(ctx))
 }
 
 // loadPoolState is the recorded state, creating wherry.operator unless dryRun: a dry run changes nothing, and an absent
@@ -365,8 +366,14 @@ func (service *Service) reissue(ctx context.Context, principal, broker, bundlePa
 		return err
 	}
 	rotated = true
-	if err := service.converge(ctx); err != nil {
+	state, err := service.converged(ctx)
+	if err != nil {
 		return err
+	}
+	// A concurrent removal's end record deleted the new password.
+	if state.Ended[principal] {
+		rotated = false
+		return fmt.Errorf("%s cannot return after its membership end", principal)
 	}
 	return writeBundle(bundle, Bundle{broker, principal, password})
 }

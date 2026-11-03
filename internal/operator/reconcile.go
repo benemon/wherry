@@ -35,17 +35,61 @@ func (service *Service) reconcileACLs(ctx context.Context, state State) error {
 	return nil
 }
 
+// convergePasses bounds the passes converge makes while wherry.operator keeps moving.
+const convergePasses = 5
+
 // converge makes Kafka match wherry.operator as read to its end, not as the command loaded it: a concurrent command's
 // record may have ended a principal or suspended a pool since.
 func (service *Service) converge(ctx context.Context) error {
-	state, err := service.LoadState(ctx)
+	_, err := service.converged(ctx)
+	return err
+}
+
+// converged is converge returning the state Kafka now matches. A pass during which wherry.operator moved may have
+// applied an older state after a newer command's final pass, so it is repeated; one during which it did not is final,
+// as each later record's command passes after it.
+func (service *Service) converged(ctx context.Context) (State, error) {
+	for range convergePasses {
+		start, err := service.operatorEnd(ctx)
+		if err != nil {
+			return State{}, err
+		}
+		state, err := service.LoadState(ctx)
+		if err != nil {
+			return State{}, err
+		}
+		converging()
+		if err := service.reconcileACLs(ctx, state); err != nil {
+			return State{}, err
+		}
+		if err := service.withdraw(ctx, state); err != nil {
+			return State{}, err
+		}
+		end, err := service.operatorEnd(ctx)
+		if err != nil {
+			return State{}, err
+		}
+		if end == start {
+			return state, nil
+		}
+	}
+	return State{}, fmt.Errorf("wherry.operator moved during each of %d convergence passes", convergePasses)
+}
+
+// Tests replace converging to act, as a concurrent operator command would, between a pass's read and its changes.
+var converging = func() {}
+
+// operatorEnd is wherry.operator's end offset, which grows with each record appended.
+func (service *Service) operatorEnd(ctx context.Context) (int64, error) {
+	listed, err := ListOffsets(ctx, kadm.NewClient(service.Operator).ListEndOffsets, OperatorTopic)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if err := service.reconcileACLs(ctx, state); err != nil {
-		return err
+	end, ok := listed.Lookup(OperatorTopic, 0)
+	if !ok {
+		return 0, errors.New("wherry.operator lists no end offset")
 	}
-	return service.withdraw(ctx, state)
+	return end.Offset, nil
 }
 
 // withdraw deletes each grant of wherry's tenant and receiver principals on wherry's topics, groups and transactional
@@ -93,11 +137,14 @@ func (service *Service) withdraw(ctx context.Context, state State) error {
 		}
 	}
 	users, err := client.DescribeUserSCRAMs(ctx)
+	if err == nil {
+		err = users.Error()
+	}
 	if err != nil {
-		return err
+		return fmt.Errorf("describe SCRAM credentials: %w", err)
 	}
 	for user, described := range users {
-		if !state.Ended[user] || described.Err != nil {
+		if !state.Ended[user] {
 			continue
 		}
 		var deletions []kadm.DeleteSCRAM

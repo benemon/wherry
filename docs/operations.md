@@ -80,23 +80,35 @@ user; commands then use the new password.
 ### Concurrent operator commands
 
 Operator commands do not lock each other. Each one that changes anything
-ends by reading `wherry.operator` to its end and making Kafka match those
-records, not the ones it read when it started: it grants what they call
-for, deletes every other grant of a `wherry.tnt.*` or `wherry.rcv.*`
+ends with passes that read `wherry.operator` to its end and make Kafka match
+those records, not the ones it read when it started: a pass grants what they
+call for, deletes every other grant of a `wherry.tnt.*` or `wherry.rcv.*`
 principal on a `wherry.` topic, a `p-` group or a `p.` transactional ID,
 and deletes the SCRAM credential of each host and receiver whose membership
 has ended. It deletes no grant of `wherry.operator`, of the Kafka super
-user, or of any other principal or resource. A revocation and a pool
-suspension make this pass after their last record.
+user, or of any other principal or resource. One exception: a revocation
+deletes every grant of the principal it revokes, on any resource, since
+`wherry.tnt.*` and `wherry.rcv.*` names are reserved to wherry. A revocation
+and a pool suspension make this pass after their last record.
 
-What this guarantees: a command that read `wherry.operator` before another
-command's record can still restore what that record withdrew, such as a
-suspended pool's task topic `WRITE` or a revoked principal's credential and
-ACLs, but only until the next operator command's final pass deletes it. In
-the other direction, a command's final pass deletes the grants a
-concurrent command adding a receiver makes before its record; that command's own pass
-restores them, and a peer denied meanwhile exits and is restarted by its
-supervisor.
+A pass that `wherry.operator` grew during may have applied older records
+over a newer command's, so the command makes another; after five such
+passes it fails with `wherry.operator moved during each of 5 convergence
+passes`. Once a command has written a record, it makes these passes on
+every return, failed or not.
+
+What this guarantees: a command that returns without an error leaves Kafka
+matching every record on `wherry.operator` when its last pass ended, and
+`wherry.operator` did not grow during that pass. A command still running
+can change Kafka after that, but its own passes then follow. A command that
+fails before it writes a record writes nothing to `wherry.operator`; topics,
+a new host's or receiver's credential, or a new receiver's grants it made
+first stay, the grants until the next command's pass. A `host add --force`
+or receiver reissue that a revocation overtakes refuses with `cannot return
+after its membership end` and writes no bundle. A command's pass deletes the
+grants a concurrent command adding a receiver makes before its record; that
+command's own pass restores them, and a peer denied meanwhile exits and is
+restarted by its supervisor.
 
 ## Create a pool
 
@@ -874,7 +886,8 @@ their issuers.
 Prerequisites: the broker settings in [Prepare Kafka](#prepare-kafka), and
 the operator's working directory. A [concurrent operator command](#concurrent-operator-commands)
 that read `wherry.operator` before the suspension can restore the task
-topic grants it withdrew until the next operator command ends.
+topic grants it withdrew only until one of the two commands' passes
+deletes them again.
 
 1. Suspend the pool. It takes no new work: hosts stop submitting to it,
    receivers stop claiming from it, and the key custodian refuses the open
