@@ -1447,7 +1447,7 @@ step fails with `step <name>: <cause>`.
 Commands run at once on one instance are not serialized: run one at a
 time. And `XDG_DATA_HOME`, or `HOME` without it, must be the same for `up`
 and `down`, since it locates the instance and its record of the host files
-`up` created; `XDG_CONFIG_HOME` and `XDG_STATE_HOME` may change, since the
+`up` created; `XDG_CONFIG_HOME` may change, since the
 record holds absolute paths.
 
 ### `wherry dev init`

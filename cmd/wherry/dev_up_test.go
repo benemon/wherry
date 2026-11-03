@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -464,5 +465,17 @@ func TestDevReadyLines(t *testing.T) {
 				t.Errorf("ready output\n%s\nlacks %q", ready.String(), want)
 			}
 		}
+	}
+}
+
+// A host file up creates is mode 0600 whatever the umask, which may withhold the owner's bits OpenFile asks for.
+func TestCreateFileIgnoresTheUmask(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "host.key")
+	defer syscall.Umask(syscall.Umask(0o277))
+	if _, err := createFile(path, []byte("key")); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v, %v; want 0600", info.Mode().Perm(), err)
 	}
 }
