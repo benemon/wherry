@@ -481,6 +481,7 @@ func TestChecksIgnoreEndedTopicsAndUnrelatedPoolRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTopicRetention(t, service, TenantTopic("unrelated"), 1)
+	revocationBounds(t, service, "1", "60000", "1")
 	if err := service.PoolApply(ctx, "p", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
