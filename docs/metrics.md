@@ -1,9 +1,8 @@
 # Metrics reference
 
-The families a receiver serves at `/metrics` when its local configuration
-sets `metrics_addr`. [Metrics](operations-receivers.md#metrics) says how to scrape a
-receiver and load the shipped dashboard and alert rules, and
-[`wherry receiver run`](commands.md#metrics) how the receiver serves them.
+Set `metrics_addr` in the receiver's local configuration to serve `/metrics`.
+Use [Receiver metrics](operations-receivers.md#metrics) to configure scraping, dashboards and alerts.
+[Command reference](commands.md#metrics) describes the listener.
 
 ## Labels
 
@@ -67,11 +66,14 @@ reason that quotes the task counts as `git remote host outside the pool's vcs
 hosts`, `pool has no storage`, `not started by task_started_by` or
 `not ended by task_ended_by`.
 
-An open wait is `opened` when the key custodian's attempt wrap arrives,
-`refused` when the key custodian refuses the request, `unanswered` when no
-answer arrives within 5 minutes and 120 seconds of the request's append time
-and the receiver releases the task, and `expired` when the run's
-`task_started_by`, or for an adopted job its `task_ended_by`, passes first.
+| Open wait outcome | Meaning |
+| --- | --- |
+| `opened` | The attempt wrap arrives. |
+| `refused` | The custodian refuses the request. |
+| `unanswered` | No answer arrives within five minutes and 120 seconds of the request's append time. |
+| `expired` | The start bound passes, or the end bound passes for an adopted job. |
+
+An unanswered request releases the task.
 
 ## Histogram buckets
 

@@ -1,7 +1,7 @@
 # Design
 
-How wherry lays its records out on Kafka, how a receiver gets its
-configuration, and the topics and ACLs `wherry operator` creates.
+Use this page to understand Kafka records, configuration delivery and key custody.
+The resource tables list what `wherry operator` creates.
 
 ## Why Kafka
 

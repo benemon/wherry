@@ -1,26 +1,22 @@
 # Runbooks
 
-One section per rule of the shipped Prometheus alert rules. Each rule's
-`runbook_url` links its section. The rules and the Grafana dashboard live in
-[`contrib/observability`](https://github.com/benemon/wherry/tree/main/contrib/observability);
-[Metrics](operations-receivers.md#metrics) says how to scrape a receiver and load them,
-and [Metrics reference](metrics.md) lists every family.
+Use the section named by the firing alert.
+The [shipped rules and dashboard](https://github.com/benemon/wherry/tree/main/contrib/observability) link to these sections.
+[Receiver metrics](operations-receivers.md#metrics) explains installation.
+[Metrics reference](metrics.md) lists the metric families.
 
-Each section says what the alert means, how to confirm it, and what to do.
-The receiver logs to standard output, one line per event, each prefixed
-`receiver: ` and a UTC timestamp; on Nomad, `nomad alloc logs` shows them,
-on Kubernetes, `kubectl logs` with the receiver's pod, and under systemd,
-`journalctl -u` with the receiver's unit. Each plugin's run section says
-where its receiver runs:
-[Nomad](https://github.com/benemon/wherry-plugins/tree/main/nomad#run-the-receiver-in-nomad),
-[Kubernetes](https://github.com/benemon/wherry-plugins/tree/main/kubernetes#run-the-receiver-in-the-cluster)
-and
-[systemd](https://github.com/benemon/wherry-plugins/tree/main/systemd#run-the-receiver-as-a-systemd-service). The confirming
-commands run on a host of a tenant entitled to the pool, with its
-[client configuration](configuration-host.md#client-configuration), except
-`wherry operator` commands, which run in the
-[operator working directory](operations-operator.md#set-up-wherry-operator) and
-connect as `wherry.operator`.
+Read receiver logs through your platform:
+
+| Platform | Command |
+| --- | --- |
+| Nomad | `nomad alloc logs` with the receiver allocation. |
+| Kubernetes or OpenShift | `kubectl logs` with the receiver pod. |
+| systemd | `journalctl -u` with the receiver unit. |
+
+Each receiver log line starts with `receiver: ` and a UTC timestamp.
+Run host checks from a tenant entitled to the pool.
+Use that host's [configuration](configuration-host.md#client-configuration).
+Run operator checks from the [operator working directory](operations-operator.md#set-up-wherry-operator).
 
 ## WherryReceiverNotAdvertising
 

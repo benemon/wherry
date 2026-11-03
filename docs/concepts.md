@@ -245,7 +245,7 @@ See [Respond to a compromised receiver or pool key](operations-operator.md#respo
 
 A stopping custodian leaves the group and waits for a successor's snapshot.
 `drain_timeout` bounds that wait.
-With a successor, it re-keys eligible queued tasks in one transaction and deletes its keys.
+With a successor, it re-keys eligible tasks in one transaction and deletes its keys.
 A failed scan or write keeps the keys until their deadlines.
 A suspended pool keeps its keys without scanning tasks.
 
