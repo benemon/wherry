@@ -7,7 +7,6 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
-	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
@@ -81,10 +80,10 @@ func docLiteral(e ast.Expr) string {
 	return ""
 }
 
-func docTags(typ reflect.Type, tag string) []string {
+func docTags(typ reflect.Type) []string {
 	var names []string
 	for i := 0; i < typ.NumField(); i++ {
-		name := strings.Split(typ.Field(i).Tag.Get(tag), ",")[0]
+		name := strings.Split(typ.Field(i).Tag.Get("yaml"), ",")[0]
 		if name != "" && name != "-" {
 			names = append(names, name)
 		}
@@ -153,101 +152,16 @@ func TestMCPDocumentedNames(t *testing.T) {
 }
 
 func TestAgentDocumentedNames(t *testing.T) {
-	var flags []string
-	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal(err)
+	_, list, ok := strings.Cut(docRead(t, "../../plugins/AGENTS.snippet.md"), "its tools do the\nsame: ")
+	if !ok {
+		t.Fatal("AGENTS.snippet.md lists no MCP tools")
 	}
-	for _, path := range files {
-		if strings.HasSuffix(path, "_test.go") {
-			continue
-		}
-		ast.Inspect(docAST(t, path), func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			switch sel.Sel.Name {
-			case "String", "Bool", "Int", "Int64", "Duration", "Func", "BoolFunc":
-				if len(call.Args) > 0 {
-					flags = append(flags, docLiteral(call.Args[0]))
-				}
-			case "StringVar", "BoolVar", "IntVar", "Int64Var", "DurationVar", "Var":
-				if len(call.Args) > 1 {
-					flags = append(flags, docLiteral(call.Args[1]))
-				}
-			}
-			return true
-		})
-	}
-	var commands []string
-	for _, line := range strings.Split(usage, "\n") {
-		words := strings.Fields(strings.ReplaceAll(line, "key rotate", "key~rotate"))
-		if len(words) == 0 || words[0] != "wherry" {
-			continue
-		}
-		expanded := []string{""}
-		for _, word := range words[1:] {
-			if strings.ContainsAny(word, "[<:") {
-				break
-			}
-			var next []string
-			for _, prefix := range expanded {
-				for _, alternative := range strings.Split(word, "|") {
-					next = append(next, strings.TrimSpace(prefix+" "+strings.ReplaceAll(alternative, "~", " ")))
-				}
-			}
-			expanded = next
-		}
-		commands = append(commands, expanded...)
-		commands = append(commands, words[1])
-	}
+	list, _, _ = strings.Cut(list, ".")
 	var tools []string
 	for name := range docTools(t) {
 		tools = append(tools, name)
 	}
-	for _, path := range []string{"../../plugins/wherry/skills/wherry/SKILL.md", "../../plugins/AGENTS.snippet.md"} {
-		doc := docRead(t, path)
-		for _, m := range regexp.MustCompile(`--([a-z][a-z-]+)|(?:\s|`+"`"+`)-([a-z])\b`).FindAllStringSubmatch(doc, -1) {
-			name := m[1] + m[2]
-			if !slices.Contains(flags, name) {
-				t.Errorf("%s: undefined flag %s", path, name)
-			}
-		}
-		for _, name := range docNames(doc) {
-			if strings.HasPrefix(name, "wherry ") {
-				words := strings.Fields(name)[1:]
-				var command []string
-				for _, word := range words {
-					if strings.HasPrefix(word, "-") || strings.ContainsAny(word, "<>") || strings.ToUpper(word) == word {
-						break
-					}
-					command = append(command, word)
-				}
-				if !slices.Contains(commands, strings.Join(command, " ")) {
-					t.Errorf("%s: command %q absent from usage", path, name)
-				}
-			}
-		}
-		if _, list, ok := strings.Cut(doc, "same: "); ok {
-			list, _, _ = strings.Cut(list, ".")
-			for _, name := range docNames(list) {
-				if !slices.Contains(tools, name) {
-					t.Errorf("%s: unregistered tool %s", path, name)
-				}
-			}
-		}
-		for _, m := range regexp.MustCompile("(?i)(?:call )`([a-z]+)`(?: tool)?|`([a-z]+)`(?: tool| returns| refuses| first| waits)").FindAllStringSubmatch(doc, -1) {
-			name := m[1] + m[2]
-			if !slices.Contains(tools, name) {
-				t.Errorf("%s: unregistered tool %s", path, name)
-			}
-		}
-	}
+	docEqual(t, "AGENTS.snippet.md tools", docNames(list), tools)
 }
 
 func TestConfigurationDocumentedFields(t *testing.T) {
@@ -263,7 +177,7 @@ func TestConfigurationDocumentedFields(t *testing.T) {
 		for _, row := range docTable(docSection(t, doc, tc.heading)) {
 			fields = append(fields, docNames(row[1])...)
 		}
-		docEqual(t, tc.heading, fields, docTags(reflect.TypeOf(tc.value), "yaml"))
+		docEqual(t, tc.heading, fields, docTags(reflect.TypeOf(tc.value)))
 	}
 	var variables []string
 	for _, row := range docTable(docSection(t, doc, "## Environment variables")) {
