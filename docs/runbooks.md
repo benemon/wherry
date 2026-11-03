@@ -182,7 +182,7 @@ Confirm it:
 1. Read the claiming receivers' logs for
    `run <id>: no answer to the open request for attempt <n>`.
 2. Find the pool's key custodian from its receivers' log lines, as in step 1
-   of [Stop a pool's key custodian](operations-operator.md#stop-a-pool-s-key-custodian),
+   of [Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian),
    and check that it is `live` in `wherry host receivers`.
 3. Read the pool's receivers' logs for lines starting `custodian:`, such
    as `custodian: published pool <pool> key <id> (<reason>)`,
@@ -232,7 +232,7 @@ Confirm it:
    and a stop with `drain_timeout` at `0s` logs
    `custodian: leaving pool <pool> with no drain timeout; keeping the pool keys to their deadlines`.
 3. Find the pool's key custodian from its receivers' log lines, as in step 1
-   of [Stop a pool's key custodian](operations-operator.md#stop-a-pool-s-key-custodian),
+   of [Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian),
    and check that it is `live` in `wherry host receivers`.
 
 Then:
@@ -241,7 +241,7 @@ Then:
 | --- | --- |
 | a planned stop whose previous custodian logged `custodian: re-keyed <n> tasks to pool key <id> and deleted <n> pool keys` | none |
 | a crash or a lost state directory | none: the hosts of the lost tasks resubmit them when they next run |
-| a planned stop with no re-key | raise `drain_timeout`, so that the stopping custodian waits for a successor's snapshot and re-keys its tasks, as in [Stop a pool's key custodian](operations-operator.md#stop-a-pool-s-key-custodian) |
+| a planned stop with no re-key | raise `drain_timeout`, so that the stopping custodian waits for a successor's snapshot and re-keys its tasks, as in [Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian) |
 | no planned stop, crash or lost state directory before the takeover | treat the new custodian as suspect and revoke it with `wherry operator receiver remove` |
 | a `contested` snapshot with no custodian change | find the writer that initialised `p.<pool>.custodian`, which every member of the pool can; revoke a suspect receiver with `wherry operator receiver remove` |
 
@@ -280,7 +280,7 @@ Then:
   window as in
   [Drain timeout and the stop window](configuration-receiver.md#drain-timeout-and-the-stop-window),
   and stop a pool's receivers one at a time, as in
-  [Stop a pool's key custodian](operations-operator.md#stop-a-pool-s-key-custodian),
+  [Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian),
   so that a stopping custodian has a live successor.
 
 ## WherryPlatformErrorsRising

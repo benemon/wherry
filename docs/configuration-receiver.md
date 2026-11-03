@@ -89,13 +89,13 @@ same entries in maps and lists, named by `-f`, or the single file
 [working directory](configuration-operator.md#operator-working-directory). The receiver's name comes
 from the command. Unknown fields are errors.
 
-| Field of the single file | Content |
-| --- | --- |
-| `pool` | the receiver's pool; required for a new receiver, and an existing one's must match |
-| `plugin_sha256` | for each plugin type, the SHA-256 of its binary as 64 lowercase hex digits: the line for the plugin binary in its release's signed `checksums.txt` ([Install plugins](operations-receivers.md#install-plugins)) |
-| `broker` | optional, default the broker in `operator.yaml`: the Kafka address the receiver's bundle names, which the receiver connects to |
-| `capacity` | optional, default 1: runs the receiver holds at once, positive |
-| `plugins` | one or more plugin entries, keyed by plugin |
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `pool` | string | required for a new receiver | Name the pool whose terms this receiver serves. |
+| `plugin_sha256` | mapping | required | Pin each plugin binary by its 64 lowercase hex SHA-256 digits. |
+| `broker` | string | broker in `operator.yaml` | Set the address written in this receiver's bundle. |
+| `capacity` | integer | `1` | Bound the number of runs the receiver holds at once. |
+| `plugins` | mapping | required | Declare plugins and their profiles. |
 
 A plugin entry's key is a [plugin](plugins.md) name; the receiver
 runs `wherry-plugin-<type>` from its plugin directory for it. Each plugin
@@ -104,17 +104,17 @@ entry:
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `labels` | mapping | none | optional; [labels](commands.md#labels) every plugin profile of the plugin inherits |
-| `config` | string | none | optional; settings every plugin profile of the plugin inherits |
-| `profiles` | list | none | one or more plugin profile entries, in routing order |
+| `config` | mapping | none | optional; settings every plugin profile of the plugin inherits |
+| `profiles` | list | required | one or more plugin profile entries, in routing order |
 
 Each profile entry:
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `name` | string | none | profile name, unique in the receiver |
-| `agent` | string | none | the agent it launches, from the pool's terms |
+| `name` | string | required | profile name, unique in the receiver |
+| `agent` | string | required | the agent it launches, from the pool's terms |
 | `labels` | mapping | none | optional; [labels](commands.md#labels) for placement |
-| `config` | string | none | the plugin's settings for this profile |
+| `config` | mapping | none | the plugin's settings for this profile |
 
 A plugin profile's `config` and `labels` are its plugin's merged with its
 own, as [Plugin profile merge](#plugin-profile-merge) describes. A

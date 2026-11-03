@@ -7,7 +7,7 @@
 
 An execution fabric for delegated agent work. The
 [Introduction](https://benemon.github.io/wherry/introduction) describes the
-model and [what ships](https://benemon.github.io/wherry/introduction#what-ships).
+model and [what ships](https://benemon.github.io/wherry/introduction#how-does-wherry-work).
 
 ## Getting started
 
@@ -30,7 +30,7 @@ and upgrades.
 
 ## Harness integration
 
-[Harness integration](https://benemon.github.io/wherry/operations-operator#harness-integration)
+[Harness integration](https://benemon.github.io/wherry/operations-hosts#harness-integration)
 installs the [`plugins/wherry`](plugins/wherry) MCP server and Agent Skill,
 and [MCP tools](https://benemon.github.io/wherry/mcp) lists the tools.
 

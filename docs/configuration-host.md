@@ -118,9 +118,9 @@ password and is not part of it, and a password of nothing else is refused.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `broker` | string | none | Kafka bootstrap address, `host:port` |
-| `principal` | string | none | SCRAM-SHA-512 user name |
-| `password` | string | none | SCRAM password |
+| `broker` | string | required | Kafka bootstrap address, `host:port` |
+| `principal` | string | required | SCRAM-SHA-512 user name |
+| `password` | string | required | SCRAM password |
 
 A bundle carries nothing about the broker's TLS CA. The Kafka platform owns
 and renews its CA; each host and receiver trusts the broker through the

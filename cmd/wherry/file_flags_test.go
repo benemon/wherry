@@ -78,7 +78,7 @@ func TestPoolConfigExampleParses(t *testing.T) {
 	if _, err := operator.EncodeRecord(operator.Record{Kind: "pool", Pool: "build", Terms: &want}); err != nil {
 		t.Fatal(err)
 	}
-	documented(t, "configuration.md", "example-pool.yaml", "example-pool/pool.yaml", "example-pool/agents/claude.yaml", "example-pool/agents/coder.yaml", "example-pool/agents/codex.yaml")
+	documented(t, "configuration-operator.md", "example-pool.yaml", "example-pool/pool.yaml", "example-pool/agents/claude.yaml", "example-pool/agents/coder.yaml", "example-pool/agents/codex.yaml")
 }
 
 // documented fails unless the page docs/<page> holds each testdata file as a whole code block, of its own or indented

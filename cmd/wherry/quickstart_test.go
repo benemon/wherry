@@ -80,7 +80,7 @@ func TestQuickstartMissingSourceError(t *testing.T) {
 		t.Fatal("configured a profile whose credential has no source")
 	}
 	line := "profile " + config.Profiles[0].Name + ": " + err.Error() + "\n"
-	for _, page := range []string{"quickstart-production.md", "configuration-receiver.md", "operations-receivers.md"} {
+	for _, page := range []string{"quickstart-production.md", "configuration-receiver.md", "operations-operator.md"} {
 		doc, err := os.ReadFile(filepath.Join("..", "..", "docs", page))
 		if err != nil {
 			t.Fatal(err)

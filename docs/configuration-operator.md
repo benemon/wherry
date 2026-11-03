@@ -2,6 +2,8 @@
 
 ## Operator working directory
 
+### Where wherry keeps your installation files
+
 One directory per installation holds what `wherry operator` keeps. Every
 operator command takes `--dir DIR`, the current directory by default.
 
@@ -23,9 +25,9 @@ names only its line numbers, and no `~` is expanded:
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `broker` | string | none | Kafka bootstrap address, `host:port`; host bundles name it, and receiver bundles unless the receiver's file names another |
+| `broker` | string | required | Kafka bootstrap address, `host:port`; host bundles name it, and receiver bundles unless the receiver's file names another |
 | `ca_file` | string | none | path of the PEM CA certificates the operator trusts the broker with, which `operator init` writes absolute; a relative path is in the working directory; absent for the system's trusted roots |
-| `password_file` | string | none | `wherry.operator`'s password file, `operator.password`; a relative path is in the working directory |
+| `password_file` | string | required | `wherry.operator`'s password file, `operator.password`; a relative path is in the working directory |
 
 It holds nothing about the Kafka super user, which only
 [`operator init`](commands.md#wherry-operator-init) uses. Kept files are not
@@ -37,6 +39,8 @@ every principal's password, in `operator.password` and each bundle
 
 ## Pool terms
 
+### Which file supplies the terms
+
 The YAML file `pool apply` reads: `-f PATH`, or `pools/<pool>.yaml` in the
 operator's [working directory](#operator-working-directory). Unknown fields
 are errors.
@@ -46,17 +50,17 @@ ignored. Any other entry and a directory with no agent files are errors.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `agents` | list | none | one or more `{name, credentials, models, default_model}`: an agent, the [credentials](#agent-credentials) it takes, and optionally the models a task may name for it and the one a task naming none runs |
-| `default_agent` | string | none | an agent from `agents`, used when a task names none; optional when `agents` holds one, which it then defaults to |
-| `start_by_limit` | duration | none | optional duration, default `72h`: the latest [`task_started_by`](configuration-receiver.md#task-bounds) a run may ask for, from its submission, and the time from a run's submission past which a receiver rejects it unclaimed; it also sets the pool topics' minimum retention, which `pool apply` raises and never lowers. With `storage`, it plus six hours must not exceed 7 days, the longest an S3 SigV4 presigned URL lasts |
-| `delivery_limit` | integer | none | optional, default 5: the share group's `share.delivery.count.limit` |
-| `lock_duration` | duration | none | optional duration, default `15s`: the share group's `share.record.lock.duration.ms` |
-| `producer_byte_rate` | integer | none | host quota, bytes per second |
-| `request_percentage` | integer | none | host quota, percentage of broker request time |
-| `output_limit` | integer | none | optional, default 8388608 (8 MiB): bytes of one output, and of a run's outputs together, and of the outcome file |
-| `reply_limit` | integer | none | optional, default 1048576 (1 MiB), or `output_limit` when that is lower: bytes of the redacted [reply](a2a-extension-v1.md#the-reply) a result returns; a longer reply is cut to it. At most `output_limit` |
-| `vcs` | string | none | optional, default none: the hosts a [git input](a2a-extension-v1.md#git-input) may clone from |
-| `storage` | mapping | none | optional, default none: `{endpoint, bucket}`, the S3-compatible store of the pool's [S3 inputs and outputs](a2a-extension-v1.md#s3-inputs-and-outputs) |
+| `agents` | list | required | Declare each agent's name, credentials and optional model restrictions. |
+| `default_agent` | string | the only agent, if there is one | Select the agent for a task that names none. |
+| `start_by_limit` | duration | `72h` | Bound how far after submission a run may start. |
+| `delivery_limit` | integer | `5` | Set the share group's delivery count limit. |
+| `lock_duration` | duration | `15s` | Set the share group's record lock duration. |
+| `producer_byte_rate` | integer | required | Set each host's producer quota in bytes per second. |
+| `request_percentage` | number | required | Set each host's quota as a percentage of broker request time. |
+| `output_limit` | integer | `8388608` | Bound one output, all outputs together and the outcome file in bytes. |
+| `reply_limit` | integer | the smaller of `1048576` and `output_limit` | Bound the redacted reply in bytes. |
+| `vcs` | list of strings | none | Allow git inputs from the listed remote hosts. |
+| `storage` | mapping | none | Set the S3-compatible store's `endpoint` and `bucket`. |
 
 An agent's `default_model`, when set, is one of its `models`; it defaults to
 the model of an agent listing one, and an agent without `models` has none. A task for an agent with `models` runs the model
@@ -299,3 +303,13 @@ You can add the entitlement again.
 Remove the tenant with `wherry operator tenant remove TENANT`.
 An ended tenant name cannot be reused.
 See [Tenant onboarding and offboarding](operations-operator.md#tenant-onboarding-and-offboarding).
+
+## How pool limits interact
+
+`start_by_limit` sets the minimum retention for pool topics.
+`pool apply` raises retention when needed.
+It never lowers retention.
+For a pool with storage, `start_by_limit` plus six hours must fit within seven days.
+This is the maximum lifetime of an S3 SigV4 presigned URL.
+`reply_limit` must be no greater than `output_limit`.
+See [Task bounds](configuration-receiver.md#task-bounds).

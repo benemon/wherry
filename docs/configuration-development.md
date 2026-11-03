@@ -5,7 +5,7 @@
 `wherry dev` runs a whole deployment on one machine for trying wherry and
 developing against it, as [Try it on one machine](quickstart-development.md#start-your-instance)
 walks through. Each command takes `--instance NAME`, default `default`, a
-[name](#names). An instance lives in `$XDG_DATA_HOME/wherry/dev/NAME`, by
+[name](commands.md#names). An instance lives in `$XDG_DATA_HOME/wherry/dev/NAME`, by
 default `~/.local/share/wherry/dev/NAME`, mode 0700, in two parts:
 `cache/`, which `init` fills and `down --reset` removes, and `env/`, which `up`
 creates and `down` removes. The ports are fixed, so one instance is up at

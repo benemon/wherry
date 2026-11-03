@@ -42,6 +42,6 @@ configuration, bundle and state directory.
    before a forced kill, with `drain_timeout` plus 5 seconds below that
    window. Restart a pool's receivers one at a time, so that a stopping key
    custodian re-keys its tasks to a live successor
-   ([Stop a pool's key custodian](operations-operator.md#stop-a-pool-s-key-custodian)).
+   ([Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian)).
 4. Restart the harness sessions that run `wherry host mcp`.
 

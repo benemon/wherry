@@ -311,7 +311,7 @@ or a whole-pool stop, it waits out `drain_timeout` within the stop window and
 then exits with its keys, and its restart continues as custodian.
 Permanently removing a pool's only receiver loses its keys. A former custodian that stays up answers open
 requests for tasks under its keys with re-key wraps until their deadlines.
-[Stop a pool's key custodian](operations-operator.md#stop-a-pool-s-key-custodian)
+[Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian)
 gives the procedure.
 
 ### Lost pool keys
