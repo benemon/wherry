@@ -89,7 +89,7 @@ Hosts and receivers exchange A2A tasks over Kafka with no server between
 them. wherry is a partial custom A2A protocol binding over Kafka: it
 provides some of A2A's operations, as records ([Binding](#binding)). This
 extension fixes the record formats and the checks each reader applies. Five
-of the records carry [A2A v1.0](https://a2a-protocol.org/) objects:
+of the records carry [A2A v1.0](https://a2a-protocol.org/v1.0.0/specification/) objects:
 submissions, statuses, transcript chunks, output chunks and results hold
 one under its A2A field name, beside a `wherry` object of the run's
 placement and routing. Every `Message` and `Artifact` wherry writes
@@ -506,6 +506,8 @@ base64 does. The fixed texts are:
   `not ended by task_ended_by (<RFC 3339 time>)`,
   `task_ended_by is past task_started_by plus the 6h run cap`,
   `unsupported message part`, `run ID does not match its signer`,
+  `the host does not supply a required credential of the agent`,
+  `a task credential takes the target of one of the agent's credentials`,
   `git remote host <host> is not in pool <pool>'s vcs hosts`, and
   `pool <pool> has no storage for S3 inputs and outputs`;
 - failed: `not started by task_started_by (<RFC 3339 time>)`,
@@ -515,7 +517,7 @@ base64 does. The fixed texts are:
   `agent exited 137 (OOMKilled)`), `agent reported no outcome`,
   `an S3 input was not fetched, or did not match its size and SHA-256`,
   `cannot be opened: the pool's custodian changed and its key was lost`
-  ([Open refusal](#open-refusal)), the reason an opened envelope fails its
+  and `envelope invalid` ([Open refusal](#open-refusal)), the reason an opened envelope fails its
   check against the task, such as `envelope is bound to another task` or
   `the URL for S3 input <name> is not its object in the pool's storage`,
   `delivery budget exhausted`,
@@ -960,7 +962,9 @@ These releases are exempt:
   continues the run;
 - a denied receiver releases the task, since it cannot write;
 - a receiver that cannot build the run's transactional producer releases
-  the task, since it cannot write.
+  the task, since it cannot write;
+- a receiver that holds its pool suspended releases the task before
+  admission, since it claims nothing from a suspended pool.
 
 A receiver whose write of the terminal fails releases the task.
 
@@ -1125,7 +1129,8 @@ request only when:
 6. when the claim changed receivers, it has no previous holder, or the
    previous holder has no live membership or its latest advertisement in the
    pool appended at or before the claim is more than 120 seconds old when the
-   custodian decides; otherwise `two live claimants`. The previous holder is
+   custodian decides; otherwise `two live claimants`. When the custodian
+   cannot read the advertisements, it counts the previous holder live. The previous holder is
    the receiver of the latest earlier `claimed` for the task whose claim
    decision served it and that the same receiver has not followed with its
    own `released`. A claim refused or never decided holds nothing, and a
@@ -1312,12 +1317,16 @@ writes, each with `v`, `kind` and `at_ms` (Unix milliseconds).
 | `entitlement` | `tenant`, `pool` | entitles the tenant to the pool |
 | `end` | `receiver`, or `tenant` and `host` | records a membership end |
 | `revoking` | `receiver`, or `tenant` and `host` | records a revocation in progress: the principal is granted no ACL and stays a member until its `end` |
+| `suspend` | `pool` | suspends the pool ([Suspension](concepts.md#suspension)) |
+| `resume` | `pool` | resumes a suspended pool |
+| `rotate-key` | `pool` | asks the pool's key custodian for a new key ([Custodian snapshot](#custodian-snapshot)) |
 
 `terms` has the members of the [pool terms](configuration.md#pool-terms) file
 and `record_limit`, the tasks topic's record limit that `pool apply` reads
 from the broker, with `start_by_limit_ms` and `lock_duration_ms` in milliseconds for its
 `start_by_limit` and `lock_duration`. `config` holds `receiver` and `pool`,
-which equal the record's, the receiver's `capacity`, and its `profiles` in
+which equal the record's, the receiver's `capacity`, `plugin_sha256`, the
+lowercase hex SHA-256 pinned for each plugin type, and its `profiles` in
 routing order, the plugins in the order of their names. Each plugin profile is the
 [profile entry](configuration.md#receiver-configuration) as `name`, `plugin`
 naming its plugin, `agent`, `labels` when set, and the merged
@@ -1329,7 +1338,8 @@ Readers fold the records in order. A reader loads no state when:
 - a `receiver` record moves a receiver to another pool or names an unknown
   pool;
 - a `receiver` or `host` record follows that member's `end`;
-- an `entitlement` names an unknown pool;
+- an `entitlement`, `suspend`, `resume` or `rotate-key` record names an
+  unknown pool;
 - a record fails to decode;
 - two of the Kafka names that pools, receivers and hosts derive (topics,
   share groups, principals and transactional prefixes) collide.
@@ -1343,7 +1353,10 @@ this one needs an upgrade; otherwise it reports that this release cannot read
 
 ## Admission
 
-A receiver that claims a submission:
+A receiver that holds its pool suspended, in its latest read of
+`wherry.operator`, releases every submission it claims before step 1,
+without reading it; the [delivery budget](#delivery-budget) exempts that
+release. Otherwise a receiver that claims a submission:
 
 1. acknowledges it and writes nothing when the pool's events already hold a
    status in a terminal state, `TASK_STATE_REJECTED` included, with its task
@@ -1382,23 +1395,28 @@ A receiver that claims a submission:
    `task_ended_by` is more than six hours after its `task_started_by`. Its
    `rejected` status names no run's task (step 4), so a later submission of
    the run that passes is admitted;
-9. releases it when no ready plugin profile satisfies the placement, unless
-   a member has claimed the run and its `task_ended_by` has passed, or its
-   `task_started_by` has passed with no `started` event;
+9. releases it when no ready plugin profile satisfies the placement. A run
+   a member has claimed goes on without one when its `task_ended_by` has
+   passed, or when its `task_started_by` has passed with no `started` event,
+   so that the run ends as below;
 10. rejects a run no pool member has claimed with
     `task_started_by is past the pool's start_by_limit` when its submission
     reached the pool's task topic more than the pool's `start_by_limit_ms`
     ago;
-11. rejects it when the host of the run's [git input](#git-input) is not
+11. rejects it with `the host does not supply a required credential of the
+    agent` when the submission's `unsupplied_credentials` names a required
+    credential of the agent, and with `a task credential takes the target of
+    one of the agent's credentials` when one does;
+12. rejects it when the host of the run's [git input](#git-input) is not
     one of the pool's current VCS hosts, and with `pool <pool> has no
     storage for S3 inputs and outputs` when the run has S3 inputs or
     outputs and the pool's terms have no `storage`;
-12. rejects it with `unsupported message part` when a `url` part appears
+13. rejects it with `unsupported message part` when a `url` part appears
     in the message;
-13. writes the echo and the `claimed` status, its `task_offset` the
+14. writes the echo and the `claimed` status, its `task_offset` the
     submission's offset.
 
-A run a cancel covers skips steps 7, 11 and 12, and ends `TASK_STATE_CANCELED`
+A run a cancel covers skips steps 7, 11, 12 and 13, and ends `TASK_STATE_CANCELED`
 after its `claimed` status. A redelivered run that a member has claimed
 goes on to adoption past its bounds. When its `task_ended_by` has passed,
 the receiver stops the job it finds and ends the run `TASK_STATE_FAILED`
