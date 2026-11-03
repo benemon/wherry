@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
@@ -93,6 +95,33 @@ func TestHostAddRefusesAnExistingFileBeforeCreatingTheRecordTopic(t *testing.T) 
 	}
 	if len(response.Topics) != 0 {
 		t.Fatalf("host add left %d topics, first %s; want none", len(response.Topics), *response.Topics[0].Topic)
+	}
+}
+
+// A host whose topic creation fails is not recorded, so check does not then look for its topic.
+func TestHostAddRecordsNothingWhenItsTopicIsRefused(t *testing.T) {
+	cluster, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	cluster.ControlKey(int16(kmsg.CreateTopics), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		cluster.KeepControl()
+		create := request.(*kmsg.CreateTopicsRequest)
+		if !slices.ContainsFunc(create.Topics, func(topic kmsg.CreateTopicsRequestTopic) bool { return topic.Topic == HostTopic("tenant-a", "host-a") }) {
+			return nil, nil, false
+		}
+		response := create.ResponseKind().(*kmsg.CreateTopicsResponse)
+		for _, topic := range create.Topics {
+			failed := kmsg.NewCreateTopicsResponseTopic()
+			failed.Topic, failed.ErrorCode = topic.Topic, kerr.TopicAuthorizationFailed.Code
+			response.Topics = append(response.Topics, failed)
+		}
+		return response, nil, true
+	})
+	if err := service.HostAdd(ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.bundle"), false); err == nil {
+		t.Fatal("host add succeeded; want its topic's creation refused")
+	}
+	if state, err := service.LoadState(ctx); err != nil || len(state.Hosts) != 0 {
+		t.Fatalf("hosts %v, %v; want none recorded", state.Hosts, err)
 	}
 }
 

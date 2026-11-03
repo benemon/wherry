@@ -439,18 +439,22 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 		defer closeBundle(bundle, &err)
 	}
 	record := Record{Kind: "host", Tenant: tenant, Host: host}
-	state, err := service.appendChecked(ctx, []byte(tenant+"."+host), record)
-	if err != nil {
-		return err
-	}
-	password, err := service.upsertUser(ctx, principal)
-	if err != nil {
+	// A host recorded before its topics and credential exist fails every later check, so they are made first.
+	if _, _, err := service.planRecord(ctx, record); err != nil {
 		return err
 	}
 	if err := service.createTopics(ctx, "-1", HostTopic(tenant, host)); err != nil {
 		return err
 	}
 	if err := service.tenantTopics(ctx, tenant); err != nil {
+		return err
+	}
+	password, err := service.upsertUser(ctx, principal)
+	if err != nil {
+		return err
+	}
+	state, err := service.appendChecked(ctx, []byte(tenant+"."+host), record)
+	if err != nil {
 		return err
 	}
 	if err := service.reconcileACLs(ctx, state); err != nil {
