@@ -1,10 +1,12 @@
 # MCP tools
 
-`wherry host mcp` serves seven tools over stdio. Each takes and returns JSON with
-a declared schema and uses the server's one host. `start_by` and `end_by`
-set the task's `task_started_by` and `task_ended_by`, each an RFC 3339 time
-or a Go duration from now, such as `90m`; omitted, they take the CLI
-defaults, `10m` and `2h`.
+Run `wherry host mcp` to serve seven tools over stdio.
+Each tool takes and returns JSON with a declared schema.
+All tools use the server's host identity.
+
+`start_by` and `end_by` set `task_started_by` and `task_ended_by`.
+Pass an RFC 3339 time or a Go duration from now, such as `90m`.
+The defaults are `10m` and `2h`.
 
 | Tool | Input | Output |
 | --- | --- | --- |

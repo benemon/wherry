@@ -2,8 +2,9 @@
 
 [Key concepts](concepts.md) explains the model. The
 [wherry A2A extension](a2a-extension-v1.md) specifies the records.
-[Configuration](configuration-host.md) lists the files the commands read, and
-[MCP tools](mcp.md) the tools `wherry host mcp` serves.
+Use the configuration guide for your role:
+[operator](configuration-operator.md), [receiver](configuration-receiver.md) or [host](configuration-host.md).
+[MCP tools](mcp.md) lists the tools served by `wherry host mcp`.
 
 ## Command tree
 

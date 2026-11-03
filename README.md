@@ -7,26 +7,32 @@
 
 An execution fabric for delegated agent work. The
 [Introduction](https://benemon.github.io/wherry/introduction) describes the
-model and [what ships](https://benemon.github.io/wherry/introduction#how-does-wherry-work).
+model and [how it works](https://benemon.github.io/wherry/introduction#how-does-wherry-work).
 
 ## Getting started
 
-The [Quickstart](https://benemon.github.io/wherry/quickstart-production) installs
-`wherry`, runs a whole deployment on one machine with `wherry dev`, then
-provisions one pool with one receiver across machines and runs a first task.
+The [development quickstart](https://benemon.github.io/wherry/quickstart-development)
+runs a whole deployment on one machine with `wherry dev`.
+The [production quickstart](https://benemon.github.io/wherry/quickstart-production)
+provisions a pool, tenant and receiver on Nomad and runs a first task.
 
 ## Configuration
 
-[Configuration](https://benemon.github.io/wherry/configuration-host) lists the
-client configuration, the receiver's local configuration, bundle, pool
-terms, receiver configuration and environment variables.
+The configuration guides cover the
+[operator](https://benemon.github.io/wherry/configuration-operator),
+[receiver](https://benemon.github.io/wherry/configuration-receiver),
+[host](https://benemon.github.io/wherry/configuration-host) and
+[development instance](https://benemon.github.io/wherry/configuration-development).
 
 ## Operations
 
-[Operations](https://benemon.github.io/wherry/operations-operator) covers preparing
-Kafka, adding tenants, hosts and receivers, revocation, key rotation, the
-pool's key custodian, the response to a compromised receiver or pool key,
-and upgrades.
+[Operator operations](https://benemon.github.io/wherry/operations-operator)
+covers Kafka, pools, tenants, receiver provisioning, revocation and reset.
+[Receiver operations](https://benemon.github.io/wherry/operations-receivers)
+covers platforms, plugins, metrics and custody.
+[Host operations](https://benemon.github.io/wherry/operations-hosts)
+covers enrolment, harnesses, files and key rotation.
+[Upgrading](https://benemon.github.io/wherry/upgrading) gives the rolling procedure.
 
 ## Harness integration
 
