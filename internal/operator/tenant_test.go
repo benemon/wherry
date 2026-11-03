@@ -494,3 +494,25 @@ func TestChecksIgnoreEndedTopicsAndUnrelatedPoolRetention(t *testing.T) {
 func removeTenantFixture(service *Service, ctx context.Context, tenant string) error {
 	return service.removeTenant(ctx, tenant, func(string) func(context.Context, string, string) error { return denied })
 }
+
+func TestCheckTenantWithoutEntitlements(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := t.Context()
+	if err := service.TenantAdd(ctx, "empty"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Check(ctx); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := kadm.NewClient(service.Operator).DeleteTopics(ctx, TenantTranscriptTopic("empty"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deleted.Error(); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Check(ctx); err == nil {
+		t.Fatal("check ignored a live tenant without entitlements")
+	}
+}
