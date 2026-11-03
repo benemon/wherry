@@ -773,6 +773,17 @@ func TestEndedHostKeyReadsOnRealBroker(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
 	defer cancel()
 	b := newBrokerPool(t, ctx, address)
+	_, hostKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration, err := signed.RegisterKey(signed.HostOwner(b.tenant, b.host), hostKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.HostTopic(b.tenant, b.host), Value: registration}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
 	r := tenantEndReceiver(t, ctx, b)
 	// Hold the state from before the end, as a refresh straddling it would.
 	state, err := b.service.LoadState(ctx)
