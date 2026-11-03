@@ -105,6 +105,11 @@ wherry wait run-<id>
 `wait` prints the agent's message once the run ends. `wherry logs run-<id>`
 prints its transcript.
 
+### Check that it worked
+
+Confirm that `wait` prints the agent's response and exits successfully.
+Use `wherry host status RUN_ID` to inspect the terminal state.
+
 ### 5. Stop
 
 ```sh
@@ -116,11 +121,6 @@ and removes the host files `up` created at the standard paths. Once the
 instance is down, `wherry dev down --reset` deletes the downloads in its
 cache. It refuses while the instance is up.
 
-
-## Check that it worked
-
-Confirm that `wait` prints the agent's response and exits successfully.
-Use `wherry host status RUN_ID` to inspect the terminal state.
 
 ## Next steps
 
