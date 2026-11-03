@@ -65,3 +65,5 @@ One `wherry` binary with four roles:
 
 Submissions, statuses, transcript chunks and results are A2A v1.0 objects.
 [The wherry A2A extension](a2a-extension-v1.md) specifies every record.
+
+Tenants are created explicitly with `wherry operator tenant add`. Pool entitlements and hosts belong to an existing live tenant. Tenant removal revokes access and permanently ends its name; it does not erase retained data.

@@ -61,3 +61,5 @@ operator runs, no component sends data to a third party, and the Kafka
 clients' telemetry to the broker is disabled. The agent's own calls, such as those to its model provider, go
 where the agent sends them; wherry does not route them. wherry and its
 plugins are open source under the Mozilla Public License 2.0.
+
+Tenants are created explicitly with `wherry operator tenant add`. Pool entitlements and hosts belong to an existing live tenant. Tenant removal revokes access and permanently ends its name; it does not erase retained data.

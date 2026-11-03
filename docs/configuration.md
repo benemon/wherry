@@ -461,7 +461,7 @@ feed and transcript topic. The Kafka cluster must allow a topic
 and [`submit`](commands.md#wherry-host-submit) measures each submission against it. A pool file
 does not set it.
 
-`pool apply`, `pool entitle` and `check` compare five record-batch sizes
+`pool apply`, `tenant pool add` and `check` compare five record-batch sizes
 against the record limits. wherry's tests build and sign each record to pin
 its size. The smallest task a host submits with a maximum envelope and its
 submit wrap, an 89326-byte batch, goes against the tasks topic's limit. Four
@@ -483,7 +483,7 @@ An input file travels base64-encoded inside the signed record, which is itself
 base64url-encoded, so an inline input takes about 16/9 of its size in the
 submission record.
 
-`pool apply` and `pool entitle` check against the broker at the time.
+`pool apply` and `tenant pool add` check against the broker at the time.
 Receivers apply the limits from their view of `wherry.operator`, which they
 read every 15 seconds, so a changed limit takes effect within that
 window.

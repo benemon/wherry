@@ -233,11 +233,11 @@ naming 256 outputs fits.
 | `wherry.pool.<pool>.tasks` | `pool apply` | at least `start_by_limit` plus 30 hours, in milliseconds; default `367200000`; `pool apply` never lowers it |
 | `wherry.pool.<pool>.events` | `pool apply` | at least tasks; `pool apply` raises it to tasks and never lowers it |
 | `wherry.pool.<pool>.custodian` | `pool apply` | `-1`, outside the pool retention bound |
-| `wherry.tenant.<tenant>` | `pool entitle`, `host add` | `2592000000` (30 days) |
-| `wherry.tenant.<tenant>.transcript` | `pool entitle`, `host add` | as the tenant feed, `2592000000` (30 days) |
+| `wherry.tenant.<tenant>` | `tenant add` | `2592000000` (30 days) |
+| `wherry.tenant.<tenant>.transcript` | `tenant add` | as the tenant feed, `2592000000` (30 days) |
 | `wherry.receiver.<receiver>` | `receiver apply` | `-1` |
 | `wherry.receiver.<receiver>.progress` | `receiver apply`, `pool apply` | at least the pool's tasks topic; never lowered |
-| `wherry.host.<tenant>.<host>` | `host add` | `-1` |
+| `wherry.host.<tenant>.<host>` | `tenant host add` | `-1` |
 
 The tasks retention keeps `start_by_limit`, the six-hour maximum run time,
 and a one-day margin. Events and the pool's progress topics stay at least as
@@ -252,10 +252,10 @@ that every recording command sets the configuration above on
 lowering it, timestamp type, `cleanup.policy`, `retention.bytes` and `segment.ms` of the pool's tasks and events topics and
 the configuration of its snapshot topic, and `receiver apply` and `pool apply` set every
 configuration above on the progress topics of the pool's live receivers, never lowering their retention.
-`pool entitle` and `pool apply` set `max.message.bytes` on
+`tenant pool add` and `pool apply` set `max.message.bytes` on
 existing tenant feeds and transcript topics. A
 tenant feed's or transcript topic's retention can be changed with Kafka's
-own tools. `pool apply` and `pool entitle` refuse terms that need more than
+own tools. `pool apply` and `tenant pool add` refuse terms that need more than
 an entitled tenant's feed or transcript topic keeps, and `wherry operator
 check` reports a topic below its bound, a progress topic that keeps less
 than its pool's tasks topic, and a pool topic whose timestamp type is not
@@ -328,3 +328,5 @@ over a newer command's, so the command makes another, up to five. Once a
 command has written a record, it makes these passes on every return, failed
 or not. [Concurrent operator commands](operations.md#concurrent-operator-commands)
 states what this guarantees.
+
+A receiver’s own revocation withdraws every grant and its credential. Tenant and entitlement ends preserve receiver access to retained run resources: feed and transcript writes and public host key reads, derived from current pool membership. Tenant topics are created only by `tenant add`.

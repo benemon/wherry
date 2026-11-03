@@ -503,7 +503,7 @@ rotates with a re-run of `init`.
 ### The operator working directory
 
 The operator's [working directory](configuration.md#operator-working-directory)
-holds `operator.password` and every bundle `host add` and `receiver apply`
+holds `operator.password` and every bundle `tenant host add` and `receiver apply`
 write, so it holds the Kafka password of every principal wherry made. Keep it
 on the operator's machine, readable by the operator alone: `bundles/` is
 mode 0700 and each password and bundle file mode 0600. `init` adds
@@ -524,3 +524,20 @@ place before `host init` connects. The Kafka platform issues
 and renews its CA; whoever distributes a private CA keeps each machine's
 file current, and a renewal needs no new bundle. A machine that trusts the
 system roots trusts every CA they hold for the broker's address.
+
+## Removal and retained data
+
+Tenant and entitlement removal revoke access and do not erase data. Receivers keep Write and Describe on ended entitlements' tenant feed and transcript and Read and Describe on every host key topic of that tenant, including ended hosts. Only the receiver's own revocation removes all its grants. These grants come from current pool membership: a receiver joining later receives them, and a host added later is readable by those receivers. This documented over-grant permits writes to a feed the tenant's hosts ignore for that pool and reads of public keys.
+
+After an entitlement ends, unclaimed tasks and claimed-task redeliveries fail admission without writes. Running jobs finish normally into the tenant feed, but hosts cannot read their pool's runs or cancel them. Pool-event readers drop their terminal statuses; the receiver still settles its claim. A run awaiting a pool key has its open refused and releases its task; its next admission rejects it. If an adopter's job already runs, or a receiver restarts mid-run, the job is left to the plugin's sweep. Receiver restarts reject redelivery rather than adopting the job.
+
+Residue and manual cleanup after revocation:
+
+- Feed and transcript topics `wherry.tenant.<T>` and `wherry.tenant.<T>.transcript` retain data for 30 days; delete the topics with Kafka's Admin API when no retained work needs them.
+- Host public key topics `wherry.host.<T>.<H>` are kept forever; delete them manually after revocation and retained work completes.
+- Tenant statuses remain on shared pool events for pool retention. Wait for retention; deleting the shared topic also deletes other tenants' statuses.
+- S3 objects under the tenant's prefix remain until the bucket lifecycle rule deletes them; delete that prefix manually if needed.
+- Receivers' kept grants above remain until manually deleted with the Admin API; operator convergence restores grants derived from the log. Coordinate cleanup with stopping retained work and removing receivers.
+- Host removal leaves its client quota; delete its user quota with the Admin API. Tenant removal deletes live hosts' quotas before revoking them; previously ended hosts' quotas require manual cleanup.
+
+Only bundle files are erased by tenant removal. Comprehensive erasure and automated topic cleanup are future work.
