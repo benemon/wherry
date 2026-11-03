@@ -2196,3 +2196,18 @@ func readTopic(ctx context.Context, client *kgo.Client, topic string) ([]*kgo.Re
 	defer reader.Close()
 	return reader.ReadFrom(ctx, topic, 0)
 }
+
+func TestPlacementSkipsRemovedEntitlement(t *testing.T) {
+	f := newFixture(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	if err := f.service.TenantPoolRemove(f.ctx, "tenant-a", "pool-a"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := f.host.Submit(f.ctx, SubmitInput{Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
+	if !errors.Is(err, ErrNoMatchingReceiver) {
+		t.Fatalf("submit after pool removal: %v", err)
+	}
+	if n := f.tasksEnd(t, "pool-a"); n != 0 {
+		t.Fatalf("removed pool received %d tasks", n)
+	}
+}
