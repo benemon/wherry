@@ -1871,12 +1871,16 @@ func TestWaitingRunReleasesWhenEntitlementEnds(t *testing.T) {
 	record := f.submit(t, f.host, nil)
 	done := f.executing(t, f.ctx, record, 1)
 	f.request(t, 1)
+	_, _, cachedHosts := f.receiver.snapshot()
 	if err := f.service.TenantPoolRemove(f.ctx, testTenant, testPool); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatal(err)
 	}
+	f.receiver.mu.Lock()
+	f.receiver.hosts = cachedHosts
+	f.receiver.mu.Unlock()
 	f.receiver.serveOpens(f.ctx)
 	if ack := <-done; ack != kgo.AckRelease {
 		t.Fatalf("ack=%v; logs=%s", ack, f.logs.String())

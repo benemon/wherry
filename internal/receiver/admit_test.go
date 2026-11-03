@@ -1646,12 +1646,16 @@ func TestEndedEntitlementRejectsUnclaimedAndRedeliveredTasks(t *testing.T) {
 	if admitted, _ := f.receiver.admit(f.ctx, record); admitted == nil {
 		t.Fatal("initial admission failed")
 	}
+	_, _, cachedHosts := f.receiver.snapshot()
 	if err := f.service.TenantPoolRemove(f.ctx, testTenant, testPool); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatal(err)
 	}
+	f.receiver.mu.Lock()
+	f.receiver.hosts = cachedHosts
+	f.receiver.mu.Unlock()
 	beforeEvents := len(f.records(t, operator.PoolEventsTopic(testPool)))
 	beforeFeed := len(f.records(t, operator.TenantTopic(testTenant)))
 	for _, attempt := range []int{1, 2} {
