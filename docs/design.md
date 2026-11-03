@@ -179,7 +179,7 @@ transactional ID prefix.
 
 | Principal | Resource | Operations |
 | --- | --- | --- |
-| `wherry.operator` | topic `wherry.operator` | Read, Write, Describe |
+| `wherry.operator` | topic `wherry.operator` | Read, Write |
 | host | topic `wherry.operator` | Read, Describe |
 | host | topic `wherry.receivers` | Read, Describe |
 | host | topic `wherry.tenant.<own tenant>` | Read, Describe |

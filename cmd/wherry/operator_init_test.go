@@ -164,7 +164,7 @@ func operatorPassword(t *testing.T, dir string) string {
 // through operator.yaml, and returns the first failure. No receiver runs here to publish a key custodian snapshot, so
 // root writes a record the snapshot's readers skip, which suspend and rotate-key read past to find none; rotate-key
 // runs that far. The removes run only with removes: their revocation waits out the broker's timeouts.
-func operatorCommands(t *testing.T, root *kgo.Client, dir, suffix string, removes bool) error {
+func operatorCommands(t *testing.T, root *kgo.Client, dir, suffix string, check, removes bool) error {
 	t.Helper()
 	pool, tenant, host, receiver := "p"+suffix, "t"+suffix, "h"+suffix, "r"+suffix
 	files := writeTree(t, map[string]string{
@@ -197,8 +197,11 @@ func operatorCommands(t *testing.T, root *kgo.Client, dir, suffix string, remove
 	if err := wherry("pool", "rotate-key", pool); err == nil || !strings.Contains(err.Error(), "name the suspect keys with --suspect-key") {
 		return fmt.Errorf("pool rotate-key = %v; want it to find no key custodian", err)
 	}
-	for _, args := range [][]string{{"pool", "resume", pool}, {"check"}} {
-		if err := wherry(args...); err != nil {
+	if err := wherry("pool", "resume", pool); err != nil {
+		return err
+	}
+	if check {
+		if err := wherry("check"); err != nil {
 			return err
 		}
 	}
@@ -243,7 +246,7 @@ func testOperatorInitDelegates(t *testing.T, b initBroker, removes bool) {
 	if err := b.init(t, dir); err != nil {
 		t.Fatal(err)
 	}
-	if err := operatorCommands(t, b.root, dir, suffix(t), removes); err != nil {
+	if err := operatorCommands(t, b.root, dir, suffix(t), true, removes); err != nil {
 		t.Fatal(err)
 	}
 	var config operatorConfig
@@ -335,7 +338,8 @@ func testOperatorACLs(t *testing.T, broker func(*testing.T) initBroker) {
 				}
 				// ACL deletion reaches each broker in turn.
 				time.Sleep(time.Second)
-				err = operatorCommands(t, b.root, dir, suffix(t), false)
+				// Without check, which requires every grant, a dropped grant fails only a command that needs it.
+				err = operatorCommands(t, b.root, dir, suffix(t), false, false)
 				if err == nil {
 					t.Fatalf("every command succeeded without %s on the %s; init grants it for nothing", dropped, acl.ResourceType)
 				}
