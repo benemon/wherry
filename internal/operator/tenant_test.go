@@ -116,6 +116,7 @@ func TestTenantKeptACLMatrix(t *testing.T) {
 				state.EndedEntitlements["t"] = map[string]bool{"p": true}
 			}
 			if phase == "new receiver" {
+				_ = ACLs(state)
 				state.Receivers["later"] = ReceiverConfig{Receiver: "later", Pool: "p"}
 				state.Hosts[TenantPrincipal("t", "later")] = Host{"t", "later"}
 			}
