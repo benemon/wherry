@@ -772,6 +772,9 @@ func operatorKafka(broker string, ca []byte, user, password string) (*kgo.Client
 }
 
 func operatorCommand(pos []string) string {
+	if len(pos) > 0 && (pos[0] == "init" || pos[0] == "check") {
+		return pos[0]
+	}
 	length := 2
 	if len(pos) >= 2 && pos[0] == "tenant" && (pos[1] == "pool" || pos[1] == "host") {
 		length = 3
