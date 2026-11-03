@@ -1305,6 +1305,7 @@ func TestConfigInputRoots(t *testing.T) {
 func TestConfigCAFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	load := func(config string) string {
 		t.Helper()
@@ -1344,6 +1345,8 @@ func TestConfigWithoutHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("XDG_STATE_HOME", "")
 	if loaded, err := LoadConfig(path); err != nil || loaded.StateDir != dir+"/state" {
 		t.Fatalf("config without HOME: %+v, %v", loaded, err)
 	}
