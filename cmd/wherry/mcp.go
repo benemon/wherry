@@ -42,8 +42,9 @@ const logsLimit, logsMaxLimit = 100, 500
 // logsBytes bounds a transcript page's JSON, within the 25,000-token default of Claude Code's MAX_MCP_OUTPUT_TOKENS.
 const logsBytes = 24 << 10
 
-func runMCP(ctx context.Context, args []string) error {
+func runMCP(ctx context.Context, args []string, stderr io.Writer) error {
 	flags := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	flags.SetOutput(stderr)
 	configFile := flags.String("config-file", "", "host configuration file")
 	if err := flags.Parse(args); err != nil {
 		return err

@@ -18,7 +18,7 @@ describes the principals and [ACLs](design.md#acls) lists the matrix.
 
 ## Signed records
 
-Every record on a shared topic is an EdDSA JWS signed by its owner. A reader
+Every record a host or receiver puts on a shared topic is an EdDSA JWS signed by its owner; `wherry.operator` records and progress records are unsigned ([Architecture](design.md)). A reader
 verifies it against the owner's current key, read from the owner's own key
 topic, and then checks it against `wherry.operator`: a submission must come
 from a live host of a tenant entitled to the pool, and a receiver's record

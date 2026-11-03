@@ -92,7 +92,7 @@ broker's: run `init` again with the Kafka super user.
 
 ### Concurrent operator commands
 
-Operator commands do not lock each other. Each one that changes Kafka ends
+Operator commands do not lock each other. Each one that changes Kafka, except `operator init`, ends
 by converging Kafka on the records of `wherry.operator` as read to its end,
 not on the ones it read when it started
 ([Operator convergence](design.md#operator-convergence)). When
@@ -711,7 +711,7 @@ the receiver host's address on a monitoring network, or put an
 authenticating proxy in front of it:
 
 ```yaml
-metrics_addr: 10.0.8.21:9464
+metrics_addr: 192.0.2.21:9464
 ```
 
 Scrape it as any Prometheus target:
@@ -720,7 +720,7 @@ Scrape it as any Prometheus target:
 scrape_configs:
   - job_name: wherry-receiver
     static_configs:
-      - targets: ["10.0.8.21:9464"]
+      - targets: ["192.0.2.21:9464"]
 ```
 
 The `tenant` label names each entitled tenant whose runs reach the pool.
@@ -1395,11 +1395,10 @@ The [release notes](https://github.com/benemon/wherry/releases) mark a
 release that changes the record formats, the key file formats or the plugin
 protocol, and give its upgrade steps.
 
-wherry's key files are private JWKs. Key files written before the JWK
-format, introduced in v0.1.0-rc.25, fail to load: the host key, a
-receiver's `signing.key` and the pool keys in its `pool-keys/`. On a clean
-break, as a [reset](#reset-a-deployment), move them aside so that the new
-release writes new ones.
+wherry's key files are private JWKs. A host key or a receiver's
+`signing.key` in an older format fails to load. On a clean break, as a
+[reset](#reset-a-deployment), move it aside so that the new release writes
+a new one.
 
 Between releases that keep the record formats, upgrade in place.
 Prerequisites: the new `wherry` binary, and each receiver's local

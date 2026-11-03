@@ -532,8 +532,9 @@ nomad var put nomad/jobs/wherry-receiver \
   config=@config.yaml ca=@/etc/wherry/kafka-ca.pem
 ```
 
-A changed item restarts the receiver's task, which reads the new bundle,
-configuration or CA.
+The example job's templates restart the receiver's task when an item
+changes
+([template `change_mode`](https://developer.hashicorp.com/nomad/docs/job-specification/template#change_mode)).
 
 ### 7. Attach the receiver policy
 
@@ -691,7 +692,7 @@ receiver=nomad-1 pool=build capacity=2 in_flight=0 advertisement_age=4s status=l
 `status=live` holds while it is within 120 seconds. `ready=true` means the
 receiver offers the plugin profile. `inline_limit` is the most inline input
 bytes the Nomad plugin delivers. `credentials` lists the agent's credentials
-from the pool terms, each with its target. One `laptop` has no source for
+from the pool terms, each with its target. A credential `laptop` has no source for
 shows as `claude-oauth-token:env=CLAUDE_CODE_OAUTH_TOKEN(missing)`.
 
 ### 4. Connect a harness

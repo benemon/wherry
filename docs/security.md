@@ -408,7 +408,7 @@ found GITHUB_TOKEN in your environment. Use it for git-token? It will be sent to
 an environment source is read where submits run, including the MCP server your harness starts.
 ```
 
-A source belongs to the credential name, not to one pool: whatever the
+A source belongs to the credential name across pools: whatever the
 variable holds goes to the agents of every pool that names the credential,
 including pools the tenant is entitled to later. A variable set in a shell is
 often set for another purpose, such as the user's own `GITHUB_TOKEN`, with

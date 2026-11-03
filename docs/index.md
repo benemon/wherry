@@ -76,7 +76,7 @@ unmodified, and everything platform-specific stays in a plugin.
 ### Trace every run from request to result
 
 Each run records who submitted it, which receiver ran each attempt, what
-it reported, and which files came back. Every shared record is signed, and every returned file is checked
+it reported, and which files came back. Every record a host or receiver shares is signed, and every returned file is checked
 against its digest before it is written.
 [Run history](governance.md#run-history) shows what is kept and for how
 long.

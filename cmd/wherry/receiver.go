@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -98,6 +99,10 @@ func loadReceiverLocalConfig(path string) (receiverLocalConfig, error) {
 
 func runReceiver(args []string, stdout, stderr io.Writer) error {
 	const usage = "usage: wherry receiver run [--config-file FILE] [--rotate-key]"
+	if len(args) == 1 && slices.Contains([]string{"-h", "-help", "--help"}, args[0]) {
+		fmt.Fprintln(stderr, usage)
+		return flag.ErrHelp
+	}
 	if len(args) == 0 || args[0] != "run" {
 		return errors.New(usage)
 	}

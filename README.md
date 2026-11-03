@@ -133,5 +133,7 @@ goreleaser release --snapshot --clean --skip=sign
 ```
 
 The documentation site embeds the wherry-plugins examples at the commit
-`WHERRY_PLUGINS_REF` names in `.github/workflows/pages.yml`. A wherry-plugins
-release sets it to the commit its tags were cut from.
+`WHERRY_PLUGINS_REF` names in `.github/workflows/pages.yml`. After a
+wherry-plugins release, set `WHERRY_PLUGINS_REF` to the full SHA of the
+commit its tags were cut from (`git rev-list -n 1 nomad/<version>` in
+wherry-plugins) and merge that change to `main`, which republishes the site.

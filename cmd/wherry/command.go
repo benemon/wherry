@@ -64,6 +64,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 	case "dev":
 		return runDev(args[1:], stdout, stderr)
 	case "version":
+		if len(args) == 2 && slices.Contains([]string{"-h", "-help", "--help"}, args[1]) {
+			fmt.Fprintln(stderr, "usage: wherry version")
+			return flag.ErrHelp
+		}
 		if len(args) != 1 {
 			return errors.New("usage: wherry version")
 		}
@@ -142,7 +146,7 @@ func runHost(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "old_key_id=%s new_key_id=%s\n", old, next)
 		return nil
 	case "mcp":
-		return runMCP(context.Background(), args[1:])
+		return runMCP(context.Background(), args[1:], stderr)
 	case "receivers":
 		return runReceivers(context.Background(), nil, args[1:], stdout, stderr)
 	}

@@ -49,8 +49,8 @@ beside the platform, object storage and git remote a run uses.
 
 ![wherry's implementation: a host, the Kafka topics, a receiver with its plugins, a platform job, object storage and a git remote](diagrams/implementation.svg)
 
-`wherry.operator` records and progress records carry no signature: each
-sits on a topic one wherry principal writes, so Kafka authenticates it.
+`wherry.operator` records and progress records carry no signature: no
+other host or receiver can write their topics, so Kafka authenticates them.
 `wherry.operator` itself can write every `wherry.` topic through its
 prefixed grant ([ACLs](#acls)), and its holder is trusted as the operator. Every other record, key
 records included, is a versioned EdDSA
@@ -71,7 +71,7 @@ pool the run was placed in, on behalf of a tenant entitled to it.
 Every topic has one partition and `LogAppendTime` timestamps, and no topic
 is deleted. `wherry.receivers` and the progress topics have
 `cleanup.policy=compact,delete`: their readers need only the latest record
-per key. Only its receiver writes a progress topic. Every receiver can write
+per key. No other host or receiver writes a progress topic. Every receiver can write
 `wherry.receivers`, so a reader keeps each key's latest record that
 verifies as its owner's. A pool's snapshot
 topic has `cleanup.policy=compact`: its readers need only the latest

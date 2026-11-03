@@ -141,6 +141,10 @@ func TestHelpPrintsUsage(t *testing.T) {
 		{[]string{"host", "receivers", "-h"}, "Usage of receivers:\n"},
 		{[]string{"host", "submit", "-h"}, "Usage of submit:\n"},
 		{[]string{"submit", "-h"}, "Usage of submit:\n"},
+		{[]string{"host", "mcp", "-h"}, "Usage of mcp:\n"},
+		{[]string{"version", "-h"}, "usage: wherry version\n"},
+		{[]string{"receiver", "-h"}, "usage: wherry receiver run [--config-file FILE] [--rotate-key]\n"},
+		{[]string{"dev", "-h"}, "usage: wherry dev <init|up|down [--reset]> [--instance NAME]\n"},
 	} {
 		var stdout, stderr bytes.Buffer
 		err := run(test.args, &stdout, &stderr)
