@@ -14,7 +14,7 @@ Every command but `version` and the shortcuts runs under its role's word:
 | Operator | `wherry operator init`; `wherry operator pool apply`, `suspend`, `resume` and `rotate-key`; `wherry operator tenant add`, `list` and `remove`; `wherry operator tenant pool add` and `remove`; `wherry operator tenant host add` and `remove`; `wherry operator receiver apply`, `show` and `remove`; `wherry operator check` |
 | Receiver | `wherry receiver run` |
 | Host user | `wherry host init`, `key rotate`, `receivers`, `mcp`, `submit`, `wait`, `status`, `events`, `logs` and `cancel` |
-| Developer | `wherry dev init`, `up` and `down` |
+| Development | [Development commands](commands-dev.md) |
 | None | `wherry version` |
 
 `wherry submit`, `wait`, `status`, `events`, `logs` and `cancel` are
@@ -28,7 +28,7 @@ Every command but `version` and the shortcuts runs under its role's word:
   shape freezes at 1.0. The CLI's text output may change. `wherry host receivers
   --json` is the one CLI JSON form, and it prints the objects the MCP
   `receivers` tool returns.
-- `wherry operator`, `wherry dev`, `wherry receiver run` and `wherry version` read no client
+- `wherry operator`, `wherry receiver run` and `wherry version` read no client
   configuration. Every `wherry host` command reads it first, and every one except `host mcp`
   then connects to Kafka.
 - Every `wherry host` command takes `--config-file FILE`. Without it, the
@@ -70,8 +70,7 @@ A key ID is the RFC 7638 SHA-256 thumbprint of the public key's JWK,
 unpadded base64url.
 
 wherry's own key files, the host key, `signing.key` and their `.next`
-files, are private JWKs (RFC 7517) with mode 0600. The TLS keys `wherry dev`
-writes for its Kafka broker are PEM, the format the broker reads.
+files, are private JWKs (RFC 7517) with mode 0600.
 
 ### Labels
 

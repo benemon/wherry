@@ -11,26 +11,26 @@ model and [what ships](https://benemon.github.io/wherry/introduction#what-ships)
 
 ## Getting started
 
-The [Quickstart](https://benemon.github.io/wherry/quickstart) installs
+The [Quickstart](https://benemon.github.io/wherry/quickstart-production) installs
 `wherry`, runs a whole deployment on one machine with `wherry dev`, then
 provisions one pool with one receiver across machines and runs a first task.
 
 ## Configuration
 
-[Configuration](https://benemon.github.io/wherry/configuration) lists the
+[Configuration](https://benemon.github.io/wherry/configuration-host) lists the
 client configuration, the receiver's local configuration, bundle, pool
 terms, receiver configuration and environment variables.
 
 ## Operations
 
-[Operations](https://benemon.github.io/wherry/operations) covers preparing
+[Operations](https://benemon.github.io/wherry/operations-operator) covers preparing
 Kafka, adding tenants, hosts and receivers, revocation, key rotation, the
 pool's key custodian, the response to a compromised receiver or pool key,
 and upgrades.
 
 ## Harness integration
 
-[Harness integration](https://benemon.github.io/wherry/operations#harness-integration)
+[Harness integration](https://benemon.github.io/wherry/operations-operator#harness-integration)
 installs the [`plugins/wherry`](plugins/wherry) MCP server and Agent Skill,
 and [MCP tools](https://benemon.github.io/wherry/mcp) lists the tools.
 
