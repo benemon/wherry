@@ -27,12 +27,17 @@ func TestTenantRemoveRetriesRevocationSteps(t *testing.T) {
 			probe := func(string) func(context.Context, string, string) error { return denied }
 			switch step {
 			case 1, 4:
+				var refused bool
 				cluster.ControlKey(kmsg.AlterUserSCRAMCredentials.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
 					req := request.(*kmsg.AlterUserSCRAMCredentialsRequest)
+					if refused {
+						return nil, nil, false
+					}
 					if step == 4 && len(req.Deletions) == 0 {
 						cluster.KeepControl()
 						return nil, nil, false
 					}
+					refused = true
 					response := req.ResponseKind().(*kmsg.AlterUserSCRAMCredentialsResponse)
 					response.Results = []kmsg.AlterUserSCRAMCredentialsResponseResult{{User: TenantPrincipal("t", "h"), ErrorCode: kerr.InvalidRequest.Code}}
 					return response, nil, true
