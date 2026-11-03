@@ -9,7 +9,13 @@ and [Metrics](commands.md#metrics) lists every family.
 Each section says what the alert means, how to confirm it, and what to do.
 The receiver logs to standard output, one line per event, each prefixed
 `receiver: ` and a UTC timestamp; on Nomad, `nomad alloc logs` shows them,
-and under systemd, `journalctl -u` with the receiver's unit. The confirming
+on Kubernetes, `kubectl logs` with the receiver's pod, and under systemd,
+`journalctl -u` with the receiver's unit. Each plugin's run section says
+where its receiver runs:
+[Nomad](https://github.com/benemon/wherry-plugins/tree/main/nomad#run-the-receiver-in-nomad),
+[Kubernetes](https://github.com/benemon/wherry-plugins/tree/main/kubernetes#run-the-receiver-in-the-cluster)
+and
+[systemd](https://github.com/benemon/wherry-plugins/tree/main/systemd#run-the-receiver-as-a-systemd-service). The confirming
 commands run on a host of a tenant entitled to the pool, with its
 [client configuration](configuration.md#client-configuration), except
 `wherry operator` commands, which run in the
@@ -72,8 +78,9 @@ Then:
   ACL the state calls for exists.
 - For `plugin <type> exited`, fix the cause the plugin's lines give, such as
   an unreachable platform API or memory pressure on the receiver host. For
-  a protocol version mismatch, install the plugin release that matches the
-  receiver's, as in [Upgrade wherry](operations.md#upgrade-wherry). The
+  a protocol version mismatch, record the pin of the plugin release that
+  speaks the receiver's protocol and install it, as in
+  [Install plugins](operations.md#install-plugins). The
   runs the receiver held are adopted once their tasks are delivered again.
 - A receiver whose membership has ended stays ended. Provision a new
   receiver under a new name and stop the old process.

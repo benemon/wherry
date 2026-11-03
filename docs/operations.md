@@ -25,8 +25,10 @@ principals and group configurations; the cluster itself is prepared once.
   the Kafka super user, which `wherry operator init` uses once. See
   [Authorization and ACLs](https://kafka.apache.org/documentation/#security_authz).
 - **`auto.create.topics.enable=false`**, so a mistyped topic name fails.
-- **`connections.max.reauth.ms`** is set on the listener. Revocation
-  waits at least that long and fails while it is unbounded.
+- **`connections.max.reauth.ms`** is set broker-wide on every broker.
+  Revocation reads that key from each broker, waits at least the longest
+  value, and fails while it is unbounded. A listener-prefixed override does
+  not count.
 - **`transaction.max.timeout.ms`** is short enough to wait out:
   revocation waits at least the longest of it,
   `connections.max.reauth.ms` and
@@ -41,16 +43,24 @@ On a [Strimzi](https://strimzi.io/documentation/) cluster, declare the
 super user as a `KafkaUser` resource. `wherry operator` creates
 `wherry.operator` and the host and receiver principals through the Kafka
 Admin API, which Strimzi's User Operator removes unless it ignores them. Set
-the User Operator's `STRIMZI_IGNORED_USERS_PATTERN` environment variable,
-described in the [Strimzi documentation](https://strimzi.io/documentation/),
-to:
+the User Operator's `STRIMZI_IGNORED_USERS_PATTERN` environment variable, as
+[Ignoring specific users](https://strimzi.io/docs/operators/latest/deploying.html#con-ignoring-some-users-in-user-operator-str)
+describes, to:
 
 ```
 ^wherry\.(operator|tnt\..+|rcv\..+)$
 ```
 
-Strimzi issues and renews the cluster CA; hosts and receivers name its
-certificate as their `ca_file`, and a renewal needs no wherry step.
+The pattern matches `wherry.operator`, every host principal
+`wherry.tnt.<tenant>.<host>` and every receiver principal
+`wherry.rcv.<receiver>`.
+
+Strimzi issues and renews the cluster CA. The operator, hosts and receivers
+name its certificate as their `ca_file`. When Strimzi replaces the CA
+certificate, put the new one in every `ca_file` that names it:
+`operator.yaml`'s, each host's and each receiver's.
+[Certificate renewal](https://strimzi.io/docs/operators/latest/deploying.html#con-certificate-renewal-str)
+gives Strimzi's timing.
 
 ## Set up `wherry operator`
 
@@ -190,8 +200,9 @@ as one file and as a directory.
 Prerequisites: the working directory and the pool's new terms in
 `pools/<pool>.yaml`.
 
-1. Find the receivers the new terms would strand: a live receiver in the
-   pool with a plugin profile whose agent the new terms drop.
+1. Find the receivers the new terms would strand: a receiver in the pool
+   whose membership has not ended, live or not, with a plugin profile whose
+   agent the new terms drop.
    `wherry operator receiver show RECEIVER` prints each profile's `agent`.
 
 2. Reconfigure each of those receivers without the profile, as in
@@ -208,8 +219,8 @@ Prerequisites: the working directory and the pool's new terms in
    wherry operator pool apply build
    ```
 
-   `pool apply` checks every live receiver in the pool against the new
-   terms first, and refuses terms that would strand one, naming each
+   `pool apply` checks every receiver in the pool whose membership has not
+   ended against the new terms first, and refuses terms that would strand one, naming each
    receiver, plugin and profile:
 
    ```
@@ -289,8 +300,10 @@ a result record is 1259677 bytes, over the 1048588-byte record limit
 `wherry submit` measures each signed submission against the recorded
 record limit. Input files grow by about 16/9 on the wire, since they are
 base64-encoded inside a record that is itself base64url-encoded. A host
-batches at most 1000012 bytes, which is the tasks topic's limit with brokers
-and the topic at their defaults. Raising `message.max.bytes` or the tasks
+batches at most 1000012 bytes, franz-go's default batch maximum, which is
+below the brokers' default `message.max.bytes` of 1048588, so the host's
+batch is the tasks topic's limit with brokers and the topic at their
+defaults. Raising `message.max.bytes` or the tasks
 topic's `max.message.bytes` leaves the limit there, and lowering either
 lowers it. Run `pool apply` after changing either, so the terms record the
 new limit. An output chunk holds
@@ -327,8 +340,11 @@ Prerequisites: the working directory
 3. Hand the bundle, `bundles/hosts/acme/laptop.bundle`, to the host's user over
    a channel you trust. It holds the host's Kafka password. When the
    broker's certificate chains to a private CA, the host also needs that
-   CA's certificate, at `~/.config/wherry/ca.pem` or a path `wherry host init`
-   asks for; the bundle does not carry it.
+   CA's certificate, as `ca.pem` in its
+   [configuration directory](configuration.md#client-configuration), by
+   default `~/.config/wherry/ca.pem`, or at a path `wherry host init` asks
+   for. `host init` asks only on a terminal, so without one put the
+   certificate in place first; the bundle does not carry it.
 
 The host's user then runs `wherry host init <bundle>`, which places the
 bundle, registers the host key and writes the
@@ -554,7 +570,8 @@ through `receiver apply`, which drains with no window.
 To apply a change at once, restart the receiver through its platform, as
 with `kubectl rollout restart`, `nomad alloc restart` or
 `systemctl restart`. It stops within its
-[`drain_timeout`](configuration.md#drain-timeout-and-the-stop-window), and
+[`drain_timeout`](configuration.md#drain-timeout-and-the-stop-window) plus
+5 seconds, and
 its held runs are released to other receivers, whose next delivery of each
 task adopts its job. When the new configuration renames a run's profile or
 changes its agent, the adopting receiver stops and purges the run's job and
@@ -649,10 +666,11 @@ awk -v name="wherry-plugin-${plugin}_${version}_${os}_${arch}" '$2 == name {prin
 ```
 
 Set it as the type's entry in the receiver configuration's `plugin_sha256`,
-which holds one for each plugin type the configuration names, and apply it:
+which holds one for each plugin type the configuration names, and apply it,
+here the configuration directory of [Add a receiver](#add-a-receiver):
 
 ```sh
-wherry operator receiver apply nomad-1
+wherry operator receiver apply nomad-1 -f nomad-1
 ```
 
 The receiver drains and restarts as in
@@ -664,10 +682,17 @@ fails with
 `profile <name>: plugin type <type>: <path> has SHA-256 <hex> and the pin is <hex>`,
 and a type with no binary with `profile <name>: no plugin for type <type>`.
 
-An upgrade or rollback takes the same steps with the other version: verify
-its `checksums.txt`, install the binary, then record its pin with
-`receiver apply`. The receiver runs the new binary from its next start on
-the new record.
+An upgrade or rollback takes the same steps with the other version, in this
+order:
+
+1. Verify the new version's `checksums.txt` and record its pin with
+   `wherry operator receiver apply`.
+2. Roll the receiver's binary, or its image, to the new version at once.
+
+The receiver reads the new record, drains and exits, and from its next start
+runs only a binary with the new pin. A restart between the two steps
+refuses the old binary with the SHA-256 error above, and the receiver
+restarts until the new binary is in place.
 
 To check the install, start the receiver and find one line per plugin,
 logged when the receiver starts it:
@@ -1027,8 +1052,10 @@ snapshot topic's configuration and single partition, and confirms that every
 ACL the state calls for exists. It does not
 check a plugin profile's plugin or `config` section; at start the receiver
 finds the type's plugin, the plugin checks each profile's section, and the
-receiver exits with `profile <name>: ...` on an error. Run it after changing a pool's terms, since
-receivers keep the configuration they started with.
+receiver exits with `profile <name>: ...` on an error. Run it after changing
+a pool's terms or a broker or topic limit: receivers apply both within 15
+seconds, and `check` reports a receiver configuration or a record they no
+longer fit.
 
 ## Reset a deployment
 
@@ -1156,8 +1183,10 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
    ```
 
 5. Let the parties reach the endpoint and trust its certificate: hosts,
-   which upload, download and delete (they trust the system roots, or only
-   the CA file in `SSL_CERT_FILE` when it is set); receiver hosts, which upload outputs with
+   which upload, download and delete, trusting the system roots and the
+   certificates in `SSL_CERT_FILE` when it is set
+   ([Environment variables](configuration.md#environment-variables));
+   receiver hosts, which upload outputs with
    their system roots; and every platform node that fetches inputs, for the
    Nomad plugin each Nomad client, whose artifact fetcher uses the system
    roots. Agent jobs do not reach the endpoint themselves; see
@@ -1405,13 +1434,17 @@ Between later releases that keep the record formats, upgrade in place.
 Prerequisites: the new `wherry` binary, and each receiver's local
 configuration, bundle and state directory.
 
-1. Replace the binary on every host and receiver host with the new
-   release's, verified as in [Install wherry](quickstart.md#install-wherry).
-2. Replace the plugins in each receiver's plugin directory together with the
-   receiver binary, verified as in [Install plugins](#install-plugins); a receiver refuses a plugin of another
-   [plugin protocol version](commands.md#plugins).
-3. Restart each receiver with the same local configuration, bundle and
-   state directory. On
+1. Replace the binary on every host with the new release's, verified as in
+   [Install wherry](quickstart.md#install-wherry).
+2. For each receiver whose plugins change, verify the new plugin release and
+   record its pin with `wherry operator receiver apply`, as in
+   [Install plugins](#install-plugins). A receiver refuses a plugin of
+   another [plugin protocol version](commands.md#plugins), so a release that
+   changes the protocol takes plugins built for it.
+3. Roll each receiver's binary and plugins, or its image, to the new
+   versions at once, and restart it with the same local configuration,
+   bundle and state directory. A restart between steps 2 and 3 refuses the
+   old plugin binary. On
    `SIGINT` or `SIGTERM` it stops claiming, closes its idle claims and lets
    the runs it holds go on for up to `drain_timeout`. It then exits without
    stopping the jobs still running and releases their tasks to the pool.
@@ -1428,7 +1461,8 @@ configuration, bundle and state directory.
 ## Harness integration
 
 `wherry host mcp` serves the host operations as MCP tools over stdio. It reads
-the client configuration and connects to Kafka as one host when it starts.
+the client configuration when it starts, and connects to Kafka as one host at
+its first tool call.
 Every tool call reuses that host and its one tenant-feed follower, and
 `wait`, `events` and `logs` also read the tenant's transcript topic. While
 the connection fails, the server retries it on each tool call.
@@ -1453,8 +1487,9 @@ harness user.
    receivers the tenant may use.
 
 The packaged `plugins/wherry/mcp.json` starts `wherry host mcp` with the default
-configuration path. For a configuration elsewhere, keep it at the default path
-or link the default path to it, or register a server of your own that runs
+configuration path, or the path `WHERRY_CONFIG` names in the harness's
+environment. For a configuration elsewhere, set `WHERRY_CONFIG` there, keep
+it at the default path or link the default path to it, or register a server of your own that runs
 `wherry host mcp --config-file PATH` and disable the packaged one, for example with
 [`claude mcp add wherry -- wherry host mcp --config-file PATH`](https://docs.anthropic.com/en/docs/claude-code/mcp)
 in Claude Code. A plugin update replaces the packaged `mcp.json`, so edits to it
