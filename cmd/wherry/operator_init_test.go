@@ -22,6 +22,7 @@ import (
 
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -32,6 +33,7 @@ import (
 type initBroker struct {
 	address, caFile, superUser, superPasswordFile string
 	root                                          *kgo.Client
+	fake                                          *kfake.Cluster // nil on a real broker
 	// login makes the broker take the password operator.password in dir holds.
 	login func(t *testing.T, dir string)
 }
@@ -89,7 +91,7 @@ func kfakeInitBroker(t *testing.T) (initBroker, *scramRecorder) {
 	cluster, ca := tlsBroker(t, kfake.Superuser("SCRAM-SHA-512", "kafka-root", "root-secret-value"))
 	recorder := recordSCRAM(cluster)
 	dir := t.TempDir()
-	b := initBroker{address: cluster.ListenAddrs()[0], caFile: filepath.Join(dir, "broker-ca.pem"), superUser: "kafka-root", superPasswordFile: filepath.Join(dir, "root-password-file")}
+	b := initBroker{address: cluster.ListenAddrs()[0], caFile: filepath.Join(dir, "broker-ca.pem"), superUser: "kafka-root", superPasswordFile: filepath.Join(dir, "root-password-file"), fake: cluster}
 	for path, contents := range map[string]string{b.caFile: ca, b.superPasswordFile: "root-secret-value\n"} {
 		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 			t.Fatal(err)
@@ -377,6 +379,135 @@ func TestOperatorInitRotatesThePassword(t *testing.T) {
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 3 {
 		t.Fatalf("working directory holds %v, %v; want operator.yaml, operator.password and .gitignore alone", entries, err)
 	}
+}
+
+// init recovers from a failure to grant, to set the password or to rename the password file: the failed run leaves
+// operator.password holding the password the broker holds, or, when only the rename failed, the broker holding the new
+// one, and a re-run gives both a new password. No run prints the super user's password or wherry.operator's.
+func TestOperatorInitRecoversFromAFailure(t *testing.T) {
+	noTerminal(t)
+	b, recorder := kfakeInitBroker(t)
+	dir := t.TempDir()
+	passwordFile := filepath.Join(dir, "operator.password")
+	secrets := []string{"root-secret-value"}
+	run := func() error {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		err := runOperator([]string{"init", "--dir", dir, "--broker", b.address, "--ca-file", b.caFile, "--super-user", b.superUser, "--super-user-password-file", b.superPasswordFile}, &stdout, &stderr)
+		if err == nil {
+			b.login(t, dir)
+			secrets = append(secrets, operatorPassword(t, dir))
+		} else {
+			fmt.Fprintln(&stderr, err)
+		}
+		for _, secret := range secrets {
+			if strings.Contains(stdout.String()+stderr.String(), secret) {
+				t.Fatalf("init printed a password: stdout %q, stderr %q", stdout.String(), stderr.String())
+			}
+		}
+		return err
+	}
+	ca, err := os.ReadFile(b.caFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// takes reports whether the broker takes password for wherry.operator, as b.login last stored it.
+	takes := func(password string) bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return connectTLS(t, b.address, string(ca), operator.OperatorPrincipal, password).Ping(ctx) == nil
+	}
+	// pending is the password init has written to its temporary file and not yet renamed into place.
+	pending := func() string {
+		matches, err := filepath.Glob(filepath.Join(dir, ".operator.password.*"))
+		if err != nil || len(matches) != 1 {
+			t.Errorf("temporary password files %v, %v; want one", matches, err)
+			return ""
+		}
+		password, err := os.ReadFile(matches[0])
+		if err != nil {
+			t.Error(err)
+		}
+		secrets = append(secrets, strings.TrimSpace(string(password)))
+		return strings.TrimSpace(string(password))
+	}
+	recovered := func(failure string) {
+		t.Helper()
+		if matches, _ := filepath.Glob(filepath.Join(dir, ".operator.password.*")); len(matches) != 0 {
+			t.Fatalf("after a failed %s, init left %v", failure, matches)
+		}
+		if err := run(); err != nil {
+			t.Fatalf("init after a failed %s: %v", failure, err)
+		}
+		if !recorder.holds(t, operator.OperatorPrincipal, operatorPassword(t, dir)) {
+			t.Fatalf("after init recovered from a failed %s, the broker does not hold operator.password's password", failure)
+		}
+	}
+	if err := run(); err != nil {
+		t.Fatal(err)
+	}
+	for request, failure := range map[kmsg.Request]string{&kmsg.CreateACLsRequest{}: "grant", &kmsg.AlterUserSCRAMCredentialsRequest{}: "password change"} {
+		old := operatorPassword(t, dir)
+		b.fake.ControlKey(request.Key(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+			pending()
+			switch request := request.(type) {
+			case *kmsg.CreateACLsRequest:
+				response := request.ResponseKind().(*kmsg.CreateACLsResponse)
+				for range request.Creations {
+					result := kmsg.NewCreateACLsResponseResult()
+					result.ErrorCode = kerr.ClusterAuthorizationFailed.Code
+					response.Results = append(response.Results, result)
+				}
+				return response, nil, true
+			case *kmsg.AlterUserSCRAMCredentialsRequest:
+				response := request.ResponseKind().(*kmsg.AlterUserSCRAMCredentialsResponse)
+				for _, upsert := range request.Upsertions {
+					result := kmsg.NewAlterUserSCRAMCredentialsResponseResult()
+					result.User, result.ErrorCode = upsert.Name, kerr.ClusterAuthorizationFailed.Code
+					response.Results = append(response.Results, result)
+				}
+				return response, nil, true
+			}
+			return nil, nil, false
+		})
+		if err := run(); err == nil {
+			t.Fatalf("init with a failed %s succeeded", failure)
+		}
+		if operatorPassword(t, dir) != old || !takes(old) {
+			t.Fatalf("after a failed %s, operator.password or the broker no longer holds the old password", failure)
+		}
+		recovered(failure)
+	}
+	// The rename fails once the broker holds the new password: operator.password is then a directory.
+	aside := filepath.Join(t.TempDir(), "operator.password")
+	var renamed string
+	// kfake keeps a control function that handles nothing, so this one acts once.
+	b.fake.ControlKey(int16(kmsg.AlterUserSCRAMCredentials), func(kmsg.Request) (kmsg.Response, error, bool) {
+		if renamed != "" {
+			return nil, nil, false
+		}
+		renamed = pending()
+		if err := os.Rename(passwordFile, aside); err != nil {
+			t.Error(err)
+		}
+		if err := os.MkdirAll(filepath.Join(passwordFile, "occupied"), 0o700); err != nil {
+			t.Error(err)
+		}
+		return nil, nil, false
+	})
+	if err := run(); err == nil {
+		t.Fatal("init with a failed rename succeeded")
+	}
+	if renamed == "" || !recorder.holds(t, operator.OperatorPrincipal, renamed) {
+		t.Fatal("init renamed its password file before the broker held the new password")
+	}
+	if err := os.RemoveAll(passwordFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(aside, passwordFile); err != nil {
+		t.Fatal(err)
+	}
+	recovered("rename")
 }
 
 // Without a terminal, init given no flags refuses naming the flags it needs, and writes nothing; on a terminal it asks
