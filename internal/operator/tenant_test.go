@@ -89,7 +89,7 @@ func TestTenantEndShapes(t *testing.T) {
 			t.Fatal(subject(got))
 		}
 	}
-	for _, record := range []Record{{Kind: "revoking", Tenant: "t"}, {Kind: "revoking", Tenant: "t", Pool: "p"}, {Kind: "end", Tenant: "t", Host: "h", Pool: "p"}, {Kind: "end", Receiver: "r", Tenant: "t"}} {
+	for _, record := range []Record{{Kind: "revoking", Tenant: "t"}, {Kind: "revoking", Tenant: "t", Pool: "p"}, {Kind: "revoking", Receiver: "r", Tenant: "t"}, {Kind: "end", Tenant: "t", Host: "h", Pool: "p"}, {Kind: "end", Receiver: "r", Tenant: "t"}} {
 		if _, err := EncodeRecord(record); err == nil {
 			t.Fatalf("accepted %+v", record)
 		}

@@ -740,7 +740,8 @@ func validateRecord(record Record) error {
 			}
 		}
 	case "revoking":
-		if (record.Receiver == "") == (record.Host == "" || record.Tenant == "") || validateNames(record.Receiver+record.Tenant, record.Host+record.Receiver) != nil ||
+		if record.Receiver != "" && (record.Tenant != "" || record.Host != "" || validateNames(record.Receiver) != nil) ||
+			record.Receiver == "" && validateNames(record.Tenant, record.Host) != nil ||
 			record.Pool != "" || record.Terms != nil || record.Config != nil {
 			return errors.New("invalid revoking record")
 		}
