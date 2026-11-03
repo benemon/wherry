@@ -683,7 +683,7 @@ func tenantEndReceiver(t *testing.T, ctx context.Context, b brokerPool) *Receive
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := testConfig(b.receiver + "-auth")
+	config := testConfig("auth-" + strings.TrimPrefix(b.receiver, "receiver-"))
 	config.Pool = b.pool
 	path := filepath.Join(t.TempDir(), "receiver.bundle")
 	if err := b.service.ReceiverAdd(ctx, config, os.Getenv("WHERRY_TRUST_BROKER"), path); err != nil {
