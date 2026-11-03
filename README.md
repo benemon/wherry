@@ -131,3 +131,7 @@ unpublished, writes the archives into `dist` locally:
 ```sh
 goreleaser release --snapshot --clean --skip=sign
 ```
+
+The documentation site embeds the wherry-plugins examples at the commit
+`WHERRY_PLUGINS_REF` names in `.github/workflows/pages.yml`. A wherry-plugins
+release sets it to the commit its tags were cut from.

@@ -7,14 +7,20 @@ on:
       - 'docs/**'
       - 'docs-site/**'
       - 'brand/**'
+      - '.github/workflows/pages.yml'
   pull_request:
     paths:
       - 'docs/**'
       - 'docs-site/**'
       - 'brand/**'
+      - '.github/workflows/pages.yml'
 
 permissions:
   contents: read
+
+env:
+  # The wherry-plugins commit whose examples the Plugins page embeds; a plugin release moves it to the commit it was cut from.
+  WHERRY_PLUGINS_REF: 106f4b1b2c7f62b68a7b73ac135085af7e20f90d
 
 concurrency:
   group: pages-${{ github.event_name }}-${{ github.ref }}
@@ -31,7 +37,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: benemon/wherry-plugins
-          ref: main
+          ref: ${{ env.WHERRY_PLUGINS_REF }}
           path: wherry-plugins
           persist-credentials: false
       - name: Set up Node.js
