@@ -8,7 +8,6 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
@@ -1030,10 +1029,8 @@ func writeHost(env *devEnv, sources map[string]credential.Source, dir string, re
 		path string
 		data []byte
 	}{{configPath, config}, {host.Bundle, bundle}, {host.HostKey, jwk}} {
-		sum := sha256.Sum256(file.data)
-		entry := devHostFile{SHA256: hex.EncodeToString(sum[:])}
 		if record {
-			recorded.Files[file.path] = entry
+			recorded.Files[file.path] = devHostFile{}
 			if err := save(); err != nil {
 				return busclient.Config{}, "", err
 			}
@@ -1048,8 +1045,7 @@ func writeHost(env *devEnv, sources map[string]credential.Source, dir string, re
 		}
 		if record {
 			devHostStep(file.path)
-			entry.Device, entry.Inode = id.Device, id.Inode
-			recorded.Files[file.path] = entry
+			recorded.Files[file.path] = id
 			if err := save(); err != nil {
 				return busclient.Config{}, "", err
 			}
@@ -1083,10 +1079,10 @@ func createFile(path string, data []byte) (devHostFile, error) {
 	return fileID(info), file.Close()
 }
 
-// fileID is the device and inode info names.
+// fileID is the device and inode info names, with its size and modification time.
 func fileID(info os.FileInfo) devHostFile {
 	stat := info.Sys().(*syscall.Stat_t)
-	return devHostFile{Device: uint64(stat.Dev), Inode: stat.Ino}
+	return devHostFile{Device: uint64(stat.Dev), Inode: stat.Ino, Size: info.Size(), ModTime: info.ModTime().UnixNano()}
 }
 
 // removeHostFiles removes what the instance's manifest records up creating at the standard host paths, then clears the
@@ -1134,13 +1130,14 @@ func notCreated(path string, entry devHostFile) error {
 	if !info.Mode().IsRegular() {
 		return errors.New("it is not what wherry dev up created")
 	}
-	if entry.Inode == 0 || entry.SHA256 == "" {
+	if entry.Inode == 0 {
 		return errors.New("wherry dev up did not record creating it")
 	}
-	if fileID(info) != (devHostFile{Device: entry.Device, Inode: entry.Inode}) {
+	id := fileID(info)
+	if id.Device != entry.Device || id.Inode != entry.Inode {
 		return errors.New("it was replaced after wherry dev up created it")
 	}
-	if sum, err := fileSHA256(path); err != nil || sum != entry.SHA256 {
+	if id != entry {
 		return errors.New("it changed after wherry dev up created it")
 	}
 	return nil

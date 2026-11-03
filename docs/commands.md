@@ -1548,8 +1548,9 @@ returns once a run of the mock agent completes. Its steps:
    the config names `env/host/state` as `state_dir`, so dev writes no state
    at the standard state path. `up` creates each file exclusively, so it
    never replaces anything there. `cache/manifest.json` records each path,
-   its directory resolved through symlinks, with the file's SHA-256 before
-   `up` creates it, and its device and inode after.
+   its directory resolved through symlinks, before `up` creates it, and the
+   file's device, inode, size and modification time after; no digest of a
+   file holding a credential is kept.
    If the config, bundle or key is already there, or appears while
    `up` creates them, `up` removes what it created there and, as for every
    other instance and with `WHERRY_CONFIG` set, writes them in
@@ -1602,7 +1603,7 @@ Its steps, each run after a failed one:
 5. `data` removes `env/`.
 6. `host` removes each file the manifest records `up` creating at the
    standard host paths while it is still that file: a regular file, not a
-   symlink, with the recorded device, inode and SHA-256, in a directory
+   symlink, with the recorded device, inode, size and modification time, in a directory
    that still resolves to the recorded one. So a stale default never
    shadows a real host's, and a real host's file stays. Anything else, a
    missing file or one whose device and inode a crash kept `up` from

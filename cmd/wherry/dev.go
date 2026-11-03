@@ -58,11 +58,13 @@ type devHostFiles struct {
 	Files map[string]devHostFile `json:"files"`
 }
 
-// devHostFile is a file's SHA-256 as up created it, and the device and inode it created it as.
+// devHostFile is the device and inode up created a file as, and its size and modification time then. The file holds a
+// credential, so no digest of its content is kept.
 type devHostFile struct {
-	SHA256 string `json:"sha256,omitzero"`
-	Device uint64 `json:"device,omitzero"`
-	Inode  uint64 `json:"inode,omitzero"`
+	Device  uint64 `json:"device,omitzero"`
+	Inode   uint64 `json:"inode,omitzero"`
+	Size    int64  `json:"size,omitzero"`
+	ModTime int64  `json:"mod_time,omitzero"`
 }
 
 type devArtefact struct {

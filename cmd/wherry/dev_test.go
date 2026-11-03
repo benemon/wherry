@@ -47,7 +47,7 @@ const manifestFixture = `{
   "default_agent": "claude",
   "storage": {"reference": "quay.io/benjamin_holmes/ceph-aio:v21", "digest": "sha256:11", "id": "sha256:22", "tag": "wherry-dev/ceph-aio:22"},
   "env_denylist": ["CODEX_API_KEY"],
-  "host_files": {"files": {"/home/u/.config/wherry/config.yaml": {"sha256": "33", "device": 44, "inode": 55}}}
+  "host_files": {"files": {"/home/u/.config/wherry/config.yaml": {"device": 44, "inode": 55, "size": 66, "mod_time": 77}}}
 }`
 
 // devFixture points HOME, the XDG directories and so the dev root and the standard host paths at temporary
