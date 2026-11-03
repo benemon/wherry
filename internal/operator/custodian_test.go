@@ -67,7 +67,7 @@ func TestSnapshotTopicIsCompactedSinglePartitionAndKeptForever(t *testing.T) {
 }
 
 // The pool's receivers read and write its snapshot topic and read through the custodian group; hosts of tenants
-// entitled to the pool read it; no one else holds either.
+// entitled to the pool read it; no one else but wherry.operator holds either.
 func TestSnapshotTopicACLs(t *testing.T) {
 	terms := modelTerms()
 	records := []Record{
@@ -84,8 +84,8 @@ func TestSnapshotTopicACLs(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := map[string][]string{}
-	for _, acl := range ACLs(state) {
-		if acl.Resource == CustodianTopic("pool-a") || acl.Resource == CustodianGroup("pool-a") {
+	for _, acl := range append(ACLs(state), OperatorACLs...) {
+		if acl.Resource == CustodianTopic("pool-a") || acl.Resource == CustodianGroup("pool-a") || acl.Prefix && (strings.HasPrefix(CustodianTopic("pool-a"), acl.Resource) || strings.HasPrefix(CustodianGroup("pool-a"), acl.Resource)) {
 			got[acl.ResourceType+" "+acl.Principal] = acl.Operations
 		}
 	}
@@ -93,6 +93,8 @@ func TestSnapshotTopicACLs(t *testing.T) {
 		"topic " + ReceiverPrincipal("receiver-a"):       {"READ", "WRITE", "DESCRIBE"},
 		"group " + ReceiverPrincipal("receiver-a"):       {"READ", "DESCRIBE"},
 		"topic " + TenantPrincipal("tenant-a", "host-a"): {"READ", "DESCRIBE"},
+		"topic " + OperatorPrincipal:                     {"CREATE", "ALTER_CONFIGS", "READ", "WRITE"},
+		"group " + OperatorPrincipal:                     {"ALTER_CONFIGS"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("pool-a snapshot ACLs %v, want %v", got, want)
