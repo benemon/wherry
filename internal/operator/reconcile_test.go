@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// operator check fails without any grant operator init gives wherry.operator, but for those Kafka implies by another.
+// operator check fails without any grant operator init gives wherry.operator.
 func TestCheckRequiresTheOperatorsGrants(t *testing.T) {
 	for _, acl := range OperatorACLs {
 		for _, operation := range acl.Operations {
@@ -27,12 +27,6 @@ func TestCheckRequiresTheOperatorsGrants(t *testing.T) {
 					t.Fatal(err)
 				}
 				err = service.Check(ctx)
-				if operation == "DESCRIBE" || operation == "DESCRIBE_CONFIGS" {
-					if err != nil {
-						t.Fatalf("check without %s, which Kafka implies by another grant: %v", operation, err)
-					}
-					return
-				}
 				if want := " ACL on " + acl.Resource + " for " + OperatorPrincipal; err == nil || !strings.HasPrefix(err.Error(), "missing ") || !strings.HasSuffix(err.Error(), want) {
 					t.Fatalf("check without %s on the %s = %v; want it missing", operation, acl.ResourceType, err)
 				}

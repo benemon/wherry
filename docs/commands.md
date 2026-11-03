@@ -540,8 +540,7 @@ and `retention.bytes=-1`, checks that each
 live receiver's progress topic keeps records at least as long as its pool's
 tasks topic, and checks that every ACL the
 state calls for is present, with `wherry.operator`'s own
-[grants](security.md#the-operator-principal) but the four Kafka implies by
-the others. It does not report ACLs beyond those, and does not check a
+[grants](security.md#the-operator-principal). It does not report ACLs beyond those, and does not check a
 plugin profile's plugin or `config` section.
 
 ## Receiver command
