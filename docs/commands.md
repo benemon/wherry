@@ -1570,8 +1570,28 @@ Lists live tenants with their pools and live hosts, in deterministic name order,
 
 ### `wherry operator tenant pool remove TENANT POOL`
 
-Ends the entitlement immediately and converges access grants. Recomputes each live host's minimum quotas across its remaining pools, deleting quotas when none remain. An absent or ended entitlement converges and applies quotas again, reports `not entitled`, and exits zero. Both pool commands refuse absent tenants (use `tenant add`) and ended tenants.
+Ends the entitlement immediately and converges access grants. Recomputes each live host's minimum
+quotas across its remaining pools, deleting quotas when none remain. An absent or ended entitlement
+converges and applies quotas again, reports `not entitled`, and exits zero. Both pool commands
+refuse absent tenants (use `tenant add`) and ended tenants.
 
 ### `wherry operator tenant remove TENANT`
 
-Ends every entitlement, deletes live hosts' quotas, revokes the tenant's hosts, then ends the tenant and removes `bundles/hosts/<tenant>/`. Each host revocation waits for its broker-derived minimum; removing a tenant with hosts takes time. Record appends and final convergences are sequential; hosts' revocation steps 2–5 run in parallel. Re-run after failure to continue, including on a revoking host. On an ended tenant, converges and retries bundle directory removal. Refuses an absent tenant. Removal revokes access; retained data and receiver grants remain. There is no `--wait` option on tenant removal.
+Ends every entitlement, deletes live hosts' quotas, revokes the tenant's hosts, then ends the tenant
+and removes `bundles/hosts/<tenant>/`. Each host revocation waits for its broker-derived minimum;
+removing a tenant with hosts takes time. Record appends and final convergences are sequential;
+hosts' revocation steps 2–5 run in parallel. Re-run after failure to continue, including on a
+revoking host. On an ended tenant, converges and retries bundle directory removal. Refuses an absent
+tenant. Removal revokes access; retained data and receiver grants remain. There is no `--wait`
+option on tenant removal.
+
+Tenant command states:
+
+| Command | Absent tenant | Live tenant | Ended tenant |
+| --- | --- | --- | --- |
+| `tenant add` | Create | Refuse: exists | Refuse: final |
+| `tenant pool add` | Refuse; use `tenant add` | Add or converge and apply quotas when already entitled | Refuse |
+| `tenant pool remove` | Refuse | End or converge and apply quotas when not entitled | Refuse |
+| `tenant host add` | Refuse | Add; reissue a live host with `--force`; refuse revoking or ended hosts | Refuse |
+| `tenant host remove` | Refuse | Revoke; retry from its record; converge when already ended | Refuse |
+| `tenant remove` | Refuse | End entitlements, revoke hosts, end tenant, remove bundles | Converge and retry bundle removal |

@@ -317,11 +317,11 @@ Prerequisites: the working directory
 [Quickstart: Host](quickstart.md#host) walks through these steps for host
 `laptop` of tenant `acme`, with its complete configuration.
 
-1. Entitle the tenant to a pool:
+1. Create the tenant and entitle it to a pool:
 
    ```sh
    wherry operator tenant add acme
-wherry operator tenant pool add acme build
+   wherry operator tenant pool add acme build
    ```
 
 2. Add each host the tenant submits from:
@@ -1485,8 +1485,13 @@ can send to remote agents; list only directories meant for that.
 
 ## Tenant onboarding and offboarding
 
-Do not run two operator commands at once. To onboard a tenant and laptop, run `wherry operator tenant add acme`, `wherry operator tenant pool add acme build`, then `wherry operator tenant host add acme laptop`. Deliver the bundle and run `wherry host init` on the laptop.
+Do not run two operator commands at once. To onboard a tenant and laptop, run `wherry operator
+tenant add acme`, `wherry operator tenant pool add acme build`, then `wherry operator tenant host
+add acme laptop`. Deliver the bundle and run `wherry host init` on the laptop.
 
-Collect results before removing a pool: `wherry operator tenant pool remove acme build` withdraws the hosts' pool access immediately. Hosts no longer see those runs through status, wait or logs and cannot cancel them. A host command whose state load straddles removal may fail once reading receiver keys; run the next command with fresh state.
+Collect results before removing a pool: `wherry operator tenant pool remove acme build` withdraws
+the hosts' pool access immediately. Hosts no longer see those runs through status, wait or logs and
+cannot cancel them. A host command whose state load straddles removal may fail once reading receiver
+keys; run the next command with fresh state.
 
 Offboard a laptop with `wherry operator tenant host remove acme laptop`; its six-step revocation waits for the broker-derived minimum. Offboard the tenant with `wherry operator tenant remove acme`; it ends all entitlements first, then revokes hosts and removes their bundle directory. With hosts this waits for revocation, even though entitlement removal itself is instant. Retry either command after a failure. Tenant names cannot be reused. Removal does not erase retained data; see [security](security.md#removal-and-retained-data).
