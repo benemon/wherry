@@ -1,5 +1,16 @@
 # Host operations
 
+## Enrol a host
+
+1. Ask your operator to create your tenant and entitle it to a pool.
+2. Ask for a host bundle from `wherry operator tenant host add TENANT HOST`.
+3. Install the broker CA if your Kafka cluster uses a private CA.
+4. Run `wherry host init HOST.bundle`.
+5. Configure the credential sources it requests.
+6. Run `wherry host receivers` to check your access.
+
+The [production quickstart](quickstart-production.md#host) gives a complete example.
+
 ## Rotate a key
 
 A rotation replaces a host's or receiver's signing key and keeps its name.

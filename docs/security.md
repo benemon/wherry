@@ -1,13 +1,13 @@
 # Security
 
-How a run's credentials travel from the host to one attempt of one
-receiver, what the pool key that carries them protects, where the host
-takes their values from, and how they reach the agent: the agent holds each
-value at its target while it runs.
-[Governance](governance.md) covers identity, grants, signed records and
-the audit trail.
+Your host resolves credentials when you submit a task.
+The credential envelope carries their values to the run's receiver.
+This page explains credential delivery and its trust boundaries.
+[Governance](governance.md) covers identity, grants and the audit trail.
 
 ## Credential envelopes
+
+![Credential delivery from a host through an encrypted envelope and the pool key custodian to an attempt](diagrams/credential-envelope.svg)
 
 The agent usually needs a model credential, and each tenant's work runs on
 that tenant's own credential. Every credential has a **source** on the
@@ -204,7 +204,7 @@ reason, or withholding re-key wraps is out of scope.
 | --- | --- |
 | Kafka operators and broker storage | ciphertext only, without a pool private key |
 | another tenant or pool | nothing: the platform's ACLs, TLS and SCRAM keep them apart, and only the pool's receivers and `wherry.operator` can write its snapshot |
-| a compromised receiver that is not the key custodian | the credentials of the runs it claims; it can become custodian through the custodian group as an honest receiver would, which raises [WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover), as every custodian change does |
+| a compromised receiver that is not the key custodian | the credentials of the runs it claims; it can become custodian through the custodian group as any pool member can, which raises [WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover), as every custodian change does |
 | the key custodian, or anyone who copies its keys | every retained envelope under those keys, without claiming |
 
 Daily [rotation](concepts.md#rotation) stops a silently copied key from

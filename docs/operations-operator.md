@@ -732,13 +732,33 @@ platform and on Kafka directly.
 
 ## Tenant onboarding and offboarding
 
-Do not run two operator commands at once. To onboard a tenant and laptop, run `wherry operator
-tenant add acme`, `wherry operator tenant pool add acme build`, then `wherry operator tenant host
-add acme laptop`. Deliver the bundle and run `wherry host init` on the laptop.
+Run one operator command at a time.
 
-Collect results before removing a pool: `wherry operator tenant pool remove acme build` withdraws
-the hosts' pool access immediately. Hosts no longer see those runs through status, wait or logs and
-cannot cancel them. A host command whose state load straddles removal may fail once reading receiver
-keys; run the next command with fresh state.
+To onboard a tenant:
 
-Offboard a laptop with `wherry operator tenant host remove acme laptop`; its six-step revocation waits for the broker-derived minimum. Offboard the tenant with `wherry operator tenant remove acme`; it ends all entitlements first, then revokes hosts and removes their bundle directory. With hosts this waits for revocation, even though entitlement removal itself is instant. Retry either command after a failure. Tenant names cannot be reused. Removal does not erase retained data; see [security](security.md#removal-and-retained-data).
+1. Run `wherry operator tenant add acme`.
+2. Run `wherry operator tenant pool add acme build`.
+3. Run `wherry operator tenant host add acme laptop`.
+4. Deliver the bundle over a channel you trust.
+5. Run `wherry host init laptop.bundle` on the host.
+
+Collect results before removing an entitlement.
+`wherry operator tenant pool remove acme build` withdraws the hosts' pool access.
+Hosts lose access to those runs through `status`, `wait` and `logs`.
+They also lose the ability to cancel them.
+A command whose state load overlaps removal can fail while reading receiver keys.
+Run the next command with fresh state.
+
+To offboard:
+
+1. Remove one host with `wherry operator tenant host remove acme laptop`.
+   This waits for the broker-derived revocation minimum.
+2. To remove the whole tenant, run `wherry operator tenant remove acme`.
+   This ends all entitlements before revoking the hosts.
+   Host revocations include the broker-derived wait.
+   The command removes the tenant's bundle directory after successful removal.
+3. Retry a failed removal command to complete its remaining work.
+
+An ended tenant name cannot be reused.
+Removal keeps retained data.
+See [Removal and retained data](security.md#removal-and-retained-data).

@@ -38,7 +38,7 @@
   headless command. wherry does not modify it. The receiver passes it a
   prompt file and reads its standard output.
 
-One person can hold every role in a development setup.
+A pool can name several agents, each launched through its own harness.
 
 ## Identity and authorisation
 
@@ -204,6 +204,8 @@ redelivery and an adoption enter](diagrams/run-lifecycle.svg)
 
 ## Pool keys and the key custodian
 
+![Pool public keys, key custody and attempt key wrapping](diagrams/pool-keys.svg)
+
 A run's credentials have to reach whichever receiver of the pool claims
 it, at any attempt, after the submitting host may have gone offline, and
 the broker must not hold them in the clear. Each pool therefore has a key
@@ -251,7 +253,7 @@ and that still holds the snapshot's key, continues with that key. Every
 `takeover` and `contested` snapshot raises
 [WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover), and hosts
 log it. Every custodian change raises the alert, a planned drain's included.
-The group coordinates honest receivers. It does not authenticate custody
+The group coordinates receivers that follow the protocol. It does not authenticate custody
 against a malicious member of the pool
 ([What the pool key protects](security.md#what-the-pool-key-protects)).
 
@@ -448,4 +450,27 @@ rotation.
 
 ## Tenants
 
-A tenant groups hosts and their access to pools. Create it explicitly with `tenant add`; only that command creates its feed and transcript topics. An entitlement is a tenant's membership of a pool, managed with `tenant pool add` and `tenant pool remove`. Removing an entitlement immediately stops new admissions and placement for that tenant in that pool; it can be added again. A tenant moves from absent to live to ended. Ending a tenant is final: its name cannot return because retained data and host keys outlive it.
+![Tenants and their hosts entitled to shared receiver pools](diagrams/tenants.svg)
+
+A tenant groups hosts and their access to pools.
+Create it explicitly with `wherry operator tenant add TENANT`.
+That command creates its feed and transcript topics.
+Host creation and entitlement changes require a live tenant.
+
+An **entitlement** gives a tenant access to a pool.
+Add it with `wherry operator tenant pool add TENANT POOL`.
+Remove it with `wherry operator tenant pool remove TENANT POOL`.
+Removal stops new admissions and placement for that tenant in the pool.
+You can add the entitlement again.
+
+A tenant moves through three states:
+
+1. Absent: no tenant record exists.
+2. Live: hosts and entitlements can belong to it.
+3. Ended: its name cannot be reused.
+
+Remove a tenant with `wherry operator tenant remove TENANT`.
+The operator ends its entitlements first.
+It then revokes its hosts before recording the tenant's end.
+Removal keeps retained data and host keys.
+See [Removal and retained data](security.md#removal-and-retained-data).
