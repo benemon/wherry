@@ -347,9 +347,8 @@ same host: the receiver restarted under the same receiver ID adopts its
 jobs, but a member on another host that claims a task starts a second job
 once the [claim check](a2a-extension-v1.md#the-claim-check) no longer counts
 the exited receiver a live claimant, as after a receiver crash. The
-systemd plugin recommends a pool per receiver for this reason. The
-receiver leaves the jobs for adoption: stopping them would bind only an
-honest receiver, and a compromised one would ignore it.
+systemd plugin recommends a pool per receiver for this reason.
+The receiver leaves jobs running for adoption.
 
 A revoked principal does not return. A host or receiver that comes back is
 provisioned under a new name, with a new principal and key topic.

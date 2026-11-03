@@ -2,37 +2,49 @@
 
 ## Where your instance lives
 
-`wherry dev` runs a whole deployment on one machine for trying wherry and
-developing against it, as [Try it on one machine](quickstart-development.md#start-your-instance)
-walks through. Each command takes `--instance NAME`, default `default`, a
-[name](commands.md#names). An instance lives in `$XDG_DATA_HOME/wherry/dev/NAME`, by
-default `~/.local/share/wherry/dev/NAME`, mode 0700, in two parts:
-`cache/`, which `init` fills and `down --reset` removes, and `env/`, which `up`
-creates and `down` removes. The ports are fixed, so one instance is up at
-a time: Nomad on 4646, 4647 and 4648, Kafka on 9093 and, with storage, S3
-on 18080, all on 127.0.0.1.
+Pass `--instance NAME` to select an instance.
+The default name is `default`.
+An instance lives in `$XDG_DATA_HOME/wherry/dev/NAME`.
+Without `XDG_DATA_HOME`, use `~/.local/share/wherry/dev/NAME`.
+The instance directory has mode 0700.
 
-An instance is up while its `env/up.json` names a live Nomad agent that
-`up` started. Every step prints its name on standard error, and a failed
-step fails with `step <name>: <cause>`, with two exceptions: a `preflight`
-refusal of `up` is the whole error, and the `host` step of `down` prints no
-name.
+| Path | Purpose | Lifecycle |
+| --- | --- | --- |
+| `cache/` | Downloads and manifest. | `init` fills it; `down --reset` removes it. |
+| `env/` | Running environment and data. | `up` creates it; `down` removes it. |
+| `env/up.json` | Record of the Nomad agent started by `up`. | A live recorded agent identifies an instance that is up. |
+| `env/host/credentials/` | Credential files copied for the instance. | Files have mode 0600. |
+| `env/host/state/` | Host run records. | Removed with the environment. |
+| `env/operator/` | Instance operator working directory and bundles. | Created during bootstrap. |
 
-Commands run at once on one instance are not serialized: run one at a
-time. `XDG_DATA_HOME`, or `HOME` without it, must be the same for `up` and
-`down`, since it locates the instance and its record of the host files `up`
-created. `XDG_CONFIG_HOME` may change, since the record holds absolute
-paths.
+Run one instance at a time.
+Ports are fixed on `127.0.0.1`:
+
+| Service | Ports |
+| --- | --- |
+| Nomad | 4646, 4647, 4648 |
+| Kafka | 9093 |
+| S3, when enabled | 18080 |
+
+Run one command at a time for each instance.
+Keep `XDG_DATA_HOME` unchanged between `up` and `down`.
+Without it, keep `HOME` unchanged.
+The manifest records host paths as absolute paths.
 
 ## Where your host files go
 
-[`wherry dev up`](commands-dev.md#wherry-dev-up) creates `config.yaml`,
-`bundle.yaml` and `host.key` here for its `default` instance when none of
-them is there and `WHERRY_CONFIG` is not set, with `state_dir` inside the
-instance, and records what it created; `wherry dev down` removes only those, while each
-is still the file `up` created. It never replaces a real host's files:
-otherwise, and for every other instance, it writes them inside the
-instance and prints the `WHERRY_CONFIG` to use.
+For instance `default`, `up` tries the standard host configuration directory.
+It writes `config.yaml`, `bundle.yaml` and `host.key` there only when all three are absent and `WHERRY_CONFIG` is unset.
+The configuration points `state_dir` inside the instance.
+
+If a host file already exists, `up` places all host files in `env/host/`.
+It also uses `env/host/` for a named instance or when `WHERRY_CONFIG` is set.
+It prints `export WHERRY_CONFIG=<path>` for you to use.
+It does not write to the path previously named by `WHERRY_CONFIG`.
+
+`down` removes standard host files only while they match the files recorded as created by `up`.
+Changed or replaced files remain.
+[Development commands](commands-dev.md#wherry-dev-down) gives the matching rules.
 
 ## Which environment variables apply
 

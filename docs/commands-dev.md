@@ -177,8 +177,7 @@ Its steps, each run after a failed one:
 4. `ports` checks that the ports are free.
 5. `data` removes `env/`.
 6. `host` removes each file the manifest records `up` creating at the
-   standard host paths while it is still that file: a regular file, not a
-   symlink, with the recorded device, inode, size and modification time, in a directory
+   standard host paths while it is still that file: a regular file with no symbolic link, with the recorded device, inode, size and modification time, in a directory
    that still resolves to the recorded one. So a stale default never
    shadows a real host's, and a real host's file stays. Anything else, a
    missing file or one whose device and inode a crash kept `up` from

@@ -2,11 +2,16 @@
 
 ## Receiver local configuration
 
-A YAML file at `/etc/wherry/config.yaml`, or at the path
-`wherry receiver run --config-file` names, read when the receiver starts. It is decoded as the
-client configuration is: unknown and duplicate fields are errors, a decode
-error names only its line numbers, and a leading `~/` is expanded in the
-flag and in every path.
+A receiver reads local YAML configuration when it starts.
+
+### Where wherry looks for the file
+
+1. Use the path passed with `wherry receiver run --config-file FILE`.
+2. Otherwise, use `/etc/wherry/config.yaml`.
+
+Unknown and duplicate fields are errors.
+Decode errors report line numbers without field values.
+A leading `~/` expands in the flag and configuration paths.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
