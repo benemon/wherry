@@ -6,7 +6,7 @@ require (
 	github.com/ProtonMail/go-crypto v1.5.2
 	github.com/benemon/wherry/pluginsdk v0.0.0
 	github.com/go-jose/go-jose/v4 v4.1.6
-	github.com/hashicorp/nomad/api v0.0.0-20261016150620-df630b26e78a
+	github.com/hashicorp/nomad/api v0.0.0-20261029144823-d0f210429976
 	github.com/minio/minio-go/v7 v7.4.1
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/prometheus/client_golang v1.25.0

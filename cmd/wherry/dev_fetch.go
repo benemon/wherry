@@ -53,7 +53,7 @@ const (
 // whose linux_amd64 zip SHA-256 (wherry-plugins .github/workflows/e2e.yml NOMAD_SHA256) the signed SHA256SUMS must
 // list. Bumping a pin is a deliberate change of both values.
 var hashicorpPins = map[string]struct{ version, linuxAMD64 string }{
-	"nomad": {"2.0.7", "4c9b8a0850d6fd9caadbbab09b3e6fdf8b77aa777729543c70c61b85acca68c1"},
+	"nomad": {"2.1.1", "073084f7690fdaea756ff1eff8b669b25c3a6c17778f19ae0c47606973ed3f39"},
 }
 
 // devHTTP fetches init's downloads; a release archive takes minutes on a slow link.
