@@ -58,9 +58,12 @@ configuration. The operator hands the bundle to the host or receiver. It never t
 
 Authorisation is
 [Kafka ACLs](https://kafka.apache.org/documentation/#security_authz), enforced
-by the broker. `wherry operator` generates every ACL from the state on
-`wherry.operator`. Each names one resource literally, except one prefixed grant per
-receiver on its pool's transactional IDs. The `wherry operator` command that
+by the broker. `wherry operator` generates every host and receiver ACL from
+the state on `wherry.operator`. Each names one resource literally, except one
+prefixed grant per receiver on its pool's transactional IDs.
+`wherry.operator`'s own grants come from `operator init`, and two of them
+are prefixed: topics `wherry.` and groups `p-`
+([The operator principal](security.md#the-operator-principal)). The `wherry operator` command that
 records a host or receiver on `wherry.operator` also issues its principal and ACLs,
 and `pool entitle` records an entitlement with its ACLs; no other approval step
 exists. [Design](design.md#acls) lists the matrix.
@@ -366,7 +369,10 @@ receivers claim nothing from it. The custodian refuses with
 `pool suspended` the open request of a claim with no `adopting` status, so
 that run's task goes back to the queue unstarted. `pool suspend` returns
 once the key custodian has acknowledged the suspension in its snapshot;
-after that no new start opens. It serves adoptions of started jobs. Runs in progress continue to their
+after that no new start opens. Until then a pass that has not read the
+record can still open a first start. A pool with no custodian yet returns
+at once, and a custodian that does not acknowledge within 5 minutes fails
+the command with the suspension not yet in effect. It serves adoptions of started jobs. Runs in progress continue to their
 terminal status. A suspension takes back no
 credential a running job holds: rotating the credential at its issuer does,
 and revoking a receiver stops it. The custodian keeps rotating its key, and
@@ -395,8 +401,9 @@ steps:
 2. Delete its ACLs.
 3. Probe every broker as the principal, with the new password. While any
    broker still authorises it, the step probes again every second for up
-   to 2 minutes, then fails. A failed login or any other probe error fails
-   the step at once.
+   to 2 minutes, then fails. A refused login, as from a broker that has not
+   yet applied the new password, is retried within the same 2 minutes. Any
+   other probe error fails the step at once.
 4. Delete its SCRAM credential.
 5. Wait the longest of the broker's re-authentication, share-group lock
    and transaction timeout intervals. A longer wait can be asked for; a

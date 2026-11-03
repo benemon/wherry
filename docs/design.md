@@ -41,13 +41,18 @@ differently live on different topics.
 | `wherry.tenant.<tenant>.transcript` | receivers of the tenant's pools | the tenant's hosts | transcript chunks, output chunks |
 | `wherry.host.<tenant>.<host>` | that host | that host, receivers of the tenant's pools | its key |
 
+`wherry.operator` can also read and write every one of these topics
+through its prefixed grant on `wherry.` topics ([ACLs](#acls)).
+
 A host and a receiver read and write these topics as their grants allow,
 beside the platform, object storage and git remote a run uses.
 
 ![wherry's implementation: a host, the Kafka topics, a receiver with its plugins, a platform job, object storage and a git remote](diagrams/implementation.svg)
 
 `wherry.operator` records and progress records carry no signature: each
-sits on a topic only one principal can write, so Kafka authenticates it. Every other record, key
+sits on a topic one wherry principal writes, so Kafka authenticates it.
+`wherry.operator` itself can write every `wherry.` topic through its
+prefixed grant ([ACLs](#acls)), and its holder is trusted as the operator. Every other record, key
 records included, is a versioned EdDSA
 [JWS](https://datatracker.ietf.org/doc/html/rfc7515). A record on a shared topic
 names its owner and key in its `kid`, and a reader verifies it against that
@@ -66,10 +71,12 @@ pool the run was placed in, on behalf of a tenant entitled to it.
 Every topic has one partition and `LogAppendTime` timestamps, and no topic
 is deleted. `wherry.receivers` and the progress topics have
 `cleanup.policy=compact,delete`: their readers need only the latest record
-per key, and only the record's owner can write that key. A pool's snapshot
+per key. Only its receiver writes a progress topic. Every receiver can write
+`wherry.receivers`, so a reader keeps each key's latest record that
+verifies as its owner's. A pool's snapshot
 topic has `cleanup.policy=compact`: its readers need only the latest
-committed snapshot, under its one key, and only the pool's receivers can
-write it. Every other topic has `cleanup.policy=delete`.
+committed snapshot, under its one key, and only the pool's receivers and
+`wherry.operator` can write it. Every other topic has `cleanup.policy=delete`.
 
 A pool's task and event topics and its receivers' progress topics keep
 records for its `start_by_limit` plus six hours plus a day, 4 days 6 hours
@@ -137,8 +144,8 @@ naming 256 outputs fits.
 
 | Topic | Created by | `retention.ms` |
 | --- | --- | --- |
-| `wherry.operator` | any recording command | `-1` |
-| `wherry.receivers` | any recording command | `604800000` (7 days) |
+| `wherry.operator` | `operator init`, then any recording command when missing | `-1` |
+| `wherry.receivers` | `operator init`, then any recording command when missing | `604800000` (7 days) |
 | `wherry.pool.<pool>.tasks` | `pool apply` | at least `start_by_limit` plus 30 hours, in milliseconds; default `367200000`; `pool apply` never lowers it |
 | `wherry.pool.<pool>.events` | `pool apply` | at least tasks; `pool apply` raises it to tasks and never lowers it |
 | `wherry.pool.<pool>.custodian` | `pool apply` | `-1`, outside the pool retention bound |
@@ -175,11 +182,14 @@ more than one partition.
 ### ACLs
 
 Every grant allows from any host. Resources are literal except the
-transactional ID prefix.
+receivers' transactional ID prefix and `wherry.operator`'s prefixed grants,
+which `operator init` gives ([The operator principal](security.md#the-operator-principal)).
 
 | Principal | Resource | Operations |
 | --- | --- | --- |
-| `wherry.operator` | topic `wherry.operator` | Read, Write |
+| `wherry.operator` | cluster | Alter, AlterConfigs |
+| `wherry.operator` | topic prefix `wherry.` | Create, AlterConfigs, Read, Write |
+| `wherry.operator` | group prefix `p-` | AlterConfigs |
 | host | topic `wherry.operator` | Read, Describe |
 | host | topic `wherry.receivers` | Read, Describe |
 | host | topic `wherry.tenant.<own tenant>` | Read, Describe |

@@ -544,8 +544,8 @@ incomplete step and fails with `revocation incomplete`. The probe asks every
 broker for the metadata of the principal's own key topic, and step 3
 completes when every broker answers `TOPIC_AUTHORIZATION_FAILED`. While a
 broker still authorises the principal, step 3 probes again every second for
-up to 2 minutes. It fails at once when the login fails or the probe returns
-any other error. Step 5 waits the largest of
+up to 2 minutes, and retries a refused login within the same 2 minutes. It
+fails at once when the probe returns any other error. Step 5 waits the largest of
 `connections.max.reauth.ms`, `group.share.max.record.lock.duration.ms` and
 `transaction.max.timeout.ms` across the brokers, and fails when one of them
 is unbounded. `--wait DURATION` lengthens that wait and must be positive;

@@ -976,8 +976,9 @@ JSON:
 ```
 
 - Only that receiver writes its progress topic, so Kafka authenticates the
-  record, and no other principal can write a key that compaction would let
-  supersede it. The live members of its pool read it; hosts do not.
+  record, and no other host or receiver principal can write a key that
+  compaction would let supersede it. `wherry.operator` can, through its
+  prefixed grant on `wherry.` topics. The live members of its pool read it; hosts do not.
 - `log_offset` is the agent output offset the run's transcript is committed
   up to. The record commits in the transaction of the [chunks](#chunk) it
   covers, every 10 seconds while the job runs. An interval with no new

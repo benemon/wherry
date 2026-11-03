@@ -37,8 +37,7 @@ the receiver's configuration can hold several profiles of the Nomad
 plugin, each with its own driver and labels. So one receiver can offer containers, host
 processes and virtual machines side by side, and a task chooses between
 them by its agent and label selector, the way it chooses anything else.
-The Nomad plugin hands the driver to Nomad unchanged; the drivers
-exercised with wherry so far are Docker, Podman and `exec`.
+The Nomad plugin hands the driver to Nomad unchanged.
 
 The
 [Nomad plugin's README](https://github.com/benemon/wherry-plugins/tree/main/nomad)
