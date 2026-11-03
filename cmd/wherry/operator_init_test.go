@@ -750,3 +750,25 @@ func TestReceiverApplyForceKeepsTheBundlesBroker(t *testing.T) {
 		t.Fatalf("bundle after --force %+v, %v; want a new password naming kafka.platform.internal:9093", after.Broker, err)
 	}
 }
+
+// host add makes existing bundle directories mode 0700, as it creates new ones.
+func TestHostAddRestrictsExistingBundleDirectories(t *testing.T) {
+	operatorEnv(t)
+	directories := []string{"bundles", filepath.Join("bundles", "hosts"), filepath.Join("bundles", "hosts", "tenant-a")}
+	for _, directory := range directories {
+		if err := os.Mkdir(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := runOperator([]string{"host", "add", "host-a", "--tenant", "tenant-a"}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	for _, directory := range directories {
+		if info, err := os.Stat(directory); err != nil || info.Mode().Perm() != 0o700 {
+			t.Fatalf("%s: %v, %v; want mode 0700", directory, info, err)
+		}
+	}
+}
