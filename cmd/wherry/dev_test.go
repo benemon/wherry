@@ -31,7 +31,7 @@ import (
 
 // manifestFixture is section 2's manifest with every field set.
 const manifestFixture = `{
-  "version": 1,
+  "version": 2,
   "updated": "2026-10-28T10:00:00Z",
   "os": "linux",
   "arch": "amd64",
@@ -46,13 +46,23 @@ const manifestFixture = `{
   "agents": ["claude", "codex"],
   "default_agent": "claude",
   "storage": {"reference": "quay.io/benjamin_holmes/ceph-aio:v21", "digest": "sha256:11", "id": "sha256:22", "tag": "wherry-dev/ceph-aio:22"},
-  "env_denylist": ["CODEX_API_KEY"]
+  "env_denylist": ["CODEX_API_KEY"],
+  "host_files": {"files": {"/home/u/.config/wherry/config.yaml": {"device": 44, "inode": 55, "size": 66, "mod_time": 77}}}
 }`
 
-// devFixture points the dev root at a temporary directory and returns the default instance.
+// devFixture points HOME, the XDG directories and so the dev root and the standard host paths at temporary
+// directories, and returns the default instance.
 func devFixture(t *testing.T) devInstance {
 	t.Helper()
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	// dev up records host paths with their symlinks resolved, and macOS's temporary directory is under the /tmp link.
+	for _, variable := range []string{"HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"} {
+		dir, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(variable, dir)
+	}
+	t.Setenv("WHERRY_CONFIG", "")
 	instance, err := openInstance("default")
 	if err != nil {
 		t.Fatal(err)
@@ -96,11 +106,11 @@ func TestDevManifestRoundTrip(t *testing.T) {
 	if info, err := os.Stat(instance.cache("manifest.json")); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("manifest mode %v, %v", info.Mode(), err)
 	}
-	if err := os.WriteFile(instance.cache("manifest.json"), []byte(strings.Replace(manifestFixture, `"version": 1,`, `"version": 2,`, 1)), 0o600); err != nil {
+	if err := os.WriteFile(instance.cache("manifest.json"), []byte(strings.Replace(manifestFixture, `"version": 2,`, `"version": 3,`, 1)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readManifest(instance); err == nil || !strings.Contains(err.Error(), instance.cache("manifest.json")) {
-		t.Fatalf("version 2 read with %v; want a refusal naming the path", err)
+		t.Fatalf("version 3 read with %v; want a refusal naming the path", err)
 	}
 }
 

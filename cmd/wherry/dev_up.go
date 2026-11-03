@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
@@ -16,7 +17,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -34,6 +37,7 @@ import (
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
+	jose "github.com/go-jose/go-jose/v4"
 	"github.com/hashicorp/nomad/api"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -157,7 +161,7 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 	if err := os.RemoveAll(instance.env()); err != nil {
 		return err
 	}
-	for _, dir := range []string{"nomad/data", "kafka/cfg", "kafka/data", "tls", "admin", "receiver/state", "host/state", "host/credentials"} {
+	for _, dir := range []string{"nomad/data", "kafka/cfg", "kafka/data", "tls", "receiver/state", "host/credentials"} {
 		if err := os.MkdirAll(instance.env(dir), 0o700); err != nil {
 			return err
 		}
@@ -194,19 +198,11 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 		return err
 	}
 
-	step("passwords")
-	passwords := map[string]string{}
-	for _, user := range []string{"admin", "operator"} {
-		secret := make([]byte, 24)
-		rand.Read(secret)
-		passwords[user] = hex.EncodeToString(secret)
-		for _, dir := range []string{"kafka/cfg", "admin"} {
-			if err := os.WriteFile(instance.env(dir, user+"-password"), []byte(passwords[user]), 0o600); err != nil {
-				return err
-			}
-		}
-	}
-	if err := writeYAML(instance.env("admin", "operator.yaml"), operatorConfig{devBroker, "ca.pem", "operator-password"}); err != nil {
+	step("super-user")
+	secret := make([]byte, 24)
+	rand.Read(secret)
+	superPassword := hex.EncodeToString(secret)
+	if err := os.WriteFile(instance.env("kafka", "cfg", "super-user-password"), []byte(superPassword), 0o600); err != nil {
 		return err
 	}
 
@@ -236,7 +232,7 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 
 	step("kafka")
 	stopWait = waiting(stderr, "kafka")
-	kafkaAlloc, err := startKafka(ctx, nomad, env, ca, passwords["admin"])
+	kafkaAlloc, err := startKafka(ctx, nomad, env, ca, superPassword)
 	stopWait()
 	if err != nil {
 		return err
@@ -268,19 +264,20 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 		}
 	}
 
-	step("operator-acl")
-	root, operatorClient, err := devAdminClients(ca, passwords)
+	step("operator")
+	service, err := devOperator(ctx, instance, devBroker)
 	if err != nil {
 		return err
 	}
-	defer root.Close()
-	defer operatorClient.Close()
-	if err := operator.Delegate(ctx, root, passwords["operator"]); err != nil {
+	defer service.Operator.Close()
+
+	step("bootstrap")
+	if err := devBootstrap(ctx, env, agents, *service); err != nil {
 		return err
 	}
 
-	step("bootstrap")
-	hostConfig, err := devBootstrap(ctx, env, agents, operator.Service{Operator: operatorClient, Broker: devBroker, CA: ca}, sources)
+	step("host")
+	hostConfig, configPath, err := placeHost(ctx, &env, sources, stderr)
 	if err != nil {
 		return err
 	}
@@ -311,7 +308,7 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 		return err
 	}
 	current = ""
-	printReady(stdout, env)
+	printReady(stdout, env, configPath)
 	return nil
 }
 
@@ -443,7 +440,7 @@ func devTLS(instance devInstance) ([]byte, error) {
 	brokerPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: brokerDER})
 	files := map[string][]byte{
 		"tls/ca.key": keyPEM(caKey), "tls/ca.pem": caPEM, "tls/broker.key": keyPEM(brokerKey), "tls/broker.pem": brokerPEM,
-		"kafka/cfg/server.pem": append(slices.Clone(brokerPEM), keyPEM(brokerKey)...), "kafka/cfg/ca.pem": caPEM, "admin/ca.pem": caPEM,
+		"kafka/cfg/server.pem": append(slices.Clone(brokerPEM), keyPEM(brokerKey)...), "kafka/cfg/ca.pem": caPEM,
 	}
 	for path, data := range files {
 		if err := os.WriteFile(instance.env(path), data, 0o600); err != nil {
@@ -508,11 +505,11 @@ log.dirs=/data/kraft
 `
 }
 
-// kafkaScript reads the passwords as $(cat /cfg/...) from the read-only bind mount, so they never enter the job spec.
+// kafkaScript reads the super user's password as $(cat /cfg/...) from the read-only bind mount, so it never enters the
+// job spec.
 func kafkaScript(clusterID string) string {
 	return "/opt/kafka/bin/kafka-storage.sh format --standalone -t " + clusterID + " -c /cfg/server.properties --ignore-formatted" +
-		` --add-scram "SCRAM-SHA-512=[name=wherry-admin,password=$(cat /cfg/admin-password)]"` +
-		` --add-scram "SCRAM-SHA-512=[name=wherry.operator,password=$(cat /cfg/operator-password)]"` +
+		` --add-scram "SCRAM-SHA-512=[name=wherry-admin,password=$(cat /cfg/super-user-password)]"` +
 		" && exec /opt/kafka/bin/kafka-server-start.sh /cfg/server.properties"
 }
 
@@ -698,7 +695,7 @@ func poll(ctx context.Context, bound time.Duration, check func() error) error {
 
 // startKafka waits for an authenticated metadata request, since rootless podman's port forwarder accepts connections
 // while the container is down.
-func startKafka(ctx context.Context, nomad *api.Client, env devEnv, ca []byte, adminPassword string) (string, error) {
+func startKafka(ctx context.Context, nomad *api.Client, env devEnv, ca []byte, superPassword string) (string, error) {
 	raw := make([]byte, 16)
 	clusterID := "-"
 	for strings.HasPrefix(clusterID, "-") {
@@ -712,7 +709,7 @@ func startKafka(ctx context.Context, nomad *api.Client, env devEnv, ca []byte, a
 	if err != nil {
 		return "", err
 	}
-	opts, err := operator.KafkaOpts(devBroker, ca, devSuperUser, adminPassword)
+	opts, err := operator.KafkaOpts(devBroker, ca, devSuperUser, superPassword)
 	if err != nil {
 		return alloc, err
 	}
@@ -839,23 +836,6 @@ func createBucket(ctx context.Context, keys [2]string) error {
 	return poll(ctx, time.Minute, func() error { return store.MakeBucket(ctx, devBucket, minio.MakeBucketOptions{}) })
 }
 
-// devAdminClients connect to the broker as wherry-admin and as the operator.
-func devAdminClients(ca []byte, passwords map[string]string) (*kgo.Client, *kgo.Client, error) {
-	var clients []*kgo.Client
-	for _, user := range [][2]string{{devSuperUser, passwords["admin"]}, {operator.OperatorPrincipal, passwords["operator"]}} {
-		opts, err := operator.KafkaOpts(devBroker, ca, user[0], user[1])
-		if err != nil {
-			return nil, nil, err
-		}
-		client, err := kgo.NewClient(append(opts, kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
-		if err != nil {
-			return nil, nil, err
-		}
-		clients = append(clients, client)
-	}
-	return clients[0], clients[1], nil
-}
-
 // devTerms are pool dev's terms: each agent with its credentials, every one optional.
 func devTerms(agents []string, defaultAgent string, storage bool) operator.Terms {
 	optional := false
@@ -903,40 +883,265 @@ func devProfiles(env devEnv, agents []string) []operator.ProfileSettings {
 	return profiles
 }
 
-// devBootstrap makes the operator's admin calls for the instance and registers its host.
-func devBootstrap(ctx context.Context, env devEnv, agents []string, service operator.Service, sources map[string]credential.Source) (busclient.Config, error) {
-	instance := env.instance
+// devOperator provisions as operator init does, on the instance's operator working directory env/operator, and
+// connects as wherry.operator through it.
+func devOperator(ctx context.Context, instance devInstance, broker string) (*operator.Service, error) {
+	dir := instance.env("operator")
+	options := map[string]string{"broker": broker, "ca-file": instance.env("tls", "ca.pem"), "super-user": devSuperUser, "super-user-password-file": instance.env("kafka", "cfg", "super-user-password")}
+	if err := operatorInit(ctx, dir, options, io.Discard); err != nil {
+		return nil, err
+	}
+	return operatorService(dir)
+}
+
+// devBootstrap makes the operator's calls for the instance, its bundles in the operator working directory, and gives
+// the receiver its config.yaml.
+func devBootstrap(ctx context.Context, env devEnv, agents []string, service operator.Service) error {
+	instance, dir := env.instance, env.instance.env("operator")
 	if err := service.PoolApply(ctx, devPool, devTerms(agents, env.manifest.DefaultAgent, env.storage()), false); err != nil {
-		return busclient.Config{}, fmt.Errorf("pool apply: %w", err)
+		return fmt.Errorf("pool apply: %w", err)
 	}
 	if err := service.TenantAdd(ctx, devTenant, devPool); err != nil {
-		return busclient.Config{}, fmt.Errorf("pool entitle: %w", err)
+		return fmt.Errorf("pool entitle: %w", err)
 	}
-	if err := service.HostAdd(ctx, devTenant, devHost, instance.env("host", "dev.bundle"), false); err != nil {
-		return busclient.Config{}, fmt.Errorf("host add: %w", err)
+	hostBundle, err := bundlePath(dir, "hosts", true, devTenant, devHost)
+	if err != nil {
+		return err
+	}
+	if err := service.HostAdd(ctx, devTenant, devHost, hostBundle, false); err != nil {
+		return fmt.Errorf("host add: %w", err)
+	}
+	receiverBundle, err := bundlePath(dir, "receivers", true, devReceiver)
+	if err != nil {
+		return err
 	}
 	receiver := operator.ReceiverConfig{Receiver: devReceiver, Pool: devPool, Capacity: 2, Profiles: devProfiles(env, agents),
 		PluginSHA256: map[string]string{"nomad": env.manifest.Plugin.SHA256}}
-	if err := service.ReceiverAdd(ctx, receiver, devBroker, instance.env("receiver", "dev-1.bundle")); err != nil {
-		return busclient.Config{}, fmt.Errorf("receiver apply: %w", err)
+	if err := service.ReceiverAdd(ctx, receiver, service.Broker, receiverBundle); err != nil {
+		return fmt.Errorf("receiver apply: %w", err)
+	}
+	local := map[string]string{"bundle": receiverBundle, "ca_file": instance.env("tls", "ca.pem"), "state_dir": instance.env("receiver", "state"), "plugin_dir": instance.cache("plugins")}
+	return writeYAML(instance.env("receiver", "config.yaml"), local)
+}
+
+// devHostStep runs after up's check of the standard host paths, with "", and after each file it creates there, with its
+// path; a variable so tests can race and interrupt up.
+var devHostStep = func(path string) {}
+
+// placeHost writes the host's bundle, config.yaml and key, and registers the host. The default instance, without
+// WHERRY_CONFIG set, creates them at the standard host paths when nothing is there, and falls back to env/host when
+// anything is or appears there; it never replaces a file. Each other instance writes them in env/host.
+func placeHost(ctx context.Context, env *devEnv, sources map[string]credential.Source, stderr io.Writer) (busclient.Config, string, error) {
+	instance := env.instance
+	if instance.name == "default" {
+		if err := removeHostFiles(instance, stderr); err != nil {
+			return busclient.Config{}, "", err
+		}
+		env.manifest.HostFiles = nil
+		if os.Getenv("WHERRY_CONFIG") == "" {
+			dir, err := busclient.ConfigDir()
+			if err != nil {
+				return busclient.Config{}, "", err
+			}
+			taken := slices.ContainsFunc([]string{filepath.Join(dir, "config.yaml"), filepath.Join(dir, "bundle.yaml"), filepath.Join(dir, "host.key")}, func(path string) bool {
+				_, err := os.Lstat(path)
+				return !errors.Is(err, os.ErrNotExist)
+			})
+			devHostStep("")
+			if !taken {
+				host, config, err := writeHost(env, sources, dir, true)
+				if err == nil {
+					return registerHost(ctx, host, config)
+				}
+				if !errors.Is(err, fs.ErrExist) {
+					return busclient.Config{}, "", err
+				}
+				if err := removeHostFiles(instance, stderr); err != nil {
+					return busclient.Config{}, "", err
+				}
+				env.manifest.HostFiles = nil
+			}
+		}
+	}
+	host, config, err := writeHost(env, sources, instance.env("host"), false)
+	if err != nil {
+		return busclient.Config{}, "", err
+	}
+	return registerHost(ctx, host, config)
+}
+
+func registerHost(ctx context.Context, host busclient.Config, config string) (busclient.Config, string, error) {
+	if _, _, err := busclient.Init(ctx, host); err != nil {
+		return busclient.Config{}, "", fmt.Errorf("init: %w", err)
+	}
+	return host, config, nil
+}
+
+// writeHost creates the host's config.yaml, bundle and key in dir, each failing if anything is there; the host's state
+// stays in the instance, so down never removes state at the standard paths. When record is set, the manifest records
+// each path before its create, and its device, inode, size and modification time after, so that down removes only what
+// up created.
+func writeHost(env *devEnv, sources map[string]credential.Source, dir string, record bool) (busclient.Config, string, error) {
+	instance := env.instance
+	stateDir := instance.env("host", "state")
+	for _, path := range []string{dir, stateDir} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			return busclient.Config{}, "", err
+		}
+	}
+	dir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return busclient.Config{}, "", err
+	}
+	source, err := bundlePath(instance.env("operator"), "hosts", false, devTenant, devHost)
+	if err != nil {
+		return busclient.Config{}, "", err
+	}
+	bundle, err := os.ReadFile(source)
+	if err != nil {
+		return busclient.Config{}, "", err
 	}
 	host := busclient.Config{
-		Bundle: instance.env("host", "dev.bundle"), CAFile: instance.env("tls", "ca.pem"), HostKey: instance.env("host", "host.key"), StateDir: instance.env("host", "state"), Credentials: sources,
+		Bundle: filepath.Join(dir, "bundle.yaml"), CAFile: instance.env("tls", "ca.pem"), HostKey: filepath.Join(dir, "host.key"), StateDir: stateDir, Credentials: sources,
 	}
 	if env.storage() {
 		host.Storage = map[string]busclient.StorageConfig{devPool: {AccessKey: "s3-access-key", SecretKey: "s3-secret-key"}}
 	}
-	if err := writeYAML(instance.env("host", "config.yaml"), hostConfigFile(host)); err != nil {
-		return busclient.Config{}, err
+	config, err := yaml.Marshal(hostConfigFile(host))
+	if err != nil {
+		return busclient.Config{}, "", err
 	}
-	local := map[string]string{"bundle": instance.env("receiver", "dev-1.bundle"), "ca_file": instance.env("tls", "ca.pem"), "state_dir": instance.env("receiver", "state"), "plugin_dir": instance.cache("plugins")}
-	if err := writeYAML(instance.env("receiver", "config.yaml"), local); err != nil {
-		return busclient.Config{}, err
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return busclient.Config{}, "", err
 	}
-	if _, _, err := busclient.Init(ctx, host); err != nil {
-		return busclient.Config{}, fmt.Errorf("init: %w", err)
+	jwk, err := (&jose.JSONWebKey{Key: key}).MarshalJSON()
+	if err != nil {
+		return busclient.Config{}, "", err
 	}
-	return host, nil
+	save := func() error { return nil }
+	if record {
+		env.manifest.HostFiles = &devHostFiles{Files: map[string]devHostFile{}}
+		save = func() error { return writeManifest(instance, env.manifest) }
+	}
+	recorded := env.manifest.HostFiles
+	configPath := filepath.Join(dir, "config.yaml")
+	for _, file := range []struct {
+		path string
+		data []byte
+	}{{configPath, config}, {host.Bundle, bundle}, {host.HostKey, jwk}} {
+		if record {
+			recorded.Files[file.path] = devHostFile{}
+			if err := save(); err != nil {
+				return busclient.Config{}, "", err
+			}
+		}
+		id, err := createFile(file.path, file.data)
+		if err != nil {
+			if record && errors.Is(err, fs.ErrExist) {
+				delete(recorded.Files, file.path)
+				err = errors.Join(err, save())
+			}
+			return busclient.Config{}, "", err
+		}
+		if record {
+			devHostStep(file.path)
+			recorded.Files[file.path] = id
+			if err := save(); err != nil {
+				return busclient.Config{}, "", err
+			}
+		}
+	}
+	return host, configPath, nil
+}
+
+// createFile creates path with data, mode 0600, failing if anything is there, a dangling symlink included, and returns
+// the device and inode of the file it created.
+func createFile(path string, data []byte) (devHostFile, error) {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return devHostFile{}, err
+	}
+	defer file.Close()
+	// The umask may narrow the mode OpenFile asks for.
+	if err := file.Chmod(0o600); err != nil {
+		return devHostFile{}, err
+	}
+	if _, err := file.Write(data); err != nil {
+		return devHostFile{}, err
+	}
+	if err := file.Sync(); err != nil {
+		return devHostFile{}, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return devHostFile{}, err
+	}
+	return fileID(info), file.Close()
+}
+
+// fileID is the device and inode info names, with its size and modification time.
+func fileID(info os.FileInfo) devHostFile {
+	stat := info.Sys().(*syscall.Stat_t)
+	return devHostFile{Device: uint64(stat.Dev), Inode: stat.Ino, Size: info.Size(), ModTime: info.ModTime().UnixNano()}
+}
+
+// removeHostFiles removes what the instance's manifest records up creating at the standard host paths, then clears the
+// record. It removes a file only while it is the one up created; what it leaves it names. A manifest it cannot read may
+// record files, so it refuses.
+func removeHostFiles(instance devInstance, stderr io.Writer) error {
+	manifest, err := readManifest(instance)
+	if err != nil {
+		config, _ := busclient.ConfigDir()
+		return fmt.Errorf("%w; it may record host files wherry dev up created: check %s, %s and %s by hand, then remove %s",
+			err, filepath.Join(config, "config.yaml"), filepath.Join(config, "bundle.yaml"), filepath.Join(config, "host.key"), instance.cache("manifest.json"))
+	}
+	if manifest == nil || manifest.HostFiles == nil {
+		return nil
+	}
+	recorded := manifest.HostFiles
+	var failures []error
+	for _, path := range slices.Sorted(maps.Keys(recorded.Files)) {
+		if err := notCreated(path, recorded.Files[path]); err != nil {
+			fmt.Fprintf(stderr, "left %s: %v\n", path, err)
+			continue
+		}
+		failures = append(failures, os.Remove(path))
+	}
+	if err := errors.Join(failures...); err != nil {
+		return err
+	}
+	manifest.HostFiles = nil
+	return writeManifest(instance, *manifest)
+}
+
+// notCreated says why path is not the file up created as entry records, nil when it is. A crash before the device and
+// inode are recorded leaves the file: its bytes alone do not show who created it.
+func notCreated(path string, entry devHostFile) error {
+	if real, err := filepath.EvalSymlinks(filepath.Dir(path)); err != nil || real != filepath.Dir(path) {
+		return errors.New("its directory is no longer the one wherry dev up created it in")
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return errors.New("it is gone")
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("it is not what wherry dev up created")
+	}
+	if entry.Inode == 0 {
+		return errors.New("wherry dev up did not record creating it")
+	}
+	id := fileID(info)
+	if id.Device != entry.Device || id.Inode != entry.Inode {
+		return errors.New("it was replaced after wherry dev up created it")
+	}
+	if id != entry {
+		return errors.New("it changed after wherry dev up created it")
+	}
+	return nil
 }
 
 // hostConfigFile is config as its YAML file holds it, with only the set fields.
@@ -1061,20 +1266,25 @@ func smoke(ctx context.Context, env devEnv, hostConfig busclient.Config) error {
 	return nil
 }
 
-func printReady(stdout io.Writer, env devEnv) {
+// printReady names config in the commands it prints unless up wrote it at the standard path, where every host command
+// reads it by default.
+func printReady(stdout io.Writer, env devEnv, config string) {
 	m := env.manifest
-	config := env.instance.env("host", "config.yaml")
-	binary := env.instance.cache("wherry")
 	fmt.Fprintf(stdout, "ready: instance %s (nomad %s, kafka %s, plugin %s, wherry %s)\n",
 		env.instance.name, m.Nomad.Version, strings.TrimPrefix(m.Images["kafka"].Digest, "sha256:")[:12], m.Plugin.Tag, m.Snapshot.Version)
 	fmt.Fprintf(stdout, "config: %s\n", config)
-	fmt.Fprintf(stdout, "submit: wherry submit --config-file %s --prompt \"...\"\n", config)
+	variable := ""
+	if m.HostFiles == nil {
+		variable = "--env WHERRY_CONFIG=" + shellQuote(config) + " "
+		fmt.Fprintf(stdout, "export WHERRY_CONFIG=%s\n", shellQuote(config))
+	}
+	fmt.Fprintln(stdout, `submit: wherry submit --prompt "..."`)
 	for _, harness := range m.Agents {
 		switch harness {
 		case "claude", "codex":
-			fmt.Fprintf(stdout, "%-7s %s mcp add wherry-%s -- %s host mcp --config-file %s\n", harness+":", harness, env.instance.name, binary, config)
+			fmt.Fprintf(stdout, "%-7s %s mcp add wherry-%s %s-- wherry host mcp\n", harness+":", harness, env.instance.name, variable)
 		case "gemini":
-			fmt.Fprintf(stdout, "%-7s gemini mcp add wherry-%s %s host mcp --config-file %s\n", "gemini:", env.instance.name, binary, config)
+			fmt.Fprintf(stdout, "%-7s gemini mcp add %swherry-%s wherry host mcp\n", "gemini:", variable, env.instance.name)
 		}
 	}
 }
@@ -1093,7 +1303,7 @@ func devDown(ctx context.Context, instance devInstance, stdout, stderr io.Writer
 	}
 	if state == nil {
 		fmt.Fprintf(stdout, "instance %s is not up\n", instance.name)
-		return os.RemoveAll(instance.env())
+		return errors.Join(removeHostFiles(instance, stderr), os.RemoveAll(instance.env()))
 	}
 	if state.Runtime == "" && manifest != nil {
 		state.Runtime = manifest.Runtime
@@ -1134,6 +1344,7 @@ func devDown(ctx context.Context, instance devInstance, stdout, stderr io.Writer
 	}
 	fmt.Fprintln(stderr, "data")
 	fail("data", os.RemoveAll(instance.env()))
+	fail("host", removeHostFiles(instance, stderr))
 	fmt.Fprintf(stdout, "down: instance %s\n", instance.name)
 	if manifest != nil {
 		for _, harness := range manifest.Agents {
