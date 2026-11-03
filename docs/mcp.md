@@ -1,6 +1,6 @@
 # MCP tools
 
-`wherry mcp` serves eight tools over stdio. Each takes and returns JSON with
+`wherry host mcp` serves seven tools over stdio. Each takes and returns JSON with
 a declared schema and uses the server's one host. `start_by` and `end_by`
 set the task's `task_started_by` and `task_ended_by`, each an RFC 3339 time
 or a Go duration from now, such as `90m`; omitted, they take the CLI
@@ -8,14 +8,13 @@ defaults, `10m` and `2h`.
 
 | Tool | Input | Output |
 | --- | --- | --- |
-| `receivers` | none | `receivers`, the objects `wherry receivers --json` prints |
+| `receivers` | none | `receivers`, the objects `wherry host receivers --json` prints |
 | `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by` | `id`, `pool`, `wait` |
 | `status` | `id`, optional | `runs`, `skipped` |
 | `wait` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `reply`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped`, `runs` |
 | `cancel` | `id` | `id`, `skipped` |
 | `events` | `id` | `id`, `events`, `chunks`, `redacted`, `skipped` |
 | `logs` | `id`, `offset`, `limit` | `id`, `attempt`, `total`, `next_offset`, `lines`, `redacted`, `skipped` |
-| `cleanup` | `id` | `id` |
 
 - `submit` returns `wait`, the shell command that waits for
   the run and prints its reply, `wherry wait ID`, with
@@ -117,8 +116,6 @@ defaults, `10m` and `2h`.
   JSON. It ends before the line that would take it past that. A line too long
   for a page alone comes back as the start of its text that fits, with
   `truncated` true and `bytes` its full size, and `next_offset` passes it.
-- `cleanup` deletes the run's S3 objects as `wherry cleanup` does, and refuses
-  with `INVALID_ARGUMENT` while the run has not ended.
 - `skipped` counts the run's records that failed verification; for a
   `status` list, the records of every listed run.
 

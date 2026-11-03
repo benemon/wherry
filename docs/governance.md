@@ -32,7 +32,7 @@ them for the pool's `start_by_limit` plus a day and six hours, 4 days 6
 hours by default, and the tenant feed and transcript topic for 30 days. A
 receiver's progress topic holds the latest transcript offset of each run it
 holds, and compaction removes a run's record after its terminal status.
-[`wherry events`](commands.md#wherry-events-run-id) prints a run's status history.
+[`wherry events`](commands.md#wherry-host-events-run-id) prints a run's status history.
 Retention bounds this history, which holds the records wherry carried. The
 platform's logs hold what an agent did inside its job.
 

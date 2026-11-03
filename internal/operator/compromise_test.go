@@ -51,13 +51,13 @@ func compromiseFixture(t *testing.T) (*kfake.Cluster, *Service, context.Context)
 	cluster, service, closeFixture := kfakeService(t)
 	t.Cleanup(closeFixture)
 	ctx := context.Background()
-	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml")); err != nil {
+	if err := service.HostAdd(ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "receiver.yaml")); err != nil {
@@ -176,7 +176,7 @@ func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
 	// The terms renaming the agent's credential come after run-current and run-other.
 	renamed := modelTerms()
 	renamed.Agents[0].Credentials[0].Name = "model-renamed"
-	if err := service.PoolUpdate(ctx, "pool-a", renamed, false); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", renamed, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.PoolRotateKey(ctx, "pool-a", nil, io.Discard); err == nil || !strings.Contains(err.Error(), "pool pool-a is not suspended") {

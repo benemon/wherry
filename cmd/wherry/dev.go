@@ -129,7 +129,7 @@ func openInstance(name string) (devInstance, error) {
 }
 
 func runDev(args []string, stdout, stderr io.Writer) error {
-	const usage = "usage: wherry dev <init|up|down|reset> [--instance NAME]"
+	const usage = "usage: wherry dev <init|up|down [--reset]> [--instance NAME]"
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
@@ -140,7 +140,7 @@ func runDev(args []string, stdout, stderr io.Writer) error {
 	flags.SetOutput(stderr)
 	name := flags.String("instance", "default", "instance name")
 	var runtimeName, agent *string
-	var storage *bool
+	var storage, reset *bool
 	var images devAgentImages
 	switch args[0] {
 	case "init":
@@ -150,7 +150,8 @@ func runDev(args []string, stdout, stderr io.Writer) error {
 	case "up":
 		runtimeName = flags.String("runtime", "", "container runtime; must equal the one init recorded")
 		flags.Var(&images, "agent-image", "NAME=IMAGE: run agent NAME in container image IMAGE (repeatable)")
-	case "down", "reset":
+	case "down":
+		reset = flags.Bool("reset", false, "clear the instance's download cache instead; refused while it is up")
 	default:
 		return errors.New(usage)
 	}
@@ -174,10 +175,12 @@ func runDev(args []string, stdout, stderr io.Writer) error {
 	case "up":
 		return devUp(ctx, instance, *runtimeName, images, stdout, stderr)
 	case "down":
+		if *reset {
+			return devReset(instance, stdout)
+		}
 		return devDown(ctx, instance, stdout, stderr)
-	default:
-		return devReset(instance, stdout)
 	}
+	return errors.New(usage)
 }
 
 // devAgentImages are the --agent-image values, in order.
@@ -219,7 +222,7 @@ func readManifest(instance devInstance) (*devManifest, error) {
 		return nil, fmt.Errorf("manifest %s: %w", path, err)
 	}
 	if manifest.Version != devManifestVersion {
-		return nil, fmt.Errorf("manifest %s has version %d, which this wherry does not read; run wherry dev reset", path, manifest.Version)
+		return nil, fmt.Errorf("manifest %s has version %d, which this wherry does not read; run wherry dev down --reset", path, manifest.Version)
 	}
 	return &manifest, nil
 }
@@ -276,7 +279,7 @@ func alive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-// refuseUp refuses init and reset on an instance that is up.
+// refuseUp refuses init and down --reset on an instance that is up.
 func refuseUp(instance devInstance) error {
 	if upState(instance) != nil {
 		return fmt.Errorf("instance %s is up; run wherry dev down first", instance.name)

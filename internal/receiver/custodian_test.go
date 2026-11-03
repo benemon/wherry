@@ -1157,6 +1157,36 @@ func TestConcurrentDrainsStopInTheWindowKeepingTheKeys(t *testing.T) {
 	}
 }
 
+// A running receiver stays up through a peer's add: the peer's record lands only once the running receiver may read
+// the peer's key topic (agb-yk39). The broker holds that grant past several refreshes, so a record appended before it
+// would be read in the meantime.
+func TestRunningReceiverStaysUpThroughAPeersAdd(t *testing.T) {
+	f := newBareFixture(t)
+	member := runMember(t, f.ctx, f.receiver, f.logs)
+	f.awaitSnapshots(t, 1)
+	awaitActing(t, f, f.receiver)
+	var held atomic.Bool
+	f.cluster.ControlKey(kmsg.CreateACLs.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		f.cluster.KeepControl()
+		for _, creation := range request.(*kmsg.CreateACLsRequest).Creations {
+			if creation.ResourceName == operator.ReceiverTopic("receiver-b") && creation.Principal == "User:"+operator.ReceiverPrincipal(testReceiver) && !held.Swap(true) {
+				f.cluster.SleepControl(func() { time.Sleep(5 * refreshInterval) })
+			}
+		}
+		return nil, nil, false
+	})
+	f.newReceiver(t, testConfig("receiver-b"))
+	if !held.Load() {
+		t.Fatal("the grant on the peer's key topic was never held")
+	}
+	time.Sleep(5 * refreshInterval)
+	select {
+	case <-member.ended:
+		t.Fatalf("the running receiver exited during a peer's add; logs:\n%s", f.logs.String())
+	default:
+	}
+}
+
 // holdJoins holds every JoinGroup of the pool's custodian group until release closes, and returns the count of those
 // held.
 func holdJoins(f fixture, release <-chan struct{}) *atomic.Int32 {

@@ -6,7 +6,7 @@ lacks, or tasks that can run while you do other work. The remote agent sees
 only the prompt, the files you send and, if given, a pushed git ref it
 clones itself.
 
-1. `wherry receivers --json` lists receivers with each plugin profile's `agent`,
+1. `wherry host receivers --json` lists receivers with each plugin profile's `agent`,
    `labels`, `ready` and `credentials`, each agent credential's `name`, with
    `optional` and `configured`, whether this host has a source for it. Pick
    an agent and build a selector from the labels.
@@ -62,12 +62,10 @@ clones itself.
    `wherry status` alone lists every run this host can see, latest update
    first. `wherry logs RUN_ID` prints the agent's output lines, and
    `wherry logs -f RUN_ID` prints them as the agent runs until the run ends.
-9. `wherry cleanup RUN_ID` deletes the S3 objects of a run that ended while
-   no `wait` ran.
 
-Where the `wherry` MCP server (`wherry mcp`) is configured, its tools do the
-same: `receivers`, `submit`, `status`, `wait`, `cancel`, `events`,
-`logs` and `cleanup`. Its `submit` returns `wait`,
+Where the `wherry` MCP server (`wherry host mcp`) is configured, its tools do the
+same: `receivers`, `submit`, `status`, `wait`, `cancel`, `events`
+and `logs`. Its `submit` returns `wait`,
 the `wherry wait` command to start in the background. Its `wait` tool
 waits up to 45 seconds; call it again while the reply carries `retry_after`. Its `logs`
 returns a page of lines; call it again with `next_offset` while it is set.

@@ -110,8 +110,9 @@ with an attempt wrap or a refusal
 ([Pool keys and the key custodian](concepts.md#pool-keys-and-the-key-custodian)).
 When a new configuration record appears, the receiver stops claiming, lets
 the runs it holds end and exits, so its platform restarts it with the new
-configuration. A record `receiver update --force` wrote has it release the
-tasks it holds at once; runs in flight are then adopted on redelivery.
+configuration. A restart through its platform applies a change at once: the
+receiver stops within its `drain_timeout` and releases the tasks it holds,
+and runs in flight are then adopted on redelivery.
 
 ## Kafka resources
 
@@ -129,7 +130,7 @@ closes and compacts within an hour, and a pool's snapshot topic
 bound, and `retention.bytes=-1`, so no size limit, the broker's
 `log.retention.bytes` included, deletes one sooner; `operator check` verifies
 both, their `cleanup.policy=delete` and their single partition. Partitions
-cannot be removed, so `pool create`, `pool update` and `operator check` refuse a
+cannot be removed, so `pool apply` and `operator check` refuse a
 tasks or events topic with more than one; the remedy is to recreate the pool's topics. A tenant feed and transcript topic also
 have `max.message.bytes=2097152`, the 2 MiB a receiver batches, so a result
 naming 256 outputs fits.
@@ -138,13 +139,13 @@ naming 256 outputs fits.
 | --- | --- | --- |
 | `wherry.operator` | any recording command | `-1` |
 | `wherry.receivers` | any recording command | `604800000` (7 days) |
-| `wherry.pool.<pool>.tasks` | `pool create` | at least `start_by_limit` plus 30 hours, in milliseconds; default `367200000`; `pool update` never lowers it |
-| `wherry.pool.<pool>.events` | `pool create` | at least tasks; `pool create` and `pool update` raise it to tasks and never lower it |
-| `wherry.pool.<pool>.custodian` | `pool create` | `-1`, outside the pool retention bound |
+| `wherry.pool.<pool>.tasks` | `pool apply` | at least `start_by_limit` plus 30 hours, in milliseconds; default `367200000`; `pool apply` never lowers it |
+| `wherry.pool.<pool>.events` | `pool apply` | at least tasks; `pool apply` raises it to tasks and never lowers it |
+| `wherry.pool.<pool>.custodian` | `pool apply` | `-1`, outside the pool retention bound |
 | `wherry.tenant.<tenant>` | `pool entitle`, `host add` | `2592000000` (30 days) |
 | `wherry.tenant.<tenant>.transcript` | `pool entitle`, `host add` | as the tenant feed, `2592000000` (30 days) |
-| `wherry.receiver.<receiver>` | `receiver add` | `-1` |
-| `wherry.receiver.<receiver>.progress` | `receiver add`, `pool create` | at least the pool's tasks topic; never lowered |
+| `wherry.receiver.<receiver>` | `receiver apply` | `-1` |
+| `wherry.receiver.<receiver>.progress` | `receiver apply`, `pool apply` | at least the pool's tasks topic; never lowered |
 | `wherry.host.<tenant>.<host>` | `host add` | `-1` |
 
 The tasks retention keeps `start_by_limit`, the six-hour maximum run time,
@@ -156,14 +157,14 @@ at `-1`, and `wherry.receivers` remains a seven-day liveness topic.
 
 `wherry operator` leaves an existing topic's configuration as it is, except
 that every recording command sets the configuration above on
-`wherry.receivers`, `pool create` and `pool update` set the retention, never
+`wherry.receivers`, `pool apply` sets the retention, never
 lowering it, timestamp type, `cleanup.policy`, `retention.bytes` and `segment.ms` of the pool's tasks and events topics and
-the configuration of its snapshot topic, and `receiver add`, `pool create` and `pool update` set every
+the configuration of its snapshot topic, and `receiver apply` and `pool apply` set every
 configuration above on the progress topics of the pool's live receivers, never lowering their retention.
-`pool entitle`, `pool create` and `pool update` set `max.message.bytes` on
+`pool entitle` and `pool apply` set `max.message.bytes` on
 existing tenant feeds and transcript topics. A
 tenant feed's or transcript topic's retention can be changed with Kafka's
-own tools. `pool create` and `pool entitle` refuse terms that need more than
+own tools. `pool apply` and `pool entitle` refuse terms that need more than
 an entitled tenant's feed or transcript topic keeps, and `wherry operator
 check` reports a topic below its bound, a progress topic that keeps less
 than its pool's tasks topic, and a pool topic whose timestamp type is not

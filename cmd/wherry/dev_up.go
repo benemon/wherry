@@ -928,19 +928,19 @@ func devProfiles(env devEnv, agents []string) []operator.ProfileSettings {
 // devBootstrap makes the operator's admin calls for the instance and registers its host.
 func devBootstrap(ctx context.Context, env devEnv, agents []string, service operator.Service, sources map[string]credential.Source) (busclient.Config, error) {
 	instance := env.instance
-	if err := service.PoolCreate(ctx, devPool, devTerms(agents, env.manifest.DefaultAgent, env.storage())); err != nil {
-		return busclient.Config{}, fmt.Errorf("pool create: %w", err)
+	if err := service.PoolApply(ctx, devPool, devTerms(agents, env.manifest.DefaultAgent, env.storage()), false); err != nil {
+		return busclient.Config{}, fmt.Errorf("pool apply: %w", err)
 	}
 	if err := service.TenantAdd(ctx, devTenant, devPool); err != nil {
 		return busclient.Config{}, fmt.Errorf("pool entitle: %w", err)
 	}
-	if err := service.HostAdd(ctx, devTenant, devHost, instance.env("host", "dev.bundle")); err != nil {
+	if err := service.HostAdd(ctx, devTenant, devHost, instance.env("host", "dev.bundle"), false); err != nil {
 		return busclient.Config{}, fmt.Errorf("host add: %w", err)
 	}
 	receiver := operator.ReceiverConfig{Receiver: devReceiver, Pool: devPool, Capacity: 2, Profiles: devProfiles(env, agents),
 		PluginSHA256: map[string]string{"nomad": env.manifest.Plugin.SHA256}}
 	if err := service.ReceiverAdd(ctx, receiver, instance.env("receiver", "dev-1.bundle")); err != nil {
-		return busclient.Config{}, fmt.Errorf("receiver add: %w", err)
+		return busclient.Config{}, fmt.Errorf("receiver apply: %w", err)
 	}
 	host := busclient.Config{
 		Bundle: instance.env("host", "dev.bundle"), HostKey: instance.env("host", "host.key"), StateDir: instance.env("host", "state"), Credentials: sources,
@@ -1090,9 +1090,9 @@ func printReady(stdout io.Writer, env devEnv) {
 	for _, harness := range m.Agents {
 		switch harness {
 		case "claude", "codex":
-			fmt.Fprintf(stdout, "%-7s %s mcp add wherry-%s -- %s mcp --config-file %s\n", harness+":", harness, env.instance.name, binary, config)
+			fmt.Fprintf(stdout, "%-7s %s mcp add wherry-%s -- %s host mcp --config-file %s\n", harness+":", harness, env.instance.name, binary, config)
 		case "gemini":
-			fmt.Fprintf(stdout, "%-7s gemini mcp add wherry-%s %s mcp --config-file %s\n", "gemini:", env.instance.name, binary, config)
+			fmt.Fprintf(stdout, "%-7s gemini mcp add wherry-%s %s host mcp --config-file %s\n", "gemini:", env.instance.name, binary, config)
 		}
 	}
 }

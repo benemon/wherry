@@ -4,7 +4,7 @@
     "wherry": {
       "type": "stdio",
       "command": "wherry",
-      "args": ["mcp"]
+      "args": ["host", "mcp"]
     }
   }
 }

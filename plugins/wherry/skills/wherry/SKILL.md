@@ -10,8 +10,8 @@ description: >-
 
 wherry sends a task to a receiver on other compute. The receiver runs an
 agent on the task and returns the result over Kafka. The tools come from the
-`wherry` MCP server (`wherry mcp`). Every tool has a `wherry` CLI command
-of the same name.
+`wherry` MCP server (`wherry host mcp`). Every tool has a `wherry host` CLI
+command of the same name.
 
 ## When to delegate
 
@@ -114,8 +114,8 @@ credential in the user's wherry configuration; without them `submit`
 returns `INVALID_ARGUMENT` saying which is missing. `wait` downloads S3
 outputs like any output, and deletes the run's objects from the bucket
 once the run has ended and every one has verified. A run that ended while
-nothing waited for it keeps them until you call `cleanup` with its id;
-`cleanup` refuses a run that has not ended.
+nothing waited for it keeps them until a `wait` on it, or the bucket's
+lifecycle rule, removes them.
 
 ## Collect the result
 
@@ -146,7 +146,7 @@ its key was lost`. Before its `task_started_by`, wherry resubmits it for you
 under a new run ID, with the same input. `wait` follows the new run, and `runs` then lists every run ID
 it followed, the run whose result it returns last. `status` returns the new
 run's ID as `replaced_by`. Use the last run ID for `status`, `events`,
-`logs`, `cancel` and `cleanup`. Do not submit the task again yourself.
+`logs` and `cancel`. Do not submit the task again yourself.
 
 `status` with the id returns the run's latest state without waiting. Without
 an id it lists every run this host can see, latest update first, each with

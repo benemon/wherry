@@ -90,8 +90,8 @@ func TestQuickstartMissingSourceError(t *testing.T) {
 	}
 }
 
-// TestQuickstartOperatorOutput runs the quickstart's wherry operator commands, pool create aside, on its files and finds what receiver add
-// --dry-run and receiver show print in docs/quickstart.md, as two YAML code blocks.
+// TestQuickstartOperatorOutput runs the quickstart's wherry operator commands, pool apply aside, on its files and finds what receiver
+// apply --dry-run and receiver show print in docs/quickstart.md, as two YAML code blocks.
 func TestQuickstartOperatorOutput(t *testing.T) {
 	service := operatorEnv(t)
 	dir := t.TempDir()
@@ -108,12 +108,12 @@ func TestQuickstartOperatorOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.PoolCreate(context.Background(), "build", terms); err != nil {
+	if err := service.PoolApply(context.Background(), "build", terms, false); err != nil {
 		t.Fatal(err)
 	}
 	wherry("pool", "entitle", "build", "--tenant", "acme")
-	dryRun := wherry("receiver", "add", "nomad-1", "--pool", "build", "--config-file", quickstart("nomad-1.yaml"), "--plugin-sha256", "nomad="+fakeSHA256, "--dry-run")
-	wherry("receiver", "add", "nomad-1", "--pool", "build", "--config-file", quickstart("nomad-1.yaml"), "--plugin-sha256", "nomad="+fakeSHA256, "--bundle-file", filepath.Join(dir, "nomad-1.bundle"))
+	dryRun := wherry("receiver", "apply", "nomad-1", "--pool", "build", "-f", quickstart("nomad-1.yaml"), "--plugin-sha256", "nomad="+fakeSHA256, "--dry-run")
+	wherry("receiver", "apply", "nomad-1", "--pool", "build", "-f", quickstart("nomad-1.yaml"), "--plugin-sha256", "nomad="+fakeSHA256, "--bundle-file", filepath.Join(dir, "nomad-1.bundle"))
 	shown := wherry("receiver", "show", "nomad-1")
 	wherry("host", "add", "laptop", "--tenant", "acme", "--bundle-file", filepath.Join(dir, "laptop.bundle"))
 	if shown != dryRun {
@@ -125,6 +125,6 @@ func TestQuickstartOperatorOutput(t *testing.T) {
 	}
 	// The docs show an example pin in place of the test plugin's.
 	if count := strings.Count(string(doc), "```yaml\n"+strings.ReplaceAll(dryRun, fakeSHA256, strings.Repeat("0123456789abcdef", 4))+"```\n"); count != 2 {
-		t.Errorf("docs/quickstart.md holds what receiver add --dry-run and receiver show print in %d code blocks, want 2:\n%s", count, dryRun)
+		t.Errorf("docs/quickstart.md holds what receiver apply --dry-run and receiver show print in %d code blocks, want 2:\n%s", count, dryRun)
 	}
 }

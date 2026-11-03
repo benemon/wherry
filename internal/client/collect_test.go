@@ -23,7 +23,7 @@ func fakeStorageFixture(t *testing.T) (*fixture, *uploadOracle, *testReceiver) {
 	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
 	f.host.storage = o.config
 	maps.Copy(f.host.credentials, o.sources)
-	if err := f.service.PoolCreate(f.ctx, "pool-s3", terms); err != nil {
+	if err := f.service.PoolApply(f.ctx, "pool-s3", terms, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-s3"); err != nil {

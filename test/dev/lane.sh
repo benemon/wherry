@@ -48,10 +48,10 @@ up)
 refusals)
   refused dev up "instance default is already up"
   refused dev init "instance default is up; run wherry dev down first"
-  refused dev reset "instance default is up; run wherry dev down first"
+  refused dev down --reset "instance default is up; run wherry dev down first"
   ;;
 receivers)
-  "$wherry" receivers --config-file "$config" | tee "$work/receivers.txt"
+  "$wherry" host receivers --config-file "$config" | tee "$work/receivers.txt"
   grep -q '^receiver=dev-1 pool=dev .* status=live$' "$work/receivers.txt" || fail "dev-1 is not live in pool dev"
   grep -q '^  profile=mock plugin=nomad agent=mock ready=true ' "$work/receivers.txt" || fail "profile mock is not ready"
   ;;
@@ -116,7 +116,7 @@ down)
   [ -d "$root/cache" ] || fail "cache/ is gone"
   ;;
 reset)
-  "$wherry" dev reset
+  "$wherry" dev down --reset
   [ ! -e "$root/cache" ] || fail "cache/ is left"
   ;;
 *)

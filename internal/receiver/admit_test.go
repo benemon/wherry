@@ -708,7 +708,7 @@ func TestCancelMustBeHostSignedForTheRunsTenant(t *testing.T) {
 	if err := f.service.TenantAdd(f.ctx, "tenant-b", testPool); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.HostAdd(f.ctx, "tenant-b", "host-b", t.TempDir()+"/host-b.yaml"); err != nil {
+	if err := f.service.HostAdd(f.ctx, "tenant-b", "host-b", t.TempDir()+"/host-b.yaml", false); err != nil {
 		t.Fatal(err)
 	}
 	_, otherHost, _ := ed25519.GenerateKey(rand.Reader)
@@ -1028,7 +1028,7 @@ func (f fixture) tenantB(t *testing.T) ed25519.PrivateKey {
 // hostOf registers host for tenant, entitled to the pool, and returns its key.
 func (f fixture) hostOf(t *testing.T, tenant, host string) ed25519.PrivateKey {
 	t.Helper()
-	if err := f.service.HostAdd(f.ctx, tenant, host, t.TempDir()+"/"+host+".yaml"); err != nil {
+	if err := f.service.HostAdd(f.ctx, tenant, host, t.TempDir()+"/"+host+".yaml", false); err != nil {
 		t.Fatal(err)
 	}
 	_, key, _ := ed25519.GenerateKey(rand.Reader)

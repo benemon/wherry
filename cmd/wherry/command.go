@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
 	json "encoding/json/v2"
 	"errors"
 	"flag"
@@ -18,25 +17,51 @@ import (
 	"time"
 
 	busclient "github.com/benemon/wherry/internal/client"
-	"github.com/benemon/wherry/internal/signed"
-	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
 )
 
+// usage is what wherry --help prints: every command under its role's word.
+const usage = `usage: wherry <command>
+
+operator:
+  wherry operator pool apply|entitle|suspend|resume|rotate-key
+  wherry operator host add|remove
+  wherry operator receiver apply|show|remove
+  wherry operator check
+receiver:
+  wherry receiver run
+host:
+  wherry host init|key rotate|receivers|mcp
+  wherry host submit|wait|status|events|logs|cancel
+shortcuts for wherry host submit|wait|status|events|logs|cancel:
+  wherry submit|wait|status|events|logs|cancel
+developer:
+  wherry dev init|up|down [--reset]
+wherry version
+`
+
+// dayToDay are the host's day-to-day commands, which wherry also runs without the host word.
+var dayToDay = map[string]func(context.Context, *busclient.Host, []string, io.Writer, io.Writer) error{
+	"submit": runSubmit, "cancel": runCancel, "wait": runWait, "status": runStatus, "events": runEvents, "logs": runLogs,
+}
+
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: wherry <init|key|key rotate|receivers|submit|cancel|wait|status|events|logs|cleanup|receiver run|operator|mcp|dev|version>")
+		return errors.New(usage)
 	}
-	if args[0] == "receiver" {
+	switch args[0] {
+	case "-h", "--help":
+		fmt.Fprint(stdout, usage)
+		return nil
+	case "receiver":
 		return runReceiver(args[1:], stdout, stderr)
-	}
-	if args[0] == "operator" {
+	case "operator":
 		return runOperator(args[1:], stdout, stderr)
-	}
-	if args[0] == "dev" {
+	case "host":
+		return runHost(args[1:], stdout, stderr)
+	case "dev":
 		return runDev(args[1:], stdout, stderr)
-	}
-	if args[0] == "version" {
+	case "version":
 		if len(args) != 1 {
 			return errors.New("usage: wherry version")
 		}
@@ -58,15 +83,26 @@ func run(args []string, stdout, stderr io.Writer) error {
 		}
 		return nil
 	}
-	if args[0] == "init" {
-		flags := flag.NewFlagSet("init", flag.ContinueOnError)
+	if command, ok := dayToDay[args[0]]; ok {
+		return command(context.Background(), nil, args[1:], stdout, stderr)
+	}
+	return fmt.Errorf("unknown command %q", args[0])
+}
+
+func runHost(args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: wherry host <init|key rotate|receivers|mcp|submit|wait|status|events|logs|cancel>")
+	}
+	switch args[0] {
+	case "init":
+		flags := flag.NewFlagSet("host init", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		configFile := flags.String("config-file", "", "host configuration file")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
 		if flags.NArg() != 0 {
-			return errors.New("usage: wherry init [--config-file FILE]")
+			return errors.New("usage: wherry host init [--config-file FILE]")
 		}
 		config, err := loadConfig(*configFile)
 		if err != nil {
@@ -78,59 +114,39 @@ func run(args []string, stdout, stderr io.Writer) error {
 		}
 		fmt.Fprintln(stdout, keyID)
 		return nil
-	}
-	if args[0] == "key" {
-		rotate := len(args) > 1 && args[1] == "rotate"
-		if rotate {
-			args = args[1:]
+	case "key":
+		const keyUsage = "usage: wherry host key rotate [--config-file FILE]"
+		if len(args) < 2 || args[1] != "rotate" {
+			return errors.New(keyUsage)
 		}
-		flags := flag.NewFlagSet("key", flag.ContinueOnError)
+		flags := flag.NewFlagSet("host key rotate", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		configFile := flags.String("config-file", "", "host configuration file")
-		if err := flags.Parse(args[1:]); err != nil {
+		if err := flags.Parse(args[2:]); err != nil {
 			return err
 		}
 		if flags.NArg() != 0 {
-			return errors.New("usage: wherry key [rotate] [--config-file FILE]")
+			return errors.New(keyUsage)
 		}
 		config, err := loadConfig(*configFile)
 		if err != nil {
 			return err
 		}
-		if rotate {
-			old, next, err := busclient.RotateKey(context.Background(), config)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(stdout, "old_key_id=%s new_key_id=%s\n", old, next)
-			return nil
-		}
-		// Connecting settles a rotation that left the next key behind.
-		if _, err := os.Stat(config.HostKey + ".next"); err == nil {
-			client, err := busclient.Connect(config, log.New(stderr, "", 0))
-			if err != nil {
-				return err
-			}
-			client.Close()
-		}
-		key, err := trust.LoadSigningKeyFile(config.HostKey)
+		old, next, err := busclient.RotateKey(context.Background(), config)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(stdout, signed.KeyID(key.Public().(ed25519.PublicKey)))
+		fmt.Fprintf(stdout, "old_key_id=%s new_key_id=%s\n", old, next)
 		return nil
-	}
-	if args[0] == "mcp" {
+	case "mcp":
 		return runMCP(context.Background(), args[1:])
+	case "receivers":
+		return runReceivers(context.Background(), nil, args[1:], stdout, stderr)
 	}
-	command, ok := map[string]func(context.Context, *busclient.Host, []string, io.Writer, io.Writer) error{
-		"receivers": runReceivers, "submit": runSubmit,
-		"cancel": runCancel, "wait": runWait, "status": runStatus, "events": runEvents, "logs": runLogs, "cleanup": runCleanup,
-	}[args[0]]
-	if !ok {
-		return fmt.Errorf("unknown command %q", args[0])
+	if command, ok := dayToDay[args[0]]; ok {
+		return command(context.Background(), nil, args[1:], stdout, stderr)
 	}
-	return command(context.Background(), nil, args[1:], stdout, stderr)
+	return fmt.Errorf("unknown host command %q", args[0])
 }
 
 // parseAnywhere parses flags given before, between or after the positional arguments, which it returns in order.
@@ -181,7 +197,7 @@ func runReceivers(ctx context.Context, client *busclient.Host, args []string, st
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry receivers [--json]")
+		return errors.New("usage: wherry host receivers [--json]")
 	}
 	client, closeClient, err := commandClient(client, *configFile, stderr)
 	if err != nil {
@@ -248,7 +264,7 @@ func runCancel(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if len(positional) != 1 {
-		return errors.New("usage: wherry cancel RUN_ID")
+		return errors.New("usage: wherry host cancel RUN_ID")
 	}
 	client, closeClient, err := commandClient(client, *configFile, stderr)
 	if err != nil {
@@ -311,7 +327,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE@REF [--git-path PATH] [--git-changes patch|bundle]] [--input FILE[:s3]]... [--credential NAME:file=FILE|NAME:env=VAR]... [--output NAME[:required][:s3]]... [--start-by TIME|DURATION] [--end-by TIME|DURATION]")
+		return errors.New("usage: wherry host submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE@REF [--git-path PATH] [--git-changes patch|bundle]] [--input FILE[:s3]]... [--credential NAME:file=FILE|NAME:env=VAR]... [--output NAME[:required][:s3]]... [--start-by TIME|DURATION] [--end-by TIME|DURATION]")
 	}
 	parts, err := inputParts(inputs)
 	if err != nil {
@@ -448,7 +464,7 @@ var stateCodes = map[wire.TaskState]int{
 const timeoutCode = 6
 
 func runWait(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
-	const waitUsage = "usage: wherry wait RUN_ID [--timeout 2h10m] [--outputs-dir DIR]"
+	const waitUsage = "usage: wherry host wait RUN_ID [--timeout 2h10m] [--outputs-dir DIR]"
 	flags := flag.NewFlagSet("wait", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() {
@@ -537,30 +553,6 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 	return nil
 }
 
-func runCleanup(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
-	flags := flag.NewFlagSet("cleanup", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	configFile := flags.String("config-file", "", "host configuration file")
-	positional, err := parseAnywhere(flags, args)
-	if err != nil {
-		return err
-	}
-	if len(positional) != 1 {
-		return errors.New("usage: wherry cleanup RUN_ID")
-	}
-	client, closeClient, err := commandClient(client, *configFile, stderr)
-	if err != nil {
-		return err
-	}
-	defer closeClient()
-	runID := positional[0]
-	if err := client.Cleanup(ctx, runID); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "run_id=%s\n", runID)
-	return nil
-}
-
 func runStatus(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("status", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -570,7 +562,7 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if len(positional) > 1 {
-		return errors.New("usage: wherry status [RUN_ID]")
+		return errors.New("usage: wherry host status [RUN_ID]")
 	}
 	client, closeClient, err := commandClient(client, *configFile, stderr)
 	if err != nil {
@@ -616,7 +608,7 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 		warnSkipped(stderr, result.Skipped)
 		return nil
 	}
-	return errors.New("usage: wherry status [RUN_ID]")
+	return errors.New("usage: wherry host status [RUN_ID]")
 }
 
 // replyPreview reports whether part is the preview of result's verified reply, which prints whole in its place.
@@ -648,7 +640,7 @@ func runEvents(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if len(positional) != 1 {
-		return errors.New("usage: wherry events RUN_ID")
+		return errors.New("usage: wherry host events RUN_ID")
 	}
 	client, closeClient, err := commandClient(client, *configFile, stderr)
 	if err != nil {
@@ -683,7 +675,7 @@ func runEvents(ctx context.Context, client *busclient.Host, args []string, stdou
 }
 
 func runLogs(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
-	const logsUsage = "usage: wherry logs RUN_ID [-f|--follow]"
+	const logsUsage = "usage: wherry host logs RUN_ID [-f|--follow]"
 	flags := flag.NewFlagSet("logs", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configFile := flags.String("config-file", "", "host configuration file")

@@ -1765,7 +1765,7 @@ func TestAForgedClaimIsServedToALivePoolMemberAlone(t *testing.T) {
 			f.quiet()
 			pool := testPool
 			if test.name == "another pool's member" {
-				if err := f.service.PoolCreate(f.ctx, "pool-b", testTerms()); err != nil {
+				if err := f.service.PoolApply(f.ctx, "pool-b", testTerms(), false); err != nil {
 					t.Fatal(err)
 				}
 				pool = "pool-b"

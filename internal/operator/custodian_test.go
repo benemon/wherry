@@ -15,13 +15,13 @@ import (
 	"github.com/twmb/franz-go/pkg/kadm"
 )
 
-// A pool's snapshot topic is created compacted, with one partition, kept forever and stamped by the broker; pool update
-// restores its configs, and pool create rolls the pool's task and events topics hourly.
+// A pool's snapshot topic is created compacted, with one partition, kept forever and stamped by the broker; pool apply
+// restores its configs, and pool apply rolls the pool's task and events topics hourly.
 func TestSnapshotTopicIsCompactedSinglePartitionAndKeptForever(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	topic := CustodianTopic("pool-a")
@@ -58,7 +58,7 @@ func TestSnapshotTopicIsCompactedSinglePartitionAndKeptForever(t *testing.T) {
 	}
 	setTopicConfig(t, service, topic, "cleanup.policy", "delete")
 	setTopicRetention(t, service, topic, 60000)
-	if err := service.PoolUpdate(ctx, "pool-a", modelTerms(), false); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	if got := configs(topic, "cleanup.policy", "retention.ms", "message.timestamp.type"); !reflect.DeepEqual(got, want) {
@@ -172,7 +172,7 @@ func TestCheckReportsSnapshotTopicAndSegmentDrift(t *testing.T) {
 			_, service, closeFixture := kfakeService(t)
 			defer closeFixture()
 			ctx := context.Background()
-			if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+			if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 				t.Fatal(err)
 			}
 			if err := service.Check(ctx); err != nil {
@@ -198,16 +198,16 @@ func deleteTopicConfig(t *testing.T, service *Service, topic, name string) {
 }
 
 // A tasks topic that holds a task without an envelope but not one with a maximum envelope and its submit wrap is
-// refused by pool update and check.
+// refused by pool apply and check.
 func TestPreflightRefusesATasksTopicTooSmallForAMaximumEnvelope(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	setTopicLimit(t, service, PoolTasksTopic("pool-a"), "88000")
-	for name, err := range map[string]error{"pool update": service.PoolUpdate(ctx, "pool-a", modelTerms(), false), "check": service.Check(ctx)} {
+	for name, err := range map[string]error{"pool apply": service.PoolApply(ctx, "pool-a", modelTerms(), false), "check": service.Check(ctx)} {
 		if err == nil || !strings.Contains(err.Error(), "a task with a maximum envelope record is ") || !strings.Contains(err.Error(), "88000-byte record limit") {
 			t.Fatalf("%s = %v; want the maximum envelope refused against the tasks topic's limit", name, err)
 		}

@@ -751,7 +751,7 @@ func TestAdoptionReadFailureReleases(t *testing.T) {
 func TestAdoptionTrustsPeerProgress(t *testing.T) {
 	f := newFixture(t, resultStream)
 	peerSigning := f.addPeer(t, "receiver-peer", testPool)
-	if err := f.service.PoolCreate(f.ctx, "pool-b", testTerms()); err != nil {
+	if err := f.service.PoolApply(f.ctx, "pool-b", testTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	otherSigning := f.addPeer(t, "receiver-other-pool", "pool-b")
@@ -1254,14 +1254,14 @@ func TestOutcomeFileEndsTheRun(t *testing.T) {
 	}
 }
 
-// conclude reads the pool's terms once: a pool update that lands while Collect runs leaves the output limit the
+// conclude reads the pool's terms once: a pool apply that lands while Collect runs leaves the output limit the
 // outcome file is read under.
 func TestConcludeReadsTermsOnce(t *testing.T) {
 	f := newFixture(t, resultStream)
 	lowered := testTerms()
 	lowered.OutputLimit = 8
 	f.plugin.collecting = func() {
-		if err := f.service.PoolUpdate(f.ctx, testPool, lowered, false); err != nil {
+		if err := f.service.PoolApply(f.ctx, testPool, lowered, false); err != nil {
 			t.Error(err)
 		}
 		if err := f.receiver.refresh(f.ctx); err != nil {

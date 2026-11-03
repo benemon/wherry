@@ -36,7 +36,7 @@ alert on the platform's series it lists follows this runbook.
 
 Confirm it:
 
-1. Run `wherry receivers`. The receiver's `status` is `stale` or `silent`,
+1. Run `wherry host receivers`. The receiver's `status` is `stale` or `silent`,
    or `ended` after a revocation, and `advertisement_age` shows the age of its
    latest advertisement.
 2. Read the receiver's log.
@@ -139,7 +139,7 @@ Confirm it:
    last start failure.
 2. Run `wherry events RUN_ID` to see each attempt and the receiver that
    made it.
-3. Run `wherry receivers`. Check that a `live` receiver offers a profile
+3. Run `wherry host receivers`. Check that a `live` receiver offers a profile
    with `ready=true` for the run's agent, with labels that satisfy the run's
    selector.
 4. Read the receivers' logs for
@@ -175,7 +175,7 @@ Confirm it:
    `run <id>: no answer to the open request for attempt <n>`.
 2. Find the pool's key custodian from its receivers' log lines, as in step 1
    of [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian),
-   and check that it is `live` in `wherry receivers`.
+   and check that it is `live` in `wherry host receivers`.
 3. Read the pool's receivers' logs for lines starting `custodian:`, such
    as `custodian: published pool <pool> key <id> (<reason>)`,
    `custodian: lost the custodian group's assignment for pool <pool>` and
@@ -225,7 +225,7 @@ Confirm it:
    `custodian: leaving pool <pool> with no drain timeout; keeping the pool keys to their deadlines`.
 3. Find the pool's key custodian from its receivers' log lines, as in step 1
    of [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian),
-   and check that it is `live` in `wherry receivers`.
+   and check that it is `live` in `wherry host receivers`.
 
 Then:
 
@@ -239,11 +239,11 @@ Then:
   [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian).
 - For a takeover with no planned stop, crash or lost state directory before
   it, treat the new custodian as suspect and revoke it with
-  `wherry operator receiver revoke`.
+  `wherry operator receiver remove`.
 - For a contested snapshot with no custodian change, find the writer that
   initialised `p.<pool>.custodian`: every member of the pool holds that
   transactional ID. Revoke a suspect receiver with
-  `wherry operator receiver revoke`.
+  `wherry operator receiver remove`.
 
 ## WherryRunsKeyLost
 
@@ -298,7 +298,7 @@ Confirm it:
    for the plugin's own warning, `nomad call failed`,
    `kubernetes call failed` or `systemd call failed`, naming the profile,
    operation and class.
-2. Run `wherry receivers`. A profile whose readiness call fails shows
+2. Run `wherry host receivers`. A profile whose readiness call fails shows
    `ready=false`.
 3. Check the platform's API health with its own tools.
 
@@ -329,7 +329,7 @@ claim renewals (`wherry_renewal_failures_total`) in 5 minutes.
 
 Confirm it:
 
-1. Run `wherry receivers`. A receiver that cannot write its advertisements
+1. Run `wherry host receivers`. A receiver that cannot write its advertisements
    turns `stale`.
 2. Read the receiver's log for `periodic step: <error>`,
    `run <id>: renew: <error>`, `run <id>: read events: <error>` and

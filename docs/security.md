@@ -23,7 +23,7 @@ the agent's credentials or of another task credential. Only the agent's run
 can read its credentials, and the platform's boundary enforces it, as each
 [plugin](plugins.md)'s README states.
 
-`wherry receivers` lists each agent's credential names, marking those this
+`wherry host receivers` lists each agent's credential names, marking those this
 host has no source for, such as
 `credentials=openai-api-key,github-token(missing,optional)`. `wherry
 submit` refuses a task at once, with
@@ -168,10 +168,10 @@ admission: a malformed first task can win its run and then fail at open with
 
 - **Size.** An envelope is at most 64 KiB, and the signed task with its
   envelope must fit the pool's record limit; `submit` measures the actual
-  record. `pool create` sizes the pool against a task with a maximum
+  record. `pool apply` sizes the pool against a task with a maximum
   envelope ([Size a pool against the broker](operations.md#size-a-pool-against-the-broker)).
 - **Time on the broker.** The pool's tasks and events topics keep records for
-  `start_by_limit` plus six hours plus a day, or longer after `pool update`
+  `start_by_limit` plus six hours plus a day, or longer after `pool apply`
   shortens `start_by_limit`, since it never lowers their retention, and roll a segment every hour,
   so retention deletes a record within about an hour of that bound; an
   envelope's exposure is that retention plus the broker's deletion lag.
@@ -242,7 +242,7 @@ pool whose terms list the agent's credentials.
        command: [vault, print, token]
    ```
 
-2. Run `wherry receivers` and check that the agent lists no required
+2. Run `wherry host receivers` and check that the agent lists no required
    credential as `missing`.
 
 3. Submit the task. Give each task credential its target with
@@ -308,14 +308,14 @@ per-workspace keys.
    ```
 
    ```sh
-   wherry operator pool create build --config-file build-terms.yaml
+   wherry operator pool apply build -f build-terms.yaml
    ```
 
    The credential is required unless the entry sets `required: false`, so
    `wherry submit` refuses a task for the agent from a host with no source
    for it.
 
-5. On each host, run `wherry receivers` and check that the agent lists
+5. On each host, run `wherry host receivers` and check that the agent lists
    `build-anthropic-api-key` without `missing`.
 
 ### Rotate a pool's credential

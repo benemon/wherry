@@ -27,7 +27,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if len(pos) == 0 {
-		return errors.New("usage: wherry operator <pool create|pool update|pool entitle|pool suspend|pool resume|pool rotate-key|receiver add|receiver update|receiver show|receiver revoke|host add|host revoke|check>")
+		return errors.New("usage: wherry operator <pool apply|pool entitle|pool suspend|pool resume|pool rotate-key|receiver apply|receiver show|receiver remove|host add|host remove|check>")
 	}
 	broker, caPath := os.Getenv("WHERRY_TRUST_BROKER"), os.Getenv("WHERRY_TRUST_CA")
 	if broker == "" || caPath == "" {
@@ -51,22 +51,9 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 	ctx := context.Background()
 	command := strings.Join(pos[:min(len(pos), 2)], " ")
 	switch command {
-	case "pool create":
+	case "pool apply":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry operator pool create NAME <--config-file FILE|--config-dir DIR>")
-		}
-		path, directory, err := configInput(options)
-		if err != nil {
-			return err
-		}
-		terms, err := readPoolConfig(path, directory)
-		if err != nil {
-			return err
-		}
-		return service.PoolCreate(ctx, pos[2], terms)
-	case "pool update":
-		if len(pos) != 3 {
-			return errors.New("usage: wherry operator pool update NAME <--config-file FILE|--config-dir DIR> [--dry-run]")
+			return errors.New("usage: wherry operator pool apply NAME -f PATH [--dry-run]")
 		}
 		path, directory, err := configInput(options)
 		if err != nil {
@@ -77,11 +64,30 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		_, dryRun := options["dry-run"]
-		return service.PoolUpdate(ctx, pos[2], terms, dryRun)
-	case "receiver add":
+		return service.PoolApply(ctx, pos[2], terms, dryRun)
+	case "receiver apply":
+		_, force := options["force"]
 		_, dryRun := options["dry-run"]
-		if len(pos) != 3 || options["pool"] == "" || options["bundle-file"] == "" && !dryRun {
-			return errors.New("usage: wherry operator receiver add ID --pool POOL <--config-file FILE|--config-dir DIR> --plugin-sha256 TYPE=HEX... <--bundle-file FILE|--dry-run>")
+		if len(pos) != 3 {
+			return errors.New("usage: wherry operator receiver apply NAME [--pool POOL] -f PATH --plugin-sha256 TYPE=HEX... [--bundle-file FILE|--dry-run] | NAME --force --bundle-file FILE")
+		}
+		state, err := service.LoadState(ctx)
+		if err != nil {
+			return err
+		}
+		current, exists := state.Receivers[pos[2]]
+		switch {
+		case exists && force:
+			if options["f"] != "" || options["plugin-sha256"] != "" || dryRun || options["bundle-file"] == "" {
+				return errors.New("usage: wherry operator receiver apply NAME --force --bundle-file FILE: --force gives the receiver a new password and bundle only")
+			}
+			return service.ReceiverReissue(ctx, pos[2], options["bundle-file"])
+		case exists && options["bundle-file"] != "":
+			return errors.New("receiver exists; --force gives it a new password and bundle")
+		case exists && options["pool"] != "" && options["pool"] != current.Pool:
+			return errors.New("receiver cannot move pool")
+		case !exists && (options["pool"] == "" || options["bundle-file"] == "" && !dryRun):
+			return errors.New("usage: wherry operator receiver apply NAME --pool POOL -f PATH --plugin-sha256 TYPE=HEX... <--bundle-file FILE|--dry-run>")
 		}
 		path, directory, err := configInput(options)
 		if err != nil {
@@ -95,32 +101,15 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		config.Receiver, config.Pool = pos[2], options["pool"]
-		if dryRun {
-			if config, err = service.ReceiverCheck(ctx, config); err != nil {
-				return err
-			}
-			return showReceiver(stdout, config)
+		switch {
+		case exists:
+			config, err = service.ReceiverUpdate(ctx, config, dryRun)
+		case dryRun:
+			config, err = service.ReceiverCheck(ctx, config)
+		default:
+			return service.ReceiverAdd(ctx, config, options["bundle-file"])
 		}
-		return service.ReceiverAdd(ctx, config, options["bundle-file"])
-	case "receiver update":
-		if len(pos) != 3 {
-			return errors.New("usage: wherry operator receiver update ID <--config-file FILE|--config-dir DIR> --plugin-sha256 TYPE=HEX... [--force] [--dry-run]")
-		}
-		path, directory, err := configInput(options)
-		if err != nil {
-			return err
-		}
-		config, err := readReceiverConfig(path, directory)
-		if err != nil {
-			return err
-		}
-		if config.PluginSHA256, err = pluginPins(options["plugin-sha256"]); err != nil {
-			return err
-		}
-		config.Receiver = pos[2]
-		_, config.Force = options["force"]
-		_, dryRun := options["dry-run"]
-		if config, err = service.ReceiverUpdate(ctx, config, dryRun); err != nil || !dryRun {
+		if err != nil || !dryRun {
 			return err
 		}
 		return showReceiver(stdout, config)
@@ -168,15 +157,16 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		return nil
 	case "host add":
 		if len(pos) != 3 || options["tenant"] == "" || options["bundle-file"] == "" {
-			return errors.New("usage: wherry operator host add HOST --tenant TENANT --bundle-file FILE")
+			return errors.New("usage: wherry operator host add HOST --tenant TENANT --bundle-file FILE [--force]")
 		}
-		return service.HostAdd(ctx, options["tenant"], pos[2], options["bundle-file"])
-	case "host revoke", "receiver revoke":
+		_, force := options["force"]
+		return service.HostAdd(ctx, options["tenant"], pos[2], options["bundle-file"], force)
+	case "host remove", "receiver remove":
 		if pos[0] == "host" && (len(pos) != 3 || options["tenant"] == "") {
-			return errors.New("usage: wherry operator host revoke HOST --tenant TENANT [--wait DURATION]")
+			return errors.New("usage: wherry operator host remove HOST --tenant TENANT [--wait DURATION]")
 		}
 		if len(pos) != 3 {
-			return errors.New("usage: wherry operator receiver revoke RECEIVER [--wait DURATION]")
+			return errors.New("usage: wherry operator receiver remove RECEIVER [--wait DURATION]")
 		}
 		wait, err := time.ParseDuration(cmp.Or(options["wait"], "0s"))
 		if err != nil {
@@ -279,7 +269,7 @@ func integral(value any) any {
 func operatorArgs(args []string) ([]string, map[string]string, error) {
 	flags := flag.NewFlagSet("operator", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	for _, name := range []string{"pool", "config-file", "config-dir", "bundle-file", "tenant", "wait", "sha256"} {
+	for _, name := range []string{"pool", "f", "bundle-file", "tenant", "wait", "sha256"} {
 		flags.String(name, "", "")
 	}
 	var pins []string
@@ -312,18 +302,16 @@ func operatorArgs(args []string) ([]string, map[string]string, error) {
 	}
 	command := strings.Join(positional[:min(len(positional), 2)], " ")
 	allowed := map[string]map[string]bool{
-		"pool create":     {"config-file": true, "config-dir": true},
-		"pool update":     {"config-file": true, "config-dir": true, "dry-run": true},
-		"receiver add":    {"pool": true, "config-file": true, "config-dir": true, "plugin-sha256": true, "bundle-file": true, "dry-run": true},
-		"receiver update": {"config-file": true, "config-dir": true, "plugin-sha256": true, "force": true, "dry-run": true},
+		"pool apply":      {"f": true, "dry-run": true},
+		"receiver apply":  {"pool": true, "f": true, "plugin-sha256": true, "bundle-file": true, "dry-run": true, "force": true},
 		"receiver show":   {},
 		"pool entitle":    {"tenant": true},
 		"pool suspend":    {},
 		"pool resume":     {},
 		"pool rotate-key": {"suspect-key": true},
-		"host add":        {"tenant": true, "bundle-file": true},
-		"host revoke":     {"tenant": true, "wait": true},
-		"receiver revoke": {"wait": true},
+		"host add":        {"tenant": true, "bundle-file": true, "force": true},
+		"host remove":     {"tenant": true, "wait": true},
+		"receiver remove": {"wait": true},
 		"check":           {},
 	}[command]
 	if allowed != nil {
@@ -353,27 +341,17 @@ func pluginPins(values string) (map[string]string, error) {
 	return pins, nil
 }
 
+// configInput is the -f path and whether it is a directory, which holds a config in the directory form.
 func configInput(options map[string]string) (string, bool, error) {
-	file, dir := options["config-file"], options["config-dir"]
-	if (file == "") == (dir == "") {
-		return "", false, errors.New("exactly one of --config-file or --config-dir is required")
-	}
-	path, directory, flagName := file, false, "--config-file"
-	if dir != "" {
-		path, directory, flagName = dir, true, "--config-dir"
+	path := options["f"]
+	if path == "" {
+		return "", false, errors.New("-f FILE or -f DIR is required")
 	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return "", false, err
 	}
-	if info.IsDir() != directory {
-		kind := "file"
-		if directory {
-			kind = "directory"
-		}
-		return "", false, fmt.Errorf("%s requires a %s: %s", flagName, kind, path)
-	}
-	return path, directory, nil
+	return path, info.IsDir(), nil
 }
 
 func readYAML(path string, value any) error {

@@ -153,13 +153,13 @@ func TestHostAddAppliesPoolQuotasOnRealBroker(t *testing.T) {
 		_, _ = kadm.NewClient(service.SuperUser).AlterUserSCRAMs(ctx, []kadm.DeleteSCRAM{{User: principal, Mechanism: kadm.ScramSha512}}, nil)
 		_, _ = service.appendChecked(ctx, []byte("end."+principal), Record{Kind: "end", Tenant: tenant, Host: host})
 	})
-	if err := service.PoolCreate(ctx, pool, terms); err != nil {
+	if err := service.PoolApply(ctx, pool, terms, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.TenantAdd(ctx, tenant, pool); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, tenant, host, filepath.Join(t.TempDir(), "bundle")); err != nil {
+	if err := service.HostAdd(ctx, tenant, host, filepath.Join(t.TempDir(), "bundle"), false); err != nil {
 		t.Fatal(err)
 	}
 	// A broker describes the quotas only once the alter reaches its metadata.
@@ -201,7 +201,7 @@ func sharePool(t *testing.T) shareTest {
 	terms.LockDurationMS = 15000
 	s := shareTest{service: service, pool: fmt.Sprintf("share-%d", time.Now().UnixNano()), lock: terms.LockDuration()}
 	ctx := context.Background()
-	if err := service.PoolCreate(ctx, s.pool, terms); err != nil {
+	if err := service.PoolApply(ctx, s.pool, terms, false); err != nil {
 		t.Fatal(err)
 	}
 	groupTerms(t, service, s.pool, strconv.Itoa(int(terms.DeliveryLimit)), strconv.FormatInt(int64(terms.LockDurationMS), 10))

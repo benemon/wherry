@@ -112,16 +112,13 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 		want error
 	}{
 		"cancelled": {func(_ *testing.T, _ context.Context, _ brokerPool, cancel context.CancelFunc) { cancel() }, context.Canceled},
-		"forced configuration change": {func(t *testing.T, ctx context.Context, b brokerPool, _ context.CancelFunc) {
-			b.configure(t, ctx, 7, true)
-		}, ErrConfigChanged},
 	} {
 		t.Run(name, func(t *testing.T) {
 			shortIntervals(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 			defer cancel()
 			b := newBrokerPool(t, ctx, address)
-			b.configure(t, ctx, 6, false)
+			b.configure(t, ctx, 6)
 			b.deliveryLimit(t, ctx, 5)
 			opts, kafka, receiverID, pool, tenant, host := b.opts, b.kafka, b.receiver, b.pool, b.tenant, b.host
 			_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
@@ -233,11 +230,11 @@ func (b brokerPool) seal(t *testing.T, ctx context.Context, submission *wire.Sub
 	}
 }
 
-// configure writes the receiver's configuration record with capacity and force.
-func (b brokerPool) configure(t *testing.T, ctx context.Context, capacity int64, force bool) {
+// configure writes the receiver's configuration record with capacity.
+func (b brokerPool) configure(t *testing.T, ctx context.Context, capacity int64) {
 	t.Helper()
 	config := testConfig(b.receiver)
-	config.Pool, config.Capacity, config.Force = b.pool, capacity, force
+	config.Pool, config.Capacity = b.pool, capacity
 	encoded, err := operator.EncodeRecord(operator.Record{Kind: "receiver", Pool: b.pool, Receiver: b.receiver, Config: &config})
 	if err != nil {
 		t.Fatal(err)
@@ -247,7 +244,7 @@ func (b brokerPool) configure(t *testing.T, ctx context.Context, capacity int64,
 	}
 }
 
-// deliveryLimit sets the pool's delivery limit in its terms and on its share group, as pool create does.
+// deliveryLimit sets the pool's delivery limit in its terms and on its share group, as pool apply does.
 func (b brokerPool) deliveryLimit(t *testing.T, ctx context.Context, limit int32) {
 	t.Helper()
 	terms := testTerms()

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -33,6 +34,7 @@ type Service struct {
 	Broker          string
 	CA              string // PEM, copied into bundles
 	DeliveryCeiling int32
+	LockCeilingMS   int64
 }
 
 type Bundle struct {
@@ -98,18 +100,10 @@ func KafkaOpts(broker string, ca []byte, user, password string) ([]kgo.Opt, erro
 	}, nil
 }
 
-// PoolCreate records terms for a new pool and creates its topics and share group.
-func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms) error {
-	return service.poolTerms(ctx, pool, terms, false, false)
-}
-
-// PoolUpdate records new terms for an existing pool and re-applies its share group's delivery limit and lock
-// duration. With dryRun it makes the checks and writes nothing.
-func (service *Service) PoolUpdate(ctx context.Context, pool string, terms Terms, dryRun bool) error {
-	return service.poolTerms(ctx, pool, terms, true, dryRun)
-}
-
-func (service *Service) poolTerms(ctx context.Context, pool string, terms Terms, update, dryRun bool) error {
+// PoolApply records terms for pool and converges its topics and share group: an absent pool is created, a present one
+// with other terms is updated, and one with the same terms has its missing topics completed. With dryRun it makes the
+// checks and writes nothing.
+func (service *Service) PoolApply(ctx context.Context, pool string, terms Terms, dryRun bool) error {
 	if err := validateNames(pool); err != nil {
 		return err
 	}
@@ -135,23 +129,21 @@ func (service *Service) poolTerms(ctx context.Context, pool string, terms Terms,
 	if effective.DeliveryLimit > service.DeliveryCeiling {
 		return fmt.Errorf("delivery limit exceeds broker ceiling %d", service.DeliveryCeiling)
 	}
-	if !update {
-		if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
+	// The broker refuses the share group's lock duration only once the terms are recorded.
+	if service.LockCeilingMS == 0 {
+		if service.LockCeilingMS, err = service.brokerSetting(ctx, "group.share.max.record.lock.duration.ms", func(a, b int64) int64 { return min(a, b) }); err != nil {
 			return err
 		}
 	}
-	current, err := service.LoadState(ctx)
+	if int64(effective.LockDurationMS) > service.LockCeilingMS {
+		return fmt.Errorf("lock_duration %s exceeds the broker's group.share.max.record.lock.duration.ms %s", effective.LockDuration(), time.Duration(service.LockCeilingMS)*time.Millisecond)
+	}
+	current, err := service.loadPoolState(ctx, dryRun)
 	if err != nil {
 		return err
 	}
 	_, exists := current.Pools[pool]
-	switch {
-	// pool create with the recorded terms completes a create that failed after recording them.
-	case exists && !update && !sameTerms(current.Pools[pool], terms):
-		return errors.New("pool exists; change its terms with pool update")
-	case !exists && update:
-		return errors.New("no pool by that name")
-	case exists:
+	if exists {
 		if err := strandedReceivers(current, pool, terms); err != nil {
 			return err
 		}
@@ -165,11 +157,14 @@ func (service *Service) poolTerms(ctx context.Context, pool string, terms Terms,
 	if terms.RecordLimit, err = service.checkLimits(ctx, current, pool, dryRun); err != nil {
 		return err
 	}
+	// The same terms at the same record limit again complete an apply that failed after recording them.
+	recorded := current.Pools[pool]
+	update := exists && (!sameTerms(recorded, terms) || recorded.RecordLimit != terms.RecordLimit)
 	if err := service.checkPoolFeedsRetention(ctx, current, pool, retention.feed); err != nil {
 		return err
 	}
 	if dryRun {
-		return nil
+		return service.onePartition(ctx, true, PoolTasksTopic(pool), PoolEventsTopic(pool))
 	}
 	// Terms with a longer start_by_limit take effect only once the retention they need has.
 	if update {
@@ -202,6 +197,29 @@ func (service *Service) poolTerms(ctx context.Context, pool string, terms Terms,
 		return err
 	}
 	return service.reconcileACLs(ctx, state)
+}
+
+// loadPoolState is the recorded state, creating wherry.operator unless dryRun: a dry run changes nothing, and an absent
+// wherry.operator records nothing.
+func (service *Service) loadPoolState(ctx context.Context, dryRun bool) (State, error) {
+	if !dryRun {
+		if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
+			return State{}, err
+		}
+		return service.LoadState(ctx)
+	}
+	request := kmsg.NewPtrMetadataRequest()
+	requested := kmsg.NewMetadataRequestTopic()
+	requested.Topic = kmsg.StringPtr(OperatorTopic)
+	request.Topics = append(request.Topics, requested)
+	response, err := request.RequestWith(ctx, service.SuperUser)
+	if err != nil {
+		return State{}, err
+	}
+	if len(response.Topics) == 1 && response.Topics[0].ErrorCode == kerr.UnknownTopicOrPartition.Code {
+		return NewState(), nil
+	}
+	return service.LoadState(ctx)
 }
 
 // poolTopics creates pool's tasks and events topics and converges them, and its live receivers' progress topics, on
@@ -246,7 +264,7 @@ func strandedReceivers(state State, pool string, terms Terms) error {
 	return nil
 }
 
-// sameTerms reports whether terms are recorded's but for the record limit, which pool create reads from the broker.
+// sameTerms reports whether terms are recorded's but for the record limit, which pool apply reads from the broker.
 func sameTerms(recorded, terms Terms) bool {
 	terms = withDefaults(terms)
 	terms.RecordLimit = recorded.RecordLimit
@@ -262,7 +280,7 @@ func (service *Service) ReceiverCheck(ctx context.Context, config ReceiverConfig
 		return ReceiverConfig{}, err
 	}
 	if _, exists := state.Receivers[config.Receiver]; exists {
-		return ReceiverConfig{}, errors.New("receiver exists; change its configuration with receiver update")
+		return ReceiverConfig{}, errors.New("receiver exists")
 	}
 	terms, ok := state.Pools[config.Pool]
 	if !ok {
@@ -275,16 +293,16 @@ func (service *Service) ReceiverCheck(ctx context.Context, config ReceiverConfig
 }
 
 func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, bundlePath string) (err error) {
-	if _, err := service.ReceiverCheck(ctx, config); err != nil {
-		return err
-	}
-	bundle, err := createBundle(bundlePath)
+	bundle, err := createBundle(bundlePath, false)
 	if err != nil {
 		return err
 	}
 	defer closeBundle(bundle, &err)
+	if _, err := service.ReceiverCheck(ctx, config); err != nil {
+		return err
+	}
 	record := Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &config}
-	state, err := service.appendChecked(ctx, []byte(config.Receiver), record)
+	state, _, err := service.planRecord(ctx, record)
 	if err != nil {
 		return err
 	}
@@ -298,10 +316,49 @@ func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, 
 	if err := service.progressTopics(ctx, state, config.Pool); err != nil {
 		return err
 	}
+	// A live peer that reads the record before it may read the new receiver's topics exits (agb-yk39).
 	if err := service.reconcileACLs(ctx, state); err != nil {
 		return err
 	}
+	if _, err := service.appendChecked(ctx, []byte(config.Receiver), record); err != nil {
+		return err
+	}
 	return writeBundle(bundle, Bundle{service.Broker, service.CA, ReceiverPrincipal(config.Receiver), password})
+}
+
+// ReceiverReissue gives a live receiver a new password and writes its bundle to bundlePath, replacing any file there.
+// Its configuration record is untouched; Kafka keeps one SCRAM credential per user, so the old password stops working.
+func (service *Service) ReceiverReissue(ctx context.Context, receiver, bundlePath string) (err error) {
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return err
+	}
+	if _, ok := state.Receivers[receiver]; !ok || state.Ended[ReceiverPrincipal(receiver)] {
+		return errors.New("no live receiver by that name")
+	}
+	return service.reissue(ctx, ReceiverPrincipal(receiver), bundlePath)
+}
+
+// reissue gives principal a new password and writes its bundle to bundlePath, replacing any file there. Once the
+// password changes, a failure leaves the old bundle, which no longer works.
+func (service *Service) reissue(ctx context.Context, principal, bundlePath string) (err error) {
+	rotated := false
+	defer func() {
+		if err != nil && rotated {
+			err = fmt.Errorf("%w: %s has a new password, so its old bundle no longer works; run the command with --force again to write a new bundle", err, principal)
+		}
+	}()
+	bundle, err := createBundle(bundlePath, true)
+	if err != nil {
+		return err
+	}
+	defer closeBundle(bundle, &err)
+	password, err := service.upsertUser(ctx, principal)
+	if err != nil {
+		return err
+	}
+	rotated = true
+	return writeBundle(bundle, Bundle{service.Broker, service.CA, principal, password})
 }
 
 // ReceiverUpdate records a new configuration for an existing receiver in its
@@ -343,18 +400,45 @@ func asRecorded(record Record) (ReceiverConfig, error) {
 	return *decoded.Config, nil
 }
 
-func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath string) (err error) {
-	bundle, err := createBundle(bundlePath)
+// HostAdd provisions host in tenant and writes its bundle to bundlePath. A host that exists is refused unless force,
+// which gives it a new password and replaces the bundle at bundlePath, leaving its record untouched.
+func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath string, force bool) (err error) {
+	// Without force the bundle's file is reserved before anything changes in Kafka.
+	var bundle *bundleFile
+	if !force {
+		if bundle, err = createBundle(bundlePath, false); err != nil {
+			return err
+		}
+		defer closeBundle(bundle, &err)
+	}
+	if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
+		return err
+	}
+	current, err := service.LoadState(ctx)
 	if err != nil {
 		return err
 	}
-	defer closeBundle(bundle, &err)
+	principal := TenantPrincipal(tenant, host)
+	if _, exists := current.Hosts[principal]; exists {
+		if !force {
+			return errors.New("host exists; --force gives it a new password and bundle")
+		}
+		if current.Ended[principal] {
+			return errors.New("host cannot return after its membership end")
+		}
+		return service.reissue(ctx, principal, bundlePath)
+	}
+	if force {
+		if bundle, err = createBundle(bundlePath, true); err != nil {
+			return err
+		}
+		defer closeBundle(bundle, &err)
+	}
 	record := Record{Kind: "host", Tenant: tenant, Host: host}
 	state, err := service.appendChecked(ctx, []byte(tenant+"."+host), record)
 	if err != nil {
 		return err
 	}
-	principal := TenantPrincipal(tenant, host)
 	password, err := service.upsertUser(ctx, principal)
 	if err != nil {
 		return err
@@ -454,7 +538,7 @@ func (service *Service) LoadState(ctx context.Context) (State, error) {
 // the most a receiver's producer batches: a result lists a reference artifact for each output it returns.
 const FeedRecordLimit = 2 << 20
 
-// feedConfigs are the configs host add, pool entitle, pool create and pool update set on tenant feeds beyond the
+// feedConfigs are the configs host add, pool entitle and pool apply set on tenant feeds beyond the
 // retention they are created with.
 var feedConfigs = map[string]string{"max.message.bytes": strconv.Itoa(FeedRecordLimit)}
 
@@ -576,29 +660,8 @@ func (service *Service) appendChecked(ctx context.Context, key []byte, record Re
 
 // appendRecord is appendChecked that also returns the record's wherry.operator offset.
 func (service *Service) appendRecord(ctx context.Context, key []byte, record Record) (State, int64, error) {
-	if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
-		return State{}, 0, err
-	}
-	if err := service.createTopicsWith(ctx, receiversConfigs, ReceiversTopic); err != nil {
-		return State{}, 0, err
-	}
-	// A topic created with older configs converges on the next operator write.
-	if err := service.configureTopics(ctx, receiversConfigs, ReceiversTopic); err != nil {
-		return State{}, 0, err
-	}
-	state, err := service.LoadState(ctx)
+	state, encoded, err := service.planRecord(ctx, record)
 	if err != nil {
-		return State{}, 0, err
-	}
-	encoded, err := EncodeRecord(record)
-	if err != nil {
-		return State{}, 0, err
-	}
-	decoded, _ := DecodeRecord(encoded)
-	if err := apply(&state, decoded); err != nil {
-		return State{}, 0, err
-	}
-	if err := state.CheckNames(); err != nil {
 		return State{}, 0, err
 	}
 	produced, err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: OperatorTopic, Key: key, Value: encoded}).First()
@@ -606,6 +669,36 @@ func (service *Service) appendRecord(ctx context.Context, key []byte, record Rec
 		return State{}, 0, fmt.Errorf("write operator record: %w", err)
 	}
 	return state, produced.Offset, nil
+}
+
+// planRecord is the state once record is appended and record encoded, refusing a record the state refuses.
+func (service *Service) planRecord(ctx context.Context, record Record) (State, []byte, error) {
+	if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
+		return State{}, nil, err
+	}
+	if err := service.createTopicsWith(ctx, receiversConfigs, ReceiversTopic); err != nil {
+		return State{}, nil, err
+	}
+	// A topic created with older configs converges on the next operator write.
+	if err := service.configureTopics(ctx, receiversConfigs, ReceiversTopic); err != nil {
+		return State{}, nil, err
+	}
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return State{}, nil, err
+	}
+	encoded, err := EncodeRecord(record)
+	if err != nil {
+		return State{}, nil, err
+	}
+	decoded, _ := DecodeRecord(encoded)
+	if err := apply(&state, decoded); err != nil {
+		return State{}, nil, err
+	}
+	if err := state.CheckNames(); err != nil {
+		return State{}, nil, err
+	}
+	return state, encoded, nil
 }
 
 func (service *Service) createTopics(ctx context.Context, retentionMS string, topics ...string) error {
@@ -924,6 +1017,9 @@ func (service *Service) onePartition(ctx context.Context, absent bool, topics ..
 		if absent && topic.ErrorCode == kerr.UnknownTopicOrPartition.Code {
 			continue
 		}
+		if err := kerr.ErrorForCode(topic.ErrorCode); err != nil {
+			return fmt.Errorf("topic %s: %w", *topic.Topic, err)
+		}
 		if partitions := len(topic.Partitions); partitions != 1 {
 			return fmt.Errorf("topic %s has %d partitions, want 1", *topic.Topic, partitions)
 		}
@@ -1156,23 +1252,63 @@ var feedRecords = []struct {
 	{"a transcript chunk", 933498},
 }
 
-func createBundle(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+// createBundle opens the file that writeBundle fills and closeBundle completes. Without replace it creates path itself,
+// refusing an existing file. With replace it opens a temporary file beside path that closeBundle renames to path, so
+// a reader of path never sees part of a bundle.
+func createBundle(path string, replace bool) (*bundleFile, error) {
+	var file *os.File
+	var err error
+	if replace {
+		file, err = os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	} else {
+		file, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &bundleFile{file, path, replace}, nil
 }
 
-// closeBundle removes a bundle whose command failed, so a retry can create it.
-func closeBundle(file *os.File, err *error) {
-	file.Close()
-	if *err != nil {
-		os.Remove(file.Name())
+type bundleFile struct {
+	*os.File
+	path    string
+	replace bool
+}
+
+// Tests replace these to fail a bundle's write, sync, close, rename or removal.
+var (
+	writeFile  = (*os.File).Write
+	syncFile   = (*os.File).Sync
+	closeFile  = (*os.File).Close
+	renameFile = os.Rename
+	removeFile = os.Remove
+)
+
+// closeBundle syncs and closes a bundle and, with replace, renames it to its path. On failure it removes the file it
+// created, so a retry can create it, and says so when it cannot: the file holds a password.
+func closeBundle(bundle *bundleFile, err *error) {
+	if *err == nil {
+		*err = syncFile(bundle.File)
+	}
+	if closeErr := closeFile(bundle.File); *err == nil {
+		*err = closeErr
+	}
+	if *err == nil && bundle.replace {
+		*err = renameFile(bundle.Name(), bundle.path)
+	}
+	if *err == nil {
+		return
+	}
+	if removeErr := removeFile(bundle.Name()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		*err = fmt.Errorf("%w; %s could not be removed and may hold the new password: %w", *err, bundle.Name(), removeErr)
 	}
 }
 
-func writeBundle(file *os.File, bundle Bundle) error {
-	encoded, err := yaml.Marshal(bundle)
+func writeBundle(bundle *bundleFile, contents Bundle) error {
+	encoded, err := yaml.Marshal(contents)
 	if err != nil {
 		return err
 	}
-	_, err = file.Write(encoded)
+	_, err = writeFile(bundle.File, encoded)
 	return err
 }

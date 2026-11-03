@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/ed25519"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,56 +11,31 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/operator"
-	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 )
 
-func TestConfigInputRequiresExactlyOne(t *testing.T) {
+// -f takes a file, or a directory holding a config in the directory form; pool apply and receiver apply refuse
+// --config-file and --config-dir.
+func TestConfigInputTakesAFileOrADirectory(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	commands := [][]string{
-		{"pool", "create", "pool-a"},
-		{"pool", "update", "pool-a"},
-		{"receiver", "add", "receiver-a"},
-		{"receiver", "update", "receiver-a"},
+	for path, want := range map[string]bool{file: false, dir: true} {
+		if got, directory, err := configInput(map[string]string{"f": path}); err != nil || got != path || directory != want {
+			t.Errorf("configInput(-f %s) = %s, %t, %v; want the path and directory %t", path, got, directory, err, want)
+		}
 	}
-	for _, command := range commands {
-		name := strings.Join(command[:2], " ")
-		t.Run(name, func(t *testing.T) {
-			for label, options := range map[string][]string{
-				"neither": nil,
-				"both":    {"--config-file", file, "--config-dir", dir},
-			} {
-				t.Run(label, func(t *testing.T) {
-					_, parsed, err := operatorArgs(append(command, options...))
-					if err != nil {
-						t.Fatal(err)
-					}
-					_, _, err = configInput(parsed)
-					if err == nil || !strings.Contains(err.Error(), "--config-file") || !strings.Contains(err.Error(), "--config-dir") {
-						t.Fatalf("config input = %v, want an error naming both flags", err)
-					}
-				})
-			}
-		})
+	if _, _, err := configInput(map[string]string{}); err == nil || !strings.Contains(err.Error(), "-f") {
+		t.Errorf("configInput without -f = %v, want an error naming -f", err)
 	}
-	for name, options := range map[string]map[string]string{
-		"directory passed to config-file": {"config-file": dir},
-		"file passed to config-dir":       {"config-dir": file},
-	} {
-		t.Run(name, func(t *testing.T) {
-			_, _, err := configInput(options)
-			flagName := "--config-file"
-			if options["config-dir"] != "" {
-				flagName = "--config-dir"
+	for _, command := range [][]string{{"pool", "apply", "pool-a"}, {"receiver", "apply", "receiver-a"}} {
+		for _, option := range []string{"--config-file", "--config-dir"} {
+			if _, _, err := operatorArgs(append(command, option, file)); err == nil {
+				t.Errorf("operatorArgs(%q %s) accepted the option", command, option)
 			}
-			if err == nil || !strings.Contains(err.Error(), flagName) {
-				t.Fatalf("config input = %v, want an error naming %s", err, flagName)
-			}
-		})
+		}
 	}
 }
 
@@ -187,11 +161,11 @@ func TestPoolConfigDirectoryRejectsInvalidLayout(t *testing.T) {
 
 func TestOperatorArgsRejectsUnknownOptions(t *testing.T) {
 	for _, args := range [][]string{
-		{"pool", "create", "pool-a", "--terms", "pool.yaml"},
-		{"receiver", "update", "receiver-a", "--config", "receiver.yaml"},
+		{"pool", "apply", "pool-a", "--terms", "pool.yaml"},
+		{"receiver", "apply", "receiver-a", "--config", "receiver.yaml"},
 		{"host", "add", "host-a", "--tenant", "tenant-a", "--bundle", "host.yaml"},
-		{"pool", "create", "pool-a", "--tenant", "tenant-a"},
-		{"receiver", "add", "receiver-a", "--pool", "pool-a", "--platform-credential-file", "nomad=token"},
+		{"pool", "apply", "pool-a", "--tenant", "tenant-a"},
+		{"receiver", "apply", "receiver-a", "--pool", "pool-a", "--platform-credential-file", "nomad=token"},
 	} {
 		_, _, err := operatorArgs(args)
 		option := strings.TrimPrefix(args[len(args)-2], "-")
@@ -206,8 +180,7 @@ func TestHostConfigFileAndIgnoredEnvironment(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("WHERRY_"+"CONFIG", filepath.Join(t.TempDir(), "bad.yaml"))
 	keyPath := filepath.Join(home, "host.key")
-	key, err := trust.GenerateSigningKeyFile(keyPath)
-	if err != nil {
+	if _, err := trust.GenerateSigningKeyFile(keyPath); err != nil {
 		t.Fatal(err)
 	}
 	configDir := filepath.Join(home, ".config", "wherry")
@@ -220,16 +193,13 @@ func TestHostConfigFileAndIgnoredEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, args := range map[string][]string{
-		"explicit": {"key", "--config-file", "~/.config/wherry/config.yaml"},
-		"default":  {"key"},
+		"explicit": {"host", "init", "--config-file", "~/.config/wherry/config.yaml"},
+		"default":  {"host", "init"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			if err := run(args, &stdout, &stderr); err != nil {
-				t.Fatal(err)
-			}
-			if want := signed.KeyID(key.Public().(ed25519.PublicKey)) + "\n"; stdout.String() != want || stderr.Len() != 0 {
-				t.Fatalf("stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
+			if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "missing.yaml") || strings.Contains(err.Error(), "bad.yaml") {
+				t.Fatalf("host init = %v, want the default path's config read and its bundle looked for", err)
 			}
 		})
 	}
@@ -238,17 +208,22 @@ func TestHostConfigFileAndIgnoredEnvironment(t *testing.T) {
 func TestHostCommandsReadConfigFile(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing.yaml")
 	for name, args := range map[string][]string{
-		"init":      {"init", "--config-file", missing},
-		"key":       {"key", "--config-file", missing},
-		"receivers": {"receivers", "--config-file", missing},
-		"submit":    {"submit", "--config-file", missing, "--prompt", "work"},
-		"cancel":    {"cancel", "--config-file", missing, "run-a"},
-		"wait":      {"wait", "run-a", "--config-file", missing},
-		"logs":      {"logs", "run-a", "--config-file", missing},
-		"status":    {"status", "--config-file", missing, "run-a"},
-		"events":    {"events", "--config-file", missing, "run-a"},
-		"cleanup":   {"cleanup", "--config-file", missing, "run-a"},
-		"mcp":       {"mcp", "--config-file", missing},
+		"host init":       {"host", "init", "--config-file", missing},
+		"host key rotate": {"host", "key", "rotate", "--config-file", missing},
+		"host receivers":  {"host", "receivers", "--config-file", missing},
+		"host submit":     {"host", "submit", "--config-file", missing, "--prompt", "work"},
+		"host cancel":     {"host", "cancel", "--config-file", missing, "run-a"},
+		"host wait":       {"host", "wait", "run-a", "--config-file", missing},
+		"host logs":       {"host", "logs", "run-a", "--config-file", missing},
+		"host status":     {"host", "status", "--config-file", missing, "run-a"},
+		"host events":     {"host", "events", "--config-file", missing, "run-a"},
+		"host mcp":        {"host", "mcp", "--config-file", missing},
+		"submit":          {"submit", "--config-file", missing, "--prompt", "work"},
+		"cancel":          {"cancel", "--config-file", missing, "run-a"},
+		"wait":            {"wait", "run-a", "--config-file", missing},
+		"logs":            {"logs", "run-a", "--config-file", missing},
+		"status":          {"status", "--config-file", missing, "run-a"},
+		"events":          {"events", "--config-file", missing, "run-a"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

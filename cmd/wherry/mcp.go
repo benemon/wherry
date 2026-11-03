@@ -49,7 +49,7 @@ func runMCP(ctx context.Context, args []string) error {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry mcp [--config-file FILE]")
+		return errors.New("usage: wherry host mcp [--config-file FILE]")
 	}
 	config, err := loadConfig(*configFile)
 	if err != nil {
@@ -269,10 +269,6 @@ type waitReply struct {
 	Redacted    map[string]int          `json:"redacted,omitempty" jsonschema:"redaction markers in the message and artifacts by the credential or S3 object each names"`
 	Skipped     int                     `json:"skipped,omitempty"`
 	Runs        []string                `json:"runs,omitempty" jsonschema:"set when the run lost its pool key before it started and was resubmitted: every run followed, the run whose outcome this is last"`
-}
-
-type cleanupOutput struct {
-	ID string `json:"id"`
 }
 
 type cancelOutput struct {
@@ -600,21 +596,6 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		return nil, output, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
-		Name: "cleanup",
-		Description: "Delete every object under a run's prefix in its pool's bucket: its S3 inputs and outputs. wait does this once a " +
-			"run is terminal and its S3 outputs verify; use cleanup for a run that ended while nothing waited for it.",
-		Annotations: &mcp.ToolAnnotations{IdempotentHint: true},
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, cleanupOutput, error) {
-		client, err := connect()
-		if err != nil {
-			return nil, cleanupOutput{}, failure(err)
-		}
-		if err := client.Cleanup(ctx, input.ID); err != nil {
-			return nil, cleanupOutput{}, failure(err)
-		}
-		return nil, cleanupOutput{ID: input.ID}, nil
-	})
 	return server
 }
 

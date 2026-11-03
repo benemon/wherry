@@ -247,7 +247,7 @@ func TestRoundTrip(t *testing.T) {
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
 	service := &operator.Service{SuperUser: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, CA: ca, DeliveryCeiling: 10}
+		Broker: address, CA: ca, DeliveryCeiling: 10, LockCeilingMS: 60000}
 	dir := t.TempDir()
 	optional := false
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{
@@ -265,10 +265,10 @@ func TestRoundTrip(t *testing.T) {
 			Config: map[string]any{"outputs": true, "finish": true, "inline_limit": 1000, "credential": "fake-token"}}},
 		PluginSHA256: map[string]string{"fake": fakeSHA256}}
 	for _, step := range []func() error{
-		func() error { return service.PoolCreate(ctx, "pool-a", terms) },
+		func() error { return service.PoolApply(ctx, "pool-a", terms, false) },
 		func() error { return service.TenantAdd(ctx, "tenant-a", "pool-a") },
-		func() error { return service.HostAdd(ctx, "tenant-a", "host-a", hostBundle) },
-		func() error { return service.HostAdd(ctx, "tenant-a", "host-b", otherBundle) },
+		func() error { return service.HostAdd(ctx, "tenant-a", "host-a", hostBundle, false) },
+		func() error { return service.HostAdd(ctx, "tenant-a", "host-b", otherBundle, false) },
 		func() error { return service.ReceiverAdd(ctx, config, receiverBundle) },
 	} {
 		if err := step(); err != nil {
@@ -669,14 +669,14 @@ func TestPlatformCredentialIsRedactedFromTheReceiverLog(t *testing.T) {
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
 	service := &operator.Service{SuperUser: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, CA: ca, DeliveryCeiling: 10}
+		Broker: address, CA: ca, DeliveryCeiling: 10, LockCeilingMS: 60000}
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []operator.ProfileSettings{
 		{Name: "fake", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": "fake-token", "log_credential": true}},
 	}, PluginSHA256: map[string]string{"fake": fakeSHA256}}
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "receiver.yaml")
-	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.ReceiverAdd(ctx, config, bundlePath); err != nil {
