@@ -552,3 +552,44 @@ func TestReceiverApplyNewBrokerKeepsThePassword(t *testing.T) {
 		t.Fatalf("bundle %v, %v; want mode 0600", info, err)
 	}
 }
+
+// receiver apply of an existing receiver whose bundle is not in the working directory is refused before it records
+// anything: the new broker could reach the receiver only in a bundle.
+func TestReceiverApplyWithoutItsBundleIsRefused(t *testing.T) {
+	service := operatorEnv(t)
+	ctx := context.Background()
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
+		t.Fatal(err)
+	}
+	file := func(broker string) string {
+		return filepath.Join(writeTree(t, map[string]string{"receiver.yaml": "pool: pool-a\nbroker: " + broker + "\nplugin_sha256: {nomad: " + fakeSHA256 + "}\n" + basePlugin + item("name: claude\nagent: claude\n", "      ")}), "receiver.yaml")
+	}
+	if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", file(service.Broker)}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join("bundles", "receivers", "receiver-a.bundle")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	end := func() int64 {
+		t.Helper()
+		offsets, err := kadm.NewClient(service.Operator).ListEndOffsets(ctx, operator.OperatorTopic)
+		if err != nil || offsets.Error() != nil {
+			t.Fatal(err, offsets.Error())
+		}
+		offset, _ := offsets.Lookup(operator.OperatorTopic, 0)
+		return offset.Offset
+	}
+	before := end()
+	want := path + " does not exist, so a new broker could not reach the receiver; --force gives the receiver a new password and bundle"
+	if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", file("kafka.platform.internal:9093")}, io.Discard, io.Discard); err == nil || err.Error() != want {
+		t.Fatalf("receiver apply without its bundle = %v; want %q", err, want)
+	}
+	if after := end(); after != before {
+		t.Fatalf("a refused receiver apply moved wherry.operator's end from %d to %d", before, after)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a refused receiver apply left %s: %v", path, err)
+	}
+}

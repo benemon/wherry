@@ -98,14 +98,24 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		case !exists && config.Pool == "":
 			return fmt.Errorf("%s names no pool", path)
 		case exists:
-			recorded, err := service.ReceiverUpdate(ctx, config, dryRun)
+			recorded, err := service.ReceiverUpdate(ctx, config, true)
 			if err != nil {
 				return err
 			}
 			if dryRun {
 				return showReceiver(stdout, recorded)
 			}
-			return rebroker(bundle, config.Broker)
+			// Only the bundle's password can carry a new broker, so a missing bundle is refused before recording.
+			kept, err := operator.ReadBundle(bundle)
+			if errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("%s does not exist, so a new broker could not reach the receiver; --force gives the receiver a new password and bundle", bundle)
+			} else if err != nil {
+				return err
+			}
+			if _, err := service.ReceiverUpdate(ctx, config, false); err != nil {
+				return err
+			}
+			return rebroker(bundle, kept, config.Broker)
 		case dryRun:
 			recorded, err := service.ReceiverCheck(ctx, config)
 			if err != nil {

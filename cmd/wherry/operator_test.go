@@ -221,7 +221,11 @@ func TestReceiverShowAndDryRun(t *testing.T) {
 	}
 	recorded := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 3, Profiles: []operator.ProfileSettings{{Name: "old", Plugin: "nomad", Agent: "claude"}},
 		PluginSHA256: map[string]string{"nomad": fakeSHA256}}
-	if err := service.ReceiverAdd(ctx, recorded, service.Broker, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+	bundle, err := bundlePath(".", "receivers", "receiver-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ReceiverAdd(ctx, recorded, service.Broker, bundle); err != nil {
 		t.Fatal(err)
 	}
 	records := func() int64 {

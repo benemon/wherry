@@ -512,7 +512,9 @@ configuration, with a `plugin_sha256` pin for each plugin type, as
 The password stays as it is. When the configuration's `broker` differs from
 the address in `bundles/receivers/nomad-1.bundle`, `receiver apply` rewrites
 the bundle with the new address and the same password; deliver it to the
-receiver host before the old address stops working. Planned changes go
+receiver host before the old address stops working. Without the bundle in
+`bundles/receivers/`, `receiver apply` records nothing and fails;
+`receiver apply nomad-1 --force` writes a new bundle with a new password. Planned changes go
 through `receiver apply`, which drains with no window.
 
 To apply a change at once, restart the receiver through its platform, as

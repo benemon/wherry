@@ -445,7 +445,9 @@ pool. The record holds only the pins the file gives, so give one for every
 plugin type. The principal and password stay as they are. When the file's
 broker address differs from the one in the receiver's bundle in
 `bundles/receivers/`, it rewrites the bundle with the new address and the
-same password. When the receiver reads a record that differs
+same password. Without that bundle it records nothing and fails, naming the
+missing bundle and that `--force` gives the receiver a new password and
+bundle. When the receiver reads a record that differs
 from the configuration it runs, it stops claiming, lets each run it holds
 end and commit with no time limit, then exits, and its platform restarts it.
 To apply a change at once, restart the receiver through its platform, as

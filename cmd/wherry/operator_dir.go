@@ -208,14 +208,10 @@ func bundlePath(dir, kind string, names ...string) (string, error) {
 	return filepath.Join(path, names[len(names)-1]+".bundle"), nil
 }
 
-// rebroker rewrites the bundle at path with its password when it names a broker other than broker.
-func rebroker(path, broker string) error {
-	bundle, err := operator.ReadBundle(path)
-	if errors.Is(err, os.ErrNotExist) || err == nil && bundle.Broker == broker {
+// rebroker rewrites bundle, read from path, with its password when it names a broker other than broker.
+func rebroker(path string, bundle operator.Bundle, broker string) error {
+	if bundle.Broker == broker {
 		return nil
-	}
-	if err != nil {
-		return err
 	}
 	bundle.Broker = broker
 	return operator.ReplaceBundle(path, bundle)
