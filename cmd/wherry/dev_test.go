@@ -54,8 +54,13 @@ const manifestFixture = `{
 // directories, and returns the default instance.
 func devFixture(t *testing.T) devInstance {
 	t.Helper()
+	// dev up records host paths with their symlinks resolved, and macOS's temporary directory is under the /tmp link.
 	for _, variable := range []string{"HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"} {
-		t.Setenv(variable, t.TempDir())
+		dir, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(variable, dir)
 	}
 	t.Setenv("WHERRY_CONFIG", "")
 	instance, err := openInstance("default")
