@@ -27,14 +27,24 @@ The host's paths are the same on every OS, macOS included:
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `bundle` | string | required | the host's bundle; `host init <bundle>` places it at `bundle.yaml` in the configuration directory and names it here |
-| `ca_file` | string | `ca.pem` in the configuration directory if that file exists, else none | PEM CA certificates the host trusts the broker with; with none, the system's trusted roots |
-| `host_key` | string | `host.key` in the configuration directory | host signing key file, a private JWK; a key file in another format fails to load |
-| `state_dir` | string | the state directory | run records |
-| `credentials` | mapping | none | credential name to its [source](security.md#credential-sources), exactly one of `file: PATH`, `env: VAR` and `command: [PROGRAM, ARG...]` |
-| `git` | list | none | `{url, credential, host_key}` entries, each giving a task whose git remote starts with `url` the credential `credential` and the OpenSSH `known_hosts` file `host_key`; `credential` is optional, and `host_key` is required for an `ssh://` remote and refused for an `https://` one ([git credentials](security.md#git-credentials)) |
-| `storage` | mapping | none | pool name to `{access_key, secret_key}`: the names of the credentials in `credentials` holding the access key and secret key of the host's S3 credential for that pool's bucket; a pool without an entry has no S3 lane on this host |
-| `input_roots` | list | the MCP server's working directory | absolute paths of existing directories the MCP server sends inputs from; the CLI reads any path it is given |
+| `bundle` | path | required | Read the host's bundle from this file. |
+| `ca_file` | path | `ca.pem` in the configuration directory if present | Trust these PEM CA certificates for the broker connection. |
+| `host_key` | path | `host.key` in the configuration directory | Read the host's private Ed25519 JWK. |
+| `state_dir` | path | the host state directory | Store local run records here. |
+| `credentials` | mapping | none | Map credential names to [sources](security.md#credential-sources). |
+| `git` | list | none | Map URL prefixes to credential names and SSH known-hosts files. |
+| `storage` | mapping | none | Map pool names to S3 `access_key` and `secret_key` credential names. |
+| `input_roots` | list of paths | MCP server working directory | Allow the MCP server to send inputs from these directories. |
+
+Without a CA file, the host trusts system roots.
+Each credential source uses exactly one of `file`, `env` and `command`.
+Git entries contain `url`, optional `credential` and `host_key`.
+An SSH remote requires `host_key`.
+An HTTPS remote refuses `host_key`.
+See [Git credentials](security.md#git-credentials).
+A pool without a storage entry has no S3 lane on this host.
+MCP input roots must be absolute paths to existing directories.
+CLI commands can read any input path you give them.
 
 `host init` writes `bundle`, a `ca_file` it asked for, and an entry in
 `credentials`, `git` and `storage` for each answer, each a reference to a

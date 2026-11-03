@@ -2,43 +2,32 @@
 
 ## Run a receiver
 
-`wherry receiver run --config-file FILE` needs:
+Before you start, prepare a bundle and persistent state directory.
+Install the plugins named in the receiver record.
+Configure a source for every platform credential its profiles need.
+For Nomad, follow the plugin's [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy).
 
-- its [local configuration](configuration-receiver.md#receiver-local-configuration),
-  at `/etc/wherry/config.yaml` unless `--config-file` names another file;
-- the bundle, readable by the receiver alone;
-- a state directory that survives restarts. It holds the receiver's
-  signing key, and while the receiver is or was its pool's key custodian,
-  the pool keys. A receiver that loses its signing key cannot start under the
-  same name again, and lost pool keys fail the runs that only they open
-  ([Lost pool keys](concepts.md#lost-pool-keys));
-- a plugin directory holding every plugin in its
-  configuration, as in [Install plugins](#install-plugins);
-- a source for each [platform credential](configuration-receiver.md#platform-credentials) its
-  plugin profiles name;
-- a supervisor that restarts the process when it exits, since a
-  configuration change, a Kafka authorisation error and a plugin's exit end
-  it, such as Nomad's `restart` block, a Kubernetes `restartPolicy` or
-  systemd's `Restart=on-failure`; a receiver with revoked or wrong
-  credentials restarts until you fix or remove it. The supervisor allows it
-  30 seconds to stop after `SIGTERM` before a forced kill, with
-  `drain_timeout` in the local configuration plus 5 seconds set below that
-  window, such as `20s`; a stop takes at most `drain_timeout` plus 5 seconds
-  ([Drain timeout and the stop window](configuration-receiver.md#drain-timeout-and-the-stop-window));
-- for the Nomad plugin, a Nomad token with the
-  [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy), from a platform credential or `NOMAD_TOKEN`
-  in the receiver's environment.
+1. Write the [local configuration](configuration-receiver.md#receiver-local-configuration).
+   Keep the bundle readable by the receiver alone.
+2. Keep the state directory across restarts and reschedules.
+   It holds the receiver's signing key and any retained pool keys.
+3. Configure your platform's supervisor to restart the receiver after it exits.
+   A configuration change, Kafka authorisation error or plugin exit ends the process.
+   Fix or remove revoked credentials to stop repeated failed starts.
+4. Set the supervisor's stop window above `drain_timeout` plus five seconds.
+   Use `drain_timeout: 20s` with a 30-second stop window.
+5. Run `wherry receiver run --config-file FILE` through the supervisor.
+   Without the flag, it reads `/etc/wherry/config.yaml`.
+6. Check the logs for `registered key: signing=<key id>` and `configured: pool=<pool> profiles=<n> capacity=<n>`.
+   `waiting for configuration` means the configuration record is missing.
+7. Run `wherry host receivers` from an entitled tenant's host.
+   Check that the receiver is `live` after its first advertisement.
 
-On first start the receiver logs `registered key: signing=<key id>`, then
-`configured: pool=<pool> profiles=<n> capacity=<n>`. It logs
-`waiting for configuration` while its record is missing. After its first
-advertisement, `wherry host receivers` on a host of an entitled tenant shows it
-`live`.
-
-A plugin that exits, or fails a ping and is killed, stops the receiver:
-it logs `stopping: plugin <type> exited` and exits non-zero, leaving the
-runs it holds for an adopter, and its supervisor restarts it.
-[Plugins](commands.md#plugins) covers what runs in flight do.
+Losing the signing key prevents reuse of the receiver's identity.
+Losing pool keys can fail tasks that depend on them.
+See [Lost pool keys](concepts.md#lost-pool-keys).
+A plugin exit leaves held runs available for adoption.
+[Plugin reference](commands.md#plugins) explains process and stream recovery.
 
 ### Install plugins
 

@@ -15,13 +15,22 @@ A leading `~/` expands in the flag and configuration paths.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `bundle` | string | required | the receiver's bundle |
-| `ca_file` | string | none | PEM CA certificates the receiver trusts the broker with; with none, the system's trusted roots |
-| `state_dir` | string | `state` in the bundle file's directory | the receiver's signing key and, while it holds any, its pool's keys in `pool-keys/` ([Pool keys](concepts.md#pool-keys-and-the-key-custodian)) |
-| `plugin_dir` | string | `/usr/local/libexec/wherry/plugins` | the directory holding the `wherry-plugin-<type>` binaries, or symbolic links to them; each starts only when its SHA-256 is the receiver record's pin for its type |
-| `metrics_addr` | string | none | `HOST:PORT` to serve [`/metrics`](operations-receivers.md#metrics) on; without it the receiver serves no metrics |
-| `drain_timeout` | duration | `0s` | how long the runs the receiver holds may go on after `SIGINT` or `SIGTERM` before it releases their tasks for adoption, a duration such as `20s`; [set it with the platform's stop window](#drain-timeout-and-the-stop-window) |
-| `credentials` | mapping | none | [platform credential](#platform-credentials) name to its [source](security.md#credential-sources), exactly one of `file: PATH`, `env: VAR` and `command: [PROGRAM, ARG...]`, validated and resolved as the host's |
+| `bundle` | path | required | Read the receiver's bundle from this file. |
+| `ca_file` | path | none | Trust these PEM CA certificates for the broker connection. |
+| `state_dir` | path | `state` beside the bundle | Store the signing key and retained pool keys here. |
+| `plugin_dir` | path | `/usr/local/libexec/wherry/plugins` | Find the `wherry-plugin-<type>` binaries here. |
+| `metrics_addr` | string | none | Serve `/metrics` at this `HOST:PORT`. |
+| `drain_timeout` | duration | `0s` | Let held runs continue for this long after a stop signal. |
+| `credentials` | mapping | none | Map platform credential names to [sources](security.md#credential-sources). |
+
+Without a CA file, the receiver trusts system roots.
+Pool keys live under `state_dir/pool-keys/`.
+Keep the state directory across restarts.
+Plugin binaries can be symbolic links.
+Their SHA-256 must match the pins in the receiver record.
+Without `metrics_addr`, no metrics listener starts.
+Set `drain_timeout` together with the platform's stop window.
+Credential sources use the same validation and resolution rules as host sources.
 
 ### Drain timeout and the stop window
 
