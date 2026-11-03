@@ -905,3 +905,15 @@ func TestAcquirePluginFallsBack(t *testing.T) {
 		t.Fatalf("acquire with a broken newest release: %v", err)
 	}
 }
+
+// dev runs the Kafka image the real-broker tests pin, so a bump of one is a bump of both.
+func TestDevKafkaIsTheTestedImage(t *testing.T) {
+	script, err := os.ReadFile("../../test/kafka/up.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, digest, _ := strings.Cut(kafkaReference, "@")
+	if !strings.Contains(string(script), "image=docker.io/apache/kafka:4.3.1@"+digest+"\n") {
+		t.Fatalf("test/kafka/up.sh pins no docker.io/apache/kafka image with dev's digest %s", digest)
+	}
+}

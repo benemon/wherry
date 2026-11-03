@@ -342,7 +342,8 @@ func runtimeAnswers(runtime string) bool {
 }
 
 const (
-	kafkaReference   = "docker.io/apache/kafka:latest"
+	// kafkaReference is Kafka 4.3.1, the image test/kafka/up.sh pins, so dev runs the broker CI tests.
+	kafkaReference   = "docker.io/apache/kafka@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837"
 	storageReference = "quay.io/benjamin_holmes/ceph-aio:v21"
 )
 

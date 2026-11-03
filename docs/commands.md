@@ -1470,7 +1470,8 @@ Acquires everything `up` runs into `cache/` and records it in
   plugin's release workflow, its archive matches `checksums.txt`, and its
   binary speaks this wherry's plugin protocol. A binary that speaks another
   is dropped for the next older release.
-- `docker.io/apache/kafka:latest`, pulled and tagged
+- Kafka 4.3.1, the `docker.io/apache/kafka` image the real-broker tests
+  pin by digest, pulled and tagged
   `wherry-dev/kafka:<id12>` in the runtime's own store. With
   `--storage-enabled`, also `quay.io/benjamin_holmes/ceph-aio:v21`, tagged
   `wherry-dev/ceph-aio:<id12>`. Under Podman the tags start `localhost/`.
