@@ -32,7 +32,9 @@ Do short or interactive work yourself.
 
 Call `receivers` first. For each receiver it returns:
 
-- `profiles`: each with its `plugin`, the `agent` it runs, its `labels`, `credentials`,
+- `profiles`: each with its `plugin`, the `agent` it runs, the agent's
+  `models` and `default_model` when it has them, `inline_limit`, the most
+  inline input bytes the profile delivers, when set, its `labels`, `credentials`,
   the agent's credentials by `name` with their target (`env`, the agent's
   environment variable, or `file`, in its credentials directory), `optional`
   and `configured`, whether this host has a source for each, and `ready`, whether the
@@ -58,7 +60,7 @@ literally and interprets only the agent name.
 A profile whose agent lists `models` runs `default_model` unless you pass
 `model`, one of those `models`, to `submit`; an agent with one model runs
 it, and with two or more and no `default_model` you must pass one. A model outside them, or none where one is required, returns
-`INVALID_ARGUMENT`. `wait` returns the `model` asked for.
+`INVALID_ARGUMENT`. `wait` returns the `model` the run's placement names.
 
 ## Submit, then keep working
 

@@ -5,8 +5,8 @@ The files wherry reads and writes, and the environment variables it takes.
 
 ## Client configuration
 
-A YAML file at `~/.config/wherry/config.yaml`, or at the path `WHERRY_CONFIG`
-names when it is set, or at the host command's `--config-file` path, which
+A YAML file, `config.yaml` in the host's configuration directory, or at the
+path `WHERRY_CONFIG` names when it is set, or at the host command's `--config-file` path, which
 wins over both. [`wherry host init`](commands.md#wherry-host-init) writes it;
 a file written in advance is used as written. Unknown and duplicate fields are
 errors, and a decode error names only its line numbers. A leading `~/` is
@@ -14,10 +14,10 @@ expanded in the flag and in every path.
 
 The host's paths are the same on every OS, macOS included:
 
-| Path | Holds |
-| --- | --- |
-| `~/.config/wherry/`, or `$XDG_CONFIG_HOME/wherry/` when that is set | `config.yaml`, `bundle.yaml`, `host.key` and, for a private CA, `ca.pem` |
-| `~/.local/state/wherry/`, or `$XDG_STATE_HOME/wherry/` when that is set | the host's state, `state_dir` |
+| Directory | Path | Holds |
+| --- | --- | --- |
+| configuration directory | `$XDG_CONFIG_HOME/wherry/`, by default `~/.config/wherry/` | `config.yaml`, `bundle.yaml`, `host.key` and, for a private CA, `ca.pem` |
+| state directory | `$XDG_STATE_HOME/wherry/`, by default `~/.local/state/wherry/` | the host's state, `state_dir` |
 
 [`wherry dev up`](commands.md#wherry-dev-up) creates `config.yaml`,
 `bundle.yaml` and `host.key` here for its `default` instance when none of
@@ -29,12 +29,12 @@ instance and prints the `WHERRY_CONFIG` to use.
 
 | Field | Default | Content |
 | --- | --- | --- |
-| `bundle` | required | the host's bundle; `host init <bundle>` places it at `~/.config/wherry/bundle.yaml` and names it here |
-| `ca_file` | `~/.config/wherry/ca.pem` if that file exists, else none | PEM CA certificates the host trusts the broker with; with none, the system's trusted roots |
-| `host_key` | `~/.config/wherry/host.key` | host signing key file |
-| `state_dir` | `~/.local/state/wherry` | run records |
+| `bundle` | required | the host's bundle; `host init <bundle>` places it at `bundle.yaml` in the configuration directory and names it here |
+| `ca_file` | `ca.pem` in the configuration directory if that file exists, else none | PEM CA certificates the host trusts the broker with; with none, the system's trusted roots |
+| `host_key` | `host.key` in the configuration directory | host signing key file, a private JWK; a key file in another format fails to load |
+| `state_dir` | the state directory | run records |
 | `credentials` | none | credential name to its [source](security.md#credential-sources), exactly one of `file: PATH`, `env: VAR` and `command: [PROGRAM, ARG...]` |
-| `git` | none | `{url, credential, host_key}` entries, each giving a task whose git remote starts with `url` the credential `credential` and the OpenSSH `known_hosts` file `host_key`, both optional ([git credentials](security.md#git-credentials)) |
+| `git` | none | `{url, credential, host_key}` entries, each giving a task whose git remote starts with `url` the credential `credential` and the OpenSSH `known_hosts` file `host_key`; `credential` is optional, and `host_key` is required for an `ssh://` remote and refused for an `https://` one ([git credentials](security.md#git-credentials)) |
 | `storage` | none | pool name to `{access_key, secret_key}`: the names of the credentials in `credentials` holding the access key and secret key of the host's S3 credential for that pool's bucket; a pool without an entry has no S3 lane on this host |
 | `input_roots` | the MCP server's working directory | absolute paths of existing directories the MCP server sends inputs from; the CLI reads any path it is given |
 
@@ -42,7 +42,9 @@ instance and prints the `WHERRY_CONFIG` to use.
 `credentials`, `git` and `storage` for each answer, each a reference to a
 source and never a value; a re-run keeps every entry and adds only what a
 newly entitled pool needs. Without a terminal it asks nothing and lists what
-still has no source.
+still has no source. It asks for the CA only on a terminal, so without one a
+broker under a private CA needs `ca.pem` in the configuration directory, or
+`ca_file` in the file, before `host init` runs.
 
 `state_dir` holds `runs/<run>.json` for each run this host submitted,
 readable by its owner alone, with the run's submission without its envelope
@@ -220,12 +222,13 @@ operator command takes `--dir DIR`, the current directory by default.
   .gitignore                 operator init appends operator.password and bundles/
 ```
 
-`operator.yaml` is decoded as the client configuration is:
+In `operator.yaml`, unknown and duplicate fields are errors, a decode error
+names only its line numbers, and no `~` is expanded:
 
 | Field | Content |
 | --- | --- |
 | `broker` | Kafka bootstrap address, `host:port`; host bundles name it, and receiver bundles unless the receiver's file names another |
-| `ca_file` | absolute path of the PEM CA certificates the operator trusts the broker with; absent for the system's trusted roots |
+| `ca_file` | path of the PEM CA certificates the operator trusts the broker with, which `operator init` writes absolute; a relative path is in the working directory; absent for the system's trusted roots |
 | `password_file` | `wherry.operator`'s password file, `operator.password`; a relative path is in the working directory |
 
 It holds nothing about the Kafka super user, which only
@@ -279,7 +282,7 @@ the environment variable the agent gets the value in, matching
 the file it gets in `WHERRY_CREDENTIALS_DIR`, a [file
 name](a2a-extension-v1.md#submission). `required` defaults to `true`. An
 agent's credentials have unique names, and no two share a target; `pool
-create` refuses terms that break a rule, naming the agent and credential.
+apply` refuses terms that break a rule, naming the agent and credential.
 
 `submit` refuses a task when its host has no source for a required
 credential of the placed agent. A run goes without an optional credential
@@ -450,9 +453,13 @@ feed and transcript topic. The Kafka cluster must allow a topic
 and [`submit`](commands.md#wherry-host-submit) measures each submission against it. A pool file
 does not set it.
 
-`pool apply`, `pool entitle` and `check` sign four records and measure
-them as record batches: the largest output chunk, of 256 KiB, two largest
-results, and the largest transcript chunk, a line of 512 KiB. Each result
+`pool apply`, `pool entitle` and `check` compare five record-batch sizes
+against the record limits. wherry's tests build and sign each record to pin
+its size. The smallest task a host submits with a maximum envelope and its
+submit wrap, an 89326-byte batch, goes against the tasks topic's limit. Four
+receiver records go against the tenant feeds' limit: the largest output
+chunk, of 256 KiB, two largest results, and the largest transcript chunk, a
+line of 512 KiB. Each result
 has the run's message with its 256 input files named but not carried, and a
 status message and a result text of 64 KiB each, both raw, as an agent's text
 that JSON escaping would lengthen travels, with a `credential` part, a
@@ -462,7 +469,7 @@ chunk, so `reply_limit` has no record-limit check. One result lists
 one also a reference artifact, and is the largest record, a 1259677-byte
 batch; the other lists 256 S3 outputs with their keys. Both carry a plugin's job name at its bound of
 253 bytes. A receiver's labels have no bound and are left empty. Any one over its record limit refuses the terms,
-naming its size and the limit.
+naming the record, its size and the limit.
 
 An input file travels base64-encoded inside the signed record, which is itself
 base64url-encoded, so an inline input takes about 16/9 of its size in the
@@ -903,12 +910,20 @@ within six hours after `start_by_limit`.
 
 | Variable | Read by | Effect |
 | --- | --- | --- |
-| `WHERRY_CONFIG` | host commands | the [client configuration](#client-configuration) path in place of `~/.config/wherry/config.yaml`; `--config-file` wins over it |
-| `XDG_CONFIG_HOME`, `XDG_STATE_HOME` | host commands | when set, the parents of the host's `wherry/` configuration and state directories in place of `~/.config` and `~/.local/state` |
-| `SSL_CERT_FILE` | host commands, `wherry receiver run`, `wherry operator` | PEM CA file that replaces the system roots, for a pool's S3 endpoint under a private CA and for a broker when no `ca_file` is set; include the public roots in it when the process also reaches public endpoints |
+| `WHERRY_CONFIG` | host commands, `wherry dev up` | the [client configuration](#client-configuration) path in place of `config.yaml` in the configuration directory; `--config-file` wins over it. When it is set, `dev up` writes the host's files inside the instance |
+| `XDG_CONFIG_HOME`, `XDG_STATE_HOME` | host commands, `wherry dev` | when set, the parents of the host's `wherry/` configuration and state directories in place of `~/.config` and `~/.local/state` |
+| `XDG_DATA_HOME` | `wherry dev` | when set, the parent of `wherry/dev/`, which holds the [dev instances](commands.md#dev-commands), in place of `~/.local/share` |
 
-`wherry operator` reads no environment variable: its connection is
+wherry reads no other variable of its own. `wherry operator`'s connection is
 [`operator.yaml`](#operator-working-directory).
+
+Go's TLS stack reads `SSL_CERT_FILE` as its
+[crypto/x509](https://pkg.go.dev/crypto/x509#SystemCertPool) package
+documents. On Linux, a broker connection without `ca_file`, in any wherry
+command, trusts the roots it names. macOS ignores it for that connection:
+use `ca_file` there. The host's S3 client adds the certificates in
+`SSL_CERT_FILE` to the system roots for a pool's storage endpoint on every
+OS.
 
 A plugin reads its own variables from the receiver's environment; the
 [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#credentials)

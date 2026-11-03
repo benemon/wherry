@@ -92,7 +92,10 @@ defaults, `10m` and `2h`.
   `wherry status` and `wherry wait` print it, and `redacted` maps each name
   to the number of its markers in the messages, the artifacts, or every line
   of the transcript's attempt.
-- `submit` checks its arguments before it connects to the bus.
+- Before it connects to the bus, `submit` checks that exactly one of `prompt`
+  and `prompt_file` is given, each input's `storage`, and `start_by` and
+  `end_by`, and reads its input files. It checks the rest, such as the agent,
+  model and git host against the pool's terms, once connected.
 - `events` returns `events`, each
   `{attempt, kind, state, receiver, time, message}`, and
   `chunks`, each `{attempt, chunks}`.

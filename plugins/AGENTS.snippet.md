@@ -7,12 +7,14 @@ only the prompt, the files you send and, if given, a pushed git ref it
 clones itself.
 
 1. `wherry host receivers --json` lists receivers with each plugin profile's `agent`,
-   `labels`, `ready` and `credentials`, each agent credential's `name`, with
+   the agent's `models` and `default_model` when it has them, `labels`,
+   `ready` and `credentials`, each agent credential's `name`, with
    its target (`env` or `file`), `optional` and `configured`, whether this
    host has a source for it. Pick
    an agent and build a selector from the labels.
 2. `wherry submit --prompt TEXT` prints `run_id` and `pool`. Add `--agent NAME`
-   to choose the agent, and `--selector` with comma-separated terms
+   to choose the agent, `--model NAME` to choose one of its `models` in place
+   of its `default_model`, and `--selector` with comma-separated terms
    (`key=v1|v2`, `key!=v`, `key`, `!key`) to require labels. Add
    `--git REMOTE@REF` for a repository the agent clones (its host must be one of
    the pool's VCS hosts), and `--git-changes patch` to get its commits back as

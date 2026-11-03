@@ -31,8 +31,9 @@ Every command but `version` and the shortcuts runs under its role's word:
   configuration. Every `wherry host` command reads it first, and every one except `host mcp`
   then connects to Kafka.
 - Every `wherry host` command takes `--config-file FILE`. Without it, the
-  command reads the file `WHERRY_CONFIG` names, else
-  `~/.config/wherry/config.yaml` ([paths](configuration.md#client-configuration)).
+  command reads the file `WHERRY_CONFIG` names, else `config.yaml` in
+  `$XDG_CONFIG_HOME/wherry/`, by default `~/.config/wherry/`
+  ([paths](configuration.md#client-configuration)).
   A leading `~/` is expanded.
 - A command's flags may come before or after its `RUN_ID`.
 - A failed command prints `wherry: <error>` on standard error and exits
@@ -129,12 +130,21 @@ value, and options can appear anywhere after `operator`. An option without a
 value fails with `flag needs an argument: -<name>`, one no operator command
 takes with `flag provided but not defined: -<name>`, and one the command does
 not take with `unknown option --<name>`. `--suspect-key` is given once per key;
-any other repeated option takes its last value. `pool apply`,
-`pool entitle`, `pool suspend`, `pool resume`, `host add` and `receiver apply` then create every ACL the new
-state calls for, re-read them, and fail with `ACL plan incomplete` when one
-is missing. They then delete the `WRITE` ACLs on a suspended pool's tasks
-topic that the pool's hosts hold unsuspended, each by a filter naming its
-principal; another principal's ACL on the topic stays.
+any other repeated option takes its last value.
+
+Every operator command other than `init`, `check`, `receiver show` and a
+`--dry-run` ends by converging Kafka on `wherry.operator`. A pass reads
+`wherry.operator` to its end and creates every ACL those records call for. It
+re-reads them and fails with `ACL plan incomplete` when one is missing. It
+deletes every other grant of a host or receiver principal on wherry's topics,
+groups and transactional IDs, which takes back a suspended pool's hosts'
+`WRITE` on its tasks topic. It deletes the SCRAM credential of each host and
+receiver whose membership ended. When `wherry.operator` grows during a pass,
+the command makes another, and after 5 such passes it fails with
+`wherry.operator moved during each of 5 convergence passes`. Once a command
+has written a record, it converges on every return, failed or not.
+[Concurrent operator commands](operations.md#concurrent-operator-commands)
+states what this guarantees.
 
 `pool apply` and `receiver apply` read the object's file: `-f PATH`, else
 `pools/<pool>.yaml` or `receivers/<receiver>.yaml` in the working directory.
@@ -154,9 +164,11 @@ creates no bundle directory.
 `bundles/receivers/<receiver>.bundle`, mode 0600, in directories mode 0700. A
 bundle holds the broker address, the principal and its password, and no CA.
 `host add` refuses a host that exists unless given `--force`. `receiver apply` of a receiver that exists
-updates its configuration. Without `--force`, a command never replaces a
-bundle: before it changes anything in Kafka it creates the bundle file,
-failing when a file is there, and writes the bundle into it at the end. A
+updates its configuration, and replaces its bundle only to change the broker
+address, keeping the password. Without `--force`, `host add` and
+`receiver apply` of a new receiver never replace a bundle: before they change
+anything in Kafka they create the bundle file, failing when a file is there,
+and write the bundle into it at the end. A
 command that fails leaves no bundle and no temporary file of its own, or, when
 it cannot remove one, fails naming it.
 
@@ -185,6 +197,7 @@ and the Kafka super user's name and password file. Without a terminal it
 refuses any missing flag but `--ca-file`, naming them:
 `operator init has no terminal to prompt on; give --broker, --super-user, --super-user-password-file`.
 
+It creates the working directory with mode 0755 when it is missing.
 Connected as the super user, once, it:
 
 1. writes a new random password for `wherry.operator` to a temporary file,
@@ -199,7 +212,9 @@ It then writes `operator.yaml`: `broker`, `ca_file` as an absolute path
 (omitted for the system roots) and `password_file: operator.password`, and
 appends `operator.password` and `bundles/` to `.gitignore`, creating it if
 absent and adding only lines it lacks. It closes the super-user connection;
-nothing it writes names the super user, which no later command uses.
+nothing it writes names the super user, which no later command uses. It ends
+by printing `wherry.operator can provision; its password is in <dir>/operator.password`
+on standard error.
 
 Running `init` again rotates `wherry.operator`'s password: Kafka holds one
 SCRAM credential per user, so commands still running with the old password
@@ -248,7 +263,9 @@ configuration it sets is not applied within 10 seconds, or when a describe of it
 still fails then, naming the describe's error. It refuses a `start_by_limit` above
 29 days and 18 hours, or one that with six hours added exceeds the
 `retention.ms` of the feed or transcript topic of a tenant entitled to the
-pool. For a pool with `storage` it refuses a `start_by_limit` that with six
+pool. It creates the pool's snapshot topic, `wherry.pool.<pool>.custodian`,
+or sets an existing one's configuration: `cleanup.policy=compact`,
+`message.timestamp.type=LogAppendTime` and `retention.ms=-1`. For a pool with `storage` it refuses a `start_by_limit` that with six
 hours added exceeds 7 days, the longest an S3 SigV4 presigned URL lasts,
 with `start_by_limit plus the 6h run cap exceeds 7 days, the longest an S3
 SigV4 presigned URL lasts`. Before it measures the records, it sets `max.message.bytes` to 2 MiB
@@ -324,7 +341,8 @@ before it decides any request. The command returns once the key custodian
 has acknowledged: it waits up to 5 minutes for a snapshot whose
 `suspended_for` is at or above its record's offset, writing
 `waiting for pool <pool>'s key custodian to acknowledge the suspend record at wherry.operator offset <offset>, up to <time>`
-to standard error every 10 seconds, then prints
+to standard error every 10 seconds, `<time>` being the time left of the 5
+minutes, then prints
 `pool <pool> is suspended: its key custodian acknowledged the suspend record at wherry.operator offset <offset>; no new start opens`.
 After that no new start opens. With no acknowledgement it fails with
 `pool <pool>'s suspend record is written at wherry.operator offset <offset>, but its key custodian did not acknowledge it within 5m0s; it is not yet in effect`.
@@ -358,7 +376,8 @@ snapshot.
 The command waits up to 5 minutes for a snapshot whose `rotated_for` is at
 or above its record's offset, writing
 `waiting for pool <pool>'s key custodian to rotate for the request at wherry.operator offset <offset>, up to <time>`
-to standard error every 10 seconds. With none, it fails with
+to standard error every 10 seconds, `<time>` being the time left of the 5
+minutes. With none, it fails with
 `pool <pool>'s key custodian published no snapshot rotated for the rotate-key request at wherry.operator offset <offset> within 5m0s; the request stands`.
 It then captures the end offset of the pool's tasks topic, reads the topic
 as `wherry.operator` through that offset, and lists every retained task
@@ -375,6 +394,7 @@ suspect_keys=<kid>[,<kid>...]
 horizon partition=<n> oldest_retained_offset=<offset>
 horizon partition=<n>: retention deleted the tasks at offsets <offset> to <offset> during the scan; they may not be listed
 horizon: the oldest retained task was appended at <time>, <age> ago; tasks deleted by retention before it are not listed
+horizon: the task topic retains no task; tasks deleted by retention are not listed
 task run=<run> tenant=<tenant> key=<kid> credentials=<name>[,<name>...] appended=<time>
 tasks=<n>
 ```
@@ -382,7 +402,9 @@ tasks=<n>
 Each partition's horizon is its log start listed after the scan, since a
 fetch below the log start begins at the start then in effect. Where
 retention moved the start during the scan, the second `horizon` line names
-the offsets it deleted, from the start listed before the scan.
+the offsets it deleted, from the start listed before the scan. The last
+`horizon` line is the first form when the topic retains a task and the
+second when it retains none.
 
 The credential names are the task's own credentials and every credential
 any terms record of the pool on `wherry.operator` gives the task's agent,
@@ -401,8 +423,9 @@ feed and transcript topic, the latter two with `max.message.bytes` 2 MiB, grants
 its bundle to `bundles/hosts/<tenant>/<host>.bundle`, naming the broker in
 `operator.yaml`. It refuses a host that exists, and an existing bundle file,
 unless given [`--force`](#operator-commands). For a host that exists,
-`--force` reissues its identity alone: it records nothing, and sets no topic,
-ACL or quota. A host whose membership ended is refused. Host names are unique
+`--force` reissues its identity: it records nothing and sets no topic or
+quota, and [converges](#operator-commands) the ACLs as every operator command
+does. A host whose membership ended is refused. Host names are unique
 within a tenant; hosts of the same name in other tenants have bundles of
 their own.
 
@@ -530,17 +553,32 @@ step 5 refuses a duration below it and names the minimum.
 
 ### `wherry operator check`
 
-Loads `wherry.operator`, checks that no two names collide, validates every
-receiver configuration against its pool's terms, checks that every pool's
-[records still fit the broker](configuration.md#record-limit), checks that every
-tenant feed and transcript topic has a `max.message.bytes` of at least 2 MiB, checks topic retention and
-timestamp type against the [bounds](design.md#topics-1), checks that each
-pool's tasks and events topics have one partition, `cleanup.policy=delete`
-and `retention.bytes=-1`, checks that each
-live receiver's progress topic keeps records at least as long as its pool's
-tasks topic, and checks that every ACL the
-state calls for is present, with `wherry.operator`'s own
-[grants](security.md#the-operator-principal). It does not report ACLs beyond those, and does not check a
+Loads `wherry.operator` and checks, in order:
+
+- that no two names collide;
+- every receiver configuration against its pool's terms;
+- that every pool's [records still fit the broker](configuration.md#record-limit);
+- topic retention and timestamp type against the [bounds](design.md#topics-1):
+  `retention.ms=-1` on `wherry.operator` and every host and receiver key
+  topic, and `message.timestamp.type=LogAppendTime` on each pool's tasks and
+  events topics;
+- that each pool's tasks and events topics have `cleanup.policy=delete`,
+  `retention.bytes=-1` and `segment.ms=3600000`;
+- that each pool's snapshot topic, `wherry.pool.<pool>.custodian`, has
+  `cleanup.policy=compact`, `message.timestamp.type=LogAppendTime` and
+  `retention.ms=-1`;
+- that each pool's tasks, events and snapshot topics have one partition;
+- that each pool's tasks topic keeps records at least `start_by_limit` plus
+  six hours plus one day, its events topic and each live receiver's progress
+  topic at least as long as the tasks topic, and each entitled tenant's feed
+  and transcript topic at least `start_by_limit` plus six hours;
+- that every tenant feed and transcript topic has a `max.message.bytes` of at
+  least 2 MiB;
+- that every ACL the state calls for is present, with `wherry.operator`'s own
+  [grants](security.md#the-operator-principal).
+
+It prints nothing when every check passes, and fails naming the first that
+does not. It does not report ACLs beyond those, and does not check a
 plugin profile's plugin or `config` section.
 
 ## Receiver command
@@ -952,16 +990,22 @@ wherry host init [BUNDLE] [--config-file FILE]
 Sets the host up from its bundle, and configures it for every pool its tenant
 is entitled to:
 
-1. With `BUNDLE`, it reads the bundle and copies it to
-   `~/.config/wherry/bundle.yaml`, mode 0600 in a directory of mode 0700,
+1. With `BUNDLE`, it reads the bundle and copies it to `bundle.yaml` in the
+   [configuration directory](configuration.md#client-configuration),
+   `$XDG_CONFIG_HOME/wherry/` or by default `~/.config/wherry/`, mode 0600 in
+   a directory of mode 0700,
    replacing any file there atomically, and names it as `bundle` in the
    configuration, even when the configuration named another bundle. Without
    `BUNDLE`, it uses the bundle the configuration names, and refuses when it
    names none.
-2. When the configuration names no `ca_file` and `~/.config/wherry/ca.pem` is
-   absent, it asks for a CA file; a blank answer keeps the system's trusted
-   roots, and a path is recorded as `ca_file` when the file holds at least one
-   PEM certificate, and asked again when it holds none.
+2. On a terminal, when the configuration names no `ca_file` and the
+   configuration directory holds no `ca.pem`, it asks for a CA file. A blank
+   answer keeps the system's trusted roots, and a path is recorded as
+   `ca_file` when the file holds at least one PEM certificate, and asked
+   again when it holds none. Without a terminal it asks nothing, so a host
+   whose broker has a private CA needs `ca.pem` in place, or `ca_file` in
+   the configuration, before `host init`. When the file is new or step 1 or 2
+   changed it, it writes the configuration now, before it connects.
 3. It creates the host key at `host_key`, a private JWK (RFC 7517) with mode
    0600, unless the file exists, creating its directory with mode 0700. It
    registers the key on the host's key topic when the topic holds none, and
@@ -981,10 +1025,12 @@ is entitled to:
 6. For each of those pools with storage and no `storage` entry, it asks for
    the names of the credentials holding the access key and the secret key,
    then their sources when they are new.
-7. It writes the configuration, at the path `--config-file` or
-   `WHERRY_CONFIG` names or `~/.config/wherry/config.yaml`, mode 0600 even
-   when the file existed with another mode, with references to sources and
-   never a value.
+7. When steps 4 to 6 changed the configuration, it writes it again.
+
+It writes the configuration at the path `--config-file` or `WHERRY_CONFIG`
+names, else `config.yaml` in the configuration directory, mode 0600 even
+when the file existed with another mode, with references to sources and
+never a value.
 
 A blank answer skips the credential, git host or pool; a credential whose
 source was asked once in a run is not asked again in that run. A re-run keeps
@@ -1315,7 +1361,8 @@ exits with status 1 and
 | 4 | the run ended `TASK_STATE_REJECTED` |
 | 6 | `--timeout` passed with the run still going |
 
-For codes 2 to 4 the error is `run ended in <state>`.
+For codes 2 to 4 the error is `run ended in <state>`. A run that ends in
+any other state but `TASK_STATE_COMPLETED` exits 1 with the same error.
 
 ### `wherry host status [RUN_ID]`
 
@@ -1440,7 +1487,9 @@ on 18080, all on 127.0.0.1.
 
 An instance is up while its `env/up.json` names a live Nomad agent that
 `up` started. Every step prints its name on standard error, and a failed
-step fails with `step <name>: <cause>`.
+step fails with `step <name>: <cause>`, with two exceptions: a `preflight`
+refusal of `up` is the whole error, and the `host` step of `down` prints no
+name.
 
 `dev` is one developer's tool, and two of its limits follow from that.
 Commands run at once on one instance are not serialized: run one at a
@@ -1614,7 +1663,8 @@ Its steps, each run after a failed one:
    that keeps its size and has its modification time set back is removed,
    since `down` keeps no digest of a file holding a credential.
 
-`down` fails naming every failed step. It keeps `cache/` and prints a
+`down` fails naming every failed step. It keeps `cache/`, prints
+`down: instance NAME` on standard output, and then prints a
 `mcp remove` line for each harness, since the registration names a
 configuration that is gone. An instance that is not up prints
 `instance NAME is not up`, removes a leftover `env/` and the host files as
@@ -1624,8 +1674,8 @@ With `--reset`, `down` removes the host files as in step 6, then
 `cache/`. It refuses `--reset` while the instance is up, and when it
 cannot read the manifest, which may record host files: it names the
 standard paths to check by hand before you remove the manifest. The
-images stay in the runtime's store. Remove `wherry-dev/kafka:<id12>` with
-the runtime.
+images stay in the runtime's store. Remove `wherry-dev/kafka:<id12>`, and
+`wherry-dev/ceph-aio:<id12>` with storage, with the runtime.
 
 ## Version command
 
