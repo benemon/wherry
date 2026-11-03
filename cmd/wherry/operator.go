@@ -21,19 +21,39 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// operatorUsage is each operator command's usage, under "" the operator's.
+var operatorUsage = map[string]string{
+	"":                "usage: wherry operator <init|pool apply|pool entitle|pool suspend|pool resume|pool rotate-key|receiver apply|receiver show|receiver remove|host add|host remove|check> [--dir DIR]",
+	"init":            "usage: wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] [--super-user NAME --super-user-password-file FILE]",
+	"pool apply":      "usage: wherry operator pool apply NAME [-f PATH] [--dry-run]",
+	"pool entitle":    "usage: wherry operator pool entitle POOL --tenant TENANT",
+	"pool suspend":    "usage: wherry operator pool suspend POOL",
+	"pool resume":     "usage: wherry operator pool resume POOL",
+	"pool rotate-key": "usage: wherry operator pool rotate-key POOL [--suspect-key KID]...",
+	"receiver apply":  "usage: wherry operator receiver apply NAME [-f PATH] [--dry-run] | NAME --force",
+	"receiver show":   "usage: wherry operator receiver show ID",
+	"receiver remove": "usage: wherry operator receiver remove RECEIVER [--wait DURATION]",
+	"host add":        "usage: wherry operator host add HOST --tenant TENANT [--force]",
+	"host remove":     "usage: wherry operator host remove HOST --tenant TENANT [--wait DURATION]",
+	"check":           "usage: wherry operator check",
+}
+
 func runOperator(args []string, stdout, stderr io.Writer) error {
 	pos, options, err := operatorArgs(args)
+	if errors.Is(err, flag.ErrHelp) {
+		fmt.Fprintln(stderr, cmp.Or(operatorUsage[strings.Join(pos[:min(len(pos), 2)], " ")], operatorUsage[""]))
+	}
 	if err != nil {
 		return err
 	}
 	if len(pos) == 0 {
-		return errors.New("usage: wherry operator <init|pool apply|pool entitle|pool suspend|pool resume|pool rotate-key|receiver apply|receiver show|receiver remove|host add|host remove|check> [--dir DIR]")
+		return errors.New(operatorUsage[""])
 	}
 	dir := cmp.Or(options["dir"], ".")
 	ctx := context.Background()
 	if pos[0] == "init" {
 		if len(pos) != 1 {
-			return errors.New("usage: wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] [--super-user NAME --super-user-password-file FILE]")
+			return errors.New(operatorUsage["init"])
 		}
 		return operatorInit(ctx, dir, options, stderr)
 	}
@@ -46,7 +66,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 	switch command {
 	case "pool apply":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry operator pool apply NAME [-f PATH] [--dry-run]")
+			return errors.New(operatorUsage[command])
 		}
 		_, dryRun := options["dry-run"]
 		path, directory, err := objectFile(dir, "pools", pos[2], options, dryRun, stderr, poolFields, promptPool)
@@ -62,7 +82,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		_, force := options["force"]
 		_, dryRun := options["dry-run"]
 		if len(pos) != 3 {
-			return errors.New("usage: wherry operator receiver apply NAME [-f PATH] [--dry-run] | NAME --force")
+			return errors.New(operatorUsage[command])
 		}
 		state, err := service.LoadState(ctx)
 		if err != nil {
@@ -130,7 +150,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		}
 	case "receiver show":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry operator receiver show ID")
+			return errors.New(operatorUsage[command])
 		}
 		state, err := service.LoadState(ctx)
 		if err != nil {
@@ -143,12 +163,12 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		return showReceiver(stdout, config)
 	case "pool entitle":
 		if len(pos) != 3 || options["tenant"] == "" {
-			return errors.New("usage: wherry operator pool entitle POOL --tenant TENANT")
+			return errors.New(operatorUsage[command])
 		}
 		return service.TenantAdd(ctx, options["tenant"], pos[2])
 	case "pool suspend", "pool resume":
 		if len(pos) != 3 {
-			return fmt.Errorf("usage: wherry operator pool %s POOL", pos[1])
+			return errors.New(operatorUsage[command])
 		}
 		outcome, err := service.PoolSuspendAcknowledged(ctx, pos[2], pos[1] == "suspend", stderr)
 		if err != nil {
@@ -158,7 +178,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		return nil
 	case "pool rotate-key":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry operator pool rotate-key POOL [--suspect-key KID]...")
+			return errors.New(operatorUsage[command])
 		}
 		var suspects []string
 		if options["suspect-key"] != "" {
@@ -172,7 +192,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		return nil
 	case "host add":
 		if len(pos) != 3 || options["tenant"] == "" {
-			return errors.New("usage: wherry operator host add HOST --tenant TENANT [--force]")
+			return errors.New(operatorUsage[command])
 		}
 		bundle, err := bundlePath(dir, "hosts", true, options["tenant"], pos[2])
 		if err != nil {
@@ -182,10 +202,10 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		return service.HostAdd(ctx, options["tenant"], pos[2], bundle, force)
 	case "host remove", "receiver remove":
 		if pos[0] == "host" && (len(pos) != 3 || options["tenant"] == "") {
-			return errors.New("usage: wherry operator host remove HOST --tenant TENANT [--wait DURATION]")
+			return errors.New(operatorUsage[command])
 		}
 		if len(pos) != 3 {
-			return errors.New("usage: wherry operator receiver remove RECEIVER [--wait DURATION]")
+			return errors.New(operatorUsage[command])
 		}
 		wait, err := time.ParseDuration(cmp.Or(options["wait"], "0s"))
 		if err != nil {
@@ -218,7 +238,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		return nil
 	case "check":
 		if len(pos) != 1 {
-			return errors.New("usage: wherry operator check")
+			return errors.New(operatorUsage[command])
 		}
 		return service.Check(ctx)
 	default:
@@ -297,7 +317,7 @@ func operatorArgs(args []string) ([]string, map[string]string, error) {
 	flags.Bool("force", false, "")
 	positional, err := parseAnywhere(flags, args)
 	if err != nil {
-		return nil, nil, err
+		return positional, nil, err
 	}
 	options := map[string]string{}
 	flags.Visit(func(option *flag.Flag) {
