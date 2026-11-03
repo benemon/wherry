@@ -23,31 +23,38 @@ import (
 
 // operatorUsage is each operator command's usage, under "" the operator's.
 var operatorUsage = map[string]string{
-	"":                "usage: wherry operator <init|pool apply|pool entitle|pool suspend|pool resume|pool rotate-key|receiver apply|receiver show|receiver remove|host add|host remove|check> [--dir DIR]",
-	"init":            "usage: wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] [--super-user NAME --super-user-password-file FILE]",
-	"pool apply":      "usage: wherry operator pool apply NAME [-f PATH] [--dry-run]",
-	"pool entitle":    "usage: wherry operator pool entitle POOL --tenant TENANT",
-	"pool suspend":    "usage: wherry operator pool suspend POOL",
-	"pool resume":     "usage: wherry operator pool resume POOL",
-	"pool rotate-key": "usage: wherry operator pool rotate-key POOL [--suspect-key KID]...",
-	"receiver apply":  "usage: wherry operator receiver apply NAME [-f PATH] [--dry-run] | NAME --force",
-	"receiver show":   "usage: wherry operator receiver show ID",
-	"receiver remove": "usage: wherry operator receiver remove RECEIVER [--wait DURATION]",
-	"host add":        "usage: wherry operator host add HOST --tenant TENANT [--force]",
-	"host remove":     "usage: wherry operator host remove HOST --tenant TENANT [--wait DURATION]",
-	"check":           "usage: wherry operator check",
+	"":                   "usage: wherry operator <init|pool apply|tenant add|tenant list|tenant pool add|tenant pool remove|tenant host add|tenant host remove|tenant remove|pool suspend|pool resume|pool rotate-key|receiver apply|receiver show|receiver remove|check> [--dir DIR]",
+	"init":               "usage: wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] [--super-user NAME --super-user-password-file FILE]",
+	"pool apply":         "usage: wherry operator pool apply NAME [-f PATH] [--dry-run]",
+	"tenant add":         "usage: wherry operator tenant add TENANT",
+	"tenant list":        "usage: wherry operator tenant list",
+	"tenant remove":      "usage: wherry operator tenant remove TENANT",
+	"tenant pool add":    "usage: wherry operator tenant pool add TENANT POOL",
+	"tenant pool remove": "usage: wherry operator tenant pool remove TENANT POOL",
+	"pool suspend":       "usage: wherry operator pool suspend POOL",
+	"pool resume":        "usage: wherry operator pool resume POOL",
+	"pool rotate-key":    "usage: wherry operator pool rotate-key POOL [--suspect-key KID]...",
+	"receiver apply":     "usage: wherry operator receiver apply NAME [-f PATH] [--dry-run] | NAME --force",
+	"receiver show":      "usage: wherry operator receiver show ID",
+	"receiver remove":    "usage: wherry operator receiver remove RECEIVER [--wait DURATION]",
+	"tenant host add":    "usage: wherry operator tenant host add TENANT HOST [--force]",
+	"tenant host remove": "usage: wherry operator tenant host remove TENANT HOST [--wait DURATION]",
+	"check":              "usage: wherry operator check",
 }
 
 func runOperator(args []string, stdout, stderr io.Writer) error {
 	pos, options, err := operatorArgs(args)
 	if errors.Is(err, flag.ErrHelp) {
-		fmt.Fprintln(stderr, cmp.Or(operatorUsage[strings.Join(pos[:min(len(pos), 2)], " ")], operatorUsage[""]))
+		fmt.Fprintln(stderr, cmp.Or(operatorUsage[operatorCommand(pos)], operatorUsage[""]))
 	}
 	if err != nil {
 		return err
 	}
 	if len(pos) == 0 {
 		return errors.New(operatorUsage[""])
+	}
+	if _, ok := operatorUsage[operatorCommand(pos)]; !ok {
+		return errors.New("unknown operator command")
 	}
 	dir := cmp.Or(options["dir"], ".")
 	ctx := context.Background()
@@ -62,7 +69,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer service.Operator.Close()
-	command := strings.Join(pos[:min(len(pos), 2)], " ")
+	command := operatorCommand(pos)
 	switch command {
 	case "pool apply":
 		if len(pos) != 3 {
@@ -161,11 +168,71 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			return errors.New("no receiver by that name")
 		}
 		return showReceiver(stdout, config)
-	case "pool entitle":
-		if len(pos) != 3 || options["tenant"] == "" {
+	case "tenant add":
+		if len(pos) != 3 {
 			return errors.New(operatorUsage[command])
 		}
-		return service.TenantAdd(ctx, options["tenant"], pos[2])
+		return service.TenantAdd(ctx, pos[2])
+	case "tenant list":
+		if len(pos) != 2 {
+			return errors.New(operatorUsage[command])
+		}
+		state, err := service.LoadState(ctx)
+		if err != nil {
+			return err
+		}
+		for _, tenant := range slices.Sorted(maps.Keys(state.Tenants)) {
+			if state.Tenants[tenant] {
+				continue
+			}
+			fmt.Fprintln(stdout, tenant)
+			for _, pool := range slices.Sorted(maps.Keys(state.Entitlements[tenant])) {
+				fmt.Fprintf(stdout, "  pool %s\n", pool)
+			}
+			for _, principal := range slices.Sorted(maps.Keys(state.Hosts)) {
+				host := state.Hosts[principal]
+				if host.Tenant == tenant && !state.Ended[principal] && !state.Revoking[principal] {
+					fmt.Fprintf(stdout, "  host %s\n", host.Name)
+				}
+			}
+		}
+		return nil
+	case "tenant pool add", "tenant pool remove":
+		if len(pos) != 5 {
+			return errors.New(operatorUsage[command])
+		}
+		state, err := service.LoadState(ctx)
+		if err != nil {
+			return err
+		}
+		entitled := state.Entitlements[pos[3]][pos[4]]
+		if pos[2] == "add" {
+			err = service.TenantPoolAdd(ctx, pos[3], pos[4])
+			if err == nil && entitled {
+				fmt.Fprintln(stdout, "already entitled")
+			}
+		} else {
+			err = service.TenantPoolRemove(ctx, pos[3], pos[4])
+			if err == nil && !entitled {
+				fmt.Fprintln(stdout, "not entitled")
+			}
+		}
+		return err
+	case "tenant remove":
+		if len(pos) != 3 {
+			return errors.New(operatorUsage[command])
+		}
+		if !wire.ValidName(pos[2]) {
+			return errors.New("invalid tenant name")
+		}
+		if err := service.TenantRemove(ctx, pos[2]); err != nil {
+			return err
+		}
+		if err := os.RemoveAll(filepath.Join(dir, "bundles", "hosts", pos[2])); err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, "done")
+		return nil
 	case "pool suspend", "pool resume":
 		if len(pos) != 3 {
 			return errors.New(operatorUsage[command])
@@ -190,21 +257,21 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		}
 		writeRotateReport(stdout, pos[2], report, time.Now())
 		return nil
-	case "host add":
-		if len(pos) != 3 || options["tenant"] == "" {
+	case "tenant host add":
+		if len(pos) != 5 {
 			return errors.New(operatorUsage[command])
 		}
-		bundle, err := bundlePath(dir, "hosts", true, options["tenant"], pos[2])
+		bundle, err := bundlePath(dir, "hosts", true, pos[3], pos[4])
 		if err != nil {
 			return err
 		}
 		_, force := options["force"]
-		return service.HostAdd(ctx, options["tenant"], pos[2], bundle, force)
-	case "host remove", "receiver remove":
-		if pos[0] == "host" && (len(pos) != 3 || options["tenant"] == "") {
+		return service.HostAdd(ctx, pos[3], pos[4], bundle, force)
+	case "tenant host remove", "receiver remove":
+		if pos[0] == "tenant" && (len(pos) != 5) {
 			return errors.New(operatorUsage[command])
 		}
-		if len(pos) != 3 {
+		if pos[0] == "receiver" && len(pos) != 3 {
 			return errors.New(operatorUsage[command])
 		}
 		wait, err := time.ParseDuration(cmp.Or(options["wait"], "0s"))
@@ -215,13 +282,13 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			return errors.New("--wait must be positive; omit it to compute the safe wait from the broker's timeouts")
 		}
 		topic := operator.ReceiverTopic(pos[2])
-		if pos[0] == "host" {
-			topic = operator.HostTopic(options["tenant"], pos[2])
+		if pos[0] == "tenant" {
+			topic = operator.HostTopic(pos[3], pos[4])
 		}
 		probe := service.Probe(topic)
 		var result operator.RevocationResult
-		if pos[0] == "host" {
-			result = service.RevokeHost(ctx, options["tenant"], pos[2], wait, probe)
+		if pos[0] == "tenant" {
+			result = service.RevokeHost(ctx, pos[3], pos[4], wait, probe)
 		} else {
 			result = service.RevokeReceiver(ctx, pos[2], wait, probe)
 		}
@@ -308,7 +375,7 @@ func integral(value any) any {
 func operatorArgs(args []string) ([]string, map[string]string, error) {
 	flags := flag.NewFlagSet("operator", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	for _, name := range []string{"f", "tenant", "wait", "sha256", "dir", "broker", "ca-file", "super-user", "super-user-password-file"} {
+	for _, name := range []string{"f", "wait", "sha256", "dir", "broker", "ca-file", "super-user", "super-user-password-file"} {
 		flags.String(name, "", "")
 	}
 	var suspects []string
@@ -333,20 +400,20 @@ func operatorArgs(args []string) ([]string, map[string]string, error) {
 	if len(suspects) > 0 {
 		options["suspect-key"] = strings.Join(suspects, "\n")
 	}
-	command := strings.Join(positional[:min(len(positional), 2)], " ")
+	command := operatorCommand(positional)
 	allowed := map[string]map[string]bool{
-		"init":            {"broker": true, "ca-file": true, "super-user": true, "super-user-password-file": true},
-		"pool apply":      {"f": true, "dry-run": true},
-		"receiver apply":  {"f": true, "dry-run": true, "force": true},
-		"receiver show":   {},
-		"pool entitle":    {"tenant": true},
-		"pool suspend":    {},
-		"pool resume":     {},
-		"pool rotate-key": {"suspect-key": true},
-		"host add":        {"tenant": true, "force": true},
-		"host remove":     {"tenant": true, "wait": true},
-		"receiver remove": {"wait": true},
-		"check":           {},
+		"init":           {"broker": true, "ca-file": true, "super-user": true, "super-user-password-file": true},
+		"pool apply":     {"f": true, "dry-run": true},
+		"receiver apply": {"f": true, "dry-run": true, "force": true},
+		"receiver show":  {},
+		"tenant add":     {}, "tenant list": {}, "tenant remove": {}, "tenant pool add": {}, "tenant pool remove": {},
+		"pool suspend":       {},
+		"pool resume":        {},
+		"pool rotate-key":    {"suspect-key": true},
+		"tenant host add":    {"force": true},
+		"tenant host remove": {"wait": true},
+		"receiver remove":    {"wait": true},
+		"check":              {},
 	}[command]
 	if allowed != nil {
 		for _, name := range slices.Sorted(maps.Keys(options)) {
@@ -699,4 +766,12 @@ func operatorKafka(broker string, ca []byte, user, password string) (*kgo.Client
 		return nil, fmt.Errorf("broker %w", err)
 	}
 	return kgo.NewClient(append(opts, kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
+}
+
+func operatorCommand(pos []string) string {
+	length := 2
+	if len(pos) >= 2 && pos[0] == "tenant" && (pos[1] == "pool" || pos[1] == "host") {
+		length = 3
+	}
+	return strings.Join(pos[:min(len(pos), length)], " ")
 }

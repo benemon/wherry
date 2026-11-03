@@ -437,6 +437,9 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	if err != nil {
 		return err
 	}
+	if err := current.LiveTenant(tenant); err != nil {
+		return err
+	}
 	principal := TenantPrincipal(tenant, host)
 	if _, exists := current.Hosts[principal]; exists {
 		if !force {
@@ -444,6 +447,9 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 		}
 		if current.Ended[principal] {
 			return errors.New("host cannot return after its membership end")
+		}
+		if current.Revoking[principal] {
+			return errors.New("host is revoking")
 		}
 		return service.reissue(ctx, principal, service.Broker, bundlePath)
 	}
@@ -459,9 +465,6 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 		return err
 	}
 	if err := service.createTopics(ctx, "-1", HostTopic(tenant, host)); err != nil {
-		return err
-	}
-	if err := service.tenantTopics(ctx, tenant); err != nil {
 		return err
 	}
 	password, err := service.upsertUser(ctx, principal)
@@ -481,18 +484,20 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	return writeBundle(bundle, Bundle{service.Broker, principal, password})
 }
 
-func (service *Service) TenantAdd(ctx context.Context, tenant, pool string) error {
+func (service *Service) TenantPoolAdd(ctx context.Context, tenant, pool string) error {
 	current, err := service.LoadState(ctx)
 	if err != nil {
 		return err
 	}
+	if err := current.LiveTenant(tenant); err != nil {
+		return err
+	}
+	if current.Entitlements[tenant][pool] {
+		return service.convergeTenantQuotas(ctx, current, tenant)
+	}
 	terms, ok := current.Pools[pool]
 	if !ok {
 		return errors.New("entitlement names unknown pool")
-	}
-	// The pool's records must fit the tenant's feed, so it exists, at FeedRecordLimit, before the entitlement does.
-	if err := service.tenantTopics(ctx, tenant); err != nil {
-		return err
 	}
 	if current.Entitlements[tenant] == nil {
 		current.Entitlements[tenant] = map[string]bool{}
@@ -513,11 +518,50 @@ func (service *Service) TenantAdd(ctx context.Context, tenant, pool string) erro
 	if err != nil {
 		return err
 	}
+	return service.convergeTenantQuotas(ctx, state, tenant)
+}
+
+func (service *Service) TenantAdd(ctx context.Context, tenant string) error {
+	record := Record{Kind: "tenant", Tenant: tenant}
+	if _, _, err := service.planRecord(ctx, record); err != nil {
+		return err
+	}
+	if err := service.tenantTopics(ctx, tenant); err != nil {
+		return err
+	}
+	if _, err := service.appendChecked(ctx, []byte("tenant."+tenant), record); err != nil {
+		return err
+	}
+	return service.converge(ctx)
+}
+
+func (service *Service) TenantPoolRemove(ctx context.Context, tenant, pool string) error {
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return err
+	}
+	if err := state.LiveTenant(tenant); err != nil {
+		return err
+	}
+	if state.Entitlements[tenant][pool] {
+		state, err = service.appendChecked(ctx, []byte("end.entitlement."+tenant+"."+pool), Record{Kind: "end", Tenant: tenant, Pool: pool})
+		if err != nil {
+			return err
+		}
+	}
+	return service.convergeTenantQuotas(ctx, state, tenant)
+}
+
+func (service *Service) convergeTenantQuotas(ctx context.Context, state State, tenant string) error {
 	if err := service.converge(ctx); err != nil {
 		return err
 	}
+	return service.tenantQuotas(ctx, state, tenant)
+}
+
+func (service *Service) tenantQuotas(ctx context.Context, state State, tenant string) error {
 	for principal, host := range state.Hosts {
-		if host.Tenant == tenant {
+		if host.Tenant == tenant && !state.Ended[principal] {
 			if err := service.applyQuota(ctx, state, tenant, principal); err != nil {
 				return err
 			}
@@ -1124,10 +1168,7 @@ func (service *Service) applyQuota(ctx context.Context, state State, tenant, pri
 			request = terms.RequestPercentage
 		}
 	}
-	if rate == 0 {
-		return nil
-	}
-	results, err := kadm.NewClient(service.Operator).AlterClientQuotas(ctx, []kadm.AlterClientQuotaEntry{{Entity: kadm.ClientQuotaEntity{{Type: "user", Name: &principal}}, Ops: []kadm.AlterClientQuotaOp{{Key: "producer_byte_rate", Value: float64(rate)}, {Key: "request_percentage", Value: request}}}})
+	results, err := kadm.NewClient(service.Operator).AlterClientQuotas(ctx, []kadm.AlterClientQuotaEntry{{Entity: kadm.ClientQuotaEntity{{Type: "user", Name: &principal}}, Ops: []kadm.AlterClientQuotaOp{{Key: "producer_byte_rate", Value: float64(rate), Remove: rate == 0}, {Key: "request_percentage", Value: request, Remove: rate == 0}}}})
 	if err != nil {
 		return err
 	}
