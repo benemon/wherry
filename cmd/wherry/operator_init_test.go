@@ -287,8 +287,8 @@ func testOperatorInitDelegates(t *testing.T, b initBroker, removes bool) {
 	}
 }
 
-// Each ACL init grants is one a command needs, but for those Kafka implies by another it grants: Describe by Read,
-// Write or Alter, DescribeConfigs by AlterConfigs.
+// Each ACL init grants is one a command needs. Kafka implies Describe by Read, Write or Alter, and DescribeConfigs by
+// AlterConfigs, so init grants neither.
 func TestOperatorInitGrantsOnlyNeededACLs(t *testing.T) {
 	noTerminal(t)
 	testOperatorACLs(t, func(t *testing.T) initBroker { b, _ := kfakeInitBroker(t); return b })
@@ -307,7 +307,6 @@ func TestOperatorInitGrantsOnlyNeededACLsOnRealBroker(t *testing.T) {
 }
 
 func testOperatorACLs(t *testing.T, broker func(*testing.T) initBroker) {
-	implied := map[string][]string{"DESCRIBE": {"READ", "WRITE", "ALTER"}, "DESCRIBE_CONFIGS": {"ALTER_CONFIGS"}}
 	for _, acl := range operator.OperatorACLs {
 		for _, dropped := range acl.Operations {
 			t.Run(acl.ResourceType+"/"+dropped, func(t *testing.T) {
@@ -317,8 +316,7 @@ func testOperatorACLs(t *testing.T, broker func(*testing.T) initBroker) {
 					t.Fatal(err)
 				}
 				builder := kadm.NewACLs().Allow("User:" + operator.OperatorPrincipal).AllowHosts("*").Operations(map[string]kadm.ACLOperation{
-					"ALTER": kadm.OpAlter, "DESCRIBE": kadm.OpDescribe, "ALTER_CONFIGS": kadm.OpAlterConfigs, "DESCRIBE_CONFIGS": kadm.OpDescribeConfigs,
-					"CREATE": kadm.OpCreate, "READ": kadm.OpRead, "WRITE": kadm.OpWrite,
+					"ALTER": kadm.OpAlter, "ALTER_CONFIGS": kadm.OpAlterConfigs, "CREATE": kadm.OpCreate, "READ": kadm.OpRead, "WRITE": kadm.OpWrite,
 				}[dropped])
 				switch acl.ResourceType {
 				case "cluster":
@@ -337,12 +335,8 @@ func testOperatorACLs(t *testing.T, broker func(*testing.T) initBroker) {
 				}
 				// ACL deletion reaches each broker in turn.
 				time.Sleep(time.Second)
-				covered := slices.ContainsFunc(implied[dropped], func(other string) bool { return slices.Contains(acl.Operations, other) })
 				err = operatorCommands(t, b.root, dir, suffix(t), false)
-				if covered && err != nil {
-					t.Fatalf("without %s on the %s, which Kafka implies by another grant: %v", dropped, acl.ResourceType, err)
-				}
-				if !covered && err == nil {
+				if err == nil {
 					t.Fatalf("every command succeeded without %s on the %s; init grants it for nothing", dropped, acl.ResourceType)
 				}
 				t.Logf("without %s on the %s: %v", dropped, acl.ResourceType, err)

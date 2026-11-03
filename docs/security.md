@@ -485,16 +485,16 @@ re-run of `init` to rotate `wherry.operator`'s password needs it again.
 
 | Resource | Operations | Used by |
 | --- | --- | --- |
-| Cluster | `Alter` | creating and deleting SCRAM credentials; creating and deleting ACLs |
-| Cluster | `Describe` | describing ACLs |
-| Cluster | `AlterConfigs`, `DescribeConfigs` | client quotas; reading broker settings |
-| Topic, prefix `wherry.` | `Create`, `AlterConfigs`, `DescribeConfigs`, `Describe`, `Read`, `Write` | the operator, receiver, pool, tenant and host topics |
+| Cluster | `Alter` | creating and deleting SCRAM credentials; creating, describing and deleting ACLs |
+| Cluster | `AlterConfigs` | client quotas; reading broker settings |
+| Topic, prefix `wherry.` | `Create`, `AlterConfigs`, `Read`, `Write` | the operator, receiver, pool, tenant and host topics |
 | Group, prefix `p-` | `AlterConfigs` | share-group settings |
 
 Kafka implies `Describe` by `Read`, `Write` and `Alter`, and
-`DescribeConfigs` by `AlterConfigs`, so four of these grants add nothing to
-the others; `init` grants them so the table states what each command uses.
-`operator check` reports any of the other seven that is missing.
+`DescribeConfigs` by `AlterConfigs`
+([authorization](https://kafka.apache.org/documentation/#security_authz_primitives)),
+so `init` grants neither. `operator check` reports any of these grants
+that is missing.
 
 `Alter` on the cluster lets its holder grant itself any ACL, so
 `wherry.operator` is close to the super user in effect: whoever holds
