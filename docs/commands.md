@@ -20,6 +20,7 @@ Every command but `version` and the shortcuts runs under its role's word:
 `wherry submit`, `wait`, `status`, `events`, `logs` and `cancel` are
 [shortcuts](#shortcuts) for the `wherry host` commands of the same name.
 `wherry --help` and `wherry -h` print the tree and list the shortcuts.
+`-h` after `wherry operator`, `wherry host` or a command prints its usage on standard error and exits with status 0.
 
 ## Conventions
 
