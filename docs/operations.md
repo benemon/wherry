@@ -1345,7 +1345,25 @@ The [release notes](https://github.com/benemon/wherry/releases) mark a
 release that changes the record formats or the plugin protocol, and give
 its upgrade steps.
 
-Between releases that keep the record formats, upgrade in place.
+The release that introduces [`wherry operator init`](#set-up-wherry-operator)
+does not upgrade in place. Its operator commands connect as `wherry.operator`
+alone, through a working directory's `operator.yaml`, which only `init`
+writes, and rely on the grants `init` gives `wherry.operator`; and its hosts
+and receivers refuse a bundle that carries a CA, as every bundle of an
+earlier release does. Upgrade an installation of an earlier release to it
+with a reset:
+
+1. [Reset the deployment](#reset-a-deployment), running its `wherry operator
+   init` step with the new release in a new working directory.
+2. Write the kept files in `pools/` and `receivers/` from the terms and
+   configurations the earlier release applied, apply them, and add every
+   host again.
+3. Give each host and receiver its new bundle from `bundles/`, and, when the
+   broker's certificate chains to a private CA, that CA's certificate: the
+   receiver's `ca_file`, and the host's `ca_file` or
+   `~/.config/wherry/ca.pem`.
+
+Between later releases that keep the record formats, upgrade in place.
 Prerequisites: the new `wherry` binary, and each receiver's local
 configuration, bundle and state directory.
 
