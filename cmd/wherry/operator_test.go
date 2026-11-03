@@ -91,6 +91,9 @@ func TestOperatorCommandUsage(t *testing.T) {
 		want string
 	}{
 		{[]string{"host", "add", "host-a"}, "unknown operator command"},
+		{[]string{"host", "add", "host-a", "--tenant", "tenant-a"}, "unknown operator command"},
+		{[]string{"host", "remove", "host-a", "--tenant", "tenant-a"}, "unknown operator command"},
+		{[]string{"pool", "entitle", "p", "--tenant", "tenant-a"}, "unknown operator command"},
 		{[]string{"host", "add", "tenant-a", "host-a"}, "unknown operator command"},
 		{[]string{"init", "extra"}, "usage: wherry operator init [--dir DIR]"},
 		{[]string{"host", "remove", "host-a"}, "unknown operator command"},
