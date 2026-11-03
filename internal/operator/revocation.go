@@ -42,8 +42,14 @@ func (service *Service) RevokeHost(ctx context.Context, tenant, host string, wai
 
 func (service *Service) revoke(ctx context.Context, end Record, principal string, wait time.Duration, probe func(context.Context, string, string) error) RevocationResult {
 	result := RevocationResult{}
+	recorded := false
 	run := func(number int, name string, fn func() error) bool {
 		err := fn()
+		// Once revoking is recorded, a failed step converges: a stale concurrent command may have restored the
+		// principal's grants after step 2. Step 6 converges itself.
+		if err != nil && recorded && number < 6 {
+			err = errors.Join(err, service.converge(ctx))
+		}
 		result.Steps = append(result.Steps, RevocationStep{number, name, err == nil, err})
 		return err == nil
 	}
@@ -79,6 +85,7 @@ func (service *Service) revoke(ctx context.Context, end Record, principal string
 				return err
 			}
 		}
+		recorded = true
 		password, err = service.upsertUser(ctx, principal)
 		return err
 	}) {
@@ -132,7 +139,12 @@ func (service *Service) revoke(ctx context.Context, end Record, principal string
 	}) {
 		return result
 	}
-	if !run(6, "record membership end", func() error { _, err := service.appendChecked(ctx, []byte("end."+principal), end); return err }) {
+	// A stale concurrent command can restore a grant or credential after steps 2 and 4; the pass after the end record
+	// deletes it again.
+	if !run(6, "record membership end", func() error {
+		_, err := service.appendChecked(ctx, []byte("end."+principal), end)
+		return errors.Join(err, service.converge(ctx))
+	}) {
 		return result
 	}
 	result.Complete = true

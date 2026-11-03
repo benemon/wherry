@@ -183,22 +183,23 @@ func (service *Service) PoolApply(ctx context.Context, pool string, terms Terms,
 			return err
 		}
 	}
-	// A new pool's topics are created only once CheckNames has accepted its record.
-	if !update {
-		if err := service.poolTopics(ctx, state, pool, retention.tasks); err != nil {
+	// Once the record is appended, a failure still converges.
+	err = func() error {
+		// A new pool's topics are created only once CheckNames has accepted its record.
+		if !update {
+			if err := service.poolTopics(ctx, state, pool, retention.tasks); err != nil {
+				return err
+			}
+		}
+		if err := service.createTopicsWith(ctx, custodianConfigs, CustodianTopic(pool)); err != nil {
 			return err
 		}
-	}
-	if err := service.createTopicsWith(ctx, custodianConfigs, CustodianTopic(pool)); err != nil {
-		return err
-	}
-	if err := service.configureTopics(ctx, custodianConfigs, CustodianTopic(pool)); err != nil {
-		return err
-	}
-	if err := service.configureGroup(ctx, pool, effective); err != nil {
-		return err
-	}
-	return service.reconcileACLs(ctx, state)
+		if err := service.configureTopics(ctx, custodianConfigs, CustodianTopic(pool)); err != nil {
+			return err
+		}
+		return service.configureGroup(ctx, pool, effective)
+	}()
+	return errors.Join(err, service.converge(ctx))
 }
 
 // loadPoolState is the recorded state, creating wherry.operator unless dryRun: a dry run changes nothing, and an absent
@@ -326,6 +327,9 @@ func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, 
 	if _, err := service.appendChecked(ctx, []byte(config.Receiver), record); err != nil {
 		return err
 	}
+	if err := service.converge(ctx); err != nil {
+		return err
+	}
 	return writeBundle(bundle, Bundle{broker, ReceiverPrincipal(config.Receiver), password})
 }
 
@@ -362,6 +366,15 @@ func (service *Service) reissue(ctx context.Context, principal, broker, bundlePa
 		return err
 	}
 	rotated = true
+	state, err := service.converged(ctx)
+	if err != nil {
+		return err
+	}
+	// A concurrent removal's end record deleted the new password.
+	if state.Ended[principal] {
+		rotated = false
+		return fmt.Errorf("%s cannot return after its membership end", principal)
+	}
 	return writeBundle(bundle, Bundle{broker, principal, password})
 }
 
@@ -385,8 +398,10 @@ func (service *Service) ReceiverUpdate(ctx context.Context, config ReceiverConfi
 	}
 	record := Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &config}
 	if !dryRun {
-		state, err = service.appendChecked(ctx, []byte(config.Receiver), record)
-		return state.Receivers[config.Receiver], err
+		if state, err = service.appendChecked(ctx, []byte(config.Receiver), record); err != nil {
+			return ReceiverConfig{}, err
+		}
+		return state.Receivers[config.Receiver], service.converge(ctx)
 	}
 	return asRecorded(record)
 }
@@ -457,7 +472,7 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	if err != nil {
 		return err
 	}
-	if err := service.reconcileACLs(ctx, state); err != nil {
+	if err := service.converge(ctx); err != nil {
 		return err
 	}
 	if err := service.applyQuota(ctx, state, tenant, principal); err != nil {
@@ -498,7 +513,7 @@ func (service *Service) TenantAdd(ctx context.Context, tenant, pool string) erro
 	if err != nil {
 		return err
 	}
-	if err := service.reconcileACLs(ctx, state); err != nil {
+	if err := service.converge(ctx); err != nil {
 		return err
 	}
 	for principal, host := range state.Hosts {
@@ -676,8 +691,12 @@ func (service *Service) appendRecord(ctx context.Context, key []byte, record Rec
 	if err != nil {
 		return State{}, 0, fmt.Errorf("write operator record: %w", err)
 	}
+	appended(record)
 	return state, produced.Offset, nil
 }
+
+// Tests replace appended to act, as a concurrent operator command would, once a record is on wherry.operator.
+var appended = func(Record) {}
 
 // planRecord is the state once record is appended and record encoded, refusing a record the state refuses.
 func (service *Service) planRecord(ctx context.Context, record Record) (State, []byte, error) {

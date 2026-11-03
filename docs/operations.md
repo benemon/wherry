@@ -77,6 +77,39 @@ holds every bundle ([Security](security.md#the-operator-working-directory)).
 To rotate `wherry.operator`'s password, run `init` again with the super
 user; commands then use the new password.
 
+### Concurrent operator commands
+
+Operator commands do not lock each other. Each one that writes a record to
+`wherry.operator` ends with passes that read `wherry.operator` to its end and make Kafka match
+those records, not the ones it read when it started: a pass grants what they
+call for, deletes every other grant of a `wherry.tnt.*` or `wherry.rcv.*`
+principal on a `wherry.` topic, a `p-` group or a `p.` transactional ID,
+and deletes the SCRAM credential of each host and receiver whose membership
+has ended. It deletes no grant of `wherry.operator`, of the Kafka super
+user, or of any other principal or resource. One exception: a revocation
+deletes every grant of the principal it revokes, on any resource, since
+`wherry.tnt.*` and `wherry.rcv.*` names are reserved to wherry. A revocation
+and a pool suspension make this pass after their last record.
+
+A pass that `wherry.operator` grew during may have applied older records
+over a newer command's, so the command makes another; after five such
+passes it fails with `wherry.operator moved during each of 5 convergence
+passes`. Once a command has written a record, it makes these passes on
+every return, failed or not.
+
+What this guarantees: a command that returns without an error leaves Kafka
+matching every record on `wherry.operator` when its last pass ended, and
+`wherry.operator` did not grow during that pass. A command still running
+can change Kafka after that, but its own passes then follow. A command that
+fails before it writes a record writes nothing to `wherry.operator`; topics,
+a new host's or receiver's credential, or a new receiver's grants it made
+first stay, the grants until the next command's pass. A `host add --force`
+or receiver reissue that a revocation overtakes refuses with `cannot return
+after its membership end` and writes no bundle. A command's pass deletes the
+grants a concurrent command adding a receiver makes before its record; that
+command's own pass restores them, and a peer denied meanwhile exits and is
+restarted by its supervisor.
+
 ## Create a pool
 
 Prerequisites: the working directory
@@ -803,10 +836,10 @@ within the stop window.
 ## Revoke a host or receiver
 
 Prerequisites: the broker settings in [Prepare Kafka](#prepare-kafka), and
-the operator's working directory. Run no other `wherry operator` command until the
-revocation completes: operator commands do not lock each other, and one that read
-`wherry.operator` before the revocation started can restore the principal's
-credential and ACLs.
+the operator's working directory. Other operator commands can run
+meanwhile: the revocation deletes again, after its membership end record,
+any credential or ACL a [concurrent command](#concurrent-operator-commands)
+restored.
 
 1. Run the revocation:
 
@@ -825,7 +858,10 @@ credential and ACLs.
    ends in ` error=<cause>`. Check what that step depends on (the broker
    connection, the broker settings), then run the command again. It starts
    again from step 1 and continues from the revoking record the failed run
-   left; the principal holds no ACL meanwhile. Step 3 already retries for up to 2 minutes while a
+   left. A run that reached step 2 deleted every grant of the principal; a
+   stale command can restore wherry-managed grants, which the next pass
+   deletes again. A run that failed before step 2 may have left the
+   principal's grants, and the run again deletes them. Step 3 already retries for up to 2 minutes while a
    broker still authorises the principal.
 
 3. For a receiver, rotate at its source each credential of the runs it
@@ -851,11 +887,10 @@ custody, and lists what was exposed so that its credentials are rotated at
 their issuers.
 
 Prerequisites: the broker settings in [Prepare Kafka](#prepare-kafka), and
-the operator's working directory. Run one `wherry operator` command at a time,
-each to its end, from the suspension to the resume: operator commands do not
-lock each other, and one that read `wherry.operator` before another's record
-can undo it, restoring the task topic grants a suspension withdrew, the
-grants a resume restored, or a revoked principal's credential and ACLs.
+the operator's working directory. A [concurrent operator command](#concurrent-operator-commands)
+that read `wherry.operator` before the suspension can restore the task
+topic grants it withdrew only until one of the two commands' passes
+deletes them again.
 
 1. Suspend the pool. It takes no new work: hosts stop submitting to it,
    receivers stop claiming from it, and the key custodian refuses the open

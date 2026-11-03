@@ -401,7 +401,9 @@ steps:
 5. Wait the longest of the broker's re-authentication, share-group lock
    and transaction timeout intervals. A longer wait can be asked for; a
    shorter one is refused.
-6. Record its membership end on `wherry.operator`.
+6. Record its membership end on `wherry.operator`, then read
+   `wherry.operator` to its end and delete again any ACL or credential a
+   concurrent command restored.
 
 No claim or write by the principal is authorised after step 5. A
 revocation run again after a failed step continues from the revoking

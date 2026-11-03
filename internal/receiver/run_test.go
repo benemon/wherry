@@ -829,6 +829,13 @@ func TestLastOffsetSkipsOnlyAnEndedHoldersTopicDenial(t *testing.T) {
 		t.Fatalf("incomplete revocation: %+v", result)
 	}
 	progress := operator.ReceiverProgressTopic("receiver-peer")
+	// Revocation withdraws this receiver's READ on the ended peer's progress topic; a stale operator command can restore
+	// it until the next command's final pass.
+	restore := kadm.NewACLs().Topics(progress).Allow(operator.ReceiverPrincipal(testReceiver)).AllowHosts("*").Operations(kadm.OpRead, kadm.OpDescribe).ResourcePatternType(kadm.ACLPatternLiteral)
+	restore.PrefixUser()
+	if results, err := kadm.NewClient(f.service.Operator).CreateACLs(f.ctx, restore); err != nil || results[0].Err != nil {
+		t.Fatalf("restore the peer's progress grant: %v, %+v", err, results)
+	}
 	var sasl atomic.Bool
 	sasl.Store(true)
 	f.cluster.ControlKey(kmsg.ListOffsets.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
