@@ -7,7 +7,10 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
@@ -215,7 +218,7 @@ func TestTenantPoolQuotaRetries(t *testing.T) {
 				got[v.Key] = v.Value
 			}
 		}
-		if got["producer_byte_rate"] != want || want == 0 && len(got) != 0 {
+		if got["producer_byte_rate"] != want || got["request_percentage"] != want/10 || want == 0 && len(got) != 0 {
 			t.Fatalf("quota=%v want rate %v", got, want)
 		}
 	}
@@ -341,8 +344,21 @@ func TestTenantRemoveRetriesAndSerializesRecords(t *testing.T) {
 			attempt, cancel := context.WithCancel(ctx)
 			defer cancel()
 			var records []Record
-			appended = func(record Record) {
+			var appends atomic.Int32
+			var overlap atomic.Bool
+			var recordMu sync.Mutex
+			recordAppend := func(record Record) {
+				if appends.Add(1) != 1 {
+					overlap.Store(true)
+				}
+				defer appends.Add(-1)
+				time.Sleep(10 * time.Millisecond)
+				recordMu.Lock()
+				defer recordMu.Unlock()
 				records = append(records, record)
+			}
+			appended = func(record Record) {
+				recordAppend(record)
 				if failKind == "entitlement" && record.Kind == "end" && record.Pool != "" || failKind == "revoking" && record.Kind == "revoking" || failKind == "host end" && record.Kind == "end" && record.Host != "" || failKind == "tenant end" && record.Kind == "end" && record.Host == "" && record.Pool == "" {
 					cancel()
 				}
@@ -352,7 +368,7 @@ func TestTenantRemoveRetriesAndSerializesRecords(t *testing.T) {
 			if failKind != "none" && err == nil {
 				t.Fatal("injected interruption did not fail")
 			}
-			appended = func(record Record) { records = append(records, record) }
+			appended = recordAppend
 			if err := removeTenantFixture(service, ctx, "t"); err != nil {
 				t.Fatal(err)
 			}
@@ -367,6 +383,9 @@ func TestTenantRemoveRetriesAndSerializesRecords(t *testing.T) {
 				if !state.Ended[principal] {
 					t.Fatalf("host not ended: %s", principal)
 				}
+			}
+			if overlap.Load() {
+				t.Fatal("concurrent record appends")
 			}
 			// Both revoking records precede the first host end; no end precedes its own revoking record.
 			seen := map[string]bool{}
