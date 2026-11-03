@@ -1866,6 +1866,8 @@ func TestTheRunsFirstNonRejectedStatusNamesItsTask(t *testing.T) {
 func TestWaitingRunReleasesWhenEntitlementEnds(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.quiet()
+	halted := make(chan error, 4)
+	f.receiver.halt = func(err error) { halted <- err }
 	record := f.submit(t, f.host, nil)
 	done := f.executing(t, f.ctx, record, 1)
 	f.request(t, 1)
@@ -1891,5 +1893,10 @@ func TestWaitingRunReleasesWhenEntitlementEnds(t *testing.T) {
 	}
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatalf("receiver stopped: %v", err)
+	}
+	select {
+	case err := <-halted:
+		t.Fatalf("receiver exited on refusal: %v", err)
+	default:
 	}
 }
