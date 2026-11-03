@@ -48,7 +48,8 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		if len(pos) != 3 {
 			return errors.New("usage: wherry operator pool apply NAME [-f PATH] [--dry-run]")
 		}
-		path, directory, err := objectFile(dir, "pools", pos[2], options, stderr, poolFields, promptPool)
+		_, dryRun := options["dry-run"]
+		path, directory, err := objectFile(dir, "pools", pos[2], options, dryRun, stderr, poolFields, promptPool)
 		if err != nil {
 			return err
 		}
@@ -56,7 +57,6 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		_, dryRun := options["dry-run"]
 		return service.PoolApply(ctx, pos[2], terms, dryRun)
 	case "receiver apply":
 		_, force := options["force"]
@@ -69,7 +69,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		current, exists := state.Receivers[pos[2]]
-		bundle, err := bundlePath(dir, "receivers", pos[2])
+		bundle, err := bundlePath(dir, "receivers", !dryRun, pos[2])
 		if err != nil {
 			return err
 		}
@@ -86,7 +86,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			}
 			return service.ReceiverReissue(ctx, pos[2], broker, bundle)
 		}
-		path, directory, err := objectFile(dir, "receivers", pos[2], options, stderr, receiverFields, func(p *prompter) (any, error) { return promptReceiver(p, service.Broker) })
+		path, directory, err := objectFile(dir, "receivers", pos[2], options, dryRun, stderr, receiverFields, func(p *prompter) (any, error) { return promptReceiver(p, service.Broker) })
 		if err != nil {
 			return err
 		}
@@ -174,7 +174,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		if len(pos) != 3 || options["tenant"] == "" {
 			return errors.New("usage: wherry operator host add HOST --tenant TENANT [--force]")
 		}
-		bundle, err := bundlePath(dir, "hosts", options["tenant"], pos[2])
+		bundle, err := bundlePath(dir, "hosts", true, options["tenant"], pos[2])
 		if err != nil {
 			return err
 		}

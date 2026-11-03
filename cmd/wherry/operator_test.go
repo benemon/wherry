@@ -221,7 +221,7 @@ func TestReceiverShowAndDryRun(t *testing.T) {
 	}
 	recorded := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 3, Profiles: []operator.ProfileSettings{{Name: "old", Plugin: "nomad", Agent: "claude"}},
 		PluginSHA256: map[string]string{"nomad": fakeSHA256}}
-	bundle, err := bundlePath(".", "receivers", "receiver-a")
+	bundle, err := bundlePath(".", "receivers", true, "receiver-a")
 	if err != nil {
 		t.Fatal(err)
 	}

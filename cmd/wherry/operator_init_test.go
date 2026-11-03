@@ -772,3 +772,62 @@ func TestHostAddRestrictsExistingBundleDirectories(t *testing.T) {
 		}
 	}
 }
+
+// A dry run writes nothing to the working directory: no bundle directory, no change to an existing one's mode, and no
+// kept file from prompts.
+func TestDryRunWritesNothingToTheWorkingDirectory(t *testing.T) {
+	service := operatorEnv(t)
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+	if err := service.PoolApply(context.Background(), "pool-a", terms, false); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": "pool: pool-a\nplugin_sha256: {nomad: " + fakeSHA256 + "}\n" + basePlugin + item("name: claude\nagent: claude\n", "      ")}), "receiver.yaml")
+	if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", file, "--dry-run"}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat("bundles"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("bundles after a dry run: %v; want it absent", err)
+	}
+	if err := os.MkdirAll(filepath.Join("bundles", "receivers"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", file, "--dry-run"}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(filepath.Join("bundles", "receivers")); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("bundles/receivers after a dry run: %v, %v; want its mode left 0755", info, err)
+	}
+	onTerminal(t, "claude\n\n\n\n\n\n\n\n")
+	if err := runOperator([]string{"pool", "apply", "prompted", "--dry-run"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "--dry-run writes nothing") {
+		t.Fatalf("pool apply --dry-run without a kept file = %v; want it refused", err)
+	}
+	if _, err := os.Stat(filepath.Join("pools", "prompted.yaml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pools/prompted.yaml after a dry run: %v; want it absent", err)
+	}
+}
+
+// receiver apply --force takes the broker from the receiver's kept file over the one in its existing bundle.
+func TestReceiverApplyForceTakesTheKeptFilesBroker(t *testing.T) {
+	service := operatorEnv(t)
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+	if err := service.PoolApply(context.Background(), "pool-a", terms, false); err != nil {
+		t.Fatal(err)
+	}
+	body := "pool: pool-a\nplugin_sha256: {nomad: " + fakeSHA256 + "}\n" + basePlugin + item("name: claude\nagent: claude\n", "      ")
+	file := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": "broker: kafka.old.internal:9093\n" + body}), "receiver.yaml")
+	if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", file}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll("receivers", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join("receivers", "receiver-a.yaml"), []byte("broker: kafka.kept.internal:9093\n"+body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runOperator([]string{"receiver", "apply", "receiver-a", "--force"}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if bundle, err := operator.ReadBundle(filepath.Join("bundles", "receivers", "receiver-a.bundle")); err != nil || bundle.Broker != "kafka.kept.internal:9093" {
+		t.Fatalf("bundle after --force names %q, %v; want the kept file's broker", bundle.Broker, err)
+	}
+}

@@ -194,8 +194,9 @@ func inDir(dir, path string) string {
 }
 
 // bundlePath is the bundle file under dir's bundles/kind named by names, the last the file's, each a directory but the
-// last, making the directories mode 0700, existing ones too: bundles hold passwords.
-func bundlePath(dir, kind string, names ...string) (string, error) {
+// last. With create it makes the directories mode 0700, existing ones too: bundles hold passwords. A dry run passes
+// false, since it writes nothing.
+func bundlePath(dir, kind string, create bool, names ...string) (string, error) {
 	for _, name := range names {
 		if !wire.ValidName(name) {
 			return "", fmt.Errorf("%q is not a valid name", name)
@@ -203,6 +204,9 @@ func bundlePath(dir, kind string, names ...string) (string, error) {
 	}
 	bundles := filepath.Join(dir, "bundles")
 	path := filepath.Join(append([]string{bundles, kind}, names[:len(names)-1]...)...)
+	if !create {
+		return filepath.Join(path, names[len(names)-1]+".bundle"), nil
+	}
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return "", err
 	}
@@ -227,8 +231,9 @@ func rebroker(path string, bundle operator.Bundle, broker string) error {
 }
 
 // objectFile is the file apply reads for name and whether it is a directory: -f's, else dir's kind/name.yaml, else
-// that file written from prompt's answers. Without a terminal to prompt on, it refuses, naming fields.
-func objectFile(dir, kind, name string, options map[string]string, prompts io.Writer, fields string, prompt func(*prompter) (any, error)) (string, bool, error) {
+// that file written from prompt's answers. Without a terminal to prompt on, it refuses, naming fields; so does a dry run,
+// which writes nothing.
+func objectFile(dir, kind, name string, options map[string]string, dryRun bool, prompts io.Writer, fields string, prompt func(*prompter) (any, error)) (string, bool, error) {
 	path := options["f"]
 	if path == "" {
 		if !wire.ValidName(name) {
@@ -236,6 +241,9 @@ func objectFile(dir, kind, name string, options map[string]string, prompts io.Wr
 		}
 		path = filepath.Join(dir, kind, name+".yaml")
 		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			if dryRun {
+				return "", false, fmt.Errorf("%s does not exist and --dry-run writes nothing; write it, or give -f FILE, with %s", path, fields)
+			}
 			if !terminal() {
 				return "", false, fmt.Errorf("%s does not exist and there is no terminal to prompt on; write it, or give -f FILE, with %s", path, fields)
 			}

@@ -143,7 +143,9 @@ which selects the directory form of the
 neither, on a terminal, the command asks for the object's real choices, with
 defaults shown, writes the file, then applies it; a refused apply leaves the
 file to correct and apply again. With neither and no terminal it refuses,
-naming the fields the file must give.
+naming the fields the file must give. `--dry-run` writes nothing to the
+working directory: with neither file it refuses rather than prompt, and it
+creates no bundle directory.
 
 `host add` and `receiver apply` write bundles under the working directory's
 `bundles/`: `bundles/hosts/<tenant>/<host>.bundle` and
