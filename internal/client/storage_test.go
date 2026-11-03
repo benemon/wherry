@@ -260,7 +260,7 @@ func storageFixture(t *testing.T) (*fixture, *oracle, *testReceiver) {
 	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-s3"); err != nil {
 		t.Fatal(err)
 	}
-	f.host.storage = o.config
+	f.host.storage = map[string]StorageConfig{"pool-s3": *o.config}
 	maps.Copy(f.host.credentials, o.sources)
 	receiver := f.addReceiver(t, "receiver-s3", "pool-s3")
 	receiver.advertise(t, f.ctx, nil)
@@ -342,7 +342,7 @@ func TestSubmitMovesInputsOverSmallestProfileLimitToS3(t *testing.T) {
 	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-inline"); err != nil {
 		t.Fatal(err)
 	}
-	f.host.storage = o.config
+	f.host.storage = map[string]StorageConfig{"pool-inline": *o.config}
 	maps.Copy(f.host.credentials, o.sources)
 	receiver := f.addReceiver(t, "receiver-a", "pool-inline")
 	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].InlineLimit = 1000 })
@@ -371,7 +371,7 @@ func recordLimitFixture(t *testing.T, stored bool) (*fixture, *uploadOracle, *te
 	terms := testTerms()
 	if stored {
 		terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
-		f.host.storage = o.config
+		f.host.storage = map[string]StorageConfig{"pool-r": *o.config}
 		maps.Copy(f.host.credentials, o.sources)
 	}
 	if err := f.service.PoolApply(f.ctx, "pool-r", terms, false); err != nil {
@@ -468,7 +468,7 @@ func TestSubmitAppliesTheProfileLimitOfAStaleReceiver(t *testing.T) {
 	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-inline"); err != nil {
 		t.Fatal(err)
 	}
-	f.host.storage = o.config
+	f.host.storage = map[string]StorageConfig{"pool-inline": *o.config}
 	maps.Copy(f.host.credentials, o.sources)
 	receiver := f.addReceiver(t, "receiver-a", "pool-inline")
 	receiver.advertise(t, f.ctx, nil)
@@ -580,7 +580,7 @@ func TestS3UseIsRefusedBeforePublishing(t *testing.T) {
 	if _, err := f.host.Submit(f.ctx, input); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "this host's configuration has no storage credential") {
 		t.Fatalf("submit without a storage credential = %v", err)
 	}
-	f.host.storage = &StorageConfig{AccessKey: "model", SecretKey: "model"}
+	f.host.storage = map[string]StorageConfig{"pool-a": {AccessKey: "model", SecretKey: "model"}}
 	if _, err := f.host.Submit(f.ctx, input); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "pool pool-a has no storage for S3 inputs and outputs") {
 		t.Fatalf("submit to a pool without storage = %v", err)
 	}
@@ -597,7 +597,7 @@ func TestS3UseIsRefusedBeforePublishing(t *testing.T) {
 func TestStorageKeysResolveThroughSources(t *testing.T) {
 	const access, secret = "storage-access-value", "storage-secret-value"
 	t.Setenv("WHERRY_TEST_STORAGE_ACCESS", access+"\n")
-	h := &Host{storage: &StorageConfig{AccessKey: "s3-access", SecretKey: "s3-secret"}, credentials: map[string]credential.Source{
+	h := &Host{storage: map[string]StorageConfig{"pool-s3": {AccessKey: "s3-access", SecretKey: "s3-secret"}}, credentials: map[string]credential.Source{
 		"s3-access": {Env: "WHERRY_TEST_STORAGE_ACCESS"},
 		"s3-secret": {Command: []string{"printf", secret + "\n"}},
 	}}
@@ -790,7 +790,7 @@ func TestPaddedStorageKeyIsRedacted(t *testing.T) {
 	if err := os.WriteFile(secret, []byte("\tpadded-secret-key  \n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h := &Host{storage: &StorageConfig{AccessKey: "padded-access", SecretKey: "padded-secret"},
+	h := &Host{storage: map[string]StorageConfig{"pool-s3": {AccessKey: "padded-access", SecretKey: "padded-secret"}},
 		credentials: map[string]credential.Source{"padded-access": {File: access}, "padded-secret": {File: secret}}}
 	ctx := context.Background()
 	store, err := h.bucket(ctx, "pool-s3", &operator.Storage{Endpoint: server.URL, Bucket: testBucket})
@@ -830,7 +830,7 @@ func TestLoopbackHTTPStorage(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	h := &Host{storage: &StorageConfig{AccessKey: "access", SecretKey: "secret"},
+	h := &Host{storage: map[string]StorageConfig{"pool-s3": {AccessKey: "access", SecretKey: "secret"}},
 		credentials: map[string]credential.Source{"access": {File: access}, "secret": {File: secret}}}
 	ctx := context.Background()
 	storage := &operator.Storage{Endpoint: server.URL, Bucket: testBucket}
@@ -849,5 +849,27 @@ func TestLoopbackHTTPStorage(t *testing.T) {
 	get, err := url.Parse(string(values[signed.S3InputValue("dataset.bin")]))
 	if err != nil || !storage.Serves(get) {
 		t.Fatalf("presigned %s, %v; want a URL the pool's storage serves", get, err)
+	}
+}
+
+// Each pool's bucket opens with that pool's storage credentials; a pool the config gives none has no storage here.
+func TestStorageCredentialsArePerPool(t *testing.T) {
+	h := &Host{storage: map[string]StorageConfig{"pool-a": {AccessKey: "a-access", SecretKey: "a-secret"}, "pool-b": {AccessKey: "b-access", SecretKey: "b-secret"}},
+		credentials: map[string]credential.Source{}}
+	for _, name := range []string{"a-access", "a-secret", "b-access", "b-secret"} {
+		h.credentials[name] = credential.Source{Command: []string{"printf", name + "-value"}}
+	}
+	pool := &operator.Storage{Endpoint: "https://s3.example.test", Bucket: testBucket}
+	for _, name := range []string{"a", "b"} {
+		store, err := h.bucket(context.Background(), "pool-"+name, pool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if creds, err := store.GetCreds(); err != nil || creds.AccessKeyID != name+"-access-value" || creds.SecretAccessKey != name+"-secret-value" {
+			t.Fatalf("pool-%s's S3 client holds %q and %q, %v; want pool-%s's pair", name, creds.AccessKeyID, creds.SecretAccessKey, err, name)
+		}
+	}
+	if _, err := h.bucket(context.Background(), "pool-c", pool); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "no storage credential for pool pool-c") {
+		t.Fatalf("bucket of a pool without storage credentials = %v", err)
 	}
 }

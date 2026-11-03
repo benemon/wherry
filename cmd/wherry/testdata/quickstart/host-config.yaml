@@ -1,4 +1,5 @@
-bundle: ~/.config/wherry/laptop.bundle
+bundle: /home/me/.config/wherry/bundle.yaml
+ca_file: /home/me/kafka-ca.pem
 credentials:
   claude-oauth-token:
-    file: ~/.config/wherry/credentials/claude-oauth-token
+    file: /home/me/claude-oauth-token

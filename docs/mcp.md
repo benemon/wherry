@@ -19,7 +19,7 @@ defaults, `10m` and `2h`.
 - `submit` returns `wait`, the shell command that waits for
   the run and prints its reply, `wherry wait ID`, with
   `--config-file` and the server's absolute configuration path when the
-  server was started with one.
+  server was started with one or with `WHERRY_CONFIG` set.
 - `submit` requires exactly one of `prompt` and `prompt_file`, a file path read
   as an input is; an empty file fails with `prompt_file is empty`. The
   server's standard input carries the MCP protocol, so `prompt_file` `-`

@@ -119,7 +119,7 @@ func TestSuspendedPoolRefusesSubmitBeforeResolvingAnything(t *testing.T) {
 	if err := f.service.PoolApply(f.ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
-	f.host.storage = o.config
+	f.host.storage = map[string]StorageConfig{"pool-a": *o.config}
 	maps.Copy(f.host.credentials, o.sources)
 	resolved := filepath.Join(t.TempDir(), "resolved")
 	f.host.credentials["model"] = credential.Source{Command: []string{"sh", "-c", `echo >> "$0"; printf model-token`, resolved}}
@@ -552,7 +552,7 @@ func keyLostS3Run(t *testing.T) (*uploadOracle, *fixture, *testReceiver, claimed
 	if err := f.service.PoolApply(f.ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
-	f.host.storage = o.config
+	f.host.storage = map[string]StorageConfig{"pool-a": *o.config}
 	maps.Copy(f.host.credentials, o.sources)
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, nil)

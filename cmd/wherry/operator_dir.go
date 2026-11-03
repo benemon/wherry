@@ -288,6 +288,17 @@ func (p *prompter) ask(question, value string) (string, error) {
 	return cmp.Or(strings.TrimSpace(line), value), nil
 }
 
+// yes writes question and reports whether the answer is y or yes; anything else is No.
+func (p *prompter) yes(question string) (bool, error) {
+	fmt.Fprint(p.out, question)
+	line, err := p.in.ReadString('\n')
+	if err != nil && line == "" {
+		return false, err
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes", nil
+}
+
 // list is ask's answer split at commas, without blanks.
 func (p *prompter) list(question, value string) ([]string, error) {
 	answer, err := p.ask(question, value)

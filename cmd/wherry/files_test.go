@@ -229,7 +229,7 @@ func TestMCPInputsStayInTheWorkingDirectory(t *testing.T) {
 	config := busclient.Config{StateDir: filepath.Join(work, "state"), HostKey: write(filepath.Join(work, "host.key")), Bundle: write(filepath.Join(outside, "bundle.yaml")),
 		Credentials: map[string]credential.Source{"model": {File: write(filepath.Join(work, "secrets", "model"))}, "github-token": {Env: "GITHUB_TOKEN"},
 			"s3-access": {File: write(filepath.Join(work, "s3", "access.key"))}, "s3-secret": {File: write(filepath.Join(work, "s3", "secret.key"))}},
-		Storage: &busclient.StorageConfig{AccessKey: "s3-access", SecretKey: "s3-secret"}}
+		Storage: map[string]busclient.StorageConfig{"pool-a": {AccessKey: "s3-access", SecretKey: "s3-secret"}}}
 	write(filepath.Join(config.StateDir, "runs", "run-a.json"))
 	read := inputReader(inputOpener(work, config))
 	for name, path := range map[string]string{
@@ -478,7 +478,7 @@ func TestSubmitTakesS3InputsAndOutputs(t *testing.T) {
 	if err := os.WriteFile(data, []byte("data"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	const rule = "this host's configuration has no storage credential for S3 inputs and outputs"
+	const rule = "this host's configuration has no storage credential for pool pool-a's S3 inputs and outputs"
 	for _, args := range [][]string{{"--input", data + ":s3"}, {"--output", "report.pdf:required:s3"}} {
 		var stdout, stderr bytes.Buffer
 		if err := runSubmit(b.ctx, b.client, append([]string{"--prompt", "x"}, args...), &stdout, &stderr); err == nil || !strings.Contains(err.Error(), rule) {

@@ -23,9 +23,9 @@ the agent's credentials or of another task credential. Only the agent's run
 can read its credentials, and the platform's boundary enforces it, as each
 [plugin](plugins.md)'s README states.
 
-`wherry host receivers` lists each agent's credential names, marking those this
-host has no source for, such as
-`credentials=openai-api-key,github-token(missing,optional)`. `wherry
+`wherry host receivers` lists each agent's credential names with their
+targets, marking those this host has no source for, such as
+`credentials=openai-api-key:env=OPENAI_API_KEY,github-token:env=GH_TOKEN(missing,optional)`. `wherry
 submit` refuses a task at once, with
 `auth required: credential <name> is not in this host's configuration`,
 when the host has no source for a required credential of the placed agent
@@ -397,6 +397,30 @@ resolve credential <name>: its file is writable by its group or open to others; 
 
 The `submit` of the [MCP server](mcp.md) refuses as an input every file
 a `file` source names, including the storage keys' files.
+
+### Suggested sources
+
+[`wherry host init`](commands.md#wherry-host-init) asks for each credential's
+source and writes the configuration with the reference it is given, `file`,
+`env` or `command`: a path, a variable's name or an argv, never a value. When
+an agent's target variable is set where `init` runs, it offers that variable,
+defaulting to No:
+
+```
+pool build delivers credential git-token to its agents as GITHUB_TOKEN.
+found GITHUB_TOKEN in your environment. Use it for git-token? It will be sent to agents in every pool, now or later, that names git-token. [y/N]
+an environment source is read where submits run, including the MCP server your harness starts.
+```
+
+A source belongs to the credential name, not to one pool: whatever the
+variable holds goes to the agents of every pool that names the credential,
+including pools the tenant is entitled to later. A variable set in a shell is
+often set for another purpose, such as the user's own `GITHUB_TOKEN`, with
+more reach than an agent needs, so only an explicit `y` takes it, and a blank
+answer asks for a source instead. An `env` source is read in each process that
+submits, so the MCP server a harness starts must have the variable too. A
+file target suggests nothing, and a configuration written in advance or
+without a terminal is used as written.
 
 ## Platform credentials
 

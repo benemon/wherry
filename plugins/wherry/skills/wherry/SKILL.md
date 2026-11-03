@@ -33,8 +33,9 @@ Do short or interactive work yourself.
 Call `receivers` first. For each receiver it returns:
 
 - `profiles`: each with its `plugin`, the `agent` it runs, its `labels`, `credentials`,
-  the agent's credentials by `name` with `optional` and `configured`,
-  whether this host has a source for each, and `ready`, whether the
+  the agent's credentials by `name` with their target (`env`, the agent's
+  environment variable, or `file`, in its credentials directory), `optional`
+  and `configured`, whether this host has a source for each, and `ready`, whether the
   receiver's live advertisement offers it now. A live receiver
   with no ready plugin profile lists every profile with `ready` false, and no task
   is placed on it.
@@ -93,8 +94,8 @@ MCP server's input roots (the directory it runs in, unless the user's wherry
 configuration lists `input_roots`), which the agent finds under their base
 names in its input directory. Inputs travel inside the task's broker record up
 to the broker's record limit and the smallest matching plugin profile's limit. When
-they would exceed either and the chosen pool has storage and the host its
-storage credential, wherry automatically carries them through S3; otherwise
+they would exceed either and the chosen pool has storage and the host a
+storage credential for that pool, wherry automatically carries them through S3; otherwise
 submit refuses before publishing and names the limit.
 The server refuses any other path, and the host's state directory, host key,
 bundle and every file a credential source names, including the storage keys' files. To give the agent a credential,
@@ -110,7 +111,7 @@ To send a large file through S3 directly, up to 5 GiB, add `storage: "s3"`
 to its input: the server uploads it to the pool's bucket and the agent finds it
 in its input directory like any input. Add `storage: "s3"` to an output to
 return it through the bucket. Both need a pool with storage and a storage
-credential in the user's wherry configuration; without them `submit`
+credential for that pool in the user's wherry configuration; without them `submit`
 returns `INVALID_ARGUMENT` saying which is missing. `wait` downloads S3
 outputs like any output, and deletes the run's objects from the bucket
 once the run has ended and every one has verified. A run that ended while
@@ -175,9 +176,11 @@ needs nothing more from this host. When a source fails to resolve, it returns
 `UNAVAILABLE`, and the wherry MCP server's log names the credential and the
 cause. A run whose agent needs a
 credential it lacks ends `TASK_STATE_FAILED` with a `message` that names the
-credential and never holds its value. Tell the user to add or fix a source for
-the credential under that name in `credentials` in their wherry configuration:
-a file, an environment variable of the MCP server's process, or a command. Never ask for the value or handle it
+credential and never holds its value. Tell the user to run `wherry host init`, which asks
+for a source for each credential their pools take that has none, or to add or
+fix a source for the credential under that name in `credentials` in their
+wherry configuration: a file, an environment variable of the MCP server's
+process, or a command. Never ask for the value or handle it
 yourself. When the user says it is in place, call `submit` again with the
 same input, and start its `wait` as before.
 

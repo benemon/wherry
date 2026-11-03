@@ -327,13 +327,14 @@ Prerequisites: the working directory
 3. Hand the bundle, `bundles/hosts/acme/laptop.bundle`, to the host's user over
    a channel you trust. It holds the host's Kafka password. When the
    broker's certificate chains to a private CA, the host also needs that
-   CA's certificate, at `~/.config/wherry/ca.pem` or the `ca_file` its
-   configuration names; the bundle does not carry it.
+   CA's certificate, at `~/.config/wherry/ca.pem` or a path `wherry host init`
+   asks for; the bundle does not carry it.
 
-The tenant then writes its
-[client configuration](configuration.md#client-configuration), with a source
-for each credential the pool's agents take, and runs `wherry host init`, as in
-[Quickstart](quickstart.md#_3-write-the-host-configuration).
+The host's user then runs `wherry host init <bundle>`, which places the
+bundle, registers the host key and writes the
+[client configuration](configuration.md#client-configuration) with a source
+for each credential the tenant's pools take, as in
+[Quickstart](quickstart.md#_3-initialise-the-host).
 
 A tenant can be entitled to several pools; run `pool entitle` once per pool.
 
@@ -1122,8 +1123,9 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
    ```
 
    The host keeps the access key and secret key as two credentials, each with
-   its own source, and names them under `storage` in its
-   [configuration](configuration.md#client-configuration):
+   its own source, and names them under the pool's entry in `storage` in its
+   [configuration](configuration.md#client-configuration); `wherry host init`
+   asks for both names and their sources for each entitled pool with storage:
 
    ```yaml
    credentials:
@@ -1132,8 +1134,9 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
      s3-secret-key:
        command: [op, read, "op://wherry/s3/secret-key"]
    storage:
-     access_key: s3-access-key
-     secret_key: s3-secret-key
+     build:
+       access_key: s3-access-key
+       secret_key: s3-secret-key
    ```
 
    Receivers and agents never hold the S3 credential; they get presigned URLs, a GET per input
