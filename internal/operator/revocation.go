@@ -225,6 +225,10 @@ func (service *Service) Probe(topic string) func(context.Context, string, string
 }
 
 func (service *Service) TenantRemove(ctx context.Context, tenant string) error {
+	return service.removeTenant(ctx, tenant, service.Probe)
+}
+
+func (service *Service) removeTenant(ctx context.Context, tenant string, probe func(string) func(context.Context, string, string) error) error {
 	state, err := service.LoadState(ctx)
 	if err != nil {
 		return err
@@ -254,7 +258,7 @@ func (service *Service) TenantRemove(ctx context.Context, tenant string) error {
 		if host.Tenant != tenant || state.Ended[principal] {
 			continue
 		}
-		r := &revocation{service: service, principal: principal, end: Record{Kind: "end", Tenant: tenant, Host: host.Name}, probe: service.Probe(HostTopic(tenant, host.Name))}
+		r := &revocation{service: service, principal: principal, end: Record{Kind: "end", Tenant: tenant, Host: host.Name}, probe: probe(HostTopic(tenant, host.Name))}
 		if result := r.steps(ctx, 1, 1); len(result.Steps) != 1 || !result.Steps[0].Complete {
 			return revocationError(result)
 		}

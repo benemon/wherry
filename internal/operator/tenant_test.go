@@ -167,7 +167,7 @@ func TestAbsentTenantCommands(t *testing.T) {
 		"pool remove": func() error { return service.TenantPoolRemove(ctx, "absent", "p") },
 		"host add":    func() error { return service.HostAdd(ctx, "absent", "h", filepath.Join(t.TempDir(), "bundle"), false) },
 		"host remove": func() error { return revocationError(service.RevokeHost(ctx, "absent", "h", 0, denied)) },
-		"remove":      func() error { return service.TenantRemove(ctx, "absent") },
+		"remove":      func() error { return removeTenantFixture(service, ctx, "absent") },
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := command(); err == nil || !strings.Contains(err.Error(), "tenant add") {
@@ -303,13 +303,13 @@ func TestEndedTenantDoesNotWithdrawSCRAM(t *testing.T) {
 	if _, err := service.upsertUser(ctx, principal); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.TenantRemove(ctx, "t"); err != nil {
+	if err := removeTenantFixture(service, ctx, "t"); err != nil {
 		t.Fatal(err)
 	}
 	if ok, err := hasCredential(ctx, service, principal); err != nil || !ok {
 		t.Fatalf("tenant-named SCRAM removed: %t %v", ok, err)
 	}
-	if err := service.TenantRemove(ctx, "t"); err != nil {
+	if err := removeTenantFixture(service, ctx, "t"); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.TenantAdd(ctx, "t"); err == nil {
@@ -348,12 +348,12 @@ func TestTenantRemoveRetriesAndSerializesRecords(t *testing.T) {
 				}
 			}
 			t.Cleanup(func() { appended = func(Record) {} })
-			err := service.TenantRemove(attempt, "t")
+			err := removeTenantFixture(service, attempt, "t")
 			if failKind != "none" && err == nil {
 				t.Fatal("injected interruption did not fail")
 			}
 			appended = func(record Record) { records = append(records, record) }
-			if err := service.TenantRemove(ctx, "t"); err != nil {
+			if err := removeTenantFixture(service, ctx, "t"); err != nil {
 				t.Fatal(err)
 			}
 			state, err := service.LoadState(ctx)
@@ -378,7 +378,7 @@ func TestTenantRemoveRetriesAndSerializesRecords(t *testing.T) {
 					t.Fatalf("host end before all preparations: %+v", records)
 				}
 			}
-			if err := service.TenantRemove(ctx, "t"); err != nil {
+			if err := removeTenantFixture(service, ctx, "t"); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -406,7 +406,7 @@ func TestTenantRemoveRepairsQuotaAfterEntitlementEnd(t *testing.T) {
 		response.Entries = append(response.Entries, kmsg.AlterClientQuotasResponseEntry{ErrorCode: kerr.UnknownServerError.Code})
 		return response, nil, true
 	})
-	if err := service.TenantRemove(ctx, "t"); err == nil {
+	if err := removeTenantFixture(service, ctx, "t"); err == nil {
 		t.Fatal("expected quota failure")
 	}
 	state, err := service.LoadState(ctx)
@@ -414,7 +414,7 @@ func TestTenantRemoveRepairsQuotaAfterEntitlementEnd(t *testing.T) {
 		t.Fatalf("end not appended: %v %v", state.Entitlements, err)
 	}
 	revocationBounds(t, service, "1", "1", "1")
-	if err := service.TenantRemove(ctx, "t"); err != nil {
+	if err := removeTenantFixture(service, ctx, "t"); err != nil {
 		t.Fatal(err)
 	}
 	principal := TenantPrincipal("t", "h")
@@ -451,7 +451,7 @@ func TestChecksIgnoreEndedTopicsAndUnrelatedPoolRetention(t *testing.T) {
 	if result := service.RevokeHost(ctx, "t", "h", 0, denied); !result.Complete {
 		t.Fatal(result)
 	}
-	if err := service.TenantRemove(ctx, "t"); err != nil {
+	if err := removeTenantFixture(service, ctx, "t"); err != nil {
 		t.Fatal(err)
 	}
 	results, err := kadm.NewClient(service.Operator).DeleteTopics(ctx, TenantTopic("t"), TenantTranscriptTopic("t"), HostTopic("t", "h"))
@@ -468,4 +468,8 @@ func TestChecksIgnoreEndedTopicsAndUnrelatedPoolRetention(t *testing.T) {
 	if err := service.Check(ctx); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func removeTenantFixture(service *Service, ctx context.Context, tenant string) error {
+	return service.removeTenant(ctx, tenant, func(string) func(context.Context, string, string) error { return denied })
 }
