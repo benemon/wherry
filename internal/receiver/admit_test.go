@@ -199,7 +199,7 @@ func TestRunTimeIsCappedSixHoursAfterTheStartBy(t *testing.T) {
 			})
 			f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
 			// The fixture's context ends within a minute, sooner than either end.
-			if status := f.receiver.execute(context.WithoutCancel(f.ctx), f.service.SuperUser, record, f.admitted(t, record), 1); status != kgo.AckAccept {
+			if status := f.receiver.execute(context.WithoutCancel(f.ctx), f.service.Operator, record, f.admitted(t, record), 1); status != kgo.AckAccept {
 				t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 			}
 			f.plugin.mu.Lock()
@@ -241,7 +241,7 @@ func TestRedeliveredClaimedRunPastStartByLimitIsAdopted(t *testing.T) {
 		task.Wherry.TaskStartedBy = time.Now().Add(time.Second).Unix()
 	})
 	time.Sleep(2100 * time.Millisecond)
-	if status := f.receiver.execute(f.ctx, f.service.SuperUser, record, f.admitted(t, record), 2); status != kgo.AckAccept {
+	if status := f.receiver.execute(f.ctx, f.service.Operator, record, f.admitted(t, record), 2); status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
 	if dispatches, lookups, follows, _ := f.plugin.counts(); dispatches != 0 || lookups != 1 || follows != 1 {
@@ -470,7 +470,7 @@ func TestClaimedRunWithNoOfferAndNoJobEnds(t *testing.T) {
 			if admitted.profile.Plugin != nil {
 				t.Fatalf("admitted with profile %q, want none", admitted.profile.Name)
 			}
-			if status := f.receiver.execute(f.ctx, f.service.SuperUser, record, admitted, 2); status != kgo.AckReject {
+			if status := f.receiver.execute(f.ctx, f.service.Operator, record, admitted, 2); status != kgo.AckReject {
 				t.Fatalf("status %v, want reject; logs:\n%s", status, f.logs.String())
 			}
 			if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != want {
@@ -771,7 +771,7 @@ func startInFlight(t *testing.T, f fixture, ctx context.Context, name string) <-
 // pollPool joins the pool's share group as the superuser and reports whether run is delivered within wait.
 func (f fixture) pollPool(t *testing.T, run string, wait time.Duration) (*kgo.Record, bool) {
 	t.Helper()
-	member, err := kgo.NewClient(append(f.service.SuperUser.Opts(), kgo.ConsumeTopics(operator.PoolTasksTopic(testPool)), kgo.ShareGroup(operator.PoolGroup(testPool)))...)
+	member, err := kgo.NewClient(append(f.service.Operator.Opts(), kgo.ConsumeTopics(operator.PoolTasksTopic(testPool)), kgo.ShareGroup(operator.PoolGroup(testPool)))...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -865,7 +865,7 @@ func TestRunsUnderRetention(t *testing.T) {
 	aged := func(topic, key string, value []byte, age time.Duration) *kgo.Record {
 		t.Helper()
 		record := &kgo.Record{Topic: topic, Key: []byte(key), Value: value, Timestamp: time.Now().Add(-age)}
-		if err := f.service.SuperUser.ProduceSync(f.ctx, record).FirstErr(); err != nil {
+		if err := f.service.Operator.ProduceSync(f.ctx, record).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 		return record
@@ -900,7 +900,7 @@ func TestRunsUnderRetention(t *testing.T) {
 	if offset, _, err := f.receiver.lastOffset(f.ctx, adoptedTask, wire.TaskHash(adopted.Value)); err != nil || offset != 41 {
 		t.Fatalf("adoption offset %d, %v; want 41", offset, err)
 	}
-	if status := f.receiver.execute(f.ctx, f.service.SuperUser, adopted, f.admitted(t, adopted), 2); status != kgo.AckAccept {
+	if status := f.receiver.execute(f.ctx, f.service.Operator, adopted, f.admitted(t, adopted), 2); status != kgo.AckAccept {
 		t.Fatalf("adopted status %v; logs:\n%s", status, f.logs.String())
 	}
 	if dispatches, _, follows, _ := f.plugin.counts(); dispatches != 0 || follows != 1 {
@@ -1263,7 +1263,7 @@ func TestCancelOfAnotherTenantDoesNotStopTheRun(t *testing.T) {
 	ctx, stop := context.WithCancel(f.ctx)
 	defer stop()
 	done := make(chan kgo.AckStatus, 1)
-	go func() { done <- f.receiver.execute(ctx, f.service.SuperUser, record, admitted, 1) }()
+	go func() { done <- f.receiver.execute(ctx, f.service.Operator, record, admitted, 1) }()
 	for {
 		if _, _, follows, _ := f.plugin.counts(); follows > 0 {
 			break
@@ -1358,7 +1358,7 @@ func TestClaimedRunWithNoOfferDuringShutdownNeverDispatches(t *testing.T) {
 	f.plugin.mu.Lock()
 	f.plugin.afterLookup = stop
 	f.plugin.mu.Unlock()
-	f.receiver.execute(ctx, f.service.SuperUser, record, admitted, 2)
+	f.receiver.execute(ctx, f.service.Operator, record, admitted, 2)
 	if dispatches, _, _, _ := f.plugin.counts(); dispatches != 0 {
 		t.Fatalf("dispatches=%d during shutdown, want none", dispatches)
 	}
@@ -1390,7 +1390,7 @@ func TestUnresolvedDispatchPastStartByKeepsItsJob(t *testing.T) {
 func (f fixture) taskFetches(t *testing.T, offset int64) (fetches, below *atomic.Int32) {
 	t.Helper()
 	topic := operator.PoolTasksTopic(testPool)
-	details, err := kadm.NewClient(f.service.SuperUser).ListTopics(f.ctx, topic)
+	details, err := kadm.NewClient(f.service.Operator).ListTopics(f.ctx, topic)
 	if err != nil || details[topic].Err != nil {
 		t.Fatalf("list %s: %v %v", topic, err, details[topic].Err)
 	}

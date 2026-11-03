@@ -33,8 +33,8 @@ func newKeyHost(t *testing.T) keyHost {
 	t.Cleanup(cancel)
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
-	service := &operator.Service{SuperUser: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, CA: ca, DeliveryCeiling: 10, LockCeilingMS: 60000}
+	service := &operator.Service{Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
+		Broker: address, CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}}}}}, DefaultAgent: "claude",
 		DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	dir := t.TempDir()
@@ -50,7 +50,11 @@ func newKeyHost(t *testing.T) keyHost {
 		}
 	}
 	resalt(t, service, bundle)
-	if err := os.WriteFile(h.config, []byte("bundle: "+bundle+"\nhost_key: "+h.keyPath+"\nstate_dir: "+h.stateDir+"\n"), 0o600); err != nil {
+	caFile := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(caFile, []byte(ca), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.config, []byte("bundle: "+bundle+"\nca_file: "+caFile+"\nhost_key: "+h.keyPath+"\nstate_dir: "+h.stateDir+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
@@ -73,11 +77,11 @@ func (h keyHost) key(t *testing.T) ed25519.PrivateKey {
 func (h keyHost) topic(t *testing.T) ([]*kgo.Record, signed.KeyState) {
 	t.Helper()
 	owner, topic := signed.HostOwner("tenant-a", "host-a"), operator.HostTopic("tenant-a", "host-a")
-	records, err := readTopic(h.ctx, h.service.SuperUser, topic)
+	records, err := readTopic(h.ctx, h.service.Operator, topic)
 	if err != nil {
 		t.Fatal(err)
 	}
-	keys, err := operator.ReadKeys(h.ctx, h.service.SuperUser, map[string]string{owner: topic})
+	keys, err := operator.ReadKeys(h.ctx, h.service.Operator, map[string]string{owner: topic})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +175,7 @@ func TestHostCommandSettlesALeftoverNextKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.service.SuperUser.ProduceSync(h.ctx, &kgo.Record{Topic: operator.HostTopic("tenant-a", "host-a"), Value: rotation}).FirstErr(); err != nil {
+	if err := h.service.Operator.ProduceSync(h.ctx, &kgo.Record{Topic: operator.HostTopic("tenant-a", "host-a"), Value: rotation}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	stdout.Reset()
@@ -208,8 +212,8 @@ func TestReceiverRotateKey(t *testing.T) {
 	defer cancel()
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
-	service := &operator.Service{SuperUser: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, CA: ca, DeliveryCeiling: 10, LockCeilingMS: 60000}
+	service := &operator.Service{Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
+		Broker: address, CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}}}}}, DefaultAgent: "claude",
 		DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
@@ -220,18 +224,18 @@ func TestReceiverRotateKey(t *testing.T) {
 	keyPath := filepath.Join(stateDir, "signing.key")
 	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1,
 		Profiles: []operator.ProfileSettings{{Name: "fake", Plugin: "fake", Agent: "claude"}}, PluginSHA256: map[string]string{"fake": fakeSHA256}}
-	if err := service.ReceiverAdd(ctx, config, bundle); err != nil {
+	if err := service.ReceiverAdd(ctx, config, service.Broker, bundle); err != nil {
 		t.Fatal(err)
 	}
 	resalt(t, service, bundle)
 	topic := operator.ReceiverTopic("receiver-a")
 	folded := func() ([]*kgo.Record, signed.KeyState) {
 		t.Helper()
-		records, err := readTopic(ctx, service.SuperUser, topic)
+		records, err := readTopic(ctx, service.Operator, topic)
 		if err != nil {
 			t.Fatal(err)
 		}
-		keys, err := operator.ReadKeys(ctx, service.SuperUser, map[string]string{"receiver-a": topic})
+		keys, err := operator.ReadKeys(ctx, service.Operator, map[string]string{"receiver-a": topic})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -246,7 +250,11 @@ func TestReceiverRotateKey(t *testing.T) {
 		return key
 	}
 	localConfig := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(localConfig, []byte("bundle: "+bundle+"\nstate_dir: "+stateDir+"\nplugin_dir: "+t.TempDir()+"\n"), 0o600); err != nil {
+	caFile := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(caFile, []byte(ca), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localConfig, []byte("bundle: "+bundle+"\nca_file: "+caFile+"\nstate_dir: "+stateDir+"\nplugin_dir: "+t.TempDir()+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// With no plugin the receiver stops at configuration, which comes before it advertises or claims anything.
@@ -290,7 +298,7 @@ func TestReceiverRotateKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.SuperUser.ProduceSync(ctx, &kgo.Record{Topic: topic, Value: rotation}).FirstErr(); err != nil {
+	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: topic, Value: rotation}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	start()

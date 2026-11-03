@@ -1,4 +1,6 @@
 bundle: /etc/wherry/receiver.bundle
+# A private CA the broker's certificate chains to; without ca_file, the system roots.
+ca_file: /etc/wherry/kafka-ca.pem
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
 metrics_addr: ":9464"

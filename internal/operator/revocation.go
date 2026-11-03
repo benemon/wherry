@@ -112,7 +112,7 @@ func (service *Service) revoke(ctx context.Context, end Record, principal string
 		return result
 	}
 	if !run(4, "delete SCRAM credential", func() error {
-		altered, err := kadm.NewClient(service.SuperUser).AlterUserSCRAMs(ctx, []kadm.DeleteSCRAM{{User: principal, Mechanism: kadm.ScramSha512}}, nil)
+		altered, err := kadm.NewClient(service.Operator).AlterUserSCRAMs(ctx, []kadm.DeleteSCRAM{{User: principal, Mechanism: kadm.ScramSha512}}, nil)
 		if err != nil {
 			return err
 		}
@@ -144,11 +144,11 @@ func (service *Service) revoke(ctx context.Context, end Record, principal string
 // SASL_AUTHENTICATION_FAILED.
 func (service *Service) Probe(topic string) func(context.Context, string, string) error {
 	return func(ctx context.Context, user, password string) error {
-		brokers, err := kadm.NewClient(service.SuperUser).ListBrokers(ctx)
+		brokers, err := kadm.NewClient(service.Operator).ListBrokers(ctx)
 		if err != nil {
 			return err
 		}
-		opts, err := KafkaOpts(service.Broker, []byte(service.CA), user, password)
+		opts, err := KafkaOpts(service.Broker, service.CA, user, password)
 		if err != nil {
 			return fmt.Errorf("service %w", err)
 		}

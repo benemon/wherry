@@ -275,8 +275,8 @@ for it.
 
 ### Give a pool's agents a dedicated credential
 
-Prerequisites: the [`wherry operator` environment](operations.md#set-up-wherry-operator),
-the pool's terms file, and, for each tenant entitled to the pool, a model
+Prerequisites: the [operator working directory](operations.md#set-up-wherry-operator),
+the pool's terms in `pools/<pool>.yaml`, and, for each tenant entitled to the pool, a model
 provider account that issues and revokes API keys, such as per-project or
 per-workspace keys.
 
@@ -308,7 +308,7 @@ per-workspace keys.
    ```
 
    ```sh
-   wherry operator pool apply build -f build-terms.yaml
+   wherry operator pool apply build
    ```
 
    The credential is required unless the entry sets `required: false`, so
@@ -443,3 +443,59 @@ fails names the credential and the cause:
 The credential never leaves the host: receivers and agents get only the URLs it presigns.
 Scope it to `wherry/<tenant>/` in each pool's bucket
 ([Operations](operations.md#s3-storage)).
+
+## The Kafka super user
+
+[`wherry operator init`](commands.md#wherry-operator-init) uses the Kafka
+super user once, to delegate provisioning to the principal
+`wherry.operator`, and then closes its connection. It takes the super user
+from its flags or prompts each time, and writes neither its name nor its
+password, nor the path of its password file, to any file. Every other
+`wherry operator` command connects as `wherry.operator` alone, so the super
+user's password can stay with the Kafka administrator after setup, and a
+re-run of `init` to rotate `wherry.operator`'s password needs it again.
+
+### The operator principal
+
+`init` grants `wherry.operator` these ACLs, which a real-broker test pins:
+
+| Resource | Operations | Used by |
+| --- | --- | --- |
+| Cluster | `Alter` | creating and deleting SCRAM credentials; creating and deleting ACLs |
+| Cluster | `Describe` | describing ACLs |
+| Cluster | `AlterConfigs`, `DescribeConfigs` | client quotas; reading broker settings |
+| Topic, prefix `wherry.` | `Create`, `AlterConfigs`, `DescribeConfigs`, `Describe`, `Read`, `Write` | the operator, receiver, pool, tenant and host topics |
+| Group, prefix `p-` | `AlterConfigs` | share-group settings |
+
+Kafka implies `Describe` by `Read`, `Write` and `Alter`, and
+`DescribeConfigs` by `AlterConfigs`, so four of these grants add nothing to
+the others; `init` grants them so the table states what each command uses.
+`operator check` reports any of the other seven that is missing.
+
+`Alter` on the cluster lets its holder grant itself any ACL, so
+`wherry.operator` is close to the super user in effect: whoever holds
+`operator.password` can take over the cluster. The gain is that the super
+user's credential is neither kept nor used after setup, and that
+`wherry.operator`'s password rotates with a re-run of `init`.
+
+### The operator working directory
+
+The operator's [working directory](configuration.md#operator-working-directory)
+holds `operator.password` and every bundle `host add` and `receiver apply`
+write, so it holds the Kafka password of every principal wherry made. Keep it
+on the operator's machine, readable by the operator alone: `bundles/` is
+mode 0700 and each password and bundle file mode 0600. `init` adds
+`operator.password` and `bundles/` to the directory's `.gitignore`, so the
+pool and receiver files can be kept in git without them. Hand each bundle to
+its host or receiver over a channel you trust.
+
+### Broker trust
+
+A bundle carries the broker address, the principal and its password, and no
+CA. Every host, receiver and the operator trusts the broker through the
+system's trusted roots, or through the CA file its own configuration names:
+`ca_file` in the host's or receiver's configuration (the host also looks for
+`~/.config/wherry/ca.pem`) and in `operator.yaml`. The Kafka platform issues
+and renews its CA; whoever distributes a private CA keeps each machine's
+file current, and a renewal needs no new bundle. A machine that trusts the
+system roots trusts every CA they hold for the broker's address.

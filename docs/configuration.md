@@ -13,6 +13,7 @@ in every path.
 | Field | Default | Content |
 | --- | --- | --- |
 | `bundle` | required | the host's bundle |
+| `ca_file` | `~/.config/wherry/ca.pem` if that file exists, else none | PEM CA certificates the host trusts the broker with; with none, the system's trusted roots |
 | `host_key` | `~/.config/wherry/host.key` | host signing key file |
 | `state_dir` | `~/.config/wherry/state` | run records |
 | `credentials` | none | credential name to its [source](security.md#credential-sources), exactly one of `file: PATH`, `env: VAR` and `command: [PROGRAM, ARG...]` |
@@ -37,6 +38,9 @@ The configuration of host `laptop`, setting every field:
 
 ```yaml
 bundle: ~/.config/wherry/laptop.bundle
+# A private CA the broker's certificate chains to; without ca_file, ~/.config/wherry/ca.pem if it exists, else the
+# system roots.
+ca_file: ~/.config/wherry/kafka-ca.pem
 host_key: ~/.config/wherry/laptop.key
 state_dir: ~/.local/state/wherry
 credentials:
@@ -85,6 +89,7 @@ flag and in every path.
 | Field | Default | Content |
 | --- | --- | --- |
 | `bundle` | required | the receiver's bundle |
+| `ca_file` | none | PEM CA certificates the receiver trusts the broker with; with none, the system's trusted roots |
 | `state_dir` | `state` in the bundle file's directory | the receiver's signing key and, while it holds any, its pool's keys in `pool-keys/` ([Pool keys](concepts.md#pool-keys-and-the-key-custodian)) |
 | `plugin_dir` | `/usr/local/libexec/wherry/plugins` | the directory holding the `wherry-plugin-<type>` binaries, or symbolic links to them; each starts only when its SHA-256 is the receiver record's pin for its type |
 | `metrics_addr` | none | `HOST:PORT` to serve [`/metrics`](operations.md#metrics) on; without it the receiver serves no metrics |
@@ -141,6 +146,8 @@ example](#receiver-configuration-example) names:
 
 ```yaml
 bundle: /etc/wherry/receiver.bundle
+# A private CA the broker's certificate chains to; without ca_file, the system roots.
+ca_file: /etc/wherry/kafka-ca.pem
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
 metrics_addr: ":9464"
@@ -152,22 +159,63 @@ credentials:
 
 ## Bundle
 
-A YAML file that `wherry operator` writes with mode 0600. Unknown fields are
-errors, and `broker`, `ca`, `principal` and `password` are required, a `ca`
-with no certificate failing with `CA contains no certificates`; a decode
-error names only its line numbers. A trailing line break ends the password
-and is not part of it, and a password of nothing else is refused.
+A YAML file that `wherry operator` writes with mode 0600 under the working
+directory's `bundles/`. Unknown fields are errors, so a bundle carrying a
+`ca` is refused, and `broker`, `principal` and `password` are required; a
+decode error names only its line numbers. A trailing line break ends the
+password and is not part of it, and a password of nothing else is refused.
 
 | Field | Content |
 | --- | --- |
 | `broker` | Kafka bootstrap address, `host:port` |
-| `ca` | PEM CA certificate for the broker's TLS certificate |
 | `principal` | SCRAM-SHA-512 user name |
 | `password` | SCRAM password |
 
+A bundle carries nothing about the broker's TLS CA. The Kafka platform owns
+and renews its CA; each host and receiver trusts the broker through the
+system's roots or the `ca_file` of its own configuration, kept current by
+whoever distributes the Kafka CA. A `ca_file` with no certificate fails with
+`CA contains no certificates`.
+
+## Operator working directory
+
+One directory per installation holds what `wherry operator` keeps. Every
+operator command takes `--dir DIR`, the current directory by default.
+
+```
+<dir>/
+  operator.yaml              written by operator init: how commands connect as wherry.operator
+  operator.password          written by operator init, mode 0600
+  pools/<pool>.yaml          pool terms, kept; pool apply reads them
+  receivers/<receiver>.yaml  receiver configurations, kept; receiver apply reads them
+  bundles/                   mode 0700
+    hosts/<tenant>/          mode 0700
+      <host>.bundle          mode 0600
+    receivers/<receiver>.bundle  mode 0600
+  .gitignore                 operator init appends operator.password and bundles/
+```
+
+`operator.yaml` is decoded as the client configuration is:
+
+| Field | Content |
+| --- | --- |
+| `broker` | Kafka bootstrap address, `host:port`; host bundles name it, and receiver bundles unless the receiver's file names another |
+| `ca_file` | absolute path of the PEM CA certificates the operator trusts the broker with; absent for the system's trusted roots |
+| `password_file` | `wherry.operator`'s password file, `operator.password`; a relative path is in the working directory |
+
+It holds nothing about the Kafka super user, which only
+[`operator init`](commands.md#wherry-operator-init) uses. Kept files are not
+consumed: change one and apply it again. There is no local state: the
+`wherry.operator` topic is the state, and when a kept file and the topic
+differ, the topic is what runs until the file is applied. The directory holds
+every principal's password, in `operator.password` and each bundle
+([Security](security.md#the-operator-working-directory)).
+
 ## Pool terms
 
-The YAML file `pool apply -f` reads. Unknown fields are errors.
+The YAML file `pool apply` reads: `-f PATH`, or `pools/<pool>.yaml` in the
+operator's [working directory](#operator-working-directory). Unknown fields
+are errors.
 When `-f` names a directory, `pool.yaml` holds every field except `agents`, and
 `agents/*.yaml` each hold one agent in file-name order. Hidden entries are
 ignored. Any other entry and a directory with no agent files are errors.
@@ -409,16 +457,18 @@ entitled to.
 ## Receiver configuration
 
 What `receiver apply` reads, recorded on
-`wherry.operator`: a [directory](#receiver-configuration-directory) or a
-single YAML file with the same entries in maps and lists, named by `-f`.
-The receiver and pool
-come from the command, as do the plugin pins: `--plugin-sha256 TYPE=HEX`
-for each plugin type, the line for the plugin binary in its release's
-signed `checksums.txt` ([Install plugins](operations.md#install-plugins)).
-Unknown fields are errors.
+`wherry.operator` but for `broker`: a
+[directory](#receiver-configuration-directory) or a single YAML file with the
+same entries in maps and lists, named by `-f`, or the single file
+`receivers/<receiver>.yaml` in the operator's
+[working directory](#operator-working-directory). The receiver's name comes
+from the command. Unknown fields are errors.
 
 | Field of the single file | Content |
 | --- | --- |
+| `pool` | the receiver's pool; required for a new receiver, and an existing one's must match |
+| `plugin_sha256` | for each plugin type, the SHA-256 of its binary as 64 lowercase hex digits: the line for the plugin binary in its release's signed `checksums.txt` ([Install plugins](operations.md#install-plugins)) |
+| `broker` | optional, default the broker in `operator.yaml`: the Kafka address the receiver's bundle names, which the receiver connects to |
 | `capacity` | optional, default 1: runs the receiver holds at once, positive |
 | `plugins` | one or more plugin entries, keyed by plugin |
 
@@ -531,7 +581,7 @@ plugins/
 
 | File | Fields |
 | --- | --- |
-| `receiver.yaml` | `capacity` |
+| `receiver.yaml` | `pool`, `plugin_sha256`, `broker` and `capacity` |
 | `plugins/<type>/plugin.yaml` | optional: the plugin's `labels` and `config` |
 | `plugins/<type>/profiles/*.yaml` | one plugin profile entry; routing order within the plugin is the lexical order of the file names |
 
@@ -552,9 +602,12 @@ plugin profile's `config` holds only what the example needs; the
 lists every setting. Neither profile names an agent credential: each
 delivers its agent's credentials at the targets the pool's terms give them.
 As one file for
-`receiver apply nomad-1 --pool build -f nomad-1.yaml --plugin-sha256 nomad=<sha256>`:
+`receiver apply nomad-1 -f nomad-1.yaml`, or kept as `receivers/nomad-1.yaml`:
 
 ```yaml
+pool: build
+plugin_sha256:
+  nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 capacity: 3
 plugins:
   nomad:
@@ -592,7 +645,7 @@ plugins:
 ```
 
 The same configuration as a directory for
-`receiver apply nomad-1 --pool build -f nomad-1 --plugin-sha256 nomad=<sha256>`:
+`receiver apply nomad-1 -f nomad-1`:
 
 ```
 nomad-1/
@@ -605,9 +658,13 @@ nomad-1/
         20-host.yaml
 ```
 
-`receiver.yaml`:
+`receiver.yaml`, with the single file's `pool`, `plugin_sha256`, `broker`
+and `capacity`:
 
 ```yaml
+pool: build
+plugin_sha256:
+  nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 capacity: 3
 ```
 
@@ -821,15 +878,14 @@ within six hours after `start_by_limit`.
 
 | Variable | Read by | Effect |
 | --- | --- | --- |
-| `SSL_CERT_FILE` | host commands | PEM CA file that replaces the system roots, for a pool's S3 endpoint under a private CA; include the public roots in it when the host also reaches public endpoints |
-| `WHERRY_TRUST_BROKER` | `wherry operator` | Kafka bootstrap address, also written into bundles |
-| `WHERRY_TRUST_CA` | `wherry operator` | PEM CA file for the broker, also written into bundles |
-| `WHERRY_TRUST_SUPER_USER` | `wherry operator` | super user name |
-| `WHERRY_TRUST_SUPER_USER_PASSWORD_FILE` | `wherry operator` | file holding the super user's SCRAM password |
-| `WHERRY_TRUST_OPERATOR_PASSWORD_FILE` | `wherry operator` | file holding the operator's SCRAM password |
+| `SSL_CERT_FILE` | host commands, `wherry receiver run`, `wherry operator` | PEM CA file that replaces the system roots, for a pool's S3 endpoint under a private CA and for a broker when no `ca_file` is set; include the public roots in it when the process also reaches public endpoints |
+
+`wherry operator` reads no environment variable: its connection is
+[`operator.yaml`](#operator-working-directory).
 
 A plugin reads its own variables from the receiver's environment; the
 [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#credentials)
 lists its.
 
-Trailing CR and LF are trimmed from password files.
+Trailing CR and LF are trimmed from password files: `operator.password`, the
+super user's password file `operator init` reads, and a bundle's password.

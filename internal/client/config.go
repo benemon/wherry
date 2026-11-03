@@ -23,9 +23,11 @@ import (
 // Config is the on-disk wherry host configuration. Credentials maps a
 // credential name to the source of its value. Git names the credential and
 // host key a task cloning under each URL prefix takes. InputRoots are the
-// directories the MCP server sends inputs from.
+// directories the MCP server sends inputs from. CAFile holds the PEM certificates the host trusts the broker with; without
+// it, the system roots.
 type Config struct {
 	Bundle      string                       `yaml:"bundle"`
+	CAFile      string                       `yaml:"ca_file"`
 	HostKey     string                       `yaml:"host_key"`
 	StateDir    string                       `yaml:"state_dir"`
 	Credentials map[string]credential.Source `yaml:"credentials"`
@@ -47,6 +49,9 @@ type StorageConfig struct {
 	AccessKey string `yaml:"access_key"`
 	SecretKey string `yaml:"secret_key"`
 }
+
+// defaultCAFile is the host's CA file when its config names none and the file exists.
+const defaultCAFile = "~/.config/wherry/ca.pem"
 
 // DefaultConfigPath returns the per-user default path.
 func DefaultConfigPath() (string, error) {
@@ -80,9 +85,16 @@ func LoadConfig(path string) (Config, error) {
 	if config.StateDir == "" {
 		config.StateDir = "~/.config/wherry/state"
 	}
-	for _, path := range []*string{&config.Bundle, &config.HostKey, &config.StateDir} {
+	for _, path := range []*string{&config.Bundle, &config.HostKey, &config.StateDir, &config.CAFile} {
 		if *path, err = ExpandHome(*path); err != nil {
 			return Config{}, err
+		}
+	}
+	if config.CAFile == "" {
+		if path, err := ExpandHome(defaultCAFile); err == nil {
+			if _, err := os.Stat(path); err == nil {
+				config.CAFile = path
+			}
 		}
 	}
 	for name, source := range config.Credentials {
@@ -162,7 +174,13 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 	if err != nil {
 		return nil, err
 	}
-	opts, err := operator.KafkaOpts(bundle.Broker, []byte(bundle.CA), bundle.Principal, bundle.Password)
+	var ca []byte
+	if config.CAFile != "" {
+		if ca, err = os.ReadFile(config.CAFile); err != nil {
+			return nil, fmt.Errorf("ca_file: %w", err)
+		}
+	}
+	opts, err := operator.KafkaOpts(bundle.Broker, ca, bundle.Principal, bundle.Password)
 	if err != nil {
 		return nil, fmt.Errorf("bundle: %w", err)
 	}

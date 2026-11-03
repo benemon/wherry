@@ -24,7 +24,7 @@ func TestShareDeliveryCarriesTheRecordsPositionAndAppendTimeOnRealBroker(t *test
 	for _, value := range []string{"first", "second", "third"} {
 		s.produce(t, value)
 	}
-	reader := NewReader(s.service.SuperUser)
+	reader := NewReader(s.service.Operator)
 	defer reader.Close()
 	records, err := reader.ReadFrom(context.Background(), PoolTasksTopic(s.pool), 0)
 	if err != nil {
@@ -70,10 +70,9 @@ func TestRetentionKeepsARecordYoungerThanRetentionMsOnRealBroker(t *testing.T) {
 	if os.Getenv("WHERRY_TRUST_BROKER") == "" {
 		t.Skip("WHERRY_TRUST_BROKER is not set")
 	}
-	service, closeService := realService(t)
-	defer closeService()
 	ctx := context.Background()
-	admin := kadm.NewClient(service.SuperUser)
+	root := realRoot(t)
+	admin := kadm.NewClient(root)
 	suffix := time.Now().UnixNano()
 	short, long := fmt.Sprintf("pin-retention-short-%d", suffix), fmt.Sprintf("pin-retention-long-%d", suffix)
 	for topic, retention := range map[string]string{short: "15000", long: "3600000"} {
@@ -81,7 +80,7 @@ func TestRetentionKeepsARecordYoungerThanRetentionMsOnRealBroker(t *testing.T) {
 	}
 	produce := func(value string) {
 		for _, topic := range []string{short, long} {
-			if err := service.SuperUser.ProduceSync(ctx, &kgo.Record{Topic: topic, Value: []byte(value)}).FirstErr(); err != nil {
+			if err := root.ProduceSync(ctx, &kgo.Record{Topic: topic, Value: []byte(value)}).FirstErr(); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -108,7 +107,7 @@ func TestRetentionKeepsARecordYoungerThanRetentionMsOnRealBroker(t *testing.T) {
 		}
 		time.Sleep(time.Second)
 	}
-	reader := NewReader(service.SuperUser)
+	reader := NewReader(root)
 	defer reader.Close()
 	records, err := reader.ReadFrom(ctx, long, 0)
 	if err != nil {
@@ -125,14 +124,13 @@ func TestReadOutsideTheLogReturnsPromptlyOnRealBroker(t *testing.T) {
 	if os.Getenv("WHERRY_TRUST_BROKER") == "" {
 		t.Skip("WHERRY_TRUST_BROKER is not set")
 	}
-	service, closeService := realService(t)
-	defer closeService()
 	ctx := context.Background()
-	admin := kadm.NewClient(service.SuperUser)
+	root := realRoot(t)
+	admin := kadm.NewClient(root)
 	topic := fmt.Sprintf("pin-read-%d", time.Now().UnixNano())
 	createPinTopic(t, admin, topic, nil)
 	for _, value := range []string{"zero", "one", "two", "three"} {
-		if err := service.SuperUser.ProduceSync(ctx, &kgo.Record{Topic: topic, Value: []byte(value)}).FirstErr(); err != nil {
+		if err := root.ProduceSync(ctx, &kgo.Record{Topic: topic, Value: []byte(value)}).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -145,7 +143,7 @@ func TestReadOutsideTheLogReturnsPromptlyOnRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader := NewReader(service.SuperUser)
+	reader := NewReader(root)
 	defer reader.Close()
 	for _, c := range []struct {
 		from  int64

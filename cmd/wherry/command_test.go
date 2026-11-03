@@ -108,7 +108,7 @@ func newBus(t *testing.T) *bus {
 	t.Cleanup(operatorClient.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
-	b := &bus{ctx: ctx, service: &operator.Service{SuperUser: root, Operator: operatorClient, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10, LockCeilingMS: 60000}, stateDir: t.TempDir(), logs: &syncBuffer{}}
+	b := &bus{ctx: ctx, service: &operator.Service{Operator: operatorClient, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10, LockCeilingMS: 60000}, stateDir: t.TempDir(), logs: &syncBuffer{}}
 	optional := false
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{
 		{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}},
@@ -128,7 +128,7 @@ func newBus(t *testing.T) *bus {
 	receiverBundle := filepath.Join(t.TempDir(), "receiver.yaml")
 	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []operator.ProfileSettings{{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "exec"}}},
 		PluginSHA256: map[string]string{"nomad": fakeSHA256}}
-	if err := b.service.ReceiverAdd(ctx, config, receiverBundle); err != nil {
+	if err := b.service.ReceiverAdd(ctx, config, b.service.Broker, receiverBundle); err != nil {
 		t.Fatal(err)
 	}
 	model := filepath.Join(t.TempDir(), "model")
@@ -192,7 +192,7 @@ func (b *bus) kafka(t *testing.T, path string) (*kgo.Client, string) {
 		t.Fatal(err)
 	}
 	// kfake's SCRAM server always offers 4096 iterations, so the 8192 that operator provisions never authenticates.
-	if _, err := kadm.NewClient(b.service.SuperUser).AlterUserSCRAMs(b.ctx, nil, []kadm.UpsertSCRAM{{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}}); err != nil {
+	if _, err := kadm.NewClient(b.service.Operator).AlterUserSCRAMs(b.ctx, nil, []kadm.UpsertSCRAM{{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}}); err != nil {
 		t.Fatal(err)
 	}
 	kafka, err := kgo.NewClient(kgo.SeedBrokers(b.service.Broker), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()),
@@ -349,7 +349,7 @@ func (b *bus) admitted(t *testing.T) task {
 func TestReceiversJSONOutputShape(t *testing.T) {
 	b := newBus(t)
 	silent := operator.ReceiverConfig{Receiver: "receiver-b", Pool: "pool-a", Capacity: 1, Profiles: []operator.ProfileSettings{{Name: "lab", Plugin: "nomad", Agent: "claude"}}, PluginSHA256: map[string]string{"nomad": fakeSHA256}}
-	if err := b.service.ReceiverAdd(b.ctx, silent, filepath.Join(t.TempDir(), "receiver.yaml")); err != nil {
+	if err := b.service.ReceiverAdd(b.ctx, silent, b.service.Broker, filepath.Join(t.TempDir(), "receiver.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer

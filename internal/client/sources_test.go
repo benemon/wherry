@@ -71,7 +71,7 @@ func TestAFailingSourceIsNamedAlone(t *testing.T) {
 			if logs := f.logs.String(); strings.Contains(logs, secret) {
 				t.Fatalf("logs carry the source's output, value or path:\n%s", logs)
 			}
-			if records, _ := readTopic(f.ctx, f.service.SuperUser, operator.PoolTasksTopic("pool-a")); len(records) != 0 {
+			if records, _ := readTopic(f.ctx, f.service.Operator, operator.PoolTasksTopic("pool-a")); len(records) != 0 {
 				t.Fatal("published a task whose credential did not resolve")
 			}
 		})
@@ -86,7 +86,7 @@ func TestSubmitRefusesARequiredAgentCredentialWithoutASource(t *testing.T) {
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "auth required: credential model is not in this host's configuration") {
 		t.Fatalf("submit = %v; want the agent's credential named", err)
 	}
-	if records, _ := readTopic(f.ctx, f.service.SuperUser, operator.PoolTasksTopic("pool-a")); len(records) != 0 {
+	if records, _ := readTopic(f.ctx, f.service.Operator, operator.PoolTasksTopic("pool-a")); len(records) != 0 {
 		t.Fatal("published a task whose agent's credential this host has no source for")
 	}
 }
@@ -114,7 +114,7 @@ func TestSubmitRefusesATaskCredentialOnAnAgentTarget(t *testing.T) {
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "task credential openai takes the environment variable MODEL_API_KEY of one of agent claude's credentials") {
 		t.Fatalf("submit = %v; want the collision named", err)
 	}
-	if records, _ := readTopic(f.ctx, f.service.SuperUser, operator.PoolTasksTopic("pool-a")); len(records) != 0 {
+	if records, _ := readTopic(f.ctx, f.service.Operator, operator.PoolTasksTopic("pool-a")); len(records) != 0 {
 		t.Fatal("published a task whose credential takes the agent's target")
 	}
 }

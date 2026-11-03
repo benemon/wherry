@@ -913,7 +913,7 @@ func advertiseWith(t *testing.T, f fixture, r *Receiver, advertisement wire.Adve
 	t.Helper()
 	advertisement.Receiver, advertisement.Pool, advertisement.Offers, advertisement.Capacity = r.id, testPool, []wire.Offer{}, 1
 	value := must(t)(wire.SignRecord(&advertisement, r.signing))
-	if err := f.service.SuperUser.ProduceSync(f.ctx, &kgo.Record{Topic: operator.ReceiversTopic, Key: []byte(r.id), Value: value, Timestamp: time.UnixMilli(advertisement.AtMS)}).FirstErr(); err != nil {
+	if err := f.service.Operator.ProduceSync(f.ctx, &kgo.Record{Topic: operator.ReceiversTopic, Key: []byte(r.id), Value: value, Timestamp: time.UnixMilli(advertisement.AtMS)}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1398,7 +1398,7 @@ func TestFencedWhileAssignedContestsOnce(t *testing.T) {
 // holdProduces answers every produce to topic with a retriable error while held is set, and closes arrived at the first.
 func holdProduces(t *testing.T, f fixture, topic string, held *atomic.Bool) <-chan struct{} {
 	t.Helper()
-	details, err := kadm.NewClient(f.service.SuperUser).ListTopics(f.ctx, topic)
+	details, err := kadm.NewClient(f.service.Operator).ListTopics(f.ctx, topic)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1451,7 +1451,7 @@ func TestTaskAppendedAfterTheDrainScanIsResubmittedOnce(t *testing.T) {
 	held.Store(true)
 	arrived := holdProduces(t, f, operator.PoolTasksTopic(testPool), &held)
 	t.Setenv("WHERRY_TEST_TOKEN", testToken)
-	kafka, err := kgo.NewClient(append(f.service.SuperUser.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
+	kafka, err := kgo.NewClient(append(f.service.Operator.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
 	if err != nil {
 		t.Fatal(err)
 	}

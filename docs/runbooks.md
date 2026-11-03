@@ -12,8 +12,11 @@ The receiver logs to standard output, one line per event, each prefixed
 and under systemd, `journalctl -u` with the receiver's unit. The confirming
 commands run on a host of a tenant entitled to the pool, with its
 [client configuration](configuration.md#client-configuration), except
-`wherry operator` commands, which need the
-[`wherry operator` environment](operations.md#set-up-wherry-operator).
+`wherry operator` commands, which run in the
+[operator working directory](operations.md#set-up-wherry-operator) and
+connect as `wherry.operator`. When every one of them fails to log in, an
+interrupted `wherry operator init` left `operator.password` behind the
+broker's: run `init` again with the Kafka super user.
 
 ## WherryReceiverNotAdvertising
 
@@ -344,9 +347,9 @@ Then:
 
 - Restore the route from the receiver host to the broker's TLS listener,
   or the brokers themselves.
-- For a TLS or SCRAM error, check the bundle's CA against the listener's
-  certificate and its principal and password against the cluster's SCRAM
-  credentials.
+- For a TLS or SCRAM error, check the receiver's `ca_file`, or the system
+  roots when it names none, against the listener's certificate, and the
+  bundle's principal and password against the cluster's SCRAM credentials.
 - For `denied <op>`, run `wherry operator check` to confirm the ACLs the state
   calls for exist, and fix the bundle's credentials; until then the
   receiver restarts and exits again.

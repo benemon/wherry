@@ -226,7 +226,7 @@ func TestRealBrokerFixture(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := f.service.verifyACLs(ctx, state); err != nil {
+		if err := f.service.verifyACLs(ctx, ACLs(state)); err != nil {
 			t.Fatal(err)
 		}
 		expectReadable(t, f.connect(t, ReceiverPrincipal(f.receiverB)), PoolEventsTopic(f.poolB))
@@ -282,7 +282,7 @@ func provision(t *testing.T) *fixture {
 		state, _ := service.LoadState(ctx)
 		for principal, end := range ends {
 			_ = service.deletePrincipalACLs(ctx, principal)
-			_, _ = kadm.NewClient(service.SuperUser).AlterUserSCRAMs(ctx, []kadm.DeleteSCRAM{{User: principal, Mechanism: kadm.ScramSha512}}, nil)
+			_, _ = kadm.NewClient(service.Operator).AlterUserSCRAMs(ctx, []kadm.DeleteSCRAM{{User: principal, Mechanism: kadm.ScramSha512}}, nil)
 			if !state.Ended[principal] {
 				_, _ = service.appendChecked(ctx, []byte("end."+principal), end)
 			}
@@ -300,7 +300,7 @@ func provision(t *testing.T) *fixture {
 	must(service.TenantAdd(ctx, f.tenantB, f.poolB))
 	for _, receiver := range [][2]string{{f.receiverA, f.poolA}, {f.receiverB, f.poolB}} {
 		path := filepath.Join(dir, receiver[0])
-		must(service.ReceiverAdd(ctx, modelConfig(receiver[0], receiver[1]), path))
+		must(service.ReceiverAdd(ctx, modelConfig(receiver[0], receiver[1]), service.Broker, path))
 		f.bundles[ReceiverPrincipal(receiver[0])] = readBundle(t, path)
 	}
 	for _, host := range [][2]string{{f.tenantA, f.hostA1}, {f.tenantA, f.hostA2}, {f.tenantB, f.hostB1}} {
@@ -308,7 +308,7 @@ func provision(t *testing.T) *fixture {
 		must(service.HostAdd(ctx, host[0], host[1], path, false))
 		f.bundles[TenantPrincipal(host[0], host[1])] = readBundle(t, path)
 	}
-	must(kafkatest.Led(ctx, service.SuperUser, PoolTasksTopic(f.poolA), PoolEventsTopic(f.poolA), PoolTasksTopic(f.poolB), PoolEventsTopic(f.poolB),
+	must(kafkatest.Led(ctx, service.Operator, PoolTasksTopic(f.poolA), PoolEventsTopic(f.poolA), PoolTasksTopic(f.poolB), PoolEventsTopic(f.poolB),
 		TenantTopic(f.tenantA), TenantTranscriptTopic(f.tenantA), TenantTopic(f.tenantB), TenantTranscriptTopic(f.tenantB),
 		ReceiverTopic(f.receiverA), ReceiverProgressTopic(f.receiverA), ReceiverTopic(f.receiverB), ReceiverProgressTopic(f.receiverB),
 		HostTopic(f.tenantA, f.hostA1), HostTopic(f.tenantA, f.hostA2), HostTopic(f.tenantB, f.hostB1)))
@@ -342,8 +342,8 @@ func (f *fixture) connect(t *testing.T, principal string, opts ...kgo.Opt) *kgo.
 		t.Fatalf("no bundle for %s", principal)
 	}
 	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM([]byte(bundle.CA)) {
-		t.Fatal("bundle CA holds no certificate")
+	if !roots.AppendCertsFromPEM(f.service.CA) {
+		t.Fatal("the broker's CA holds no certificate")
 	}
 	client, err := kgo.NewClient(append([]kgo.Opt{kgo.SeedBrokers(bundle.Broker), kgo.DialTLSConfig(&tls.Config{RootCAs: roots}), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()), kgo.RequestRetries(1)}, opts...)...)
 	if err != nil {
@@ -483,7 +483,7 @@ func groupTerms(t *testing.T, service *Service, pool, limit, lock string) {
 	request.Resources = append(request.Resources, resource)
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		response, err := service.SuperUser.Request(context.Background(), request)
+		response, err := service.Operator.Request(context.Background(), request)
 		if err != nil {
 			t.Fatal(err)
 		}

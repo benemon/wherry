@@ -12,7 +12,7 @@ import (
 )
 
 func (service *Service) reconcileACLs(ctx context.Context, state State) error {
-	client := kadm.NewClient(service.SuperUser)
+	client := kadm.NewClient(service.Operator)
 	for _, acl := range ACLs(state) {
 		builder, err := aclBuilder(acl)
 		if err != nil {
@@ -28,7 +28,7 @@ func (service *Service) reconcileACLs(ctx context.Context, state State) error {
 			}
 		}
 	}
-	if err := service.verifyACLs(ctx, state); err != nil {
+	if err := service.verifyACLs(ctx, ACLs(state)); err != nil {
 		return fmt.Errorf("ACL plan incomplete after re-read: %w", err)
 	}
 	// A suspended pool's task-topic WRITE grants go by filters naming each principal, so no other grant is touched.
@@ -56,9 +56,9 @@ func (service *Service) reconcileACLs(ctx context.Context, state State) error {
 	return nil
 }
 
-func (service *Service) verifyACLs(ctx context.Context, state State) error {
-	client := kadm.NewClient(service.SuperUser)
-	for _, acl := range ACLs(state) {
+func (service *Service) verifyACLs(ctx context.Context, acls []ACL) error {
+	client := kadm.NewClient(service.Operator)
+	for _, acl := range acls {
 		builder, err := aclBuilder(acl)
 		if err != nil {
 			return err
@@ -87,7 +87,7 @@ func (service *Service) deletePrincipalACLs(ctx context.Context, principal strin
 
 // deleteACLs deletes the ACLs builder matches and waits until no broker describes one.
 func (service *Service) deleteACLs(ctx context.Context, builder *kadm.ACLBuilder) error {
-	results, err := kadm.NewClient(service.SuperUser).DeleteACLs(ctx, builder)
+	results, err := kadm.NewClient(service.Operator).DeleteACLs(ctx, builder)
 	if err != nil {
 		return err
 	}
@@ -99,7 +99,7 @@ func (service *Service) deleteACLs(ctx context.Context, builder *kadm.ACLBuilder
 	// Brokers apply an ACL deletion in turn, so a describe can briefly still list it; retry within the probe window.
 	deadline := time.Now().Add(probeWindow)
 	for {
-		remaining, err := kadm.NewClient(service.SuperUser).DescribeACLs(ctx, builder)
+		remaining, err := kadm.NewClient(service.Operator).DescribeACLs(ctx, builder)
 		if err != nil {
 			return err
 		}
@@ -133,6 +133,8 @@ func aclBuilder(acl ACL) (*kadm.ACLBuilder, error) {
 		builder.Groups(acl.Resource)
 	case "transactional":
 		builder.TransactionalIDs(acl.Resource)
+	case "cluster":
+		builder.Clusters()
 	default:
 		return nil, errors.New("unknown ACL resource type")
 	}
@@ -152,6 +154,12 @@ func aclBuilder(acl ACL) (*kadm.ACLBuilder, error) {
 			operations[i] = kadm.OpDescribe
 		case "DESCRIBE_CONFIGS":
 			operations[i] = kadm.OpDescribeConfigs
+		case "CREATE":
+			operations[i] = kadm.OpCreate
+		case "ALTER":
+			operations[i] = kadm.OpAlter
+		case "ALTER_CONFIGS":
+			operations[i] = kadm.OpAlterConfigs
 		default:
 			return nil, errors.New("unknown ACL operation")
 		}

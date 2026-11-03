@@ -22,7 +22,8 @@ func ACLs(state State) []ACL {
 		return writeDescribe
 	}
 	// A revoking or ended principal is granted nothing, so no reconcile during its revocation restores a grant.
-	acls := []ACL{{OperatorPrincipal, "topic", OperatorTopic, false, []string{"READ", "WRITE", "DESCRIBE"}}}
+	// wherry.operator's own grants are operator init's (OperatorACLs).
+	var acls []ACL
 	for principal, host := range state.Hosts {
 		if !state.Ended[principal] && !state.Revoking[principal] {
 			acls = append(acls, ACL{principal, "topic", OperatorTopic, false, readDescribe}, ACL{principal, "topic", ReceiversTopic, false, readDescribe}, ACL{principal, "topic", TenantTopic(host.Tenant), false, readDescribe}, ACL{principal, "topic", TenantTranscriptTopic(host.Tenant), false, readDescribe}, ACL{principal, "topic", HostTopic(host.Tenant, host.Name), false, []string{"READ", "WRITE", "DESCRIBE"}})

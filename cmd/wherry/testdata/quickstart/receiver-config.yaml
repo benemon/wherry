@@ -1,4 +1,5 @@
 bundle: /etc/wherry/nomad-1.bundle
+ca_file: /etc/wherry/kafka-ca.pem
 state_dir: /var/lib/wherry
 plugin_dir: /usr/local/libexec/wherry/plugins
 credentials:

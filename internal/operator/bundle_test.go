@@ -6,17 +6,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 // kafkaChanges counts wherry.operator's records and the SCRAM users, which a provisioning command changes first.
 func kafkaChanges(t *testing.T, service *Service) [2]int64 {
 	t.Helper()
-	admin := kadm.NewClient(service.SuperUser)
+	admin := kadm.NewClient(service.Operator)
 	offsets, err := admin.ListEndOffsets(t.Context(), OperatorTopic)
 	if err == nil {
 		err = offsets.Error()
@@ -40,7 +42,7 @@ var bundleAdds = []struct {
 		return service.HostAdd(context.Background(), "tenant-a", "host-b", path, false)
 	}},
 	{"receiver", func(service *Service, path string) error {
-		return service.ReceiverAdd(context.Background(), modelConfig("receiver-b", "pool-a"), path)
+		return service.ReceiverAdd(context.Background(), modelConfig("receiver-b", "pool-a"), service.Broker, path)
 	}},
 }
 
@@ -72,7 +74,7 @@ func TestHostAddRefusesAnExistingFileBeforeCreatingTheRecordTopic(t *testing.T) 
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	responses, err := kadm.NewClient(service.SuperUser).DeleteTopics(ctx, OperatorTopic)
+	responses, err := kadm.NewClient(service.Operator).DeleteTopics(ctx, OperatorTopic)
 	if err == nil {
 		err = responses.Error()
 	}
@@ -87,12 +89,39 @@ func TestHostAddRefusesAnExistingFileBeforeCreatingTheRecordTopic(t *testing.T) 
 		t.Fatalf("host add = %v; want the existing file refused", err)
 	}
 	// kadm's ListTopics answers from cached metadata; a direct request lists what exists.
-	response, err := kmsg.NewPtrMetadataRequest().RequestWith(ctx, service.SuperUser)
+	response, err := kmsg.NewPtrMetadataRequest().RequestWith(ctx, service.Operator)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(response.Topics) != 0 {
 		t.Fatalf("host add left %d topics, first %s; want none", len(response.Topics), *response.Topics[0].Topic)
+	}
+}
+
+// A host whose topic creation fails is not recorded, so check does not then look for its topic.
+func TestHostAddRecordsNothingWhenItsTopicIsRefused(t *testing.T) {
+	cluster, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	cluster.ControlKey(int16(kmsg.CreateTopics), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		cluster.KeepControl()
+		create := request.(*kmsg.CreateTopicsRequest)
+		if !slices.ContainsFunc(create.Topics, func(topic kmsg.CreateTopicsRequestTopic) bool { return topic.Topic == HostTopic("tenant-a", "host-a") }) {
+			return nil, nil, false
+		}
+		response := create.ResponseKind().(*kmsg.CreateTopicsResponse)
+		for _, topic := range create.Topics {
+			failed := kmsg.NewCreateTopicsResponseTopic()
+			failed.Topic, failed.ErrorCode = topic.Topic, kerr.TopicAuthorizationFailed.Code
+			response.Topics = append(response.Topics, failed)
+		}
+		return response, nil, true
+	})
+	if err := service.HostAdd(ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.bundle"), false); err == nil {
+		t.Fatal("host add succeeded; want its topic's creation refused")
+	}
+	if state, err := service.LoadState(ctx); err != nil || len(state.Hosts) != 0 {
+		t.Fatalf("hosts %v, %v; want none recorded", state.Hosts, err)
 	}
 }
 
@@ -182,7 +211,7 @@ func TestReissueFailingAfterThePasswordChanges(t *testing.T) {
 				return service.HostAdd(t.Context(), "tenant-a", "host-a", path, true)
 			}},
 			{"receiver", func(service *Service, path string) error {
-				return service.ReceiverReissue(t.Context(), "receiver-a", path)
+				return service.ReceiverReissue(t.Context(), "receiver-a", service.Broker, path)
 			}},
 		} {
 			t.Run(step.name+"/"+identity.name, func(t *testing.T) {

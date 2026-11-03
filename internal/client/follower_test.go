@@ -96,7 +96,7 @@ func pastDeadline(t *testing.T, host *Host, runID string) *runRecord {
 // committedEnd returns the tenant feed's committed end.
 func committedEnd(t *testing.T, f *fixture) int64 {
 	t.Helper()
-	ends, err := kadm.NewClient(f.service.SuperUser).ListCommittedOffsets(f.ctx, operator.TenantTopic("tenant-a"))
+	ends, err := kadm.NewClient(f.service.Operator).ListCommittedOffsets(f.ctx, operator.TenantTopic("tenant-a"))
 	if err == nil {
 		err = ends.Error()
 	}
@@ -153,7 +153,7 @@ func TestAFollowerBelowTheLogStartStartsAtIt(t *testing.T) {
 	end := committedEnd(t, f)
 	var deleted kadm.Offsets
 	deleted.AddOffset(operator.TenantTopic("tenant-a"), 0, end, -1)
-	responses, err := kadm.NewClient(f.service.SuperUser).DeleteRecords(f.ctx, deleted)
+	responses, err := kadm.NewClient(f.service.Operator).DeleteRecords(f.ctx, deleted)
 	if err == nil {
 		err = responses.Error()
 	}
@@ -182,7 +182,7 @@ func TestAViewWhileTheFollowerCannotFetchReadsOnce(t *testing.T) {
 	runID := task.submission.Wherry.Run
 	following(t, f, f.host)
 	denied := kadm.NewACLs().Deny("User:" + operator.TenantPrincipal("tenant-a", "host-a")).Topics(operator.TenantTopic("tenant-a")).Operations(kadm.OpRead).ResourcePatternType(kadm.ACLPatternLiteral)
-	created, err := kadm.NewClient(f.service.SuperUser).CreateACLs(f.ctx, denied)
+	created, err := kadm.NewClient(f.service.Operator).CreateACLs(f.ctx, denied)
 	if err == nil {
 		for _, result := range created {
 			err = errors.Join(err, result.Err)

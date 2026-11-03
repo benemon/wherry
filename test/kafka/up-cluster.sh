@@ -3,9 +3,9 @@
 # counterpart of up.sh. Each node is a combined broker and controller (node IDs 1-3, a static three-voter quorum): three
 # containers rather than six fit a CI runner, the quorum still survives the loss of one node, and the tests move
 # partition leaders by election rather than by stopping nodes. Every node has up.sh's listeners, TLS and SCRAM: a TLS
-# listener with SCRAM-SHA-512 and the StandardAuthorizer (super user wherry-admin, operator wherry.operator with the
-# operator's ACLs on wherry.operator) and a plaintext listener whose anonymous principal is a super user, published on
-# 127.0.0.1:9092/9093, 19092/19093 and 29092/29093 for nodes 1, 2 and 3. The nodes reach each other on a container
+# listener with SCRAM-SHA-512 and the StandardAuthorizer (super user wherry-admin; the fixtures delegate to
+# wherry.operator as wherry operator init does) and a plaintext listener whose anonymous principal is a super user,
+# published on 127.0.0.1:9092/9093, 19092/19093 and 29092/29093 for nodes 1, 2 and 3. The nodes reach each other on a container
 # network over a plaintext INTERNAL listener (inter-broker) and the CONTROLLER listener. Topics default to replication
 # factor 3 and min.insync.replicas 2, which wherry's topics take since wherry creates them with the broker's default
 # replication factor; the internal topics (offsets, transaction state, share-group state) are replicated the same way.
@@ -88,11 +88,10 @@ for node in "${nodes[@]}"; do
     -p "127.0.0.1:$((9092 + offset)):9092" -p "127.0.0.1:$((9093 + offset)):9093" \
     -v "$dir/server-$node.properties:/cfg/server.properties:ro" -v "$dir/server.pem:/certs/server.pem:ro" \
     -e CLUSTER_ID="$cluster" -e KAFKA_HEAP_OPTS="-Xmx768m -Xms768m" \
-    -e ADMIN_PASSWORD="$(cat "$dir/admin-password")" -e OPERATOR_PASSWORD="$(cat "$dir/operator-password")" \
+    -e ADMIN_PASSWORD="$(cat "$dir/admin-password")" \
     --entrypoint /bin/sh "$image" -c '
       /opt/kafka/bin/kafka-storage.sh format -t "$CLUSTER_ID" -c /cfg/server.properties \
-        --add-scram "SCRAM-SHA-512=[name=wherry-admin,password=$ADMIN_PASSWORD]" \
-        --add-scram "SCRAM-SHA-512=[name=wherry.operator,password=$OPERATOR_PASSWORD]" >/dev/null &&
+        --add-scram "SCRAM-SHA-512=[name=wherry-admin,password=$ADMIN_PASSWORD]" >/dev/null &&
       exec /opt/kafka/bin/kafka-server-start.sh /cfg/server.properties' >/dev/null
 done
 
@@ -115,9 +114,6 @@ if [ -z "$ready" ]; then
   echo "up-cluster.sh: ${#nodes[@]} brokers never registered" >&2
   exit 1
 fi
-"$container" exec wherry-kafka-1 /opt/kafka/bin/kafka-acls.sh --bootstrap-server "$internal" --add \
-  --allow-principal User:wherry.operator --operation Write --operation Read --operation Describe \
-  --topic wherry.operator >/dev/null
 
 cat > "$dir/env" <<EOF
 export WHERRY_KAFKA_TEST_BROKER=127.0.0.1:9092

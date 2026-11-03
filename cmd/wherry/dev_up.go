@@ -206,7 +206,7 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 			}
 		}
 	}
-	if err := os.WriteFile(instance.env("admin", "admin.env"), []byte(devAdminEnv(instance)), 0o600); err != nil {
+	if err := writeYAML(instance.env("admin", "operator.yaml"), operatorConfig{devBroker, "ca.pem", "operator-password"}); err != nil {
 		return err
 	}
 
@@ -275,18 +275,12 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 	}
 	defer root.Close()
 	defer operatorClient.Close()
-	results, err := kadm.NewClient(root).CreateACLs(ctx, operatorACL())
-	if err != nil {
+	if err := operator.Delegate(ctx, root, passwords["operator"]); err != nil {
 		return err
-	}
-	for _, result := range results {
-		if result.Err != nil {
-			return result.Err
-		}
 	}
 
 	step("bootstrap")
-	hostConfig, err := devBootstrap(ctx, env, agents, operator.Service{SuperUser: root, Operator: operatorClient, Broker: devBroker, CA: string(ca)}, sources)
+	hostConfig, err := devBootstrap(ctx, env, agents, operator.Service{Operator: operatorClient, Broker: devBroker, CA: ca}, sources)
 	if err != nil {
 		return err
 	}
@@ -319,12 +313,6 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 	current = ""
 	printReady(stdout, env)
 	return nil
-}
-
-// operatorACL is the operator's ACL on wherry.operator, which the cluster's preparer grants before wherry operator runs.
-func operatorACL() *kadm.ACLBuilder {
-	return kadm.NewACLs().Allow("User:"+operator.OperatorPrincipal).AllowHosts("*").Topics(operator.OperatorTopic).
-		Operations(kadm.OpRead, kadm.OpWrite, kadm.OpDescribe).ResourcePatternType(kadm.ACLPatternLiteral)
 }
 
 // verifyCache checks every file the manifest records against its SHA-256.
@@ -468,16 +456,6 @@ func devTLS(instance devInstance) ([]byte, error) {
 func randomSerial() *big.Int {
 	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
 	return serial
-}
-
-// devAdminEnv exports the trust broker settings wherry operator reads.
-func devAdminEnv(instance devInstance) string {
-	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'" }
-	return "export WHERRY_TRUST_BROKER=" + devBroker + "\n" +
-		"export WHERRY_TRUST_CA=" + quote(instance.env("admin", "ca.pem")) + "\n" +
-		"export WHERRY_TRUST_SUPER_USER=" + devSuperUser + "\n" +
-		"export WHERRY_TRUST_SUPER_USER_PASSWORD_FILE=" + quote(instance.env("admin", "admin-password")) + "\n" +
-		"export WHERRY_TRUST_OPERATOR_PASSWORD_FILE=" + quote(instance.env("admin", "operator-password")) + "\n"
 }
 
 // renderAgentHCL is the Nomad dev agent's configuration.
@@ -939,11 +917,11 @@ func devBootstrap(ctx context.Context, env devEnv, agents []string, service oper
 	}
 	receiver := operator.ReceiverConfig{Receiver: devReceiver, Pool: devPool, Capacity: 2, Profiles: devProfiles(env, agents),
 		PluginSHA256: map[string]string{"nomad": env.manifest.Plugin.SHA256}}
-	if err := service.ReceiverAdd(ctx, receiver, instance.env("receiver", "dev-1.bundle")); err != nil {
+	if err := service.ReceiverAdd(ctx, receiver, devBroker, instance.env("receiver", "dev-1.bundle")); err != nil {
 		return busclient.Config{}, fmt.Errorf("receiver apply: %w", err)
 	}
 	host := busclient.Config{
-		Bundle: instance.env("host", "dev.bundle"), HostKey: instance.env("host", "host.key"), StateDir: instance.env("host", "state"), Credentials: sources,
+		Bundle: instance.env("host", "dev.bundle"), CAFile: instance.env("tls", "ca.pem"), HostKey: instance.env("host", "host.key"), StateDir: instance.env("host", "state"), Credentials: sources,
 	}
 	if env.storage() {
 		host.Storage = &busclient.StorageConfig{AccessKey: "s3-access-key", SecretKey: "s3-secret-key"}
@@ -951,7 +929,7 @@ func devBootstrap(ctx context.Context, env devEnv, agents []string, service oper
 	if err := writeYAML(instance.env("host", "config.yaml"), hostConfigFile(host)); err != nil {
 		return busclient.Config{}, err
 	}
-	local := map[string]string{"bundle": instance.env("receiver", "dev-1.bundle"), "state_dir": instance.env("receiver", "state"), "plugin_dir": instance.cache("plugins")}
+	local := map[string]string{"bundle": instance.env("receiver", "dev-1.bundle"), "ca_file": instance.env("tls", "ca.pem"), "state_dir": instance.env("receiver", "state"), "plugin_dir": instance.cache("plugins")}
 	if err := writeYAML(instance.env("receiver", "config.yaml"), local); err != nil {
 		return busclient.Config{}, err
 	}
@@ -963,7 +941,7 @@ func devBootstrap(ctx context.Context, env devEnv, agents []string, service oper
 
 // hostConfigFile is config as its YAML file holds it, with only the set fields.
 func hostConfigFile(config busclient.Config) map[string]any {
-	file := map[string]any{"bundle": config.Bundle, "host_key": config.HostKey, "state_dir": config.StateDir}
+	file := map[string]any{"bundle": config.Bundle, "ca_file": config.CAFile, "host_key": config.HostKey, "state_dir": config.StateDir}
 	if len(config.Credentials) > 0 {
 		sources := map[string]map[string]string{}
 		for name, source := range config.Credentials {

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,19 +17,16 @@ import (
 
 // -f takes a file, or a directory holding a config in the directory form; pool apply and receiver apply refuse
 // --config-file and --config-dir.
-func TestConfigInputTakesAFileOrADirectory(t *testing.T) {
+func TestObjectFileTakesAFileOrADirectory(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
 	for path, want := range map[string]bool{file: false, dir: true} {
-		if got, directory, err := configInput(map[string]string{"f": path}); err != nil || got != path || directory != want {
-			t.Errorf("configInput(-f %s) = %s, %t, %v; want the path and directory %t", path, got, directory, err, want)
+		if got, directory, err := objectFile(t.TempDir(), "pools", "pool-a", map[string]string{"f": path}, false, io.Discard, poolFields, nil); err != nil || got != path || directory != want {
+			t.Errorf("objectFile(-f %s) = %s, %t, %v; want the path and directory %t", path, got, directory, err, want)
 		}
-	}
-	if _, _, err := configInput(map[string]string{}); err == nil || !strings.Contains(err.Error(), "-f") {
-		t.Errorf("configInput without -f = %v, want an error naming -f", err)
 	}
 	for _, command := range [][]string{{"pool", "apply", "pool-a"}, {"receiver", "apply", "receiver-a"}} {
 		for _, option := range []string{"--config-file", "--config-dir"} {
@@ -165,7 +163,11 @@ func TestOperatorArgsRejectsUnknownOptions(t *testing.T) {
 		{"receiver", "apply", "receiver-a", "--config", "receiver.yaml"},
 		{"host", "add", "host-a", "--tenant", "tenant-a", "--bundle", "host.yaml"},
 		{"pool", "apply", "pool-a", "--tenant", "tenant-a"},
-		{"receiver", "apply", "receiver-a", "--pool", "pool-a", "--platform-credential-file", "nomad=token"},
+		{"receiver", "apply", "receiver-a", "--platform-credential-file", "nomad=token"},
+		{"receiver", "apply", "receiver-a", "--pool", "pool-a"},
+		{"receiver", "apply", "receiver-a", "--plugin-sha256", "nomad=" + fakeSHA256},
+		{"host", "add", "host-a", "--tenant", "tenant-a", "--bundle-file", "host.bundle"},
+		{"pool", "apply", "pool-a", "--super-user", "admin"},
 	} {
 		_, _, err := operatorArgs(args)
 		option := strings.TrimPrefix(args[len(args)-2], "-")

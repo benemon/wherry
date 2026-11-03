@@ -77,8 +77,15 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// tlsCluster is kfake behind TLS with a throwaway CA, so bundles carry a real CA and principals log in over TLS.
+// tlsCluster is tlsBroker with admin and wherry.operator its super users.
 func tlsCluster(t *testing.T, opts ...kfake.Opt) (*kfake.Cluster, string) {
+	t.Helper()
+	return tlsBroker(t, append([]kfake.Opt{kfake.Superuser("SCRAM-SHA-512", "admin", "password"), kfake.Superuser("SCRAM-SHA-512", "wherry.operator", "operator-password")}, opts...)...)
+}
+
+// tlsBroker is kfake behind TLS with a throwaway CA, which it returns, enforcing ACLs on principals that log in over
+// TLS.
+func tlsBroker(t *testing.T, opts ...kfake.Opt) (*kfake.Cluster, string) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -100,8 +107,7 @@ func tlsCluster(t *testing.T, opts ...kfake.Opt) (*kfake.Cluster, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cluster := kfake.MustCluster(append([]kfake.Opt{kfake.TLS(&tls.Config{Certificates: []tls.Certificate{pair}}), kfake.EnableSASL(), kfake.EnableACLs(),
-		kfake.Superuser("SCRAM-SHA-512", "admin", "password"), kfake.Superuser("SCRAM-SHA-512", "wherry.operator", "operator-password")}, opts...)...)
+	cluster := kfake.MustCluster(append([]kfake.Opt{kfake.TLS(&tls.Config{Certificates: []tls.Certificate{pair}}), kfake.EnableSASL(), kfake.EnableACLs()}, opts...)...)
 	t.Cleanup(cluster.Close)
 	return cluster, string(certPEM)
 }
@@ -125,17 +131,15 @@ func TestPasswordLineBreakIsNotThePassword(t *testing.T) {
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
 	dir := t.TempDir()
-	caPath, passwordPath := filepath.Join(dir, "ca.pem"), filepath.Join(dir, "password")
-	if err := os.WriteFile(caPath, []byte(ca), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	passwordPath := filepath.Join(dir, "password")
 	if err := os.WriteFile(passwordPath, []byte("password\r\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("WHERRY_TRUST_BROKER", address)
-	t.Setenv("WHERRY_TRUST_CA", caPath)
-	t.Setenv("WHERRY_TEST_PASSWORD_FILE", passwordPath)
-	client, err := operatorKafka(address, []byte(ca), "admin", "WHERRY_TEST_PASSWORD_FILE")
+	password, err := os.ReadFile(passwordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := operatorKafka(address, []byte(ca), "admin", string(password))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +147,7 @@ func TestPasswordLineBreakIsNotThePassword(t *testing.T) {
 	if err := client.Ping(ctx); err != nil {
 		t.Fatalf("super-user client with a password file ending in a line break: %v", err)
 	}
-	service := &operator.Service{SuperUser: connectTLS(t, address, ca, "admin", "password"), Broker: address, CA: ca}
+	service := &operator.Service{Operator: connectTLS(t, address, ca, "admin", "password"), Broker: address, CA: []byte(ca)}
 	// The superuser is authorised, so a probe that logs in finds it still authorised.
 	if err := service.Probe("wherry.operator")(ctx, "admin", "password\n"); !errors.Is(err, operator.ErrStillAuthorised) {
 		t.Fatalf("probe with a password ending in a line break = %v; want a login", err)
@@ -232,7 +236,7 @@ func resalt(t *testing.T, service *operator.Service, bundlePath string) {
 		t.Fatal(err)
 	}
 	upsert := kadm.UpsertSCRAM{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}
-	if altered, err := kadm.NewClient(service.SuperUser).AlterUserSCRAMs(context.Background(), nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
+	if altered, err := kadm.NewClient(service.Operator).AlterUserSCRAMs(context.Background(), nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
 		t.Fatalf("re-salt %s: %v %v", bundle.Principal, err, altered.Error())
 	}
 }
@@ -246,8 +250,8 @@ func TestRoundTrip(t *testing.T) {
 	defer cancel()
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
-	service := &operator.Service{SuperUser: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, CA: ca, DeliveryCeiling: 10, LockCeilingMS: 60000}
+	service := &operator.Service{Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
+		Broker: address, CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}
 	dir := t.TempDir()
 	optional := false
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{
@@ -269,7 +273,7 @@ func TestRoundTrip(t *testing.T) {
 		func() error { return service.TenantAdd(ctx, "tenant-a", "pool-a") },
 		func() error { return service.HostAdd(ctx, "tenant-a", "host-a", hostBundle, false) },
 		func() error { return service.HostAdd(ctx, "tenant-a", "host-b", otherBundle, false) },
-		func() error { return service.ReceiverAdd(ctx, config, receiverBundle) },
+		func() error { return service.ReceiverAdd(ctx, config, service.Broker, receiverBundle) },
 	} {
 		if err := step(); err != nil {
 			t.Fatal(err)
@@ -292,7 +296,7 @@ func TestRoundTrip(t *testing.T) {
 	logger := log.New(logs, "receiver: ", 0)
 	newReceiver := func(plugins *plugins) *receiver.Receiver {
 		t.Helper()
-		r, err := receiver.New(bundle, stateDir, false, 0, plugins.profile, logger, prometheus.NewRegistry())
+		r, err := receiver.New(bundle, []byte(ca), stateDir, false, 0, plugins.profile, logger, prometheus.NewRegistry())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -328,7 +332,11 @@ func TestRoundTrip(t *testing.T) {
 	// The agent's credential comes from the host's environment and the task's from a command; the host has no source
 	// for the agent's optional credential.
 	t.Setenv("WHERRY_ROUNDTRIP_MODEL", credentialText)
-	hostConfig := busclient.Config{Bundle: hostBundle, HostKey: filepath.Join(dir, "host.key"), StateDir: filepath.Join(dir, "host-state"),
+	caFile := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(caFile, []byte(ca), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hostConfig := busclient.Config{Bundle: hostBundle, CAFile: caFile, HostKey: filepath.Join(dir, "host.key"), StateDir: filepath.Join(dir, "host-state"),
 		Credentials: map[string]credential.Source{"model": {Env: "WHERRY_ROUNDTRIP_MODEL"}, "deploy-key": {Command: []string{"cat", deployPath}}}}
 	hostConfig.Storage = bucket.config
 	maps.Copy(hostConfig.Credentials, bucket.sources)
@@ -384,7 +392,7 @@ func TestRoundTrip(t *testing.T) {
 		len(awaited.NotReturned) != 1 || awaited.NotReturned[0] != (wire.UnreturnedOutput{Name: "link", Size: 4, Reason: "rejected: symlink"}) {
 		t.Fatalf("outputs %d, not returned %+v, rejected %+v; want big.bin and empty verified and the link refused", len(awaited.Outputs), awaited.NotReturned, awaited.Rejected)
 	}
-	otherConfig := busclient.Config{Bundle: otherBundle, HostKey: filepath.Join(dir, "other.key"), StateDir: filepath.Join(dir, "other-state")}
+	otherConfig := busclient.Config{Bundle: otherBundle, CAFile: caFile, HostKey: filepath.Join(dir, "other.key"), StateDir: filepath.Join(dir, "other-state")}
 	if _, err := busclient.Init(ctx, otherConfig); err != nil {
 		t.Fatal(err)
 	}
@@ -668,8 +676,8 @@ func TestPlatformCredentialIsRedactedFromTheReceiverLog(t *testing.T) {
 	defer cancel()
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
-	service := &operator.Service{SuperUser: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, CA: ca, DeliveryCeiling: 10, LockCeilingMS: 60000}
+	service := &operator.Service{Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
+		Broker: address, CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []operator.ProfileSettings{
 		{Name: "fake", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": "fake-token", "log_credential": true}},
@@ -679,7 +687,7 @@ func TestPlatformCredentialIsRedactedFromTheReceiverLog(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ReceiverAdd(ctx, config, bundlePath); err != nil {
+	if err := service.ReceiverAdd(ctx, config, service.Broker, bundlePath); err != nil {
 		t.Fatal(err)
 	}
 	resalt(t, service, bundlePath)
@@ -692,7 +700,7 @@ func TestPlatformCredentialIsRedactedFromTheReceiverLog(t *testing.T) {
 		running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	logs := &syncBuffer{}
-	r, err := receiver.New(bundle, filepath.Join(dir, "state"), false, 0, plugins.profile, log.New(logs, "receiver: ", 0), prometheus.NewRegistry())
+	r, err := receiver.New(bundle, []byte(ca), filepath.Join(dir, "state"), false, 0, plugins.profile, log.New(logs, "receiver: ", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}

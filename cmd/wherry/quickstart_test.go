@@ -31,7 +31,7 @@ func TestQuickstartFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	config.Receiver, config.Pool, config.PluginSHA256 = "nomad-1", "build", map[string]string{"nomad": fakeSHA256}
+	config.Receiver = "nomad-1"
 	if err := operator.ValidateConfig(config, terms); err != nil {
 		t.Fatal(err)
 	}
@@ -93,8 +93,20 @@ func TestQuickstartMissingSourceError(t *testing.T) {
 // TestQuickstartOperatorOutput runs the quickstart's wherry operator commands, pool apply aside, on its files and finds what receiver
 // apply --dry-run and receiver show print in docs/quickstart.md, as two YAML code blocks.
 func TestQuickstartOperatorOutput(t *testing.T) {
+	receiverFile, err := filepath.Abs(quickstart("nomad-1.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// kfake reports no group.share.max.delivery.count.limit, so the pool is created on a service that knows its ceiling.
+	terms, err := readPoolConfig(quickstart("build-terms.yaml"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "quickstart.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	service := operatorEnv(t)
-	dir := t.TempDir()
 	wherry := func(args ...string) string {
 		t.Helper()
 		var stdout bytes.Buffer
@@ -103,28 +115,25 @@ func TestQuickstartOperatorOutput(t *testing.T) {
 		}
 		return stdout.String()
 	}
-	// kfake reports no group.share.max.delivery.count.limit, so the pool is created on a service that knows its ceiling.
-	terms, err := readPoolConfig(quickstart("build-terms.yaml"), false)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := service.PoolApply(context.Background(), "build", terms, false); err != nil {
 		t.Fatal(err)
 	}
 	wherry("pool", "entitle", "build", "--tenant", "acme")
-	dryRun := wherry("receiver", "apply", "nomad-1", "--pool", "build", "-f", quickstart("nomad-1.yaml"), "--plugin-sha256", "nomad="+fakeSHA256, "--dry-run")
-	wherry("receiver", "apply", "nomad-1", "--pool", "build", "-f", quickstart("nomad-1.yaml"), "--plugin-sha256", "nomad="+fakeSHA256, "--bundle-file", filepath.Join(dir, "nomad-1.bundle"))
+	// The quickstart keeps the receiver's file in the working directory, where apply finds it.
+	if err := os.Mkdir("receivers", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(receiverFile, filepath.Join("receivers", "nomad-1.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	dryRun := wherry("receiver", "apply", "nomad-1", "--dry-run")
+	wherry("receiver", "apply", "nomad-1")
 	shown := wherry("receiver", "show", "nomad-1")
-	wherry("host", "add", "laptop", "--tenant", "acme", "--bundle-file", filepath.Join(dir, "laptop.bundle"))
+	wherry("host", "add", "laptop", "--tenant", "acme")
 	if shown != dryRun {
 		t.Fatalf("show printed\n%s\nwant what the dry run printed\n%s", shown, dryRun)
 	}
-	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "quickstart.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The docs show an example pin in place of the test plugin's.
-	if count := strings.Count(string(doc), "```yaml\n"+strings.ReplaceAll(dryRun, fakeSHA256, strings.Repeat("0123456789abcdef", 4))+"```\n"); count != 2 {
+	if count := strings.Count(string(doc), "```yaml\n"+dryRun+"```\n"); count != 2 {
 		t.Errorf("docs/quickstart.md holds what receiver apply --dry-run and receiver show print in %d code blocks, want 2:\n%s", count, dryRun)
 	}
 }
