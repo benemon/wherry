@@ -1,5 +1,13 @@
 # Quickstart: production
 
+Run a first task on a Nomad cluster.
+This guide uses pool `build`, tenant `acme`, host `laptop` and receiver `nomad-1`.
+
+## Before you start
+
+You need a Kafka cluster, a Nomad cluster and an agent image.
+Review the [Kafka prerequisites](operations-operator.md#prepare-kafka) and the Nomad prerequisites below.
+
 ## Install wherry
 
 Install wherry with [Homebrew](https://brew.sh/), on macOS or Linux:
@@ -654,3 +662,13 @@ refused while it ran. The run does not resume.
 
 1. Fix the credential's source in `credentials` in the host configuration.
 2. Submit the task again with `wherry submit`, which starts a new run.
+
+## Check that it worked
+
+Confirm that `wherry host receivers` shows `nomad-1` as `live`.
+Confirm that your first run ends in `TASK_STATE_COMPLETED`.
+
+## Next steps
+
+Read [Key concepts](concepts.md) to understand placement and recovery.
+See [Host operations](operations-hosts.md) for the next tasks.

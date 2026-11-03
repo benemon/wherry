@@ -1,5 +1,13 @@
 # Quickstart: development
 
+Run a complete instance on one machine.
+Use this instance to try wherry or develop integrations.
+
+## Before you start
+
+You need Linux or macOS, Docker or Podman, and an installed agent harness.
+Use `--agent mock` if you do not have a harness.
+
 ## Install wherry
 
 Install wherry with [Homebrew](https://brew.sh/), on macOS or Linux:
@@ -12,44 +20,8 @@ The `benemon/tap` formula installs the release archive for the machine's OS
 and architecture, and Homebrew checks the archive against the SHA-256 the
 formula names. Every release updates the formula.
 
-### Install a release archive
+## Start your instance
 
-Each [release](https://github.com/benemon/wherry/releases) carries
-`wherry_<version>_<os>_<arch>.tar.gz` for `linux` and `darwin` on `amd64` and
-`arm64`, `checksums.txt` with each archive's SHA-256,
-`checksums.txt.sigstore.json`, the keyless signature over it, and
-`<archive>.sbom.json`, an SPDX SBOM for each archive. `<version>` is a
-release tag. Download the archive and the checksums, verify the checksums'
-signature with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/),
-check the archive against them, and extract the binary:
-
-```sh
-version=<version> os=linux arch=amd64
-base=https://github.com/benemon/wherry/releases/download/$version
-archive=wherry_${version}_${os}_${arch}.tar.gz
-curl -fsSL --remote-name-all "$base/$archive" "$base/checksums.txt" "$base/checksums.txt.sigstore.json"
-cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
-  --certificate-identity-regexp '^https://github\.com/benemon/wherry/\.github/workflows/release\.yml@refs/tags/v' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
-grep "  $archive\$" checksums.txt | sha256sum -c -
-tar -xzf "$archive" --strip-components=1 "${archive%.tar.gz}/wherry"
-install -m 0755 wherry /usr/local/bin/wherry
-```
-
-On macOS, `shasum -a 256 -c -` takes the place of `sha256sum -c -`. Each
-archive also carries a provenance attestation, which
-[GitHub's CLI](https://cli.github.com/) verifies in place of the signature and
-checksum steps:
-
-```sh
-gh attestation verify "$archive" -R benemon/wherry
-```
-
-Install wherry on the operator's machine before the operator's steps.
-
-## Try it on one machine
-
-To try wherry or develop against it before the operator's steps,
 `wherry dev` runs a whole deployment on one machine: a Nomad dev agent, a
 single-broker Kafka with TLS and SCRAM, pool `dev`, tenant `dev` with host
 `dev`, and receiver `dev-1`. Its agents run under Nomad's `raw_exec`
@@ -57,7 +29,7 @@ driver as you, so a harness uses your own login. Nothing in it is fit for
 production: Nomad's ACLs are off and every agent runs with your rights.
 [Dev commands](commands-dev.md#dev-commands) describes each command.
 
-### Prerequisites
+### What your machine needs
 
 - Linux or macOS, `amd64` or `arm64`, with wherry installed as
   [Install wherry](quickstart-production.md#install-wherry) shows.
@@ -145,3 +117,13 @@ and removes the host files `up` created at the standard paths. Once the
 instance is down, `wherry dev down --reset` deletes the downloads in its
 cache. It refuses while the instance is up.
 
+
+## Check that it worked
+
+Confirm that `wait` prints the agent's response and exits successfully.
+Use `wherry host status RUN_ID` to inspect the terminal state.
+
+## Next steps
+
+Read [Key concepts](concepts.md) to understand placement and recovery.
+See [Development instance configuration](configuration-development.md) for the next tasks.
