@@ -463,7 +463,8 @@ with or without `--dry-run`.
 
 With `--force`, it [reissues](#operator-commands) an existing receiver's
 identity and writes its new bundle, naming the broker of
-`receivers/<receiver>.yaml` when that file names one. It does not change the
+`receivers/<receiver>.yaml` when that file names one, else that of the
+receiver's existing bundle, else that of `operator.yaml`. It does not change the
 receiver's configuration record, and takes no `-f` or `--dry-run`.
 
 ### `wherry operator receiver show RECEIVER`

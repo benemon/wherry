@@ -78,6 +78,9 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 				return errors.New("usage: wherry operator receiver apply NAME --force: --force gives an existing receiver a new password and bundle only")
 			}
 			broker := service.Broker
+			if current, err := operator.ReadBundle(bundle); err == nil {
+				broker = current.Broker
+			}
 			if kept, err := readReceiverConfig(filepath.Join(dir, "receivers", pos[2]+".yaml"), false); err == nil && kept.Broker != "" {
 				broker = kept.Broker
 			}

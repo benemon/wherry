@@ -593,3 +593,29 @@ func TestReceiverApplyWithoutItsBundleIsRefused(t *testing.T) {
 		t.Fatalf("a refused receiver apply left %s: %v", path, err)
 	}
 }
+
+// receiver apply --force for a receiver applied from a file outside the working directory keeps the broker its bundle
+// names.
+func TestReceiverApplyForceKeepsTheBundlesBroker(t *testing.T) {
+	service := operatorEnv(t)
+	ctx := context.Background()
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": "pool: pool-a\nbroker: kafka.platform.internal:9093\nplugin_sha256: {nomad: " + fakeSHA256 + "}\n" + basePlugin + item("name: claude\nagent: claude\n", "      ")}), "receiver.yaml")
+	if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", file}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join("bundles", "receivers", "receiver-a.bundle")
+	before, err := operator.ReadBundle(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runOperator([]string{"receiver", "apply", "receiver-a", "--force"}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if after, err := operator.ReadBundle(path); err != nil || after.Broker != "kafka.platform.internal:9093" || after.Password == before.Password {
+		t.Fatalf("bundle after --force %+v, %v; want a new password naming kafka.platform.internal:9093", after.Broker, err)
+	}
+}
