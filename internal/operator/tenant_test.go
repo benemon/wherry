@@ -2,7 +2,9 @@ package operator
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -270,6 +272,13 @@ func TestTenantPoolQuotaRetries(t *testing.T) {
 	failQuota()
 	if err := service.HostAdd(ctx, "t", "h2", bundle, false); err == nil {
 		t.Fatal("expected post-append host quota failure")
+	}
+	failQuota()
+	if err := service.HostAdd(ctx, "t", "h2", bundle, true); err == nil {
+		t.Fatal("expected --force quota failure")
+	}
+	if _, err := os.Stat(bundle); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a failed --force left a bundle: %v", err)
 	}
 	if err := service.HostAdd(ctx, "t", "h2", bundle, true); err != nil {
 		t.Fatal(err)
