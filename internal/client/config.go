@@ -24,42 +24,61 @@ import (
 // credential name to the source of its value. Git names the credential and
 // host key a task cloning under each URL prefix takes. InputRoots are the
 // directories the MCP server sends inputs from. CAFile holds the PEM certificates the host trusts the broker with; without
-// it, the system roots.
+// it, the system roots. Storage maps a pool to the credentials of its bucket.
 type Config struct {
 	Bundle      string                       `yaml:"bundle"`
-	CAFile      string                       `yaml:"ca_file"`
-	HostKey     string                       `yaml:"host_key"`
-	StateDir    string                       `yaml:"state_dir"`
-	Credentials map[string]credential.Source `yaml:"credentials"`
-	Git         []GitCredential              `yaml:"git"`
-	Storage     *StorageConfig               `yaml:"storage"`
-	InputRoots  []string                     `yaml:"input_roots"`
+	CAFile      string                       `yaml:"ca_file,omitempty"`
+	HostKey     string                       `yaml:"host_key,omitempty"`
+	StateDir    string                       `yaml:"state_dir,omitempty"`
+	Credentials map[string]credential.Source `yaml:"credentials,omitempty"`
+	Git         []GitCredential              `yaml:"git,omitempty"`
+	Storage     map[string]StorageConfig     `yaml:"storage,omitempty"`
+	InputRoots  []string                     `yaml:"input_roots,omitempty"`
 }
 
 // GitCredential gives a task whose git remote starts with URL the credential Credential and, for ssh, the known_hosts
 // file HostKey.
 type GitCredential struct {
 	URL        string `yaml:"url"`
-	Credential string `yaml:"credential"`
-	HostKey    string `yaml:"host_key"`
+	Credential string `yaml:"credential,omitempty"`
+	HostKey    string `yaml:"host_key,omitempty"`
 }
 
-// StorageConfig names the credentials holding the host's S3 access key and secret key.
+// StorageConfig names the credentials holding the host's S3 access key and secret key for a pool's bucket.
 type StorageConfig struct {
 	AccessKey string `yaml:"access_key"`
 	SecretKey string `yaml:"secret_key"`
 }
 
-// defaultCAFile is the host's CA file when its config names none and the file exists.
-const defaultCAFile = "~/.config/wherry/ca.pem"
+// ConfigDir is $XDG_CONFIG_HOME/wherry, by default ~/.config/wherry on every OS: it holds the host's bundle.yaml,
+// host.key, config.yaml and ca.pem.
+func ConfigDir() (string, error) {
+	return xdgDir("XDG_CONFIG_HOME", ".config")
+}
 
-// DefaultConfigPath returns the per-user default path.
-func DefaultConfigPath() (string, error) {
+// StateDir is $XDG_STATE_HOME/wherry, by default ~/.local/state/wherry on every OS.
+func StateDir() (string, error) {
+	return xdgDir("XDG_STATE_HOME", filepath.Join(".local", "state"))
+}
+
+func xdgDir(variable, fallback string) (string, error) {
+	if dir := os.Getenv(variable); dir != "" {
+		return filepath.Join(dir, "wherry"), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", "wherry", "config.yaml"), nil
+	return filepath.Join(home, fallback, "wherry"), nil
+}
+
+// DefaultConfigPath returns the per-user default path.
+func DefaultConfigPath() (string, error) {
+	dir, err := ConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "config.yaml"), nil
 }
 
 // LoadConfig decodes the config at path, defaulting host_key and state_dir.
@@ -80,21 +99,25 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, errors.New("config requires bundle")
 	}
 	if config.HostKey == "" {
-		config.HostKey = "~/.config/wherry/host.key"
+		dir, err := ConfigDir()
+		if err != nil {
+			return Config{}, err
+		}
+		config.HostKey = filepath.Join(dir, "host.key")
 	}
 	if config.StateDir == "" {
-		config.StateDir = "~/.config/wherry/state"
+		if config.StateDir, err = StateDir(); err != nil {
+			return Config{}, err
+		}
 	}
 	for _, path := range []*string{&config.Bundle, &config.HostKey, &config.StateDir, &config.CAFile} {
 		if *path, err = ExpandHome(*path); err != nil {
 			return Config{}, err
 		}
 	}
-	if config.CAFile == "" {
-		if path, err := ExpandHome(defaultCAFile); err == nil {
-			if _, err := os.Stat(path); err == nil {
-				config.CAFile = path
-			}
+	if dir, err := ConfigDir(); err == nil && config.CAFile == "" {
+		if _, err := os.Stat(filepath.Join(dir, "ca.pem")); err == nil {
+			config.CAFile = filepath.Join(dir, "ca.pem")
 		}
 	}
 	for name, source := range config.Credentials {
@@ -125,13 +148,13 @@ func LoadConfig(path string) (Config, error) {
 			}
 		}
 	}
-	if config.Storage != nil {
-		if config.Storage.AccessKey == "" || config.Storage.SecretKey == "" {
-			return Config{}, errors.New("config storage requires access_key and secret_key")
+	for pool, storage := range config.Storage {
+		if storage.AccessKey == "" || storage.SecretKey == "" {
+			return Config{}, fmt.Errorf("config storage of pool %s requires access_key and secret_key", pool)
 		}
-		for _, key := range [][2]string{{"access_key", config.Storage.AccessKey}, {"secret_key", config.Storage.SecretKey}} {
+		for _, key := range [][2]string{{"access_key", storage.AccessKey}, {"secret_key", storage.SecretKey}} {
 			if _, configured := config.Credentials[key[1]]; !configured {
-				return Config{}, fmt.Errorf("config storage %s names credential %s, which credentials does not configure", key[0], key[1])
+				return Config{}, fmt.Errorf("config storage of pool %s: %s names credential %s, which credentials does not configure", pool, key[0], key[1])
 			}
 		}
 	}
@@ -149,23 +172,35 @@ func LoadConfig(path string) (Config, error) {
 	return config, nil
 }
 
-// Init creates the host key if it is missing and registers it on the host's
-// key topic, returning its key ID.
-func Init(ctx context.Context, config Config) (string, error) {
+// Init creates the host key if it is missing and registers it on the host's key topic, returning its key ID and the
+// terms of every pool the host's tenant is entitled to.
+func Init(ctx context.Context, config Config) (string, map[string]operator.Terms, error) {
 	if _, err := os.Stat(config.HostKey); errors.Is(err, os.ErrNotExist) {
 		if err := os.MkdirAll(filepath.Dir(config.HostKey), 0o700); err != nil {
-			return "", err
+			return "", nil, err
 		}
 		if _, err := trust.GenerateSigningKeyFile(config.HostKey); err != nil {
-			return "", err
+			return "", nil, err
 		}
 	}
 	host, err := Connect(config, log.New(io.Discard, "", 0))
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	defer host.Close()
-	return host.Register(ctx)
+	keyID, err := host.Register(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	state, err := host.reader.Load(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	pools := map[string]operator.Terms{}
+	for pool := range state.Entitlements[host.tenant] {
+		pools[pool] = state.Pools[pool]
+	}
+	return keyID, pools, nil
 }
 
 // Connect opens the bundle's TLS and SCRAM-SHA-512 Kafka connection as its host principal; the host logs to logger.

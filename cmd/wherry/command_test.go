@@ -391,9 +391,9 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 	if !strings.Contains(stdout.String(), "  profile=lab plugin=nomad agent=claude ready=true labels=runtime=exec inline_limit=49152") {
 		t.Fatalf("receivers output %q does not carry the profile, its plugin and its inline limit", stdout.String())
 	}
-	// The agent's credentials by name, with whether this host has a source for each; their targets stay out.
-	if output := stdout.String(); !strings.Contains(output, " credentials=model,github-token(missing,optional)\n") || strings.Contains(output, "GH_TOKEN") {
-		t.Fatalf("receivers output %q, want the agent's credentials marked configured or missing", output)
+	// The agent's credentials by name and target, with whether this host has a source for each.
+	if output := stdout.String(); !strings.Contains(output, " credentials=model:env=MODEL_API_KEY,github-token:env=GH_TOKEN(missing,optional)\n") {
+		t.Fatalf("receivers output %q, want the agent's credentials with their targets, marked configured or missing", output)
 	}
 }
 

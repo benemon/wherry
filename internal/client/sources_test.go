@@ -136,13 +136,14 @@ func TestConfigSourcesAndGit(t *testing.T) {
 		"an unknown source":              {"git:\n  - url: https://a/\n    credential: absent\n", "names credential absent, which credentials does not configure"},
 		"an unreadable key":              {"git:\n  - url: ssh://a/\n    host_key: " + filepath.Join(dir, "absent") + "\n", "config git url ssh://a/: host_key is not a readable file"},
 		"a directory as key":             {"git:\n  - url: ssh://a/\n    host_key: " + dir + "\n", "config git url ssh://a/: host_key is not a readable file"},
-		"storage without its secret key": {"credentials:\n  a: {env: A}\nstorage:\n  access_key: a\n", "config storage requires access_key and secret_key"},
-		"storage without its access key": {"credentials:\n  a: {env: A}\nstorage:\n  secret_key: a\n", "config storage requires access_key and secret_key"},
-		"an unknown access key": {"credentials:\n  a: {env: A}\nstorage:\n  access_key: absent\n  secret_key: a\n",
-			"config storage access_key names credential absent, which credentials does not configure"},
-		"an unknown secret key": {"credentials:\n  a: {env: A}\nstorage:\n  access_key: a\n  secret_key: absent\n",
-			"config storage secret_key names credential absent, which credentials does not configure"},
-		"storage key files": {"storage:\n  access_key_file: a\n  secret_key_file: b\n", "decode config"},
+		"storage without its secret key": {"credentials:\n  a: {env: A}\nstorage:\n  pool-a:\n    access_key: a\n", "config storage of pool pool-a requires access_key and secret_key"},
+		"storage without its access key": {"credentials:\n  a: {env: A}\nstorage:\n  pool-a:\n    secret_key: a\n", "config storage of pool pool-a requires access_key and secret_key"},
+		"one pair for every pool":        {"credentials:\n  a: {env: A}\nstorage:\n  access_key: a\n  secret_key: a\n", "decode config"},
+		"an unknown access key": {"credentials:\n  a: {env: A}\nstorage:\n  pool-a:\n    access_key: absent\n    secret_key: a\n",
+			"config storage of pool pool-a: access_key names credential absent, which credentials does not configure"},
+		"an unknown secret key": {"credentials:\n  a: {env: A}\nstorage:\n  pool-a:\n    access_key: a\n    secret_key: absent\n",
+			"config storage of pool pool-a: secret_key names credential absent, which credentials does not configure"},
+		"storage key files": {"storage:\n  pool-a:\n    access_key_file: a\n    secret_key_file: b\n", "decode config"},
 	} {
 		if err := os.WriteFile(path, []byte("bundle: bundle.yaml\n"+test.config), 0o600); err != nil {
 			t.Fatal(err)
@@ -152,12 +153,12 @@ func TestConfigSourcesAndGit(t *testing.T) {
 		}
 	}
 	config := "bundle: bundle.yaml\ncredentials:\n  a:\n    command: [vault, print, token]\n  s3: {env: S3}\ngit:\n  - url: ssh://a/\n    credential: a\n    host_key: " + hostKey +
-		"\nstorage:\n  access_key: s3\n  secret_key: a\n"
+		"\nstorage:\n  pool-a:\n    access_key: s3\n    secret_key: a\n"
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if config, err := LoadConfig(path); err != nil || !slices.Equal(config.Credentials["a"].Command, []string{"vault", "print", "token"}) || config.Git[0].HostKey != hostKey ||
-		*config.Storage != (StorageConfig{AccessKey: "s3", SecretKey: "a"}) {
+		config.Storage["pool-a"] != (StorageConfig{AccessKey: "s3", SecretKey: "a"}) {
 		t.Fatalf("config %+v, %v", config, err)
 	}
 }

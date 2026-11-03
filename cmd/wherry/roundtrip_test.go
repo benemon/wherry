@@ -338,9 +338,9 @@ func TestRoundTrip(t *testing.T) {
 	}
 	hostConfig := busclient.Config{Bundle: hostBundle, CAFile: caFile, HostKey: filepath.Join(dir, "host.key"), StateDir: filepath.Join(dir, "host-state"),
 		Credentials: map[string]credential.Source{"model": {Env: "WHERRY_ROUNDTRIP_MODEL"}, "deploy-key": {Command: []string{"cat", deployPath}}}}
-	hostConfig.Storage = bucket.config
+	hostConfig.Storage = map[string]busclient.StorageConfig{"pool-a": *bucket.config}
 	maps.Copy(hostConfig.Credentials, bucket.sources)
-	if _, err := busclient.Init(ctx, hostConfig); err != nil {
+	if _, _, err := busclient.Init(ctx, hostConfig); err != nil {
 		t.Fatal(err)
 	}
 	hostLogs := &syncBuffer{}
@@ -393,7 +393,7 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatalf("outputs %d, not returned %+v, rejected %+v; want big.bin and empty verified and the link refused", len(awaited.Outputs), awaited.NotReturned, awaited.Rejected)
 	}
 	otherConfig := busclient.Config{Bundle: otherBundle, CAFile: caFile, HostKey: filepath.Join(dir, "other.key"), StateDir: filepath.Join(dir, "other-state")}
-	if _, err := busclient.Init(ctx, otherConfig); err != nil {
+	if _, _, err := busclient.Init(ctx, otherConfig); err != nil {
 		t.Fatal(err)
 	}
 	other, err := busclient.Connect(otherConfig, log.New(hostLogs, "other: ", 0))

@@ -137,10 +137,12 @@ type Profile struct {
 	Ready        bool              `json:"ready"`
 }
 
-// Credential is one of an agent's credentials: whether a run goes without it when its host has no source for it, and
-// whether this host has one.
+// Credential is one of an agent's credentials: its target, the agent's environment variable Env or credentials-directory
+// file File; whether a run goes without it when its host has no source for it; and whether this host has one.
 type Credential struct {
 	Name       string `json:"name"`
+	Env        string `json:"env,omitzero"`
+	File       string `json:"file,omitzero"`
 	Optional   bool   `json:"optional,omitzero"`
 	Configured bool   `json:"configured"`
 }
@@ -156,8 +158,8 @@ type Host struct {
 	stateDir    string
 	credentials map[string]credential.Source
 	git         []GitCredential
-	// storage is the host's S3 credential, nil when its configuration has none.
-	storage *StorageConfig
+	// storage holds the host's S3 credentials by pool; a pool without an entry has no storage on this host.
+	storage map[string]StorageConfig
 	logger  *log.Logger
 	// follower is the host's reader of the tenant feed, kept while its context lasts.
 	followMu sync.Mutex
@@ -359,7 +361,8 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err := wire.ValidateInputs(input.Parts, math.MaxInt64); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
-	storable := v.state.Pools[pool].Storage != nil && h.storage != nil
+	_, credentialed := h.storage[pool]
+	storable := v.state.Pools[pool].Storage != nil && credentialed
 	toS3 := func() {
 		parts := make([]wire.Part, 0, len(input.Parts))
 		for _, part := range input.Parts {
@@ -718,7 +721,7 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 				listed.Models, listed.DefaultModel = agents[index].Models, agents[index].DefaultModel
 				for _, credential := range agents[index].Credentials {
 					_, configured := h.credentials[credential.Name]
-					listed.Credentials = append(listed.Credentials, Credential{Name: credential.Name, Optional: credential.Optional(), Configured: configured})
+					listed.Credentials = append(listed.Credentials, Credential{Name: credential.Name, Env: credential.Env, File: credential.File, Optional: credential.Optional(), Configured: configured})
 				}
 			}
 			receiver.Profiles = append(receiver.Profiles, listed)

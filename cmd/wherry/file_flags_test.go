@@ -7,12 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/benemon/wherry/internal/operator"
-	"github.com/benemon/wherry/internal/trust"
 )
 
 // -f takes a file, or a directory holding a config in the directory form; pool apply and receiver apply refuse
@@ -177,63 +177,65 @@ func TestOperatorArgsRejectsUnknownOptions(t *testing.T) {
 	}
 }
 
-func TestHostConfigFileAndIgnoredEnvironment(t *testing.T) {
+// hostCommands are every command that reads the host config, each with extra after its command words.
+func hostCommands(extra ...string) map[string][]string {
+	commands := map[string][]string{
+		"host init":       {"host", "init"},
+		"host key rotate": {"host", "key", "rotate"},
+		"host receivers":  {"host", "receivers"},
+		"host submit":     {"host", "submit", "--prompt", "work"},
+		"host cancel":     {"host", "cancel", "run-a"},
+		"host wait":       {"host", "wait", "run-a"},
+		"host logs":       {"host", "logs", "run-a"},
+		"host status":     {"host", "status", "run-a"},
+		"host events":     {"host", "events", "run-a"},
+		"host mcp":        {"host", "mcp"},
+		"submit":          {"submit", "--prompt", "work"},
+		"cancel":          {"cancel", "run-a"},
+		"wait":            {"wait", "run-a"},
+		"logs":            {"logs", "run-a"},
+		"status":          {"status", "run-a"},
+		"events":          {"events", "run-a"},
+	}
+	for name, args := range commands {
+		words := len(strings.Fields(name))
+		commands[name] = append(append(slices.Clone(args[:words]), extra...), args[words:]...)
+	}
+	return commands
+}
+
+// Every host command reads the config --config-file names, else the one WHERRY_CONFIG names, else the default.
+func TestHostCommandsReadTheirConfig(t *testing.T) {
+	noTerminal(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("WHERRY_"+"CONFIG", filepath.Join(t.TempDir(), "bad.yaml"))
-	keyPath := filepath.Join(home, "host.key")
-	if _, err := trust.GenerateSigningKeyFile(keyPath); err != nil {
-		t.Fatal(err)
-	}
+	t.Setenv("XDG_CONFIG_HOME", "")
+	flagged, environment := filepath.Join(t.TempDir(), "flagged.yaml"), filepath.Join(t.TempDir(), "environment.yaml")
 	configDir := filepath.Join(home, ".config", "wherry")
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	config := []byte("bundle: missing.yaml\nhost_key: " + keyPath + "\n")
-	defaultPath := filepath.Join(configDir, "config.yaml")
-	if err := os.WriteFile(defaultPath, config, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("bundle: bundle.yaml\ninput_roots: ["+filepath.Join(home, "default-root")+"]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for name, args := range map[string][]string{
-		"explicit": {"host", "init", "--config-file", "~/.config/wherry/config.yaml"},
-		"default":  {"host", "init"},
+	for _, test := range []struct {
+		name, variable string
+		flags          []string
+		want           string
+	}{
+		{"default", "", nil, "default-root"},
+		{"WHERRY_CONFIG", environment, nil, "environment.yaml"},
+		{"--config-file over WHERRY_CONFIG", environment, []string{"--config-file", flagged}, "flagged.yaml"},
 	} {
-		t.Run(name, func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "missing.yaml") || strings.Contains(err.Error(), "bad.yaml") {
-				t.Fatalf("host init = %v, want the default path's config read and its bundle looked for", err)
-			}
-		})
-	}
-}
-
-func TestHostCommandsReadConfigFile(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "missing.yaml")
-	for name, args := range map[string][]string{
-		"host init":       {"host", "init", "--config-file", missing},
-		"host key rotate": {"host", "key", "rotate", "--config-file", missing},
-		"host receivers":  {"host", "receivers", "--config-file", missing},
-		"host submit":     {"host", "submit", "--config-file", missing, "--prompt", "work"},
-		"host cancel":     {"host", "cancel", "--config-file", missing, "run-a"},
-		"host wait":       {"host", "wait", "run-a", "--config-file", missing},
-		"host logs":       {"host", "logs", "run-a", "--config-file", missing},
-		"host status":     {"host", "status", "--config-file", missing, "run-a"},
-		"host events":     {"host", "events", "--config-file", missing, "run-a"},
-		"host mcp":        {"host", "mcp", "--config-file", missing},
-		"submit":          {"submit", "--config-file", missing, "--prompt", "work"},
-		"cancel":          {"cancel", "--config-file", missing, "run-a"},
-		"wait":            {"wait", "run-a", "--config-file", missing},
-		"logs":            {"logs", "run-a", "--config-file", missing},
-		"status":          {"status", "--config-file", missing, "run-a"},
-		"events":          {"events", "--config-file", missing, "run-a"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			err := run(args, &stdout, &stderr)
-			if err == nil || !strings.Contains(err.Error(), "missing.yaml") {
-				t.Fatalf("run(%q) = %v, want the configured path read", args, err)
-			}
-		})
+		t.Setenv("WHERRY_CONFIG", test.variable)
+		for name, args := range hostCommands(test.flags...) {
+			t.Run(test.name+"/"+name, func(t *testing.T) {
+				var stdout, stderr bytes.Buffer
+				if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("run(%q) = %v, want the config read that names %s", args, err, test.want)
+				}
+			})
+		}
 	}
 }
 

@@ -924,7 +924,7 @@ func devBootstrap(ctx context.Context, env devEnv, agents []string, service oper
 		Bundle: instance.env("host", "dev.bundle"), CAFile: instance.env("tls", "ca.pem"), HostKey: instance.env("host", "host.key"), StateDir: instance.env("host", "state"), Credentials: sources,
 	}
 	if env.storage() {
-		host.Storage = &busclient.StorageConfig{AccessKey: "s3-access-key", SecretKey: "s3-secret-key"}
+		host.Storage = map[string]busclient.StorageConfig{devPool: {AccessKey: "s3-access-key", SecretKey: "s3-secret-key"}}
 	}
 	if err := writeYAML(instance.env("host", "config.yaml"), hostConfigFile(host)); err != nil {
 		return busclient.Config{}, err
@@ -933,7 +933,7 @@ func devBootstrap(ctx context.Context, env devEnv, agents []string, service oper
 	if err := writeYAML(instance.env("receiver", "config.yaml"), local); err != nil {
 		return busclient.Config{}, err
 	}
-	if _, err := busclient.Init(ctx, host); err != nil {
+	if _, _, err := busclient.Init(ctx, host); err != nil {
 		return busclient.Config{}, fmt.Errorf("init: %w", err)
 	}
 	return host, nil
@@ -949,8 +949,12 @@ func hostConfigFile(config busclient.Config) map[string]any {
 		}
 		file["credentials"] = sources
 	}
-	if config.Storage != nil {
-		file["storage"] = map[string]string{"access_key": config.Storage.AccessKey, "secret_key": config.Storage.SecretKey}
+	if len(config.Storage) > 0 {
+		storage := map[string]map[string]string{}
+		for pool, keys := range config.Storage {
+			storage[pool] = map[string]string{"access_key": keys.AccessKey, "secret_key": keys.SecretKey}
+		}
+		file["storage"] = storage
 	}
 	return file
 }

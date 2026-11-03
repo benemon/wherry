@@ -287,6 +287,19 @@ func scrapedValue(t *testing.T, r *Receiver, series string) float64 {
 	return 0
 }
 
+// awaitScraped waits up to 15 seconds for series in a scrape of r to equal want, and returns its last value.
+func awaitScraped(t *testing.T, r *Receiver, series string, want float64) float64 {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		got := scrapedValue(t, r, series)
+		if got == want || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestAcknowledgedAdvertisementSetsItsTime(t *testing.T) {
 	f := newFixture(t, resultStream)
 	before := float64(time.Now().UnixNano()) / 1e9

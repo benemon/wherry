@@ -5,21 +5,36 @@ The files wherry reads and writes, and the environment variables it takes.
 
 ## Client configuration
 
-A YAML file at `~/.config/wherry/config.yaml`, or at the host command's
-`--config-file` path. Unknown and duplicate fields are errors, and a decode
-error names only its line numbers. A leading `~/` is expanded in the flag and
-in every path.
+A YAML file at `~/.config/wherry/config.yaml`, or at the path `WHERRY_CONFIG`
+names when it is set, or at the host command's `--config-file` path, which
+wins over both. [`wherry host init`](commands.md#wherry-host-init) writes it;
+a file written in advance is used as written. Unknown and duplicate fields are
+errors, and a decode error names only its line numbers. A leading `~/` is
+expanded in the flag and in every path.
+
+The host's paths are the same on every OS, macOS included:
+
+| Path | Holds |
+| --- | --- |
+| `~/.config/wherry/`, or `$XDG_CONFIG_HOME/wherry/` when that is set | `config.yaml`, `bundle.yaml`, `host.key` and, for a private CA, `ca.pem` |
+| `~/.local/state/wherry/`, or `$XDG_STATE_HOME/wherry/` when that is set | the host's state, `state_dir` |
 
 | Field | Default | Content |
 | --- | --- | --- |
-| `bundle` | required | the host's bundle |
+| `bundle` | required | the host's bundle; `host init <bundle>` places it at `~/.config/wherry/bundle.yaml` and names it here |
 | `ca_file` | `~/.config/wherry/ca.pem` if that file exists, else none | PEM CA certificates the host trusts the broker with; with none, the system's trusted roots |
 | `host_key` | `~/.config/wherry/host.key` | host signing key file |
-| `state_dir` | `~/.config/wherry/state` | run records |
+| `state_dir` | `~/.local/state/wherry` | run records |
 | `credentials` | none | credential name to its [source](security.md#credential-sources), exactly one of `file: PATH`, `env: VAR` and `command: [PROGRAM, ARG...]` |
 | `git` | none | `{url, credential, host_key}` entries, each giving a task whose git remote starts with `url` the credential `credential` and the OpenSSH `known_hosts` file `host_key`, both optional ([git credentials](security.md#git-credentials)) |
-| `storage` | none | `{access_key, secret_key}`: the names of the credentials in `credentials` holding the access key and secret key of the host's S3 credential; a host without it uses no S3 lane |
+| `storage` | none | pool name to `{access_key, secret_key}`: the names of the credentials in `credentials` holding the access key and secret key of the host's S3 credential for that pool's bucket; a pool without an entry has no S3 lane on this host |
 | `input_roots` | the MCP server's working directory | absolute paths of existing directories the MCP server sends inputs from; the CLI reads any path it is given |
+
+`host init` writes `bundle`, a `ca_file` it asked for, and an entry in
+`credentials`, `git` and `storage` for each answer, each a reference to a
+source and never a value; a re-run keeps every entry and adds only what a
+newly entitled pool needs. Without a terminal it asks nothing and lists what
+still has no source.
 
 `state_dir` holds `runs/<run>.json` for each run this host submitted,
 readable by its owner alone, with the run's submission without its envelope
@@ -42,7 +57,7 @@ bundle: ~/.config/wherry/laptop.bundle
 # system roots.
 ca_file: ~/.config/wherry/kafka-ca.pem
 host_key: ~/.config/wherry/laptop.key
-state_dir: ~/.local/state/wherry
+state_dir: ~/.local/state/wherry/laptop
 credentials:
   claude-oauth-token:
     file: ~/.config/wherry/credentials/claude-oauth-token
@@ -66,16 +81,18 @@ git:
     host_key: ~/.config/wherry/known_hosts/gitlab
 input_roots: [~/src, ~/notes]
 storage:
-  access_key: s3-access-key
-  secret_key: s3-secret-key
+  build:
+    access_key: s3-access-key
+    secret_key: s3-secret-key
 ```
 
 `credentials` holds a source for each credential the agents of the
 [pool terms example](#pool-terms-example) take: two files, a password
 manager's command for `openai-api-key`, and the submitting process's
 `GITHUB_TOKEN` for `github-token`, which `git` also gives every task cloning
-under `https://github.com/acme/`. `storage` takes the S3 access key from a
-file and the secret key from the password manager. Each source resolves at
+under `https://github.com/acme/`. `storage` gives pool `build`'s bucket the S3
+access key from a file and the secret key from the password manager; another
+pool with storage takes its own entry. Each source resolves at
 each submit.
 
 ## Receiver local configuration
@@ -878,6 +895,8 @@ within six hours after `start_by_limit`.
 
 | Variable | Read by | Effect |
 | --- | --- | --- |
+| `WHERRY_CONFIG` | host commands | the [client configuration](#client-configuration) path in place of `~/.config/wherry/config.yaml`; `--config-file` wins over it |
+| `XDG_CONFIG_HOME`, `XDG_STATE_HOME` | host commands | when set, the parents of the host's `wherry/` configuration and state directories in place of `~/.config` and `~/.local/state` |
 | `SSL_CERT_FILE` | host commands, `wherry receiver run`, `wherry operator` | PEM CA file that replaces the system roots, for a pool's S3 endpoint under a private CA and for a broker when no `ca_file` is set; include the public roots in it when the process also reaches public endpoints |
 
 `wherry operator` reads no environment variable: its connection is

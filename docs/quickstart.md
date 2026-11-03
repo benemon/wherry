@@ -227,7 +227,7 @@ Every run of it takes the credential `claude-oauth-token`, which the agent
 finds in the environment variable `CLAUDE_CODE_OAUTH_TOKEN`, where Claude
 Code reads its token. The name is the link to the host: `laptop`'s
 configuration gives `claude-oauth-token` a source in
-[Host step 3](#_3-write-the-host-configuration). A host without one has
+[Host step 3](#_3-initialise-the-host). A host without one has
 `wherry submit` refuse the task:
 
 ```
@@ -621,16 +621,16 @@ wherry host receivers
 
 ```
 receiver=nomad-1 pool=build capacity=2 in_flight=0 advertisement_age=4s status=live
-  profile=container plugin=nomad agent=claude ready=true labels=isolation=container inline_limit=45056 credentials=claude-oauth-token
-  profile=host plugin=nomad agent=claude ready=true labels=isolation=host inline_limit=45056 credentials=claude-oauth-token
+  profile=container plugin=nomad agent=claude ready=true labels=isolation=container inline_limit=45056 credentials=claude-oauth-token:env=CLAUDE_CODE_OAUTH_TOKEN
+  profile=host plugin=nomad agent=claude ready=true labels=isolation=host inline_limit=45056 credentials=claude-oauth-token:env=CLAUDE_CODE_OAUTH_TOKEN
 ```
 
 `advertisement_age` is the age of the receiver's latest advertisement, and
 `status=live` holds while it is within 120 seconds. `ready=true` means the
 receiver offers the plugin profile. `inline_limit` is the most inline input
 bytes the Nomad plugin delivers. `credentials` lists the agent's credentials
-from the pool terms; one `laptop` has no source for shows as
-`claude-oauth-token(missing)`.
+from the pool terms, each with its target; one `laptop` has no source for
+shows as `claude-oauth-token:env=CLAUDE_CODE_OAUTH_TOKEN(missing)`.
 
 ## Host
 
@@ -645,73 +645,84 @@ wherry operator host add laptop --tenant acme
 `host add` records host `laptop` of tenant `acme`, creates its Kafka
 principal and key topic, and writes its bundle,
 `bundles/hosts/acme/laptop.bundle`, mode 0600. Hand the bundle to `laptop`'s user
-over a channel you trust; it holds the host's Kafka password. On `laptop`,
-put it where the host configuration names it, and the broker's CA
-certificate at `~/.config/wherry/ca.pem`, where the host looks for one when
-its configuration names no `ca_file`:
-
-```sh
-install -d -m 0700 ~/.config/wherry
-install -m 0600 laptop.bundle ~/.config/wherry/laptop.bundle
-install -m 0644 kafka-ca.pem ~/.config/wherry/ca.pem
-```
+over a channel you trust; it holds the host's Kafka password. The bundle
+carries nothing about the broker's CA: `laptop` trusts the broker through the
+system's trusted roots, or, for a private CA, through the CA file whoever
+distributes the Kafka CA puts on it.
 
 ### 2. Install wherry
 
 On `laptop`, install wherry as in [Install wherry](#install-wherry).
 
-### 3. Write the host configuration
+### 3. Initialise the host
 
-On `laptop`, put the Claude Code OAuth token in
-`~/.config/wherry/credentials/claude-oauth-token`, readable by its owner
+On `laptop`, keep the Claude Code OAuth token in a file readable by its owner
 alone. The command reads the token from standard input:
 
 ```sh
-install -d -m 0700 ~/.config/wherry/credentials
-(umask 077 && cat > ~/.config/wherry/credentials/claude-oauth-token)
+(umask 077 && cat > ~/claude-oauth-token)
 ```
 
-Then write the [client configuration](configuration.md#client-configuration)
-to `~/.config/wherry/config.yaml`, the path every host command reads by
-default:
+Then give `host init` the bundle:
+
+```sh
+wherry host init laptop.bundle
+```
+
+```
+CA file for the broker's certificate (blank for the system roots): ~/kafka-ca.pem
+wrote /home/me/.config/wherry/config.yaml
+<key ID>
+pool build delivers credential claude-oauth-token to its agents as CLAUDE_CODE_OAUTH_TOKEN.
+Source for credential claude-oauth-token (file:PATH, env:VAR or command:ARGV; blank skips): file:~/claude-oauth-token
+wrote /home/me/.config/wherry/config.yaml
+```
+
+`host init` copies the bundle to `~/.config/wherry/bundle.yaml`, mode 0600 in
+a directory of mode 0700, creates `~/.config/wherry/host.key`, registers it on
+the host's key topic, and prints its key ID, its RFC 7638 thumbprint in
+base64url. It asks for a CA file only when its configuration names none and
+`~/.config/wherry/ca.pem` is absent; leave it blank for a broker whose
+certificate the system's roots trust. It then reads the terms of every pool
+`acme` is entitled to and asks for a source for each credential their agents
+take that the configuration lacks: here `claude-oauth-token`, which the pool
+terms name in [Operator step 3](#_3-write-the-pool-terms). It writes
+`~/.config/wherry/config.yaml`, the [client
+configuration](configuration.md#client-configuration) every host command
+reads, with the source's reference, never the token:
 
 ```yaml
-bundle: ~/.config/wherry/laptop.bundle
+bundle: /home/me/.config/wherry/bundle.yaml
+ca_file: /home/me/kafka-ca.pem
 credentials:
   claude-oauth-token:
-    file: ~/.config/wherry/credentials/claude-oauth-token
-```
-
-`credentials` gives `claude-oauth-token`, which the pool terms name in
-[Operator step 3](#_3-write-the-pool-terms), its source. Without the entry,
-`wherry submit` refuses the task:
-
-```
-invalid input: auth required: credential claude-oauth-token is not in this host's configuration
+    file: /home/me/claude-oauth-token
 ```
 
 `wherry submit` encrypts the file's contents byte for byte in the task's
 envelope under the pool's key, and the receiver that claims the task opens
 it through the pool's key custodian. A credential can also come from an
 environment variable of the submitting process,
-`env: CLAUDE_CODE_OAUTH_TOKEN`, or from a command's output,
-`command: [op, read, "op://wherry/claude/credential"]`
-([credential sources](security.md#credential-sources)).
+`env:CLAUDE_CODE_OAUTH_TOKEN`, or from a command's output,
+`command:op read op://wherry/claude/credential`
+([credential sources](security.md#credential-sources)). When the agent's
+variable is already set where `host init` runs, it offers that variable as
+the source, defaulting to No ([suggested sources](security.md#suggested-sources)).
 
-### 4. Register the host key
+A credential left blank stays unconfigured, and `wherry submit` refuses a
+task that needs it:
 
-On `laptop`:
-
-```sh
-wherry host init
+```
+invalid input: auth required: credential claude-oauth-token is not in this host's configuration
 ```
 
-`host init` creates `~/.config/wherry/host.key`, registers it on the host's key
-topic, and prints its key ID, its RFC 7638 thumbprint in base64url.
-`wherry host receivers` now lists `nomad-1` as
-[Receiver step 9](#_9-check-the-receiver) shows.
+Run `wherry host init` again, without the bundle, to give it a source; a
+re-run keeps every entry and asks only for what is missing, such as the
+credentials of a pool `acme` is entitled to later. `wherry host receivers`
+now lists `nomad-1` as [Receiver step 9](#_9-check-the-receiver) shows.
 
-### 5. Connect a harness
+### 4. Connect a harness
+
 
 On `laptop`, install the wherry plugin in the harness, so that its agent
 submits tasks through `wherry host mcp`. In Claude Code:
@@ -727,7 +738,7 @@ which lists `nomad-1`. The plugin's server reads
 [Harness integration](operations.md#harness-integration) covers other
 harnesses and a configuration at another path.
 
-### 6. Submit a task
+### 5. Submit a task
 
 On `laptop`, from the command line:
 
@@ -745,7 +756,7 @@ run_id=run-<id> pool=build
 
 `--selector isolation=host` runs it on plugin profile `host`.
 
-### 7. Wait for the run
+### 6. Wait for the run
 
 On `laptop`:
 

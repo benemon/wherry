@@ -289,7 +289,7 @@ func TestMCPSubmitWaitRoundTrip(t *testing.T) {
 	callTool(t, ctx, session, "receivers", map[string]any{}, &receivers)
 	if len(receivers.Receivers) != 1 || receivers.Receivers[0].ReceiverID != "receiver-a" || receivers.Receivers[0].Pool != "pool-a" || receivers.Receivers[0].Status != "live" ||
 		!reflect.DeepEqual(receivers.Receivers[0].Profiles, []busclient.Profile{{Name: "lab", Plugin: "nomad", Agent: "claude", InlineLimit: 49152,
-			Credentials: []busclient.Credential{{Name: "model", Configured: true}, {Name: "github-token", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: true}}) {
+			Credentials: []busclient.Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true}, {Name: "github-token", Env: "GH_TOKEN", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: true}}) {
 		t.Fatalf("receivers %#v", receivers)
 	}
 	var submitted submitOutput
@@ -858,6 +858,7 @@ func TestMCPPromptFile(t *testing.T) {
 }
 
 func TestWaitCommand(t *testing.T) {
+	t.Setenv("WHERRY_CONFIG", "")
 	plain, err := waitCommand("")
 	if err != nil || plain("run-1") != "wherry wait run-1" {
 		t.Fatalf("no config file: %v", err)
@@ -872,6 +873,15 @@ func TestWaitCommand(t *testing.T) {
 	out, err := exec.Command("sh", "-c", "printf %s "+strings.TrimPrefix(named("run-1"), "wherry wait run-1 --config-file ")).Output()
 	if err != nil || string(out) != filepath.Join(dir, "it's.yaml") {
 		t.Fatalf("the shell reads the path as %q, %v", out, err)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("WHERRY_CONFIG", "~/x.yaml")
+	for _, flag := range []string{"", "~/x.yaml"} {
+		named, err := waitCommand(flag)
+		if want := "wherry wait run-1 --config-file '" + filepath.Join(home, "x.yaml") + "'"; err != nil || named("run-1") != want {
+			t.Fatalf("config file %q: %q, %v; want %q", flag, named("run-1"), err, want)
+		}
 	}
 }
 

@@ -70,14 +70,18 @@ func runMCP(ctx context.Context, args []string) error {
 	return newMCPServer(connect, inputReader(open), open, wait, logger).Run(ctx, &mcp.StdioTransport{})
 }
 
-// waitCommand returns the shell command that waits for a run and prints its reply, naming configFile, made absolute
-// and quoted, when it is set.
+// waitCommand returns the shell command that waits for a run and prints its reply, naming the config configFile, else
+// $WHERRY_CONFIG, names, with ~ expanded, made absolute and quoted, when one is set.
 func waitCommand(configFile string) (func(id string) string, error) {
+	configFile = cmp.Or(configFile, os.Getenv("WHERRY_CONFIG"))
 	if configFile == "" {
 		return func(id string) string { return "wherry wait " + id }, nil
 	}
-	path, err := filepath.Abs(configFile)
+	path, err := busclient.ExpandHome(configFile)
 	if err != nil {
+		return nil, err
+	}
+	if path, err = filepath.Abs(path); err != nil {
 		return nil, err
 	}
 	quoted := "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
@@ -351,7 +355,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "receivers",
-		Description: "List the receivers of the pools this tenant may use: each receiver's status (live, stale, silent or ended) and capacity, and each profile's plugin type, agent and labels as wherry.operator records them, its inline_limit from the offer, and its agent's models, default_model and credentials from the pool's terms, each credential with optional and configured, whether this host has a source for it, with ready set when the receiver's live advertisement offers the profile. A live receiver with no ready profile lists every profile with ready false. Read it to choose an agent and selector before submit.",
+		Description: "List the receivers of the pools this tenant may use: each receiver's status (live, stale, silent or ended) and capacity, and each profile's plugin type, agent and labels as wherry.operator records them, its inline_limit from the offer, and its agent's models, default_model and credentials from the pool's terms, each credential with its target (env, the agent's environment variable, or file, in its credentials directory), optional and configured, whether this host has a source for it, with ready set when the receiver's live advertisement offers the profile. A live receiver with no ready profile lists every profile with ready false. Read it to choose an agent and selector before submit.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ receiversInput) (*mcp.CallToolResult, receiversOutput, error) {
 		client, err := connect()

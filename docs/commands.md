@@ -30,8 +30,10 @@ Every command but `version` and the shortcuts runs under its role's word:
 - `wherry operator`, `wherry dev`, `wherry receiver run` and `wherry version` read no client
   configuration. Every `wherry host` command reads it first, and every one except `host mcp`
   then connects to Kafka.
-- Every `wherry host` command takes `--config-file FILE`. It defaults to
-  `~/.config/wherry/config.yaml`. A leading `~/` is expanded.
+- Every `wherry host` command takes `--config-file FILE`. Without it, the
+  command reads the file `WHERRY_CONFIG` names, else
+  `~/.config/wherry/config.yaml` ([paths](configuration.md#client-configuration)).
+  A leading `~/` is expanded.
 - A command's flags may come before or after its `RUN_ID`.
 - A failed command prints `wherry: <error>` on standard error and exits
   with status 1. `wait` has its own [exit codes](#exit-codes).
@@ -944,11 +946,54 @@ flags. No other command has a shortcut.
 
 ### `wherry host init`
 
-Creates the host key at `host_key`, a private JWK (RFC 7517) with mode
-0600, unless the file exists,
-creating its directory with mode 0700. It then registers the key on the
-host's key topic when the topic holds none, and prints the key ID. It fails
-when the key topic holds another key.
+```sh
+wherry host init [BUNDLE] [--config-file FILE]
+```
+
+Sets the host up from its bundle, and configures it for every pool its tenant
+is entitled to:
+
+1. With `BUNDLE`, it reads the bundle and copies it to
+   `~/.config/wherry/bundle.yaml`, mode 0600 in a directory of mode 0700,
+   replacing any file there atomically, and names it as `bundle` in the
+   configuration, even when the configuration named another bundle. Without
+   `BUNDLE`, it uses the bundle the configuration names, and refuses when it
+   names none.
+2. When the configuration names no `ca_file` and `~/.config/wherry/ca.pem` is
+   absent, it asks for a CA file; a blank answer keeps the system's trusted
+   roots, and a path is recorded as `ca_file` when the file holds at least one
+   PEM certificate, and asked again when it holds none.
+3. It creates the host key at `host_key`, a private JWK (RFC 7517) with mode
+   0600, unless the file exists, creating its directory with mode 0700. It
+   registers the key on the host's key topic when the topic holds none, and
+   prints the key ID. It fails when the key topic holds another key.
+4. It reads the terms of every pool the tenant is entitled to, and asks for a
+   source, `file:PATH`, `env:VAR` or `command:ARGV`, for each credential their
+   agents take that `credentials` lacks. It names each pool that delivers the
+   credential and its target there; a name several pools share is asked
+   once. When the agent's target variable is set in the environment, it
+   first offers that variable as the source, defaulting to No
+   ([suggested sources](security.md#suggested-sources)).
+5. For each VCS host of those pools with no `git` entry for it, it asks for a
+   URL prefix on that host, `y` taking `https://<host>/`, and the credential the
+   prefix takes, blank for anonymous, then that credential's source when it is
+   new. A prefix that does not start with `https://` or `ssh://`, names another
+   host or is in `git` already is asked again.
+6. For each of those pools with storage and no `storage` entry, it asks for
+   the names of the credentials holding the access key and the secret key,
+   then their sources when they are new.
+7. It writes the configuration, at the path `--config-file` or
+   `WHERRY_CONFIG` names or `~/.config/wherry/config.yaml`, mode 0600 even
+   when the file existed with another mode, with references to sources and
+   never a value.
+
+A blank answer skips the credential, git host or pool; a credential whose
+source was asked once in a run is not asked again in that run. A re-run keeps
+every entry and asks only for what is missing. Without a terminal it asks nothing:
+it writes the configuration with the bundle, and lists each credential, git
+host and pool storage that still has no source. A tenant entitled to no pool
+gets its bundle placed and key registered, and `host init` says to run it
+again once the operator entitles the tenant to a pool.
 
 ### `wherry host key rotate`
 
@@ -982,7 +1027,7 @@ and receiver ID:
 
 ```
 receiver=<id> pool=<pool> capacity=<n> in_flight=<n> advertisement_age=<age> status=<status>
-  profile=<name> plugin=<type> agent=<agent> ready=<bool> labels=<k=v,...> [inline_limit=<n>] [models=<m,...> default_model=<m>] [credentials=<name[(missing,optional)],...>]
+  profile=<name> plugin=<type> agent=<agent> ready=<bool> labels=<k=v,...> [inline_limit=<n>] [models=<m,...> default_model=<m>] [credentials=<name:env=VAR|name:file=FILE[(missing,optional)],...>]
 ```
 
 `status` is `live` when the latest advertisement is dated within 120
@@ -994,18 +1039,19 @@ receiver's configuration record, and an agent's `models` and
 and its advertisement offers the profile. A live receiver with no ready
 profile lists each profile with `ready=false`. `inline_limit`, when set, is
 the most inline input bytes the offered profile delivers. `credentials` names
-the agent's credentials in the pool's terms, marking `missing` each this
-host's configuration has no [source](configuration.md#client-configuration) for and
-`optional` each a run goes without, as in
-`credentials=openai-api-key,github-token(missing,optional)`. It shows no
-target.
+the agent's credentials in the pool's terms, each with its target, the
+agent's environment variable or the file in its credentials directory,
+marking `missing` each this host's configuration has no
+[source](configuration.md#client-configuration) for and `optional` each a run
+goes without, as in
+`credentials=openai-api-key:env=OPENAI_API_KEY,github-token:env=GH_TOKEN(missing,optional)`.
 
 `--json` prints a JSON array, one object per receiver:
 
 | Member | Content |
 | --- | --- |
 | `receiver_id`, `pool` | strings |
-| `profiles` | `{name, plugin, agent, inline_limit, models, default_model, credentials, labels, ready}`, `credentials` holding `{name, optional, configured}`; optional values are omitted when unset |
+| `profiles` | `{name, plugin, agent, inline_limit, models, default_model, credentials, labels, ready}`, `credentials` holding `{name, env, file, optional, configured}`, `env` or `file` the target; optional values are omitted when unset |
 | `capacity`, `in_flight` | integers from the latest advertisement |
 | `last_advertised` | RFC 3339 time of the latest advertisement; omitted when there is none |
 | `status` | `live`, `stale`, `silent` or `ended` |

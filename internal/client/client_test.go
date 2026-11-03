@@ -1175,8 +1175,8 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	}
 	if a := got["receiver-a"]; a.Status != "live" || a.Capacity != 3 || a.InFlight != 1 ||
 		!reflect.DeepEqual(a.Profiles, []Profile{
-			{Name: "lab", Plugin: "nomad", Agent: "claude", InlineLimit: 49152, Credentials: []Credential{{Name: "model", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true},
-			{Name: "cloud", Plugin: "aws", Agent: "codex", Credentials: []Credential{{Name: "openai", Configured: true}, {Name: "github-token", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
+			{Name: "lab", Plugin: "nomad", Agent: "claude", InlineLimit: 49152, Credentials: []Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true},
+			{Name: "cloud", Plugin: "aws", Agent: "codex", Credentials: []Credential{{Name: "openai", Env: "OPENAI_API_KEY", Configured: true}, {Name: "github-token", Env: "GH_TOKEN", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
 		}) {
 		t.Fatalf("live receiver %#v", a)
 	}
@@ -1233,9 +1233,43 @@ func TestConfigRejectsUnknownField(t *testing.T) {
 	}
 }
 
-func TestDefaultConfigPathIsYAML(t *testing.T) {
-	if path, err := DefaultConfigPath(); err != nil || !strings.HasSuffix(path, filepath.Join(".config", "wherry", "config.yaml")) {
-		t.Fatalf("default config path %s, %v", path, err)
+// The host's files default to ~/.config/wherry and its state to ~/.local/state/wherry on every OS, or under
+// $XDG_CONFIG_HOME and $XDG_STATE_HOME when set.
+func TestHostPathsDefaultToXDGLocations(t *testing.T) {
+	// os.UserConfigDir matches the rule on Linux alone; on macOS it is ~/Library/Application Support.
+	if source, err := os.ReadFile("config.go"); err != nil || bytes.Contains(source, []byte("os.UserConfigDir")) {
+		t.Fatalf("config.go calls os.UserConfigDir, or %v", err)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for name, test := range map[string]struct{ configHome, stateHome, config, state string }{
+		"unset": {"", "", filepath.Join(home, ".config", "wherry"), filepath.Join(home, ".local", "state", "wherry")},
+		"set":   {filepath.Join(home, "c"), filepath.Join(home, "s"), filepath.Join(home, "c", "wherry"), filepath.Join(home, "s", "wherry")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", test.configHome)
+			t.Setenv("XDG_STATE_HOME", test.stateHome)
+			if path, err := DefaultConfigPath(); err != nil || path != filepath.Join(test.config, "config.yaml") {
+				t.Fatalf("default config path %s, %v; want %s", path, err, filepath.Join(test.config, "config.yaml"))
+			}
+			if err := os.MkdirAll(test.config, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte("bundle: bundle.yaml\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			config, err := LoadConfig(path)
+			if err != nil || config.HostKey != filepath.Join(test.config, "host.key") || config.StateDir != test.state || config.CAFile != "" {
+				t.Fatalf("config %+v, %v; want host_key in %s, state_dir %s and no ca_file", config, err, test.config, test.state)
+			}
+			if err := os.WriteFile(filepath.Join(test.config, "ca.pem"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if config, err := LoadConfig(path); err != nil || config.CAFile != filepath.Join(test.config, "ca.pem") {
+				t.Fatalf("ca_file %s, %v; want the present %s", config.CAFile, err, filepath.Join(test.config, "ca.pem"))
+			}
+		})
 	}
 }
 
@@ -1271,6 +1305,7 @@ func TestConfigInputRoots(t *testing.T) {
 func TestConfigCAFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	load := func(config string) string {
 		t.Helper()
@@ -1310,6 +1345,8 @@ func TestConfigWithoutHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("XDG_STATE_HOME", "")
 	if loaded, err := LoadConfig(path); err != nil || loaded.StateDir != dir+"/state" {
 		t.Fatalf("config without HOME: %+v, %v", loaded, err)
 	}
@@ -1348,7 +1385,7 @@ func TestConfigExampleLoads(t *testing.T) {
 		}
 	}
 	// host_key and state_dir differ from their defaults, so a member the example drops shows here.
-	if config.HostKey != filepath.Join(home, ".config", "wherry", "laptop.key") || config.StateDir != filepath.Join(home, ".local", "state", "wherry") ||
+	if config.HostKey != filepath.Join(home, ".config", "wherry", "laptop.key") || config.StateDir != filepath.Join(home, ".local", "state", "wherry", "laptop") ||
 		!slices.Equal(config.InputRoots, []string{filepath.Join(home, "src"), filepath.Join(home, "notes")}) {
 		t.Fatalf("host key %s, state dir %s, input roots %v, want each under %s", config.HostKey, config.StateDir, config.InputRoots, home)
 	}
@@ -1679,8 +1716,8 @@ func TestReceiversListsALiveReceiverWithNoOffers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(receivers) != 1 || receivers[0].Status != "live" || !reflect.DeepEqual(receivers[0].Profiles, []Profile{
-		{Name: "lab", Plugin: "nomad", Agent: "claude", Credentials: []Credential{{Name: "model", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: false},
-		{Name: "cloud", Plugin: "aws", Agent: "codex", Credentials: []Credential{{Name: "openai", Configured: true}, {Name: "github-token", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
+		{Name: "lab", Plugin: "nomad", Agent: "claude", Credentials: []Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: false},
+		{Name: "cloud", Plugin: "aws", Agent: "codex", Credentials: []Credential{{Name: "openai", Env: "OPENAI_API_KEY", Configured: true}, {Name: "github-token", Env: "GH_TOKEN", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
 	}) {
 		t.Fatalf("receivers %#v; want the live receiver with its configured profiles, none ready", receivers)
 	}

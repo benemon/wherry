@@ -20,9 +20,9 @@ import (
 // others cannot access; Env, an environment variable of the resolving process; Command, an argv run without a shell
 // whose stdout is the value.
 type Source struct {
-	File    string   `yaml:"file"`
-	Env     string   `yaml:"env"`
-	Command []string `yaml:"command"`
+	File    string   `yaml:"file,omitempty"`
+	Env     string   `yaml:"env,omitempty"`
+	Command []string `yaml:"command,omitempty"`
 }
 
 // commandTimeout bounds a command source, long enough for an interactive unlock such as a password manager's; tests

@@ -8,7 +8,8 @@ clones itself.
 
 1. `wherry host receivers --json` lists receivers with each plugin profile's `agent`,
    `labels`, `ready` and `credentials`, each agent credential's `name`, with
-   `optional` and `configured`, whether this host has a source for it. Pick
+   its target (`env` or `file`), `optional` and `configured`, whether this
+   host has a source for it. Pick
    an agent and build a selector from the labels.
 2. `wherry submit --prompt TEXT` prints `run_id` and `pool`. Add `--agent NAME`
    to choose the agent, and `--selector` with comma-separated terms
@@ -22,7 +23,7 @@ clones itself.
    storage; otherwise submit refuses before publishing),
    `--credential NAME:file=FILE` or `--credential NAME:env=VAR` for each
    configured credential it needs as a file or an environment variable, and `--output NAME[:required]` for each file you want back. Where the
-   pool has storage and your configuration a storage credential,
+   pool has storage and your configuration a storage credential for it,
    `--input FILE:s3` sends a larger file (5 GiB at most) through the pool's
    bucket, and `--output NAME:s3` returns one that way. Keep working.
 3. `wherry wait RUN_ID` blocks until the run ends (2 hours 10 minutes at
@@ -37,9 +38,10 @@ clones itself.
    host's configuration` when the host has no source for a credential the
    agent requires or the task names, and names the credential when its
    source fails. A run whose agent needs a credential it lacks ends
-   `TASK_STATE_FAILED`, and its message names the credential. Tell the user which credential it names, and to add
-   a source for it (a file, an environment variable or a command) under
-   `credentials` in their wherry configuration. Never handle the value
+   `TASK_STATE_FAILED`, and its message names the credential. Tell the user which credential it names, and to run
+   `wherry host init`, which asks for a source for it (a file, an environment
+   variable or a command), or to add one under `credentials` in their wherry
+   configuration. Never handle the value
    yourself. Then submit the task again and wait for the new run.
 5. A run whose pool lost its key before the run started ends
    `TASK_STATE_FAILED` with `cannot be opened: the pool's custodian changed

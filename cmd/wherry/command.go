@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	json "encoding/json/v2"
 	"errors"
@@ -95,25 +96,22 @@ func runHost(args []string, stdout, stderr io.Writer) error {
 	}
 	switch args[0] {
 	case "init":
+		const initUsage = "usage: wherry host init [BUNDLE] [--config-file FILE]"
 		flags := flag.NewFlagSet("host init", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		configFile := flags.String("config-file", "", "host configuration file")
-		if err := flags.Parse(args[1:]); err != nil {
-			return err
-		}
-		if flags.NArg() != 0 {
-			return errors.New("usage: wherry host init [--config-file FILE]")
-		}
-		config, err := loadConfig(*configFile)
+		positional, err := parseAnywhere(flags, args[1:])
 		if err != nil {
 			return err
 		}
-		keyID, err := busclient.Init(context.Background(), config)
+		if len(positional) > 1 {
+			return errors.New(initUsage)
+		}
+		path, err := configPath(*configFile)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(stdout, keyID)
-		return nil
+		return hostInit(context.Background(), path, strings.Join(positional, ""), stdout, stderr)
 	case "key":
 		const keyUsage = "usage: wherry host key rotate [--config-file FILE]"
 		if len(args) < 2 || args[1] != "rotate" {
@@ -163,12 +161,18 @@ func parseAnywhere(flags *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
-func loadConfig(path string) (busclient.Config, error) {
-	if path == "" {
-		var err error
-		if path, err = busclient.DefaultConfigPath(); err != nil {
-			return busclient.Config{}, err
-		}
+// configPath is the host config a host command reads: flag's, else $WHERRY_CONFIG, else the default.
+func configPath(flag string) (string, error) {
+	if path := cmp.Or(flag, os.Getenv("WHERRY_CONFIG")); path != "" {
+		return path, nil
+	}
+	return busclient.DefaultConfigPath()
+}
+
+func loadConfig(flag string) (busclient.Config, error) {
+	path, err := configPath(flag)
+	if err != nil {
+		return busclient.Config{}, err
 	}
 	return busclient.LoadConfig(path)
 }
@@ -233,6 +237,10 @@ func runReceivers(ctx context.Context, client *busclient.Host, args []string, st
 				if len(profile.Credentials) > 0 {
 					names := make([]string, 0, len(profile.Credentials))
 					for _, credential := range profile.Credentials {
+						name := credential.Name + ":env=" + credential.Env
+						if credential.File != "" {
+							name = credential.Name + ":file=" + credential.File
+						}
 						var notes []string
 						if !credential.Configured {
 							notes = append(notes, "missing")
@@ -241,10 +249,9 @@ func runReceivers(ctx context.Context, client *busclient.Host, args []string, st
 							notes = append(notes, "optional")
 						}
 						if len(notes) > 0 {
-							names = append(names, credential.Name+"("+strings.Join(notes, ",")+")")
-						} else {
-							names = append(names, credential.Name)
+							name += "(" + strings.Join(notes, ",") + ")"
 						}
+						names = append(names, name)
 					}
 					fmt.Fprintf(stdout, " credentials=%s", strings.Join(names, ","))
 				}
