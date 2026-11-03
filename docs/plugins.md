@@ -84,9 +84,11 @@ receiver a pool of its own.
 
 ### Kubernetes
 
-A receiver image, its local configuration, a manifest with the Deployment,
-service account, Role, state claim, runs claim and metrics Service, and a script that applies them, on Kubernetes and
-OpenShift alike. The receiver pod and every agent pod mount the runs claim, so the
+A receiver image, its local configuration, and a Kustomize directory with the
+Deployment, service account, Role, state claim, runs claim and metrics Service,
+applied with `kubectl apply -k`, on Kubernetes and OpenShift alike. The
+directory makes the Secret from the receiver's bundle and the ConfigMap from
+`config.yaml`. The receiver pod and every agent pod mount the runs claim, so the
 cluster needs a storage class that provisions ReadWriteMany claims, such as
 CephFS, NFS, EFS or Azure Files. An agent pod runs the agent's image alone, the
 plugin's config has no `helper_image`, and an upgrade is an image change. The
@@ -105,13 +107,18 @@ covers building the image and deploying it.
 
 <<< @/examples/kubernetes/receiver.yaml{yaml}
 
-`apply.sh`:
+`kustomization.yaml`:
 
-<<< @/examples/kubernetes/apply.sh{bash}
+<<< @/examples/kubernetes/kustomization.yaml{yaml}
+
+`fsgroup.yaml`, for a state volume whose root the receiver cannot write:
+
+<<< @/examples/kubernetes/fsgroup.yaml{yaml}
 
 ### Nomad
 
-A receiver image with the Nomad plugin, and its local configuration. The
+A receiver image with the Nomad plugin, its local configuration, and a job
+that renders the bundle and `config.yaml` from a Nomad Variable. The
 [Nomad plugin's README](https://github.com/benemon/wherry-plugins/tree/main/nomad#run-the-receiver-in-a-container)
 covers building and running it.
 
@@ -122,3 +129,7 @@ covers building and running it.
 `Containerfile`:
 
 <<< @/examples/nomad/Containerfile{dockerfile}
+
+`wherry-receiver.nomad.hcl`:
+
+<<< @/examples/nomad/wherry-receiver.nomad.hcl{hcl}
