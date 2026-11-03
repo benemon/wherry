@@ -979,7 +979,8 @@ func registerHost(ctx context.Context, host busclient.Config, config string) (bu
 
 // writeHost creates the host's config.yaml, bundle and key in dir, each failing if anything is there; the host's state
 // stays in the instance, so down never removes state at the standard paths. When record is set, the manifest records
-// each path and SHA-256 before its create, and its device and inode after, so that down removes only what up created.
+// each path before its create, and its device, inode, size and modification time after, so that down removes only what
+// up created.
 func writeHost(env *devEnv, sources map[string]credential.Source, dir string, record bool) (busclient.Config, string, error) {
 	instance := env.instance
 	stateDir := instance.env("host", "state")

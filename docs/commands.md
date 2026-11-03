@@ -1608,9 +1608,11 @@ Its steps, each run after a failed one:
    shadows a real host's, and a real host's file stays. Anything else, a
    missing file or one whose device and inode a crash kept `up` from
    recording included, it leaves and names:
-   `left <path>: <reason>`. One window remains: a file replaced between
+   `left <path>: <reason>`. Two cases remain: a file replaced between
    this check and its removal is removed, since the operating system
-   offers no removal conditional on identity.
+   offers no removal conditional on identity; and a file edited in place
+   that keeps its size and has its modification time set back is removed,
+   since `down` keeps no digest of a file holding a credential.
 
 `down` fails naming every failed step. It keeps `cache/` and prints a
 `mcp remove` line for each harness, since the registration names a
