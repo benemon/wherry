@@ -51,7 +51,7 @@ type oracle struct {
 }
 
 // uploadOracle is a fake S3 store keeping objects by path, /bucket/key. ops logs its object requests in order: PUT, GET
-// and DELETE with the path.
+// and DELETE with the path. access logs the access key that signed each request.
 type uploadOracle struct {
 	endpoint string
 	config   *StorageConfig
@@ -59,6 +59,7 @@ type uploadOracle struct {
 	mu       sync.Mutex
 	objects  map[string][]byte
 	ops      []string
+	access   []string
 }
 
 func newUploadOracle(t *testing.T) *uploadOracle {
@@ -68,6 +69,10 @@ func newUploadOracle(t *testing.T) *uploadOracle {
 		o.mu.Lock()
 		defer o.mu.Unlock()
 		query, bucket := r.URL.Query(), strings.TrimSuffix(r.URL.Path, "/")
+		if _, signature, ok := strings.Cut(r.Header.Get("Authorization"), "Credential="); ok {
+			access, _, _ := strings.Cut(signature, "/")
+			o.access = append(o.access, access)
+		}
 		switch {
 		case r.Method == http.MethodGet && query.Has("location"):
 			w.Header().Set("Content-Type", "application/xml")
@@ -871,5 +876,117 @@ func TestStorageCredentialsArePerPool(t *testing.T) {
 	}
 	if _, err := h.bucket(context.Background(), "pool-c", pool); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "no storage credential for pool pool-c") {
 		t.Fatalf("bucket of a pool without storage credentials = %v", err)
+	}
+}
+
+// twoPoolS3Fixture adds pool-b beside pool-a, both with storage at a fake S3 store and each with its own storage
+// credentials on the host, and a live receiver in pool alone.
+func twoPoolS3Fixture(t *testing.T, pool string) (*uploadOracle, *fixture, *testReceiver) {
+	t.Helper()
+	o := newUploadOracle(t)
+	f := newFixture(t)
+	terms := testTerms()
+	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
+	f.host.storage = map[string]StorageConfig{}
+	for _, name := range []string{"pool-a", "pool-b"} {
+		if err := f.service.PoolApply(f.ctx, name, terms, false); err != nil {
+			t.Fatal(err)
+		}
+		f.host.storage[name] = StorageConfig{AccessKey: name + "-access", SecretKey: name + "-secret"}
+		for _, key := range []string{name + "-access", name + "-secret"} {
+			f.host.credentials[key] = credential.Source{Command: []string{"printf", key + "-value"}}
+		}
+	}
+	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-b"); err != nil {
+		t.Fatal(err)
+	}
+	receiver := f.addReceiver(t, "receiver-"+pool, pool)
+	receiver.advertise(t, f.ctx, nil)
+	return o, f, receiver
+}
+
+// Submit, its presigned URLs, resubmit, cleanup and download each reach S3 with the run's pool's storage credentials
+// when another pool's are configured too.
+func TestStorageReadersUseTheRunsPoolsCredentials(t *testing.T) {
+	for _, pool := range []string{"pool-a", "pool-b"} {
+		t.Run(pool, func(t *testing.T) {
+			o, f, receiver := twoPoolS3Fixture(t, pool)
+			want := pool + "-access-value"
+			signedBy := func(step string) {
+				t.Helper()
+				o.mu.Lock()
+				defer o.mu.Unlock()
+				if len(o.access) == 0 || slices.ContainsFunc(o.access, func(access string) bool { return access != want }) {
+					t.Fatalf("%s signed S3 requests with %q; want %s alone", step, o.access, want)
+				}
+				o.access = nil
+			}
+			presignedBy := func(step, runID string) {
+				t.Helper()
+				_, values, err := open(t, f, runID, f.poolKeys[pool])
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, urls := range []map[string]string{values.S3Inputs, values.S3Outputs} {
+					for _, raw := range urls {
+						if parsed, err := url.Parse(raw); err != nil || !strings.HasPrefix(parsed.Query().Get("X-Amz-Credential"), want+"/") {
+							t.Fatalf("%s presigned %s, %v; want %s's credential", step, raw, err, want)
+						}
+					}
+				}
+			}
+			submit := func() claimed {
+				t.Helper()
+				file, _ := randomFile(t, "dataset.bin", 1024)
+				submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}},
+					Outputs: []wire.ExpectedOutput{{Name: "report.pdf", Storage: wire.StorageS3}}, EndBy: time.Now().Add(time.Hour), StartBy: time.Now().Add(time.Minute)})
+				if err != nil || submitted.Pool != pool {
+					t.Fatalf("submit = %+v, %v; want pool %s", submitted, err, pool)
+				}
+				task := receiver.claim(t, f.ctx, submitted.RunID)[0]
+				receiver.feed(t, f.ctx, submitted.RunID, receiver.echo(t, task), receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil))
+				signedBy("submit")
+				presignedBy("submit", submitted.RunID)
+				return task
+			}
+			task := submit()
+			receiver.keyLost(t, f.ctx, task)
+			replacementID, err := f.host.resubmit(f.ctx, task.submission.Wherry.Run, false)
+			if err != nil || replacementID == "" {
+				t.Fatalf("resubmit = %q, %v", replacementID, err)
+			}
+			presignedBy("resubmit", replacementID)
+			next := receiver.claim(t, f.ctx, replacementID)[0]
+			receiver.feed(t, f.ctx, replacementID, receiver.echo(t, next), receiver.status(t, next, 1, "rejected-1", "rejected", wire.TaskStateRejected, nil))
+			if err := f.host.Cleanup(f.ctx, replacementID); err != nil {
+				t.Fatal(err)
+			}
+			signedBy("cleanup")
+			task = submit()
+			runID := task.submission.Wherry.Run
+			key := wire.S3OutputKey("tenant-a", runID, "report.pdf")
+			o.mu.Lock()
+			o.objects["/"+testBucket+"/"+key] = []byte("report")
+			o.mu.Unlock()
+			receiver.feed(t, f.ctx, runID, receiver.s3Result(t, task, []wire.ReturnedOutput{{Name: "report.pdf", SHA256: hexSum([]byte("report")), Size: 6, Key: key}})...)
+			awaited, err := f.host.Await(f.ctx, runID, 5*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if downloaded, rejected, err := f.host.DownloadOutputs(f.ctx, runID, awaited, t.TempDir()); err != nil || len(downloaded) != 1 || len(rejected) != 0 {
+				t.Fatalf("downloaded %+v, rejected %+v, %v", downloaded, rejected, err)
+			}
+			signedBy("download")
+		})
+	}
+}
+
+// A pool with storage and no storage entry is storage-less on a host whose config gives another pool one.
+func TestSubmitToAPoolWithoutAStorageEntryBesideOneWithIt(t *testing.T) {
+	f, o, _ := recordLimitFixture(t, true)
+	f.host.storage = map[string]StorageConfig{"pool-other": *o.config}
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 60000), Filename: "data.bin"}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "-byte record, over pool pool-r's 100000-byte record limit; a pool with storage and a host storage credential") {
+		t.Fatalf("submit = %v; want the pool refused as storage-less", err)
 	}
 }

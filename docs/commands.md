@@ -956,11 +956,13 @@ is entitled to:
 1. With `BUNDLE`, it reads the bundle and copies it to
    `~/.config/wherry/bundle.yaml`, mode 0600 in a directory of mode 0700,
    replacing any file there atomically, and names it as `bundle` in the
-   configuration. Without `BUNDLE`, it uses the bundle the configuration
-   names, and refuses when it names none.
+   configuration, even when the configuration named another bundle. Without
+   `BUNDLE`, it uses the bundle the configuration names, and refuses when it
+   names none.
 2. When the configuration names no `ca_file` and `~/.config/wherry/ca.pem` is
    absent, it asks for a CA file; a blank answer keeps the system's trusted
-   roots, and a path is recorded as `ca_file`.
+   roots, and a path is recorded as `ca_file` when the file holds at least one
+   PEM certificate, and asked again when it holds none.
 3. It creates the host key at `host_key`, a private JWK (RFC 7517) with mode
    0600, unless the file exists, creating its directory with mode 0700. It
    registers the key on the host's key topic when the topic holds none, and
@@ -973,17 +975,21 @@ is entitled to:
    first offers that variable as the source, defaulting to No
    ([suggested sources](security.md#suggested-sources)).
 5. For each VCS host of those pools with no `git` entry for it, it asks for a
-   URL prefix, by default `https://<host>/`, and the credential the prefix
-   takes, blank for anonymous, then that credential's source when it is new.
+   URL prefix on that host, `y` taking `https://<host>/`, and the credential the
+   prefix takes, blank for anonymous, then that credential's source when it is
+   new. A prefix that does not start with `https://` or `ssh://`, names another
+   host or is in `git` already is asked again.
 6. For each of those pools with storage and no `storage` entry, it asks for
    the names of the credentials holding the access key and the secret key,
    then their sources when they are new.
 7. It writes the configuration, at the path `--config-file` or
-   `WHERRY_CONFIG` names or `~/.config/wherry/config.yaml`, mode 0600, with
-   references to sources and never a value.
+   `WHERRY_CONFIG` names or `~/.config/wherry/config.yaml`, mode 0600 even
+   when the file existed with another mode, with references to sources and
+   never a value.
 
-A blank answer skips the credential, git host or pool. A re-run keeps every
-entry and asks only for what is missing. Without a terminal it asks nothing:
+A blank answer skips the credential, git host or pool; a credential whose
+source was asked once in a run is not asked again in that run. A re-run keeps
+every entry and asks only for what is missing. Without a terminal it asks nothing:
 it writes the configuration with the bundle, and lists each credential, git
 host and pool storage that still has no source. A tenant entitled to no pool
 gets its bundle placed and key registered, and `host init` says to run it

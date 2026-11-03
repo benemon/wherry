@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -73,15 +74,23 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 	onTerminal := terminal()
 	p := newPrompter(prompts)
 	if _, err := os.Stat(filepath.Join(dir, "ca.pem")); file.CAFile == "" && errors.Is(err, os.ErrNotExist) && onTerminal {
-		answer, err := p.ask("CA file for the broker's certificate (blank for the system roots)", "")
-		if err != nil {
-			return err
-		}
-		if answer != "" {
-			if file.CAFile, err = localPath(answer); err != nil {
+		for {
+			answer, err := p.ask("CA file for the broker's certificate (blank for the system roots)", "")
+			if err != nil {
 				return err
 			}
-			changed = true
+			if answer == "" {
+				break
+			}
+			caFile, err := localPath(answer)
+			if err != nil {
+				return err
+			}
+			if pem, err := os.ReadFile(caFile); err == nil && x509.NewCertPool().AppendCertsFromPEM(pem) {
+				file.CAFile, changed = caFile, true
+				break
+			}
+			fmt.Fprintf(p.out, "%s holds no PEM certificate\n", caFile)
 		}
 	}
 	if changed {
@@ -110,11 +119,17 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 		}
 		file.Credentials[name], changed = source, true
 	}
-	// configured asks for name's source unless the config has one, and reports whether it has one now.
+	// configured asks for name's source unless the config has one or this run asked already, and reports whether it has
+	// one now.
+	asked := map[string]bool{}
 	configured := func(name string, uses []credentialUse) (bool, error) {
 		if _, ok := file.Credentials[name]; ok {
 			return true, nil
 		}
+		if asked[name] {
+			return false, nil
+		}
+		asked[name] = true
 		source, err := askSource(p, name, uses)
 		if err != nil || source.Validate() != nil {
 			return false, err
@@ -169,8 +184,8 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 			if err != nil {
 				return err
 			}
-			ok := entry.Credential == ""
-			if !ok {
+			ok := entry.URL != ""
+			if ok && entry.Credential != "" {
 				if ok, err = configured(entry.Credential, nil); err != nil {
 					return err
 				}
@@ -275,19 +290,24 @@ func askSource(p *prompter, name string, uses []credentialUse) (credential.Sourc
 	}
 }
 
-// askGit asks for the URL prefix and credential name of a git entry for vcsHost that git lacks.
+// askGit asks for the URL prefix and credential name of a git entry for vcsHost that git lacks; a blank prefix skips
+// vcsHost, returning no URL.
 func askGit(p *prompter, vcsHost string, git []busclient.GitCredential) (busclient.GitCredential, error) {
+	byDefault := "https://" + vcsHost + "/"
 	for {
-		prefix, err := p.ask("Git URL prefix for "+vcsHost, "https://"+vcsHost+"/")
-		if err != nil {
+		prefix, err := p.ask("Git URL prefix for "+vcsHost+" (y for "+byDefault+"; blank skips "+vcsHost+")", "")
+		if err != nil || prefix == "" {
 			return busclient.GitCredential{}, err
 		}
-		if (strings.HasPrefix(prefix, "https://") || strings.HasPrefix(prefix, "ssh://")) &&
+		if prefix == "y" {
+			prefix = byDefault
+		}
+		if (strings.HasPrefix(prefix, "https://") || strings.HasPrefix(prefix, "ssh://")) && (wire.GitInput{Remote: prefix}).VCSHost() == vcsHost &&
 			!slices.ContainsFunc(git, func(entry busclient.GitCredential) bool { return entry.URL == prefix }) {
 			name, err := p.ask("Credential for "+prefix+" (blank: anonymous)", "")
 			return busclient.GitCredential{URL: prefix, Credential: name}, err
 		}
-		fmt.Fprintln(p.out, "a git URL prefix starts with https:// or ssh:// and is not already in the config")
+		fmt.Fprintf(p.out, "a git URL prefix for %s starts with https://%s or ssh://%s and is not already in the config\n", vcsHost, vcsHost, vcsHost)
 	}
 }
 
@@ -305,6 +325,10 @@ func writeHostConfig(path string, file busclient.Config, prompts io.Writer) erro
 		return err
 	}
 	if err := writeYAML(path, file); err != nil {
+		return err
+	}
+	// writeYAML's mode applies only to a new file, and the config names credential sources.
+	if err := os.Chmod(path, 0o600); err != nil {
 		return err
 	}
 	fmt.Fprintf(prompts, "wrote %s\n", path)

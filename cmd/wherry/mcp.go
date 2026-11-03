@@ -63,21 +63,25 @@ func runMCP(ctx context.Context, args []string) error {
 	connect, closeHost := sharedHost(func() (*busclient.Host, error) { return busclient.Connect(config, logger) })
 	defer closeHost()
 	open := inputOpener(dir, config)
-	wait, err := waitCommand(cmp.Or(*configFile, os.Getenv("WHERRY_CONFIG")))
+	wait, err := waitCommand(*configFile)
 	if err != nil {
 		return err
 	}
 	return newMCPServer(connect, inputReader(open), open, wait, logger).Run(ctx, &mcp.StdioTransport{})
 }
 
-// waitCommand returns the shell command that waits for a run and prints its reply, naming configFile, made absolute
-// and quoted, when it is set.
+// waitCommand returns the shell command that waits for a run and prints its reply, naming the config configFile, else
+// $WHERRY_CONFIG, names, with ~ expanded, made absolute and quoted, when one is set.
 func waitCommand(configFile string) (func(id string) string, error) {
+	configFile = cmp.Or(configFile, os.Getenv("WHERRY_CONFIG"))
 	if configFile == "" {
 		return func(id string) string { return "wherry wait " + id }, nil
 	}
-	path, err := filepath.Abs(configFile)
+	path, err := busclient.ExpandHome(configFile)
 	if err != nil {
+		return nil, err
+	}
+	if path, err = filepath.Abs(path); err != nil {
 		return nil, err
 	}
 	quoted := "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"

@@ -1303,7 +1303,7 @@ With `--git-changes`, the agent returns its commits as `changes.patch` or
 applies them with its own credentials:
 
 ```
-apply with: git am /home/me/.config/wherry/state/runs/run-.../outputs/changes.patch
+apply with: git am /home/me/.local/state/wherry/runs/run-.../outputs/changes.patch
 ```
 
 The agent pushes only when the prompt asks it to and the credential allows

@@ -121,7 +121,7 @@ func fileCredential(name, file string) operator.AgentCredential {
 }
 
 // host init BUNDLE places the bundle in a 0700 directory as a 0600 file, registers the host key, prints its ID, and
-// records the CA file it asks for when no ca.pem is present.
+// records the CA file it asks for when no ca.pem is present, re-asking for a file that holds no certificate.
 func TestHostInitPlacesTheBundle(t *testing.T) {
 	t.Setenv("MODEL_API_KEY", "")
 	h := newInitHost(t, map[string]operator.Terms{"pool-a": agentTerms(envCredential("model", "MODEL_API_KEY"))})
@@ -129,10 +129,14 @@ func TestHostInitPlacesTheBundle(t *testing.T) {
 	if err := os.Rename(filepath.Join(h.dir, "ca.pem"), caFile); err != nil {
 		t.Fatal(err)
 	}
-	onTerminal(t, caFile+"\n\n")
+	notCA := filepath.Join(t.TempDir(), "not-ca.pem")
+	if err := os.WriteFile(notCA, []byte("not a certificate\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	onTerminal(t, notCA+"\n"+caFile+"\n\n")
 	stdout, prompts := h.init(t, h.bundle)
-	if !strings.Contains(prompts, "CA file for the broker's certificate (blank for the system roots)") {
-		t.Fatalf("init asked\n%s\nwant the CA file asked for", prompts)
+	if strings.Count(prompts, "CA file for the broker's certificate (blank for the system roots)") != 2 || !strings.Contains(prompts, notCA+" holds no PEM certificate\n") {
+		t.Fatalf("init asked\n%s\nwant the CA file asked for again after %s", prompts, notCA)
 	}
 	placed := filepath.Join(h.dir, "bundle.yaml")
 	for path, want := range map[string]os.FileMode{h.dir: 0o700, placed: 0o600} {
@@ -289,9 +293,9 @@ func TestHostInitAsksForGitAndStorage(t *testing.T) {
 	terms.Storage = &operator.Storage{Endpoint: "https://s3.example.test", Bucket: "bucket-a"}
 	h := newInitHost(t, map[string]operator.Terms{"pool-a": terms, "pool-b": agentTerms()})
 	keys := t.TempDir()
-	onTerminal(t, "\ngit-token\nenv:GIT_TOKEN\ns3-access\nfile:"+filepath.Join(keys, "access")+"\ns3-secret\nfile:"+filepath.Join(keys, "secret")+"\n")
+	onTerminal(t, "y\ngit-token\nenv:GIT_TOKEN\ns3-access\nfile:"+filepath.Join(keys, "access")+"\ns3-secret\nfile:"+filepath.Join(keys, "secret")+"\n")
 	_, prompts := h.init(t, h.bundle)
-	for _, want := range []string{"Git URL prefix for git.example.test [https://git.example.test/]", "Credential for https://git.example.test/ (blank: anonymous)", "Credential holding pool pool-a's S3 access key"} {
+	for _, want := range []string{"Git URL prefix for git.example.test (y for https://git.example.test/; blank skips git.example.test)", "Credential for https://git.example.test/ (blank: anonymous)", "Credential holding pool pool-a's S3 access key"} {
 		if !strings.Contains(prompts, want) {
 			t.Errorf("init asked\n%s\nwant %q", prompts, want)
 		}
@@ -307,6 +311,53 @@ func TestHostInitAsksForGitAndStorage(t *testing.T) {
 	}
 	if _, err := busclient.LoadConfig(h.config); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A git prefix on another host than the VCS host asked for is refused and re-asked, and a blank prefix skips the host.
+func TestHostInitGitPrefixNamesItsHost(t *testing.T) {
+	terms := agentTerms()
+	terms.VCS = []string{"git.example.test"}
+	h := newInitHost(t, map[string]operator.Terms{"pool-a": terms})
+	onTerminal(t, "https://other.example.test/\n\n\n")
+	_, prompts := h.init(t, h.bundle)
+	if strings.Count(prompts, "Git URL prefix for git.example.test") != 2 || !strings.Contains(prompts, "a git URL prefix for git.example.test starts with https://git.example.test or ssh://git.example.test") {
+		t.Fatalf("init asked\n%s\nwant the prefix on another host refused and re-asked", prompts)
+	}
+	if config := h.written(t); len(config.Git) != 0 || !strings.Contains(prompts, "git host git.example.test") {
+		t.Fatalf("config git %+v, init printed\n%s\nwant no entry and the host listed", config.Git, prompts)
+	}
+}
+
+// A credential whose source this run asked for and was skipped is not asked again when git or storage names it.
+func TestHostInitAsksASkippedCredentialOnce(t *testing.T) {
+	t.Setenv("SHARED_TOKEN", "")
+	terms := agentTerms(envCredential("shared", "SHARED_TOKEN"))
+	terms.VCS = []string{"git.example.test"}
+	terms.Storage = &operator.Storage{Endpoint: "https://s3.example.test", Bucket: "bucket-a"}
+	h := newInitHost(t, map[string]operator.Terms{"pool-a": terms})
+	onTerminal(t, "\ny\nshared\nshared\n")
+	_, prompts := h.init(t, h.bundle)
+	if asked := strings.Count(prompts, "Source for credential shared"); asked != 1 {
+		t.Fatalf("init asked for shared's source %d times:\n%s\nwant once", asked, prompts)
+	}
+	for _, want := range []string{"credential shared (pool pool-a as SHARED_TOKEN, required)", "git host git.example.test", "storage of pool pool-a"} {
+		if !strings.Contains(prompts, want) {
+			t.Errorf("init printed\n%s\nwant %q listed", prompts, want)
+		}
+	}
+}
+
+// init makes an existing config it writes mode 0600.
+func TestHostInitMakesAnExistingConfigPrivate(t *testing.T) {
+	h := newInitHost(t, nil)
+	if err := os.WriteFile(h.config, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	noTerminal(t)
+	h.init(t, h.bundle)
+	if info, err := os.Stat(h.config); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("config %v, %v; want mode 0600", info, err)
 	}
 }
 
