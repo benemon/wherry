@@ -4,19 +4,23 @@ One section per rule of the shipped Prometheus alert rules. Each rule's
 `runbook_url` links its section. The rules and the Grafana dashboard live in
 [`contrib/observability`](https://github.com/benemon/wherry/tree/main/contrib/observability);
 [Metrics](operations.md#metrics) says how to scrape a receiver and load them,
-and [Metrics](commands.md#metrics) lists every family.
+and [Metrics reference](metrics.md) lists every family.
 
 Each section says what the alert means, how to confirm it, and what to do.
 The receiver logs to standard output, one line per event, each prefixed
 `receiver: ` and a UTC timestamp; on Nomad, `nomad alloc logs` shows them,
-and under systemd, `journalctl -u` with the receiver's unit. The confirming
+on Kubernetes, `kubectl logs` with the receiver's pod, and under systemd,
+`journalctl -u` with the receiver's unit. Each plugin's run section says
+where its receiver runs:
+[Nomad](https://github.com/benemon/wherry-plugins/tree/main/nomad#run-the-receiver-in-nomad),
+[Kubernetes](https://github.com/benemon/wherry-plugins/tree/main/kubernetes#run-the-receiver-in-the-cluster)
+and
+[systemd](https://github.com/benemon/wherry-plugins/tree/main/systemd#run-the-receiver-as-a-systemd-service). The confirming
 commands run on a host of a tenant entitled to the pool, with its
 [client configuration](configuration.md#client-configuration), except
 `wherry operator` commands, which run in the
 [operator working directory](operations.md#set-up-wherry-operator) and
-connect as `wherry.operator`. When every one of them fails to log in, an
-interrupted `wherry operator init` left `operator.password` behind the
-broker's: run `init` again with the Kafka super user.
+connect as `wherry.operator`.
 
 ## WherryReceiverNotAdvertising
 
@@ -72,8 +76,9 @@ Then:
   ACL the state calls for exists.
 - For `plugin <type> exited`, fix the cause the plugin's lines give, such as
   an unreachable platform API or memory pressure on the receiver host. For
-  a protocol version mismatch, install the plugin release that matches the
-  receiver's, as in [Upgrade wherry](operations.md#upgrade-wherry). The
+  a protocol version mismatch, record the pin of the plugin release that
+  speaks the receiver's protocol and install it, as in
+  [Install plugins](operations.md#install-plugins). The
   runs the receiver held are adopted once their tasks are delivered again.
 - A receiver whose membership has ended stays ended. Provision a new
   receiver under a new name and stop the old process.
@@ -206,14 +211,14 @@ group still assigns it the partition re-initialises its transactional ID
 and republishes its snapshot as `contested`; a second fence within the
 45-second session timeout stands it down until it is assigned again. The
 alert fires on any increase of `wherry_custodian_takeovers_total` within 15
-minutes, by `reason`, `takeover` or `contested`. A `bootstrap` or `rotation`
-snapshot counts nothing.
+minutes, by `reason`, `takeover` or `contested`. `bootstrap` and `rotation`
+snapshots do not count.
 
 Every custodian change raises it, a planned drain's included, so expect it
-at each planned stop of a custodian. It is not suppressed for drains because
-it is also the signal of a compromised receiver taking custody through the
-custodian group ([What the pool key protects](security.md#what-the-pool-key-protects)):
-a takeover no planned stop or crash explains is that.
+at each planned stop of a custodian. It also signals a compromised receiver
+taking custody through the custodian group
+([What the pool key protects](security.md#what-the-pool-key-protects)).
+Treat a takeover that no planned stop or crash explains as a compromise.
 
 Confirm it:
 
@@ -232,21 +237,13 @@ Confirm it:
 
 Then:
 
-- For a takeover after a planned stop whose previous custodian logged
-  `custodian: re-keyed <n> tasks to pool key <id> and deleted <n> pool keys`,
-  nothing more is needed.
-- For a takeover after a crash or a lost state directory, nothing more is
-  needed; the hosts of the lost tasks resubmit them when they next run.
-- For a takeover after a planned stop with no re-key, raise `drain_timeout`, so that the
-  stopping custodian waits for a successor's snapshot and re-keys its tasks, as in
-  [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian).
-- For a takeover with no planned stop, crash or lost state directory before
-  it, treat the new custodian as suspect and revoke it with
-  `wherry operator receiver remove`.
-- For a contested snapshot with no custodian change, find the writer that
-  initialised `p.<pool>.custodian`: every member of the pool holds that
-  transactional ID. Revoke a suspect receiver with
-  `wherry operator receiver remove`.
+| Cause | Action |
+| --- | --- |
+| a planned stop whose previous custodian logged `custodian: re-keyed <n> tasks to pool key <id> and deleted <n> pool keys` | none |
+| a crash or a lost state directory | none: the hosts of the lost tasks resubmit them when they next run |
+| a planned stop with no re-key | raise `drain_timeout`, so that the stopping custodian waits for a successor's snapshot and re-keys its tasks, as in [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian) |
+| no planned stop, crash or lost state directory before the takeover | treat the new custodian as suspect and revoke it with `wherry operator receiver remove` |
+| a `contested` snapshot with no custodian change | find the writer that initialised `p.<pool>.custodian`, which every member of the pool can; revoke a suspect receiver with `wherry operator receiver remove` |
 
 ## WherryRunsKeyLost
 

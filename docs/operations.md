@@ -25,13 +25,16 @@ principals and group configurations; the cluster itself is prepared once.
   the Kafka super user, which `wherry operator init` uses once. See
   [Authorization and ACLs](https://kafka.apache.org/documentation/#security_authz).
 - **`auto.create.topics.enable=false`**, so a mistyped topic name fails.
-- **`connections.max.reauth.ms`** is set on the listener. Revocation
-  waits at least that long and fails while it is unbounded.
+- **`connections.max.reauth.ms`** is set broker-wide on every broker.
+  Revocation reads that key from each broker, waits at least the longest
+  value, and fails while it is unbounded. A listener-prefixed override does
+  not count.
 - **`transaction.max.timeout.ms`** is short enough to wait out:
   revocation waits at least the longest of it,
   `connections.max.reauth.ms` and
-  `group.share.max.record.lock.duration.ms`. Kafka's default makes each
-  revocation wait that long.
+  `group.share.max.record.lock.duration.ms`. See Kafka's
+  [`transaction.max.timeout.ms`](https://kafka.apache.org/documentation/#brokerconfigs_transaction.max.timeout.ms)
+  for its default.
 - **One SCRAM principal** exists: the Kafka super user. `wherry operator
   init` creates `wherry.operator` and grants it its ACLs.
 
@@ -41,16 +44,24 @@ On a [Strimzi](https://strimzi.io/documentation/) cluster, declare the
 super user as a `KafkaUser` resource. `wherry operator` creates
 `wherry.operator` and the host and receiver principals through the Kafka
 Admin API, which Strimzi's User Operator removes unless it ignores them. Set
-the User Operator's `STRIMZI_IGNORED_USERS_PATTERN` environment variable,
-described in the [Strimzi documentation](https://strimzi.io/documentation/),
-to:
+the User Operator's `STRIMZI_IGNORED_USERS_PATTERN` environment variable, as
+[Ignoring specific users](https://strimzi.io/docs/operators/latest/deploying.html#con-ignoring-some-users-in-user-operator-str)
+describes, to:
 
 ```
 ^wherry\.(operator|tnt\..+|rcv\..+)$
 ```
 
-Strimzi issues and renews the cluster CA; hosts and receivers name its
-certificate as their `ca_file`, and a renewal needs no wherry step.
+The pattern matches `wherry.operator`, every host principal
+`wherry.tnt.<tenant>.<host>` and every receiver principal
+`wherry.rcv.<receiver>`.
+
+Strimzi issues and renews the cluster CA. The operator, hosts and receivers
+name its certificate as their `ca_file`. When Strimzi replaces the CA
+certificate, put the new one in every `ca_file` that names it:
+`operator.yaml`'s, each host's and each receiver's.
+[Certificate renewal](https://strimzi.io/docs/operators/latest/deploying.html#con-certificate-renewal-str)
+gives Strimzi's timing.
 
 ## Set up `wherry operator`
 
@@ -75,38 +86,28 @@ and connects as `wherry.operator` alone. Keep the directory private: it
 holds every bundle ([Security](security.md#the-operator-working-directory)).
 
 To rotate `wherry.operator`'s password, run `init` again with the super
-user; commands then use the new password.
+user. Commands then use the new password. When every operator command fails
+to log in, an interrupted `init` left `operator.password` behind the
+broker's: run `init` again with the Kafka super user.
 
 ### Concurrent operator commands
 
-Operator commands do not lock each other. Each one that writes a record to
-`wherry.operator` ends with passes that read `wherry.operator` to its end and make Kafka match
-those records, not the ones it read when it started: a pass grants what they
-call for, deletes every other grant of a `wherry.tnt.*` or `wherry.rcv.*`
-principal on a `wherry.` topic, a `p-` group or a `p.` transactional ID,
-and deletes the SCRAM credential of each host and receiver whose membership
-has ended. It deletes no grant of `wherry.operator`, of the Kafka super
-user, or of any other principal or resource. One exception: a revocation
-deletes every grant of the principal it revokes, on any resource, since
-`wherry.tnt.*` and `wherry.rcv.*` names are reserved to wherry. A revocation
-and a pool suspension make this pass after their last record.
+Operator commands do not lock each other. Each one that changes Kafka, except `operator init`, ends
+by converging Kafka on the records of `wherry.operator` as read to its end,
+not on the ones it read when it started
+([Operator convergence](design.md#operator-convergence)). When
+`wherry.operator` keeps growing, the command fails after five passes with
+`wherry.operator moved during each of 5 convergence passes`; run it again.
 
-A pass that `wherry.operator` grew during may have applied older records
-over a newer command's, so the command makes another; after five such
-passes it fails with `wherry.operator moved during each of 5 convergence
-passes`. Once a command has written a record, it makes these passes on
-every return, failed or not.
-
-What this guarantees: a command that returns without an error leaves Kafka
-matching every record on `wherry.operator` when its last pass ended, and
-`wherry.operator` did not grow during that pass. A command still running
-can change Kafka after that, but its own passes then follow. A command that
-fails before it writes a record writes nothing to `wherry.operator`; topics,
+A command that returns without an error leaves Kafka matching every record
+on `wherry.operator` when its last pass ended. A command still running can
+change Kafka after that, but its own passes then follow. A command that
+fails before it writes a record writes nothing to `wherry.operator`. Topics,
 a new host's or receiver's credential, or a new receiver's grants it made
 first stay, the grants until the next command's pass. A `host add --force`
 or receiver reissue that a revocation overtakes refuses with `cannot return
 after its membership end` and writes no bundle. A command's pass deletes the
-grants a concurrent command adding a receiver makes before its record; that
+grants a concurrent command adding a receiver makes before its record. That
 command's own pass restores them, and a peer denied meanwhile exits and is
 restarted by its supervisor.
 
@@ -190,8 +191,9 @@ as one file and as a directory.
 Prerequisites: the working directory and the pool's new terms in
 `pools/<pool>.yaml`.
 
-1. Find the receivers the new terms would strand: a live receiver in the
-   pool with a plugin profile whose agent the new terms drop.
+1. Find the receivers the new terms would strand: a receiver in the pool
+   whose membership has not ended, live or not, with a plugin profile whose
+   agent the new terms drop.
    `wherry operator receiver show RECEIVER` prints each profile's `agent`.
 
 2. Reconfigure each of those receivers without the profile, as in
@@ -208,8 +210,8 @@ Prerequisites: the working directory and the pool's new terms in
    wherry operator pool apply build
    ```
 
-   `pool apply` checks every live receiver in the pool against the new
-   terms first, and refuses terms that would strand one, naming each
+   `pool apply` checks every receiver in the pool whose membership has not
+   ended against the new terms first, and refuses terms that would strand one, naming each
    receiver, plugin and profile:
 
    ```
@@ -225,7 +227,7 @@ Prerequisites: the working directory and the pool's new terms in
 Receivers reject a task still unclaimed `start_by_limit` after its
 submission, and a task whose `task_started_by` is later, with
 `task_started_by is past the pool's start_by_limit`; `wherry submit`
-refuses such a `task_started_by` before it publishes. Every run therefore ends
+refuses such a `task_started_by` before it publishes. Every run ends
 within six hours after `start_by_limit`. A longer limit keeps prompts on
 the broker longer. Lowering `start_by_limit` leaves the pool topics'
 retention where it is, so runs submitted under the longer limit keep their
@@ -289,8 +291,10 @@ a result record is 1259677 bytes, over the 1048588-byte record limit
 `wherry submit` measures each signed submission against the recorded
 record limit. Input files grow by about 16/9 on the wire, since they are
 base64-encoded inside a record that is itself base64url-encoded. A host
-batches at most 1000012 bytes, which is the tasks topic's limit with brokers
-and the topic at their defaults. Raising `message.max.bytes` or the tasks
+batches at most 1000012 bytes, franz-go's default batch maximum, which is
+below the brokers' default `message.max.bytes` of 1048588, so the host's
+batch is the tasks topic's limit with brokers and the topic at their
+defaults. Raising `message.max.bytes` or the tasks
 topic's `max.message.bytes` leaves the limit there, and lowering either
 lowers it. Run `pool apply` after changing either, so the terms record the
 new limit. An output chunk holds
@@ -327,8 +331,11 @@ Prerequisites: the working directory
 3. Hand the bundle, `bundles/hosts/acme/laptop.bundle`, to the host's user over
    a channel you trust. It holds the host's Kafka password. When the
    broker's certificate chains to a private CA, the host also needs that
-   CA's certificate, at `~/.config/wherry/ca.pem` or a path `wherry host init`
-   asks for; the bundle does not carry it.
+   CA's certificate, as `ca.pem` in its
+   [configuration directory](configuration.md#client-configuration), by
+   default `~/.config/wherry/ca.pem`, or at a path `wherry host init` asks
+   for. `host init` asks only on a terminal, so without one put the
+   certificate in place first; the bundle does not carry it.
 
 The host's user then runs `wherry host init <bundle>`, which places the
 bundle, registers the host key and writes the
@@ -349,16 +356,8 @@ the host is offline until its user puts the new bundle in place.
 A receiver runs a pool's tasks on the plugin profiles of its
 [receiver configuration](configuration.md#receiver-configuration);
 [Placement](concepts.md#placement) says how a task reaches one.
-On a host-local platform such as systemd, a receiver adopts only the jobs on
-its own host, so a pool with receivers on several hosts can run a task twice
-after a receiver is lost: once the lease of the task's holder, the latest
-receiver the key custodian served the task to that has not since released
-it, lapses 120 seconds after the holder's last advertisement, or once its
-membership ends, a receiver on another host starts the task again while the
-first job may still run. Give each host-local receiver a
-pool of its own, as the
-[systemd plugin's README](https://github.com/benemon/wherry-plugins/tree/main/systemd#run-the-receiver-as-a-systemd-service)
-says.
+Give a host-local receiver, such as a systemd one, a pool of its own, as
+[systemd](plugins.md#systemd) explains.
 [Quickstart: Receiver](quickstart.md#receiver) walks through adding and
 starting receiver `nomad-1`, with every file it writes.
 
@@ -388,74 +387,74 @@ host that meets [Run a receiver](#run-a-receiver).
            20-host.yaml
    ```
 
-`receiver.yaml`:
+   `receiver.yaml`:
 
-```yaml
-pool: build
-plugin_sha256:
-  nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-capacity: 3
-```
+   ```yaml
+   pool: build
+   plugin_sha256:
+     nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+   capacity: 3
+   ```
 
-`plugins/nomad/plugin.yaml`, the `config` every profile inherits, with the
-name of the [platform credential](configuration.md#platform-credentials)
-that authenticates to the cluster:
+   `plugins/nomad/plugin.yaml`, the `config` every profile inherits, with the
+   name of the [platform credential](configuration.md#platform-credentials)
+   that authenticates to the cluster:
 
-```yaml
-# Every plugin profile of this plugin inherits these keys and can override them.
-config:
-  address: https://nomad.example.com:4646
-  ca_file: /etc/wherry/nomad-ca.pem
-  namespace: agents
-  credential: nomad-token
-```
+   ```yaml
+   # Every plugin profile of this plugin inherits these keys and can override them.
+   config:
+     address: https://nomad.example.com:4646
+     ca_file: /etc/wherry/nomad-ca.pem
+     namespace: agents
+     credential: nomad-token
+   ```
 
-`plugins/nomad/profiles/10-container.yaml`:
+   `plugins/nomad/profiles/10-container.yaml`:
 
-```yaml
-name: container
-agent: claude
-labels:
-  isolation: container
-config:
-  runtime:
-    driver: docker
-    config:
-      image: registry.example.com/claude-agent:1.0
-```
+   ```yaml
+   name: container
+   agent: claude
+   labels:
+     isolation: container
+   config:
+     runtime:
+       driver: docker
+       config:
+         image: registry.example.com/claude-agent:1.0
+   ```
 
-`plugins/nomad/profiles/20-host.yaml`, on a node pool whose nodes have
-Codex installed:
+   `plugins/nomad/profiles/20-host.yaml`, on a node pool whose nodes have
+   Codex installed:
 
-```yaml
-name: host
-agent: codex
-labels:
-  isolation: host
-config:
-  node_pool: codex
-  runtime:
-    driver: exec
-    config:
-      command: /bin/sh
-      args:
-        - -c
-        - >-
-          exec codex exec --json --ephemeral --skip-git-repo-check
-          --sandbox workspace-write - < "$NOMAD_TASK_DIR/prompt.txt"
-```
+   ```yaml
+   name: host
+   agent: codex
+   labels:
+     isolation: host
+   config:
+     node_pool: codex
+     runtime:
+       driver: exec
+       config:
+         command: /bin/sh
+         args:
+           - -c
+           - >-
+             exec codex exec --json --ephemeral --skip-git-repo-check
+             --sandbox workspace-write - < "$NOMAD_TASK_DIR/prompt.txt"
+   ```
 
-[Receiver configuration directory](configuration.md#receiver-configuration-directory)
-gives the layout and routing order, and
-[Plugin profile merge](configuration.md#plugin-profile-merge) how a
-profile inherits its plugin's `config` and `labels`. The
-[Nomad plugin's settings](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
-cover the `config` section, and its
-[agent jobs](https://github.com/benemon/wherry-plugins/tree/main/nomad#agent-jobs)
-how a command reads `WHERRY_MODEL`.
-[Codex's non-interactive mode](https://developers.openai.com/codex/noninteractive)
-covers the `codex exec` flags and the API key variable the pool's terms
-target.
+   [Receiver configuration directory](configuration.md#receiver-configuration-directory)
+   gives the layout and routing order, and
+   [Plugin profile merge](configuration.md#plugin-profile-merge) how a
+   profile inherits its plugin's `config` and `labels`. The
+   [Nomad plugin's settings](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
+   cover the `config` section, and its
+   [agent jobs](https://github.com/benemon/wherry-plugins/tree/main/nomad#agent-jobs)
+   how a command reads `WHERRY_MODEL`.
+   [Codex's non-interactive mode](https://developers.openai.com/codex/noninteractive)
+   covers the `codex exec` flags and the API key variable the pool's terms
+   target.
 
 2. Check the configuration. `--dry-run` validates the configuration
    against the pool's terms and prints the pins and each plugin profile as
@@ -484,30 +483,30 @@ target.
    plugin profiles name. This local configuration gives `nomad-token` a
    file source:
 
-```yaml
-bundle: /etc/wherry/receiver.bundle
-# A private CA the broker's certificate chains to; without ca_file, the system roots.
-ca_file: /etc/wherry/kafka-ca.pem
-state_dir: /var/lib/wherry/state
-plugin_dir: /usr/local/libexec/wherry/plugins
-metrics_addr: ":9464"
-drain_timeout: 20s
-credentials:
-  nomad-token:
-    file: /etc/wherry/nomad-token
-```
+   ```yaml
+   bundle: /etc/wherry/receiver.bundle
+   # A private CA the broker's certificate chains to; without ca_file, the system roots.
+   ca_file: /etc/wherry/kafka-ca.pem
+   state_dir: /var/lib/wherry/state
+   plugin_dir: /usr/local/libexec/wherry/plugins
+   metrics_addr: ":9464"
+   drain_timeout: 20s
+   credentials:
+     nomad-token:
+       file: /etc/wherry/nomad-token
+   ```
 
-Start the receiver under a supervisor that restarts it when it exits and
-allows it 30 seconds to stop, with `drain_timeout: 20s`, as in
-[Run a receiver](#run-a-receiver). A
-platform credential with no source fails that plugin profile's
-configuration, and the receiver exits with:
+6. Start the receiver under a supervisor that restarts it when it exits and
+   allows it 30 seconds to stop, with `drain_timeout: 20s`, as in
+   [Run a receiver](#run-a-receiver). A
+   platform credential with no source fails that plugin profile's
+   configuration, and the receiver exits with:
 
-```
-profile container: credential "nomad-token" has no source in the receiver's configuration
-```
+   ```
+   profile container: credential "nomad-token" has no source in the receiver's configuration
+   ```
 
-6. On a host of an entitled tenant, check that `wherry host receivers` shows the
+7. On a host of an entitled tenant, check that `wherry host receivers` shows the
    receiver `live` with each profile `ready=true`.
 
 To rotate a platform credential, replace the value at its source and
@@ -554,7 +553,8 @@ through `receiver apply`, which drains with no window.
 To apply a change at once, restart the receiver through its platform, as
 with `kubectl rollout restart`, `nomad alloc restart` or
 `systemctl restart`. It stops within its
-[`drain_timeout`](configuration.md#drain-timeout-and-the-stop-window), and
+[`drain_timeout`](configuration.md#drain-timeout-and-the-stop-window) plus
+5 seconds, and
 its held runs are released to other receivers, whose next delivery of each
 task adopts its job. When the new configuration renames a run's profile or
 changes its agent, the adopting receiver stops and purges the run's job and
@@ -649,10 +649,11 @@ awk -v name="wherry-plugin-${plugin}_${version}_${os}_${arch}" '$2 == name {prin
 ```
 
 Set it as the type's entry in the receiver configuration's `plugin_sha256`,
-which holds one for each plugin type the configuration names, and apply it:
+which holds one for each plugin type the configuration names, and apply it,
+here the configuration directory of [Add a receiver](#add-a-receiver):
 
 ```sh
-wherry operator receiver apply nomad-1
+wherry operator receiver apply nomad-1 -f nomad-1
 ```
 
 The receiver drains and restarts as in
@@ -664,10 +665,17 @@ fails with
 `profile <name>: plugin type <type>: <path> has SHA-256 <hex> and the pin is <hex>`,
 and a type with no binary with `profile <name>: no plugin for type <type>`.
 
-An upgrade or rollback takes the same steps with the other version: verify
-its `checksums.txt`, install the binary, then record its pin with
-`receiver apply`. The receiver runs the new binary from its next start on
-the new record.
+An upgrade or rollback takes the same steps with the other version, in this
+order:
+
+1. Verify the new version's `checksums.txt` and record its pin with
+   `wherry operator receiver apply`.
+2. Roll the receiver's binary, or its image, to the new version at once.
+
+The receiver reads the new record, drains and exits, and from its next start
+runs only a binary with the new pin. A restart between the two steps
+refuses the old binary with the SHA-256 error above, and the receiver
+restarts until the new binary is in place.
 
 To check the install, start the receiver and find one line per plugin,
 logged when the receiver starts it:
@@ -678,14 +686,20 @@ receiver: <date> <time> plugin <type>: version <version> protocol <n>
 
 A plugin that leaves `pluginsdk.Version` unset logs `version unreported`.
 
-### As a Nomad job
+### Platforms
 
-On Nomad, the receiver runs as a service job whose
-[workload identity](https://developer.hashicorp.com/nomad/docs/concepts/workload-identity)
-gives the Nomad plugin its token. The Nomad plugin owns those jobs:
-[Run the receiver in Nomad](https://github.com/benemon/wherry-plugins/tree/main/nomad#run-the-receiver-in-nomad)
-has the receiver container under the docker driver and the exec driver job
-on versioned host paths, each with its steps, and CI validates both.
+Each plugin's README runs the receiver on its platform, with its steps:
+
+- [Nomad](https://github.com/benemon/wherry-plugins/tree/main/nomad#run-the-receiver-in-nomad),
+  as a service job whose
+  [workload identity](https://developer.hashicorp.com/nomad/docs/concepts/workload-identity)
+  gives the Nomad plugin its token;
+- [Kubernetes](https://github.com/benemon/wherry-plugins/tree/main/kubernetes#run-the-receiver-in-the-cluster),
+  OpenShift included, as a Deployment;
+- [systemd](https://github.com/benemon/wherry-plugins/tree/main/systemd#run-the-receiver-as-a-systemd-service),
+  as a service unit.
+
+[Plugins](plugins.md) embeds each example.
 
 ### Metrics
 
@@ -697,7 +711,7 @@ the receiver host's address on a monitoring network, or put an
 authenticating proxy in front of it:
 
 ```yaml
-metrics_addr: 10.0.8.21:9464
+metrics_addr: 192.0.2.21:9464
 ```
 
 Scrape it as any Prometheus target:
@@ -706,7 +720,7 @@ Scrape it as any Prometheus target:
 scrape_configs:
   - job_name: wherry-receiver
     static_configs:
-      - targets: ["10.0.8.21:9464"]
+      - targets: ["192.0.2.21:9464"]
 ```
 
 The `tenant` label names each entitled tenant whose runs reach the pool.
@@ -714,7 +728,7 @@ Whoever can scrape a receiver sees every tenant's activity on its pool: its
 runs and their outcomes, durations, rejections and open waits. Give scrape access only to those who may
 see all of the pool's tenants. No label or value carries a prompt, output,
 run ID, error text, URL, image, path, node or credential name.
-[Metrics](commands.md#metrics) lists the families.
+[Metrics reference](metrics.md) lists the families.
 
 [`contrib/observability`](https://github.com/benemon/wherry/tree/main/contrib/observability)
 holds a Grafana dashboard, `wherry-dashboard.json`, and Prometheus alert
@@ -1027,8 +1041,10 @@ snapshot topic's configuration and single partition, and confirms that every
 ACL the state calls for exists. It does not
 check a plugin profile's plugin or `config` section; at start the receiver
 finds the type's plugin, the plugin checks each profile's section, and the
-receiver exits with `profile <name>: ...` on an error. Run it after changing a pool's terms, since
-receivers keep the configuration they started with.
+receiver exits with `profile <name>: ...` on an error. Run it after changing
+a pool's terms or a broker or topic limit: receivers apply both within 15
+seconds, and `check` reports a receiver configuration or a record they no
+longer fit.
 
 ## Reset a deployment
 
@@ -1156,8 +1172,10 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
    ```
 
 5. Let the parties reach the endpoint and trust its certificate: hosts,
-   which upload, download and delete (they trust the system roots, or only
-   the CA file in `SSL_CERT_FILE` when it is set); receiver hosts, which upload outputs with
+   which upload, download and delete, trusting the system roots and the
+   certificates in `SSL_CERT_FILE` when it is set
+   ([Environment variables](configuration.md#environment-variables));
+   receiver hosts, which upload outputs with
    their system roots; and every platform node that fetches inputs, for the
    Nomad plugin each Nomad client, whose artifact fetcher uses the system
    roots. Agent jobs do not reach the endpoint themselves; see
@@ -1265,12 +1283,12 @@ and [systemd](https://github.com/benemon/wherry-plugins/tree/main/systemd#agent-
 The CA and proxy settings stay yours: `GIT_SSL_CAINFO`, `SSL_CERT_FILE`,
 `HTTPS_PROXY` and the like reach `git` as the image or platform sets them.
 
-Start the agent's harness in a directory above the checkout. Claude Code in print mode skips the workspace trust prompt and runs the
-hooks and MCP servers of the project it starts in, so a harness started in a
-cloned repository runs that repository's hooks with the agent's credential in
-reach. Started above the checkout, it reads the repository's files without
-loading its project settings, including after the agent changes directory in
-a shell. The start directory is the plugin profile's to set: on Nomad, a runtime
+Start the agent's harness in a directory above the checkout. A harness
+loads the project settings of the directory it starts in: Claude Code in
+print mode runs that project's hooks and MCP servers without a trust prompt
+([Claude Code settings](https://docs.anthropic.com/en/docs/claude-code/settings)).
+A harness started in a cloned repository would run its hooks with the
+agent's credential in reach. The start directory is the plugin profile's to set: on Nomad, a runtime
 command such as `cd /local && exec claude ...` starts the harness in the task
 directory, and the clone lands below it.
 
@@ -1369,49 +1387,34 @@ brokers or to the storage endpoint.
 
 Readers ignore unknown members on `wherry.operator` records and reject every
 record with a higher `v` than their release knows as written by a later
-release; upgrade the reader. A
-host's run records carry `redaction_key`, so an older `wherry` cannot read a
-run this release submitted. A host or receiver of an earlier release that
-rejects unknown members on `wherry.operator` records cannot decode pool terms
-that set `models` or `default_model`, and stops reading `wherry.operator` while
-they hold them, so upgrade every receiver and host before the terms set them.
-Such a release reports those records as written by a later release;
-upgrade it. A harness does not restart a running `wherry host mcp` when its binary
-changes, so restart the MCP server after upgrading.
+release. Upgrade the reader. A harness does not restart a running
+`wherry host mcp` when its binary changes, so restart the MCP server after
+upgrading.
 
 The [release notes](https://github.com/benemon/wherry/releases) mark a
-release that changes the record formats or the plugin protocol, and give
-its upgrade steps.
+release that changes the record formats, the key file formats or the plugin
+protocol, and give its upgrade steps.
 
-The release that introduces [`wherry operator init`](#set-up-wherry-operator)
-does not upgrade in place. Its operator commands connect as `wherry.operator`
-alone, through a working directory's `operator.yaml`, which only `init`
-writes, and rely on the grants `init` gives `wherry.operator`; and its hosts
-and receivers refuse a bundle that carries a CA, as every bundle of an
-earlier release does. Upgrade an installation of an earlier release to it
-with a reset:
+wherry's key files are private JWKs. A host key or a receiver's
+`signing.key` in an older format fails to load. On a clean break, as a
+[reset](#reset-a-deployment), move it aside so that the new release writes
+a new one.
 
-1. [Reset the deployment](#reset-a-deployment), running its `wherry operator
-   init` step with the new release in a new working directory.
-2. Write the kept files in `pools/` and `receivers/` from the terms and
-   configurations the earlier release applied, apply them, and add every
-   host again.
-3. Give each host and receiver its new bundle from `bundles/`, and, when the
-   broker's certificate chains to a private CA, that CA's certificate: the
-   receiver's `ca_file`, and the host's `ca_file` or
-   `~/.config/wherry/ca.pem`.
-
-Between later releases that keep the record formats, upgrade in place.
+Between releases that keep the record formats, upgrade in place.
 Prerequisites: the new `wherry` binary, and each receiver's local
 configuration, bundle and state directory.
 
-1. Replace the binary on every host and receiver host with the new
-   release's, verified as in [Install wherry](quickstart.md#install-wherry).
-2. Replace the plugins in each receiver's plugin directory together with the
-   receiver binary, verified as in [Install plugins](#install-plugins); a receiver refuses a plugin of another
-   [plugin protocol version](commands.md#plugins).
-3. Restart each receiver with the same local configuration, bundle and
-   state directory. On
+1. Replace the binary on every host with the new release's, verified as in
+   [Install wherry](quickstart.md#install-wherry).
+2. For each receiver whose plugins change, verify the new plugin release and
+   record its pin with `wherry operator receiver apply`, as in
+   [Install plugins](#install-plugins). A receiver refuses a plugin of
+   another [plugin protocol version](commands.md#plugins), so a release that
+   changes the protocol takes plugins built for it.
+3. Roll each receiver's binary and plugins, or its image, to the new
+   versions at once, and restart it with the same local configuration,
+   bundle and state directory. A restart between steps 2 and 3 refuses the
+   old plugin binary. On
    `SIGINT` or `SIGTERM` it stops claiming, closes its idle claims and lets
    the runs it holds go on for up to `drain_timeout`. It then exits without
    stopping the jobs still running and releases their tasks to the pool.
@@ -1428,7 +1431,8 @@ configuration, bundle and state directory.
 ## Harness integration
 
 `wherry host mcp` serves the host operations as MCP tools over stdio. It reads
-the client configuration and connects to Kafka as one host when it starts.
+the client configuration when it starts, and connects to Kafka as one host at
+its first tool call.
 Every tool call reuses that host and its one tenant-feed follower, and
 `wait`, `events` and `logs` also read the tenant's transcript topic. While
 the connection fails, the server retries it on each tool call.
@@ -1439,8 +1443,9 @@ configuration, bundle, host key and credential files readable by the
 harness user.
 
 1. Install the plugin. In Claude Code, add this repository as a
-   marketplace, install the plugin from it, then run `/reload-plugins` in
-   the session:
+   marketplace and install the plugin from it, as
+   [Claude Code's plugin documentation](https://docs.anthropic.com/en/docs/claude-code/plugins)
+   describes:
 
    ```sh
    claude plugin marketplace add benemon/wherry
@@ -1448,13 +1453,14 @@ harness user.
    ```
 
    Another harness installs `plugins/wherry` through its own plugin
-   mechanism, then restarts its session.
+   mechanism.
 2. Check the connection with the `receivers` tool, which lists the
    receivers the tenant may use.
 
 The packaged `plugins/wherry/mcp.json` starts `wherry host mcp` with the default
-configuration path. For a configuration elsewhere, keep it at the default path
-or link the default path to it, or register a server of your own that runs
+configuration path, or the path `WHERRY_CONFIG` names in the harness's
+environment. For a configuration elsewhere, set `WHERRY_CONFIG` there, keep
+it at the default path or link the default path to it, or register a server of your own that runs
 `wherry host mcp --config-file PATH` and disable the packaged one, for example with
 [`claude mcp add wherry -- wherry host mcp --config-file PATH`](https://docs.anthropic.com/en/docs/claude-code/mcp)
 in Claude Code. A plugin update replaces the packaged `mcp.json`, so edits to it

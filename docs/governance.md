@@ -8,15 +8,17 @@ where a run's data goes.
 The operator issues every identity. `wherry operator` creates each host and
 receiver as a Kafka principal and writes its bundle, which the operator
 hands over outside Kafka. The broker enforces every grant: `wherry operator`
-generates each ACL from the state on `wherry.operator`, and no other approval
-step exists. A tenant's hosts reach only the pools the tenant is entitled
-to, and a receiver reaches only its own pool.
+generates each host and receiver ACL from the state on `wherry.operator`,
+`operator init` gives `wherry.operator` its own, and no other approval step
+exists. A tenant's hosts reach only the pools the tenant is entitled to. A
+receiver reaches its own pool, and the feeds, transcript topics and host key
+topics of the tenants entitled to it.
 [Identity and authorisation](concepts.md#identity-and-authorisation)
 describes the principals and [ACLs](design.md#acls) lists the matrix.
 
 ## Signed records
 
-Every record on a shared topic is an EdDSA JWS signed by its owner. A reader
+Every record a host or receiver puts on a shared topic is an EdDSA JWS signed by its owner; `wherry.operator` records and progress records are unsigned ([Architecture](design.md)). A reader
 verifies it against the owner's current key, read from the owner's own key
 topic, and then checks it against `wherry.operator`: a submission must come
 from a live host of a tenant entitled to the pool, and a receiver's record
@@ -48,8 +50,9 @@ Everything wherry carries stays on infrastructure the operator runs:
 - each credential leaves the host only inside the task's envelope,
   encrypted under the pool's key, is opened by the pool's key custodian to
   check its binding to the task and by one attempt of the claiming
-  receiver, and reaches the agent at its target, as
-  [Security](security.md) describes;
+  receiver, is decrypted by a former custodian holding a replaced pool key
+  to check a content key before it re-keys the task, and reaches the agent
+  at its target, as [Security](security.md) describes;
 - the host keeps its run records, each with the run's task content and
   redaction key but no credential value in the clear, in its own state directory.
 

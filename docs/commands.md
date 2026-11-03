@@ -20,6 +20,7 @@ Every command but `version` and the shortcuts runs under its role's word:
 `wherry submit`, `wait`, `status`, `events`, `logs` and `cancel` are
 [shortcuts](#shortcuts) for the `wherry host` commands of the same name.
 `wherry --help` and `wherry -h` print the tree and list the shortcuts.
+`-h` after `wherry operator`, `wherry host` or a command prints its usage on standard error and exits with status 0.
 
 ## Conventions
 
@@ -31,16 +32,16 @@ Every command but `version` and the shortcuts runs under its role's word:
   configuration. Every `wherry host` command reads it first, and every one except `host mcp`
   then connects to Kafka.
 - Every `wherry host` command takes `--config-file FILE`. Without it, the
-  command reads the file `WHERRY_CONFIG` names, else
-  `~/.config/wherry/config.yaml` ([paths](configuration.md#client-configuration)).
+  command reads the file `WHERRY_CONFIG` names, else `config.yaml` in
+  `$XDG_CONFIG_HOME/wherry/`, by default `~/.config/wherry/`
+  ([paths](configuration.md#client-configuration)).
   A leading `~/` is expanded.
 - A command's flags may come before or after its `RUN_ID`.
 - A failed command prints `wherry: <error>` on standard error and exits
   with status 1. `wait` has its own [exit codes](#exit-codes).
 - Durations use Go syntax, such as `90s`, `45m` or `720h`, and must be
-  positive. `host remove` and `receiver remove` refuse a `--wait` of zero or
-  less before they revoke anything. They compute the minimum wait from the
-  broker's timeouts; `--wait` can lengthen it but not shorten it.
+  positive. [`receiver remove`](#wherry-operator-receiver-remove-receiver)
+  gives the rules for `--wait`.
 - `cancel`, `wait`, `status`, `events` and `logs` print
   `skipped N unverifiable records` on standard error when N records of the
   run fail verification.
@@ -129,12 +130,21 @@ value, and options can appear anywhere after `operator`. An option without a
 value fails with `flag needs an argument: -<name>`, one no operator command
 takes with `flag provided but not defined: -<name>`, and one the command does
 not take with `unknown option --<name>`. `--suspect-key` is given once per key;
-any other repeated option takes its last value. `pool apply`,
-`pool entitle`, `pool suspend`, `pool resume`, `host add` and `receiver apply` then create every ACL the new
-state calls for, re-read them, and fail with `ACL plan incomplete` when one
-is missing. They then delete the `WRITE` ACLs on a suspended pool's tasks
-topic that the pool's hosts hold unsuspended, each by a filter naming its
-principal; another principal's ACL on the topic stays.
+any other repeated option takes its last value.
+
+Every operator command other than `init`, `check`, `receiver show` and a
+`--dry-run` ends by converging Kafka on `wherry.operator`. A pass reads
+`wherry.operator` to its end and creates every ACL those records call for. It
+re-reads them and fails with `ACL plan incomplete` when one is missing. It
+deletes every other grant of a host or receiver principal on wherry's topics,
+groups and transactional IDs, which takes back a suspended pool's hosts'
+`WRITE` on its tasks topic. It deletes the SCRAM credential of each host and
+receiver whose membership ended. When `wherry.operator` grows during a pass,
+the command makes another, and after 5 such passes it fails with
+`wherry.operator moved during each of 5 convergence passes`. Once a command
+has written a record, it converges on every return, failed or not.
+[Concurrent operator commands](operations.md#concurrent-operator-commands)
+states what this guarantees.
 
 `pool apply` and `receiver apply` read the object's file: `-f PATH`, else
 `pools/<pool>.yaml` or `receivers/<receiver>.yaml` in the working directory.
@@ -154,9 +164,11 @@ creates no bundle directory.
 `bundles/receivers/<receiver>.bundle`, mode 0600, in directories mode 0700. A
 bundle holds the broker address, the principal and its password, and no CA.
 `host add` refuses a host that exists unless given `--force`. `receiver apply` of a receiver that exists
-updates its configuration. Without `--force`, a command never replaces a
-bundle: before it changes anything in Kafka it creates the bundle file,
-failing when a file is there, and writes the bundle into it at the end. A
+updates its configuration, and replaces its bundle only to change the broker
+address, keeping the password. Without `--force`, `host add` and
+`receiver apply` of a new receiver never replace a bundle: before they change
+anything in Kafka they create the bundle file, failing when a file is there,
+and write the bundle into it at the end. A
 command that fails leaves no bundle and no temporary file of its own, or, when
 it cannot remove one, fails naming it.
 
@@ -185,6 +197,7 @@ and the Kafka super user's name and password file. Without a terminal it
 refuses any missing flag but `--ca-file`, naming them:
 `operator init has no terminal to prompt on; give --broker, --super-user, --super-user-password-file`.
 
+It creates the working directory with mode 0755 when it is missing.
 Connected as the super user, once, it:
 
 1. writes a new random password for `wherry.operator` to a temporary file,
@@ -199,7 +212,9 @@ It then writes `operator.yaml`: `broker`, `ca_file` as an absolute path
 (omitted for the system roots) and `password_file: operator.password`, and
 appends `operator.password` and `bundles/` to `.gitignore`, creating it if
 absent and adding only lines it lacks. It closes the super-user connection;
-nothing it writes names the super user, which no later command uses.
+nothing it writes names the super user, which no later command uses. It ends
+by printing `wherry.operator can provision; its password is in <dir>/operator.password`
+on standard error.
 
 Running `init` again rotates `wherry.operator`'s password: Kafka holds one
 SCRAM credential per user, so commands still running with the old password
@@ -221,40 +236,41 @@ agents, each one's models and credentials (`NAME=ENV_VAR` or
 1048576), `request_percentage` (default 10) and `start_by_limit` (default
 `72h0m0s`).
 
-With no pool of that name, it records the terms, creates the pool's tasks
-and events topics, and sets the configuration of share group `p-<pool>`:
-`share.auto.offset.reset=earliest`, `share.isolation.level=read_committed`,
-`share.delivery.count.limit` and `share.record.lock.duration.ms` from the
-terms' `delivery_limit` and `lock_duration`, 5 and `15s` when the terms omit
-them. It refuses, before it reads the broker, terms whose agent credentials
-break the [pool terms](configuration.md#pool-terms) rules, and a delivery limit above the lowest
+With no pool of that name, it records the terms, creates the pool's tasks,
+events and snapshot topics, and sets the configuration of its share group
+and topics:
+
+| Resource | Settings |
+| --- | --- |
+| share group `p-<pool>` | `share.auto.offset.reset=earliest`, `share.isolation.level=read_committed`, `share.delivery.count.limit` from `delivery_limit` (default 5), `share.record.lock.duration.ms` from `lock_duration` (default `15s`) |
+| tasks topic `wherry.pool.<pool>.tasks` | `retention.ms` of `start_by_limit` plus six hours plus one day, unless it is already longer; `message.timestamp.type=LogAppendTime`, `cleanup.policy=delete`, `retention.bytes=-1`, `segment.ms=3600000` |
+| events topic `wherry.pool.<pool>.events` | the tasks topic's `retention.ms`, unless it is already longer; the tasks topic's other settings |
+| snapshot topic `wherry.pool.<pool>.custodian` | `cleanup.policy=compact`, `message.timestamp.type=LogAppendTime`, `retention.ms=-1` |
+| progress topic of each live receiver in the pool | the tasks topic's `retention.ms`, unless it is already longer, created when missing |
+| feed and transcript topic of every tenant with a host or an entitlement | `max.message.bytes=2097152` (2 MiB), set before it measures the records |
+
+It sets these on new and existing topics. [Topics](design.md#topics-1) gives
+the reasons.
+
+It refuses, before it reads the broker, terms whose agent credentials
+break the [pool terms](configuration.md#pool-terms) rules, and a
+`start_by_limit` above 29 days and 18 hours. For a pool with `storage` it
+refuses a `start_by_limit` that with six hours added exceeds 7 days, the
+longest an S3 SigV4 presigned URL lasts, with `start_by_limit plus the 6h
+run cap exceeds 7 days, the longest an S3 SigV4 presigned URL lasts`. It
+refuses a delivery limit above the lowest
 `group.share.max.delivery.count.limit` across the brokers, and terms whose
 [records do not fit the broker](configuration.md#record-limit). Before it
 records anything it refuses a `lock_duration` above the brokers'
-`group.share.max.record.lock.duration.ms`, naming the field and the ceiling.
-Before it records the terms it refuses a pool
-name that is not valid and an existing tasks or events topic with more than one
-partition; it creates the topics after it records the terms, which is when it
-checks the pool's names against every other recorded name. On new and
-existing topics it sets the tasks `retention.ms` to
-`start_by_limit` plus six hours plus one day unless it is already longer, and the
-events `retention.ms` to the tasks topic's unless it is already longer, their
-`message.timestamp.type` to `LogAppendTime`, their `cleanup.policy` to
-`delete` and their `retention.bytes` to `-1`, refuses either with more than
-one partition, and creates the progress topic
-of each live receiver in the pool, or sets an existing one's configuration,
-with the tasks topic's `retention.ms` unless the progress topic's is already longer. It fails when a topic
-configuration it sets is not applied within 10 seconds, or when a describe of it
-still fails then, naming the describe's error. It refuses a `start_by_limit` above
-29 days and 18 hours, or one that with six hours added exceeds the
-`retention.ms` of the feed or transcript topic of a tenant entitled to the
-pool. For a pool with `storage` it refuses a `start_by_limit` that with six
-hours added exceeds 7 days, the longest an S3 SigV4 presigned URL lasts,
-with `start_by_limit plus the 6h run cap exceeds 7 days, the longest an S3
-SigV4 presigned URL lasts`. Before it measures the records, it sets `max.message.bytes` to 2 MiB
-(2097152) on the feed and transcript topic of every tenant with a host or an
-entitlement. See
-[Topics](design.md#topics-1).
+`group.share.max.record.lock.duration.ms`, naming the field and the ceiling,
+and a `start_by_limit` that with six hours added exceeds the `retention.ms`
+of the feed or transcript topic of a tenant entitled to the pool. Before it
+records the terms it refuses a pool name that is not valid and an existing
+tasks or events topic with more than one partition. It creates the topics
+after it records the terms, which is when it checks the pool's names
+against every other recorded name. It fails when a topic configuration it
+sets is not applied within 10 seconds, or when a describe of it still fails
+then, naming the describe's error.
 
 With a pool of that name and other terms, it records the new terms, makes
 the checks and settings above, and sets the share group's `share.delivery.count.limit` and
@@ -283,6 +299,10 @@ set it. Terms it refuses fail in the same way with or without
 
 ### `wherry operator pool entitle POOL --tenant TENANT`
 
+```sh
+wherry operator pool entitle POOL --tenant TENANT
+```
+
 Entitles the tenant to an existing pool, creates the tenant feed and
 transcript topic with `max.message.bytes` 2 MiB, or sets existing ones to
 it, and grants the tenant's hosts and the pool's receivers
@@ -293,6 +313,10 @@ pool's `start_by_limit` plus six hours, and records nothing. It applies
 each host's [quotas](configuration.md#quotas).
 
 ### `wherry operator pool suspend POOL`
+
+```sh
+wherry operator pool suspend POOL
+```
 
 Records a `suspend` record for the pool on `wherry.operator` and reconciles the
 ACLs. A suspended pool's tenants' hosts hold no `WRITE` on its tasks topic.
@@ -324,7 +348,8 @@ before it decides any request. The command returns once the key custodian
 has acknowledged: it waits up to 5 minutes for a snapshot whose
 `suspended_for` is at or above its record's offset, writing
 `waiting for pool <pool>'s key custodian to acknowledge the suspend record at wherry.operator offset <offset>, up to <time>`
-to standard error every 10 seconds, then prints
+to standard error every 10 seconds, `<time>` being the time left of the 5
+minutes, then prints
 `pool <pool> is suspended: its key custodian acknowledged the suspend record at wherry.operator offset <offset>; no new start opens`.
 After that no new start opens. With no acknowledgement it fails with
 `pool <pool>'s suspend record is written at wherry.operator offset <offset>, but its key custodian did not acknowledge it within 5m0s; it is not yet in effect`.
@@ -333,6 +358,10 @@ When the pool has no snapshot it returns at once with
 A custodian whose advertisement has gone stale is still awaited, since it can still open requests.
 
 ### `wherry operator pool resume POOL`
+
+```sh
+wherry operator pool resume POOL
+```
 
 Records a `resume` record for the pool on `wherry.operator` and reconciles the
 ACLs, granting the hosts' `WRITE` on the tasks topic again. Receivers claim
@@ -343,6 +372,10 @@ acknowledgement as `pool suspend` does, printing
 `pool <pool> is resumed: its key custodian acknowledged the resume record at wherry.operator offset <offset>; first starts open again`.
 
 ### `wherry operator pool rotate-key POOL [--suspect-key KID]...`
+
+```sh
+wherry operator pool rotate-key POOL [--suspect-key KID]...
+```
 
 Refuses a pool that is not suspended with `pool <pool> is not suspended; run
 wherry operator pool suspend <pool> first`. Otherwise records a `rotate-key`
@@ -358,7 +391,8 @@ snapshot.
 The command waits up to 5 minutes for a snapshot whose `rotated_for` is at
 or above its record's offset, writing
 `waiting for pool <pool>'s key custodian to rotate for the request at wherry.operator offset <offset>, up to <time>`
-to standard error every 10 seconds. With none, it fails with
+to standard error every 10 seconds, `<time>` being the time left of the 5
+minutes. With none, it fails with
 `pool <pool>'s key custodian published no snapshot rotated for the rotate-key request at wherry.operator offset <offset> within 5m0s; the request stands`.
 It then captures the end offset of the pool's tasks topic, reads the topic
 as `wherry.operator` through that offset, and lists every retained task
@@ -375,6 +409,7 @@ suspect_keys=<kid>[,<kid>...]
 horizon partition=<n> oldest_retained_offset=<offset>
 horizon partition=<n>: retention deleted the tasks at offsets <offset> to <offset> during the scan; they may not be listed
 horizon: the oldest retained task was appended at <time>, <age> ago; tasks deleted by retention before it are not listed
+horizon: the task topic retains no task; tasks deleted by retention are not listed
 task run=<run> tenant=<tenant> key=<kid> credentials=<name>[,<name>...] appended=<time>
 tasks=<n>
 ```
@@ -382,7 +417,9 @@ tasks=<n>
 Each partition's horizon is its log start listed after the scan, since a
 fetch below the log start begins at the start then in effect. Where
 retention moved the start during the scan, the second `horizon` line names
-the offsets it deleted, from the start listed before the scan.
+the offsets it deleted, from the start listed before the scan. The last
+`horizon` line is the first form when the topic retains a task and the
+second when it retains none.
 
 The credential names are the task's own credentials and every credential
 any terms record of the pool on `wherry.operator` gives the task's agent,
@@ -401,8 +438,9 @@ feed and transcript topic, the latter two with `max.message.bytes` 2 MiB, grants
 its bundle to `bundles/hosts/<tenant>/<host>.bundle`, naming the broker in
 `operator.yaml`. It refuses a host that exists, and an existing bundle file,
 unless given [`--force`](#operator-commands). For a host that exists,
-`--force` reissues its identity alone: it records nothing, and sets no topic,
-ACL or quota. A host whose membership ended is refused. Host names are unique
+`--force` reissues its identity: it records nothing and sets no topic or
+quota, and [converges](#operator-commands) the ACLs as every operator command
+does. A host whose membership ended is refused. Host names are unique
 within a tenant; hosts of the same name in other tenants have bundles of
 their own.
 
@@ -473,6 +511,10 @@ receiver's configuration record, and takes no `-f` or `--dry-run`.
 
 ### `wherry operator receiver show RECEIVER`
 
+```sh
+wherry operator receiver show RECEIVER
+```
+
 Prints the receiver's recorded configuration as YAML: `capacity`, then
 `plugin_sha256`, the SHA-256 pinned for each plugin type, then
 `profiles`, each plugin profile resolved, in routing order, with its
@@ -503,11 +545,19 @@ holds; neither `show` nor `--dry-run` prints a credential value.
 
 ### `wherry operator host remove HOST --tenant TENANT`
 
+```sh
+wherry operator host remove HOST --tenant TENANT [--wait DURATION]
+```
+
 Runs the [revocation](concepts.md#revocation) steps for the host, as
 [`receiver remove`](#wherry-operator-receiver-remove-receiver) does for a
 receiver.
 
 ### `wherry operator receiver remove RECEIVER`
+
+```sh
+wherry operator receiver remove RECEIVER [--wait DURATION]
+```
 
 Runs the [revocation](concepts.md#revocation) steps. When it ends, it
 prints one line per step it ran:
@@ -521,26 +571,47 @@ incomplete step and fails with `revocation incomplete`. The probe asks every
 broker for the metadata of the principal's own key topic, and step 3
 completes when every broker answers `TOPIC_AUTHORIZATION_FAILED`. While a
 broker still authorises the principal, step 3 probes again every second for
-up to 2 minutes. It fails at once when the login fails or the probe returns
-any other error. Step 5 waits the largest of
+up to 2 minutes, and retries a refused login within the same 2 minutes. It
+fails at once when the probe returns any other error. Step 5 waits the largest of
 `connections.max.reauth.ms`, `group.share.max.record.lock.duration.ms` and
 `transaction.max.timeout.ms` across the brokers, and fails when one of them
-is unbounded. `--wait DURATION` lengthens that wait and must be positive;
-step 5 refuses a duration below it and names the minimum.
+is unbounded. `--wait DURATION` lengthens that wait and cannot shorten it.
+The command refuses a `--wait` of zero or less before it revokes anything,
+and step 1 refuses a duration below the minimum, naming it, before it
+records anything.
 
 ### `wherry operator check`
 
-Loads `wherry.operator`, checks that no two names collide, validates every
-receiver configuration against its pool's terms, checks that every pool's
-[records still fit the broker](configuration.md#record-limit), checks that every
-tenant feed and transcript topic has a `max.message.bytes` of at least 2 MiB, checks topic retention and
-timestamp type against the [bounds](design.md#topics-1), checks that each
-pool's tasks and events topics have one partition, `cleanup.policy=delete`
-and `retention.bytes=-1`, checks that each
-live receiver's progress topic keeps records at least as long as its pool's
-tasks topic, and checks that every ACL the
-state calls for is present, with `wherry.operator`'s own
-[grants](security.md#the-operator-principal). It does not report ACLs beyond those, and does not check a
+```sh
+wherry operator check
+```
+
+Loads `wherry.operator` and checks, in order:
+
+- that no two names collide;
+- every receiver configuration against its pool's terms;
+- that every pool's [records still fit the broker](configuration.md#record-limit);
+- topic retention and timestamp type against the [bounds](design.md#topics-1):
+  `retention.ms=-1` on `wherry.operator` and every host and receiver key
+  topic, and `message.timestamp.type=LogAppendTime` on each pool's tasks and
+  events topics;
+- that each pool's tasks and events topics have `cleanup.policy=delete`,
+  `retention.bytes=-1` and `segment.ms=3600000`;
+- that each pool's snapshot topic, `wherry.pool.<pool>.custodian`, has
+  `cleanup.policy=compact`, `message.timestamp.type=LogAppendTime` and
+  `retention.ms=-1`;
+- that each pool's tasks, events and snapshot topics have one partition;
+- that each pool's tasks topic keeps records at least `start_by_limit` plus
+  six hours plus one day, its events topic and each live receiver's progress
+  topic at least as long as the tasks topic, and each entitled tenant's feed
+  and transcript topic at least `start_by_limit` plus six hours;
+- that every tenant feed and transcript topic has a `max.message.bytes` of at
+  least 2 MiB;
+- that every ACL the state calls for is present, with `wherry.operator`'s own
+  [grants](security.md#the-operator-principal).
+
+It prints nothing when every check passes, and fails naming the first that
+does not. It does not report ACLs beyond those, and does not check a
 plugin profile's plugin or `config` section.
 
 ## Receiver command
@@ -583,86 +654,6 @@ On start it:
    assigns it the topic's partition. A receiver whose membership ended
    leaves the group and never acts as custodian.
 
-The key custodian writes every snapshot through the transactional ID
-`p.<pool>.custodian`, one transaction per snapshot, and reads the committed
-snapshot back before it marks the key published. When assigned, a receiver
-that the current snapshot names and that holds the snapshot's key continues
-with that key; any other generates a P-256 key, stores it, and publishes it
-with reason `bootstrap` when the topic holds no snapshot and `takeover`
-otherwise: after a drain, a crash, or the same receiver returning without
-its keys. A takeover logs `custodian: took over pool <pool>
-(WherryCustodianTakeover)` and counts in `wherry_custodian_takeovers_total`
-with reason `takeover` once, when its snapshot is first read back, also on a
-later pass when the commit landed but its read-back failed. The custodian rotates the key at the
-append time of the snapshot first read back naming it plus 24 hours plus a
-jitter under one hour derived from the pool and key ID, publishing a
-`rotation` snapshot, at once on a [`rotate-key`](#wherry-operator-pool-rotate-key-pool-suspect-key-kid) record whose
-`wherry.operator` offset is above the snapshot's `rotated_for`, and republishes its snapshot with the same reason after
-its signing key rotates; a republish does not move the rotation. A commit
-is attempted up to 3 times on the same producer, and a fenced or denied
-commit is not retried; a commit with an
-unknown outcome counts in `wherry_ambiguous_commits_total`. The custodian
-initialises `p.<pool>.custodian` only when assigned. A custodian whose
-producer is fenced while assigned logs `custodian: fenced while assigned in
-pool <pool>; re-initialising to republish (WherryCustodianTakeover)`, counts
-in `wherry_custodian_takeovers_total` with reason `contested`, initialises
-`p.<pool>.custodian` again and republishes its snapshot with reason
-`contested`, under a new key when the current snapshot names another
-receiver. A second fence within the custodian group's 45-second session
-timeout logs
-`custodian: fenced again within the session timeout in pool <pool>; standing down until assigned again`. A receiver whose assignment
-ends, that stood down, or whose failed write is followed by another
-receiver's committed snapshot writes no more snapshots until it is assigned
-again.
-
-On `SIGINT`, `SIGTERM` or a configuration change, a receiver ends any custody
-pass in progress at once, closes its custodian group client and removes its
-static membership from the group, which hands the partition on at once. The key custodian with a
-`drain_timeout` over `0s` logs `custodian: stepping down in pool <pool>;
-waiting up to <timeout> for a successor` and after the removal waits until
-its stop plus `drain_timeout` for another receiver's snapshot. Every step of the drain, the
-re-key's reads, its transaction and the key deletion included,
-ends within `drain_timeout` plus 5 seconds of the stop; a read or write that
-bound ends keeps the keys. With a successor's snapshot, it
-reads the task topic to its last stable offset and the pool's events, writes
-in one transaction a re-key wrap to the successor's current key, once for each
-task hash, for every task its keys open that is an authorised host's under its
-run's Kafka key and derived run ID, whose bounds hold at its append time, that
-is its run's task when the run has one, and that is not terminal, not past its
-`task_ended_by` and not already re-keyed to that key, and then deletes its
-pool keys. A read or write
-error keeps the keys to their deadlines. A task appended under its key after
-that read is not re-keyed: it fails key-lost before it starts, and its host
-resubmits it before its `task_started_by`. While its pool is suspended it
-does not scan the task topic and keeps its keys. With no successor's snapshot
-by the deadline it logs `custodian: no successor in pool <pool>; keeping the pool
-keys to their deadlines` and exits with its keys, and its restart continues
-as custodian. A custodian with no other member to succeed it, in a
-one-receiver pool, a scale to zero or a whole-pool stop, waits out
-`drain_timeout`. With `drain_timeout` at `0s` it logs `custodian: leaving pool <pool> with no drain timeout;
-keeping the pool keys to their deadlines` and exits with its keys; its
-successor publishes a `takeover`.
-
-The key custodian answers its pool's open requests, every 2 seconds, with an
-attempt wrap or a refusal after the claim check
-([Open request](a2a-extension-v1.md#open-request)), each with its claim
-decision in one transaction through `p.<pool>.custodian`. A receiver that
-holds pool keys but not the current key answers an open request for a task
-it can open with a re-key wrap to the current key.
-
-A replaced key's deadline is `start_by_limit` plus 7 hours after the append
-time of the snapshot that replaced it, as the receiver's first custody pass
-after the replacement reads it. A key replaced before the receiver started
-counts from the receiver's first custody pass. A key the receiver generated
-and has not yet read back in a committed snapshot is marked published and
-kept current when the current snapshot names it. Any other such key's
-deadline is `start_by_limit` plus 7 hours after the current snapshot's
-append time. A custody pass reads the latest committed snapshot, also while
-another writer's transaction is open on the snapshot topic; after a read
-error the receiver keeps every key. It deletes a key at its deadline, and all of its
-keys at the end of a drain that re-keyed every task they open. Every
-other key stays in its state directory.
-
 It logs its own lines to standard output with the prefix `receiver: `;
 plugin and link lines are hclog lines named `plugin`. Plugin lines, the
 plugin's raw standard error that go-plugin relays, and profile configure,
@@ -693,6 +684,30 @@ It refuses to start after its membership end.
 With `metrics_addr` set it serves its [metrics](#metrics) at `/metrics` on
 that address, and fails at start when it cannot listen there. Without it
 it serves none.
+
+#### Key custody
+
+While the custodian group assigns it the snapshot topic's partition, the
+receiver is its pool's key custodian: it publishes snapshots, rotates the
+pool key, answers open requests every 2 seconds, and on a stop hands custody
+to a successor and re-keys its tasks.
+[Key custody](design.md#key-custody) gives the mechanism, and
+[Pool keys and the key custodian](concepts.md#pool-keys-and-the-key-custodian)
+the model. On `SIGINT`, `SIGTERM` or a configuration change, every step of
+a custodian's drain ends within `drain_timeout` plus 5 seconds of the stop.
+
+| Log line | When |
+| --- | --- |
+| `custodian: took over pool <pool> (WherryCustodianTakeover)` | its `takeover` snapshot is first read back; counts in `wherry_custodian_takeovers_total` with reason `takeover` |
+| `custodian: fenced while assigned in pool <pool>; re-initialising to republish (WherryCustodianTakeover)` | its producer is fenced while it is assigned; counts in `wherry_custodian_takeovers_total` with reason `contested` |
+| `custodian: fenced again within the session timeout in pool <pool>; standing down until assigned again` | a second fence within the group's 45-second session timeout |
+| `custodian: stepping down in pool <pool>; waiting up to <timeout> for a successor` | a stop with a `drain_timeout` over `0s` |
+| `custodian: no successor in pool <pool>; keeping the pool keys to their deadlines` | no successor's snapshot by the end of `drain_timeout`; it exits with its keys, and its restart continues as custodian |
+| `custodian: leaving pool <pool> with no drain timeout; keeping the pool keys to their deadlines` | a stop with `drain_timeout` at `0s`; its successor publishes a `takeover` |
+
+A snapshot commit with an unknown outcome counts in
+`wherry_ambiguous_commits_total`. The custodian's suspended-pool drain logs
+the line [`pool suspend`](#wherry-operator-pool-suspend-pool) shows.
 
 ### Plugins
 
@@ -726,39 +741,14 @@ profile with a `credential` name its local configuration has no source for
 fails its configuration with an error naming the profile and the
 credential.
 
-A plugin also reports, for each profile, the paths of the input, output and
-credentials directories as its agent sees them, which the receiver writes
-into the prompt, and implements `InlineLimit` to report the most inline input
-bytes it delivers. Zero declares no profile limit. Dispatch carries a run's
-input files and every delivered credential with the prompt, and a fetch for
-each S3 input: its name, presigned URL,
-size and SHA-256, which the plugin fetches and verifies before the agent
-starts, reporting a job that never started with class `fetch` when it
-cannot. A plugin that cannot deliver an input reports it, and the run ends
-`TASK_STATE_FAILED` naming it. Once the job ends the receiver
-stops it and asks the plugin to collect its outputs, which arrive over
-the link in pieces of at most 1 MiB. The outputs the receiver names for
-streaming, its S3 outputs, the plugin streams as the receiver reads them.
-
-A plugin gives each agent the `git` environment that
-[Git input](a2a-extension-v1.md#git-input) specifies, through
-`pluginsdk.AgentEnvironment` and `pluginsdk.AgentUnset`.
-[Git repositories](operations.md#git-repositories) states its limits.
-
-The receiver and a plugin talk gRPC over
-[go-plugin](https://github.com/hashicorp/go-plugin) with mutual TLS on a
-certificate pair made for each start, plugin protocol version 10. The receiver refuses a
-plugin of any other protocol version at its start, so the receiver and its
-plugins upgrade together. Configure carries the profile's platform
-credential, when it names one, and no agent credential. Dispatch carries
-every credential of the run as a `pluginsdk.Secret` holding its name, its value
-and exactly one target: `Env`, an environment variable the plugin sets for the
-agent, or `File`, a file it writes in the agent's credentials directory.
-The receiver refuses a version 9 plugin with
-`incompatible API version with plugin. Plugin version: 9, Client versions: [10]`.
-The receiver refuses a plugin that offers no TLS certificate. Every call names
-its profile. A plugin accepts messages up to 64 MiB; the receiver logs a larger
-Dispatch as `dispatch rejected: message too large`.
+[Plugin protocol](plugin-protocol.md) specifies what a plugin implements and
+how it talks to the receiver. The receiver refuses a plugin of another
+plugin protocol version at its start, as for a version 9 plugin,
+`incompatible API version with plugin. Plugin version: 9, Client versions: [10]`,
+so the receiver and its plugins upgrade together. It refuses a plugin that
+offers no TLS certificate, and logs a Dispatch over 64 MiB as
+`dispatch rejected: message too large`. A plugin that cannot deliver an
+input reports it, and the run ends `TASK_STATE_FAILED` naming it.
 
 Each advertisement gives every profile's sweep and readiness call one
 advertise interval, 30 seconds; a call that runs out counts as not ready
@@ -766,10 +756,8 @@ and is logged. Each offer carries the profile's declared inline input limit;
 negative limits are invalid.
 
 Each scrape of `/metrics` calls every profile's `Metrics` at once, each within
-2 seconds. A plugin answers with samples of the `wherry_plugin_` families,
-each a family name, labels, and a counter or gauge value or a histogram. A
-histogram gives the cumulative count at each bound of
-`pluginsdk.PlacementBuckets`, its sum and its count. The receiver drops a
+2 seconds, and the plugin answers with samples of the `wherry_plugin_`
+families ([Metrics](plugin-protocol.md#metrics)). The receiver drops a
 sample, and counts it in `wherry_metrics_dropped_total` by reason, when:
 
 - its family is not one of the four (`unknown_family`);
@@ -796,16 +784,15 @@ jobs running; once the broker delivers their tasks again, the restarted
 receiver or another member adopts each job and follows it from its last
 offset.
 
-A plugin's `Follow` may fail at any time; the receiver recovers the stream,
-so a plugin need not. When `Follow` fails otherwise, the receiver asks
+A plugin's `Follow` may fail at any time, and the receiver recovers the
+stream ([Follow](plugin-protocol.md#follow)). When `Follow` fails, the receiver asks
 `Lookup` for the run's job and logs
 `run <id>: follow failed (<class>); following again from offset <offset>`
 once per run for each class. A running job (`job running`) it follows
 again from the end of the last line it took, as it does a lost plugin link,
 and a failed `Lookup` (`lookup failed`) it retries, a second apart, until the
 run passes `task_ended_by`, when it ends with that bound. An ended job
-(`job ended`) it follows once more from that line end: a plugin's `Follow` on
-an ended job reads the rest of the log and returns its `Terminal`. A job that
+(`job ended`) it follows once more from that line end. A job that
 never started is a `platform` start failure. Otherwise the run fails with
 `log stream failed`.
 
@@ -827,9 +814,8 @@ into spaces and cuts the result to 512 bytes. For class `fetch` the line is
 which can quote a presigned URL, is logged as `[omitted]`. The reason goes
 to the receiver's log only.
 
-A plugin returns a failed platform call as a `pluginsdk.Error`, which names
-the operation (`Op`) and the platform's failure class (`Class`) beside the
-error, and crosses the link as a gRPC status detail. The receiver logs a
+A plugin returns a failed platform call as a
+[`pluginsdk.Error`](plugin-protocol.md#errors). The receiver logs a
 plugin call's error as `op=<op> class=<class>: <text>`, without
 `class=` when the plugin gives none, or as its text alone when the error
 has no operation, under the rules for a
@@ -848,14 +834,6 @@ leaves a job whose profile is another of its profiles to that profile, and
 stops and purges
 any other job under the run's ID and dispatches the run again.
 
-The protocol is the Go module `github.com/benemon/wherry/pluginsdk` in this
-repository. [`plugin.proto`](https://github.com/benemon/wherry/blob/main/pluginsdk/proto/wherry/plugin/v1/plugin.proto)
-defines the service. `pluginsdk.Serve` runs a plugin and gives its factory
-the logger whose JSON lines the receiver relays at their level. A plugin sets
-`pluginsdk.Version` before `Serve`, and the receiver logs it when it starts
-the plugin. `pluginsdktest` is the conformance suite a plugin runs against its
-platform.
-
 ### Metrics
 
 A receiver with `metrics_addr` set serves its metrics in the Prometheus
@@ -863,74 +841,11 @@ text format over plain HTTP. `GET /metrics` is the only route; every other
 path answers 404, and a method other than GET or HEAD on `/metrics`
 answers 405. The scrape holds the Go runtime (`go_`) and
 process (`process_`) families, `wherry_build_info` with `version` and
-`revision` and value 1, and the families below, each with the label `pool`.
+`revision` and value 1, and the [families](metrics.md#families), each with
+the label `pool`.
 
-Every label value comes from the receiver's configuration, its pool's terms and
-entitlements, or a fixed list. No label or value carries a run ID, prompt,
-output, error text, URL, image, path, node or credential name. An agent the
-pool's terms do not name is `other`. `model` is the placement's model when the
-agent's `models` in the terms hold it, `other` when they do not, and empty for
-an agent with no `models`. A `state` outside the A2A task states is `other`.
-A run ended without a plugin profile, one given back at the delivery budget
-before any profile took it, has `profile="none"` in `wherry_runs_total` and
-`wherry_delivery_budget_exhausted_total`.
-
-| Family | Type | Labels | Counts |
-| --- | --- | --- | --- |
-| `wherry_claims_total` | counter | `tenant` | claimed tasks whose submission verifies |
-| `wherry_admissions_total` | counter | `tenant`, `profile` | tasks admitted, by the profile they were routed to |
-| `wherry_rejections_total` | counter | `tenant`, `reason` | rejections, by reason |
-| `wherry_runs_total` | counter | `tenant`, `profile`, `agent`, `model`, `state` | runs ended `completed`, `failed` or `canceled`, except a run whose terminal's commit had an unknown outcome and committed, which no receiver counts |
-| `wherry_delivery_budget_exhausted_total` | counter | `tenant`, `profile` | runs ended `failed` with `delivery budget exhausted` |
-| `wherry_run_duration_seconds` | histogram | `tenant`, `profile`, `agent`, `model`, `state` | time from this attempt's claim to the run's terminal state; an adopted run counts the adopting attempt only, and a run whose terminal's commit had an unknown outcome and committed is not observed |
-| `wherry_queue_wait_seconds` | histogram | `tenant`, `profile` | time from submission to first claim |
-| `wherry_adoptions_total` | counter | `tenant`, `profile` | runs that adopted an earlier attempt's job |
-| `wherry_redeliveries_total` | counter | `tenant`, `profile` | runs executed on a redelivery |
-| `wherry_in_flight` | gauge | `profile` | tasks held |
-| `wherry_capacity` | gauge | none | the configured capacity |
-| `wherry_runs_past_deadline` | gauge | `profile` | tasks held past their task_ended_by that have not ended |
-| `wherry_advertised_timestamp_seconds` | gauge | none | Unix time of the latest advertisement Kafka acknowledged, 0 before the first |
-| `wherry_start_failures_total` | counter | `profile`, `class` | start failures: `input-too-large`, `dispatch`, `platform`, and `offer-unavailable`, which counts a release by a member with no matching profile, has no start-failure record and carries `profile="none"` |
-| `wherry_dispatch_outcomes_total` | counter | `profile`, `outcome` | dispatches: `created`, `nothing`, `unknown` |
-| `wherry_stop_failures_total` | counter | `profile` | failed `Stop` calls |
-| `wherry_purge_failures_total` | counter | `profile` | failed `Purge` calls |
-| `wherry_sweep_failures_total` | counter | `profile` | failed `Sweep` calls |
-| `wherry_collection_failures_total` | counter | `profile`, `reason` | runs whose outputs were not collected: `not_stopped`, `over_limits`, `timeout`, `failed` |
-| `wherry_open_waits_total` | counter | `tenant`, `outcome` | open request waits: `opened`, `refused`, `unanswered`, `expired` |
-| `wherry_open_wait_seconds` | histogram | `tenant` | time a claimed run waited for its attempt wrap or refusal |
-| `wherry_redactions_total` | counter | `tenant`, `profile` | credential values replaced in published output |
-| `wherry_bus_errors_total` | counter | `op` | Kafka errors: `read`, `write`, `transactional ID`, `share group` |
-| `wherry_denials_total` | counter | `op` | Kafka authorisation errors, by the capability denied: `read`, `write`, `transactional ID`, `share group`, `membership` |
-| `wherry_renewal_failures_total` | counter | none | failed claim renewals |
-| `wherry_transaction_aborts_total` | counter | none | transactions aborted after a failed produce |
-| `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome: a run gives its task back for redelivery, an open request is answered again only when its answer is absent, and the key custodian reads back its snapshot topic |
-| `wherry_fenced_total` | counter | none | runs given up to a newer holder |
-| `wherry_custodian_takeovers_total` | counter | `reason` | snapshots this receiver published taking over its pool's key custody: `takeover`, `contested`; both start at 0 |
-| `wherry_runs_key_lost_total` | counter | none | runs this receiver ended with the wherry event `key-lost`; starts at 0 |
-| `wherry_claimant_changes_total` | counter | `reason` | claims the key custodian served to a new claimant: `released`, `lease` |
-| `wherry_ignored_wraps_total` | counter | none | wraps whose key does not decrypt the task's envelope |
-| `wherry_metrics_dropped_total` | counter | `profile`, `reason` | plugin samples dropped and `Metrics` calls that failed |
-| `wherry_plugin_platform_errors_total` | counter | `profile`, `class` | platform API errors: `unavailable`, `denied`, `conflict`, `timeout`, `other` |
-| `wherry_plugin_cleanup_pending` | gauge | `profile` | the profile's ended jobs awaiting cleanup |
-| `wherry_plugin_sweep_deletions_total` | counter | `profile`, `kind` | material a sweep deleted: `job`, `variable`, `directory` |
-| `wherry_plugin_placement_seconds` | histogram | `profile` | time from dispatch to the agent task starting |
-| `wherry_plugin_storage_free_bytes` | gauge | `profile` | free bytes of the storage the profile's runs share |
-
-A rejection's `reason` is its fixed text, such as `duplicate submission`. A
-reason that quotes the task counts as `git remote host outside the pool's vcs
-hosts`, `pool has no storage`, `not started by task_started_by` or
-`not ended by task_ended_by`.
-
-An open wait is `opened` when the key custodian's attempt wrap arrives,
-`refused` when the key custodian refuses the request, `unanswered` when no
-answer arrives within 5 minutes and 120 seconds of the request's append time
-and the receiver releases the task, and `expired` when the run's
-`task_started_by`, or for an adopted job its `task_ended_by`, passes first.
-
-The core histograms' buckets are 1, 5, 15, 30 and 60 seconds, 2, 5, 10 and 30
-minutes, and 1, 2, 4 and 6 hours. `wherry_plugin_placement_seconds` uses
-`pluginsdk.PlacementBuckets`: 1, 2, 5, 10 and 30 seconds, and 1, 2, 5, 10 and 30
-minutes.
+[Metrics reference](metrics.md) lists the families, their labels and the
+histogram buckets.
 
 ## Host commands
 
@@ -952,16 +867,22 @@ wherry host init [BUNDLE] [--config-file FILE]
 Sets the host up from its bundle, and configures it for every pool its tenant
 is entitled to:
 
-1. With `BUNDLE`, it reads the bundle and copies it to
-   `~/.config/wherry/bundle.yaml`, mode 0600 in a directory of mode 0700,
+1. With `BUNDLE`, it reads the bundle and copies it to `bundle.yaml` in the
+   [configuration directory](configuration.md#client-configuration),
+   `$XDG_CONFIG_HOME/wherry/` or by default `~/.config/wherry/`, mode 0600 in
+   a directory of mode 0700,
    replacing any file there atomically, and names it as `bundle` in the
    configuration, even when the configuration named another bundle. Without
    `BUNDLE`, it uses the bundle the configuration names, and refuses when it
    names none.
-2. When the configuration names no `ca_file` and `~/.config/wherry/ca.pem` is
-   absent, it asks for a CA file; a blank answer keeps the system's trusted
-   roots, and a path is recorded as `ca_file` when the file holds at least one
-   PEM certificate, and asked again when it holds none.
+2. On a terminal, when the configuration names no `ca_file` and the
+   configuration directory holds no `ca.pem`, it asks for a CA file. A blank
+   answer keeps the system's trusted roots, and a path is recorded as
+   `ca_file` when the file holds at least one PEM certificate, and asked
+   again when it holds none. Without a terminal it asks nothing, so a host
+   whose broker has a private CA needs `ca.pem` in place, or `ca_file` in
+   the configuration, before `host init`. When the file is new or step 1 or 2
+   changed it, it writes the configuration now, before it connects.
 3. It creates the host key at `host_key`, a private JWK (RFC 7517) with mode
    0600, unless the file exists, creating its directory with mode 0700. It
    registers the key on the host's key topic when the topic holds none, and
@@ -981,10 +902,12 @@ is entitled to:
 6. For each of those pools with storage and no `storage` entry, it asks for
    the names of the credentials holding the access key and the secret key,
    then their sources when they are new.
-7. It writes the configuration, at the path `--config-file` or
-   `WHERRY_CONFIG` names or `~/.config/wherry/config.yaml`, mode 0600 even
-   when the file existed with another mode, with references to sources and
-   never a value.
+7. When steps 4 to 6 changed the configuration, it writes it again.
+
+It writes the configuration at the path `--config-file` or `WHERRY_CONFIG`
+names, else `config.yaml` in the configuration directory, mode 0600 even
+when the file existed with another mode, with references to sources and
+never a value.
 
 A blank answer skips the credential, git host or pool; a credential whose
 source was asked once in a run is not asked again in that run. A re-run keeps
@@ -1315,7 +1238,8 @@ exits with status 1 and
 | 4 | the run ended `TASK_STATE_REJECTED` |
 | 6 | `--timeout` passed with the run still going |
 
-For codes 2 to 4 the error is `run ended in <state>`.
+For codes 2 to 4 the error is `run ended in <state>`. A run that ends in
+any other state but `TASK_STATE_COMPLETED` exits 1 with the same error.
 
 ### `wherry host status [RUN_ID]`
 
@@ -1440,14 +1364,15 @@ on 18080, all on 127.0.0.1.
 
 An instance is up while its `env/up.json` names a live Nomad agent that
 `up` started. Every step prints its name on standard error, and a failed
-step fails with `step <name>: <cause>`.
+step fails with `step <name>: <cause>`, with two exceptions: a `preflight`
+refusal of `up` is the whole error, and the `host` step of `down` prints no
+name.
 
-`dev` is one developer's tool, and two of its limits follow from that.
 Commands run at once on one instance are not serialized: run one at a
-time. And `XDG_DATA_HOME`, or `HOME` without it, must be the same for `up`
-and `down`, since it locates the instance and its record of the host files
-`up` created; `XDG_CONFIG_HOME` may change, since the
-record holds absolute paths.
+time. `XDG_DATA_HOME`, or `HOME` without it, must be the same for `up` and
+`down`, since it locates the instance and its record of the host files `up`
+created. `XDG_CONFIG_HOME` may change, since the record holds absolute
+paths.
 
 ### `wherry dev init`
 
@@ -1614,7 +1539,8 @@ Its steps, each run after a failed one:
    that keeps its size and has its modification time set back is removed,
    since `down` keeps no digest of a file holding a credential.
 
-`down` fails naming every failed step. It keeps `cache/` and prints a
+`down` fails naming every failed step. It keeps `cache/`, prints
+`down: instance NAME` on standard output, and then prints a
 `mcp remove` line for each harness, since the registration names a
 configuration that is gone. An instance that is not up prints
 `instance NAME is not up`, removes a leftover `env/` and the host files as
@@ -1624,8 +1550,8 @@ With `--reset`, `down` removes the host files as in step 6, then
 `cache/`. It refuses `--reset` while the instance is up, and when it
 cannot read the manifest, which may record host files: it names the
 standard paths to check by hand before you remove the manifest. The
-images stay in the runtime's store. Remove `wherry-dev/kafka:<id12>` with
-the runtime.
+images stay in the runtime's store. Remove `wherry-dev/kafka:<id12>`, and
+`wherry-dev/ceph-aio:<id12>` with storage, with the runtime.
 
 ## Version command
 

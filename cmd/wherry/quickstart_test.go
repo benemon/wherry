@@ -66,8 +66,9 @@ func TestQuickstartFiles(t *testing.T) {
 	documented(t, "quickstart.md", "quickstart/build-terms.yaml", "quickstart/nomad-1.yaml", "quickstart/receiver-config.yaml", "quickstart/host-config.yaml")
 }
 
-// TestQuickstartMissingSourceError finds in the quickstart, the configuration reference and operations the line the receiver prints
-// exits with for a platform credential with no source, as receiver.Run wraps the profile's error.
+// TestQuickstartMissingSourceError finds in the quickstart, the configuration reference and operations, as a code block
+// of its own or of a numbered step, the line the receiver exits with for a platform credential with no source, as
+// receiver.Run wraps the profile's error.
 func TestQuickstartMissingSourceError(t *testing.T) {
 	config, err := readReceiverConfig(quickstart("nomad-1.yaml"), false)
 	if err != nil {
@@ -84,14 +85,14 @@ func TestQuickstartMissingSourceError(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(doc), "```\n"+line+"```\n") {
+		if block := "```\n" + line + "```\n"; !strings.Contains(string(doc), block) && !strings.Contains(string(doc), inStep(block)) {
 			t.Errorf("docs/%s has no code block holding %q", page, line)
 		}
 	}
 }
 
 // TestQuickstartOperatorOutput runs the quickstart's wherry operator commands, pool apply aside, on its files and finds what receiver
-// apply --dry-run and receiver show print in docs/quickstart.md, as two YAML code blocks.
+// apply --dry-run and receiver show print, the same YAML, in docs/quickstart.md as one YAML code block.
 func TestQuickstartOperatorOutput(t *testing.T) {
 	receiverFile, err := filepath.Abs(quickstart("nomad-1.yaml"))
 	if err != nil {
@@ -133,7 +134,7 @@ func TestQuickstartOperatorOutput(t *testing.T) {
 	if shown != dryRun {
 		t.Fatalf("show printed\n%s\nwant what the dry run printed\n%s", shown, dryRun)
 	}
-	if count := strings.Count(string(doc), "```yaml\n"+dryRun+"```\n"); count != 2 {
-		t.Errorf("docs/quickstart.md holds what receiver apply --dry-run and receiver show print in %d code blocks, want 2:\n%s", count, dryRun)
+	if count := strings.Count(string(doc), "```yaml\n"+dryRun+"```\n"); count != 1 {
+		t.Errorf("docs/quickstart.md holds what receiver apply --dry-run and receiver show print in %d code blocks, want 1:\n%s", count, dryRun)
 	}
 }

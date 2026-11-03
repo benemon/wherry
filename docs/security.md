@@ -45,8 +45,10 @@ returns.
 
 The pool's snapshot topic, `wherry.pool.<pool>.custodian`, holds the
 custodian's signed snapshots: public keys only. The pool's receivers read
-and write it, and the hosts of entitled tenants read it; no other principal
-has a grant on it ([ACLs](design.md#acls)). A host takes the latest
+and write it, and the hosts of entitled tenants read it. `wherry.operator`
+can also read and write it, through its prefixed grant on `wherry.` topics
+([The operator principal](#the-operator-principal)); no other wherry
+principal has a grant on it ([ACLs](design.md#acls)). A host takes the latest
 committed snapshot alone, refuses to submit when its writer is not the
 custodian it names or that custodian is not a live member of the pool, and
 never falls back to an earlier snapshot.
@@ -71,7 +73,8 @@ The receiver redacts each credential of 8 bytes or more that it delivered,
 with or without its trailing newline and as JSON escapes it, from
 everything it publishes for the attempt. Each marker is an HMAC of the
 credential's name under the run's redaction key, so no marker maps to a
-name without that key. The receiver redacts no value shorter than 8 bytes
+name without that key. A credential whose marker would contain a delivered
+value is replaced by `[*]` instead, so no replacement writes a value back. The receiver redacts no value shorter than 8 bytes
 once its trailing CR and LF are removed, and logs
 `run <id>: credential <name> too short to redact`.
 
@@ -112,7 +115,11 @@ otherwise refuses it with the reason the
   `wherry operator pool suspend` returns once the key custodian has
   acknowledged the suspension with `suspended_for` in its snapshot, which a
   pass publishes before it decides any request and after every attempt wrap
-  of the previous pass committed: after that no new start opens;
+  of the previous pass committed: after that no new start opens. A pool
+  with no snapshot has no custodian to open anything, and the command
+  returns at once. With no acknowledgement within 5 minutes the command
+  fails with `... it is not yet in effect`, and a first start can still
+  open until the custodian reads the record;
 - when the claim changed receivers, it has no previous holder, or the
   previous holder's membership ended or its latest advertisement in the pool
   appended at or before the claim is more than 120 seconds old. The previous
@@ -123,9 +130,8 @@ otherwise refuses it with the reason the
 
 The custodian serves a new claimant once the previous holder has
 released the task or gone silent, and refuses it with `two live claimants`
-while the previous holder is live. It records each decision on a claim durably and reuses it, and it
-opens the envelope and checks its binding before it wraps the content key,
-so a spliced envelope never releases its key.
+while the previous holder is live. It records each decision on a claim
+durably and reuses it.
 
 A refused claimant acts on the reason:
 
@@ -197,12 +203,13 @@ reason, or withholding re-key wraps is out of scope.
 | Party | What it gets |
 | --- | --- |
 | Kafka operators and broker storage | ciphertext only, without a pool private key |
-| another tenant or pool | nothing: the platform's ACLs, TLS and SCRAM keep them apart, and only the pool's receivers can write its snapshot |
-| a compromised receiver that is not the key custodian | the credentials of the runs it claims; it can become custodian through the custodian group as an honest receiver would, which raises [WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover); every custodian change raises it, a planned drain's included, so a takeover that no planned stop or crash explains is the sign |
+| another tenant or pool | nothing: the platform's ACLs, TLS and SCRAM keep them apart, and only the pool's receivers and `wherry.operator` can write its snapshot |
+| a compromised receiver that is not the key custodian | the credentials of the runs it claims; it can become custodian through the custodian group as an honest receiver would, which raises [WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover), as every custodian change does |
 | the key custodian, or anyone who copies its keys | every retained envelope under those keys, without claiming |
 
 Daily [rotation](concepts.md#rotation) stops a silently copied key from
-receiving new tasks within a day. Deleting a key at its deadline protects
+receiving new tasks within 25 hours: the custodian rotates 24 hours plus a
+jitter under one hour after the key's snapshot. Deleting a key at its deadline protects
 old envelopes only if the key was never copied.
 
 ### Trade-offs of pool custody
@@ -346,19 +353,8 @@ Prerequisites: the tenant's account at the model provider.
 When a receiver is revoked, rotate each credential it could open, as in
 [Revoke a host or receiver](operations.md#revoke-a-host-or-receiver).
 
-A revoked or denied receiver exits and leaves the jobs it held running, and
-closing its share sessions attempts to release their tasks: when the broker
-accepts the release they return to the pool at once, otherwise when their
-locks lapse. On a
-pool-wide platform, such as Nomad or Kubernetes, another member adopts each
-job. A host-local platform, such as systemd, adopts only on the same host:
-the receiver restarted under the same receiver ID adopts its jobs, but a
-member on another host starts a second job once the
-[claim check](a2a-extension-v1.md#the-claim-check) no longer counts the
-exited receiver a live claimant, as after a receiver crash, so the systemd
-plugin recommends a pool per receiver. Stopping the jobs would bind only an
-honest receiver; a compromised one ignores it, so leaving them removes no
-protection. Revocation still ends the receiver's access.
+A revoked or denied receiver leaves the jobs it held running for adoption,
+as [Revocation](concepts.md#revocation) describes.
 
 ## Credential sources
 
@@ -412,7 +408,7 @@ found GITHUB_TOKEN in your environment. Use it for git-token? It will be sent to
 an environment source is read where submits run, including the MCP server your harness starts.
 ```
 
-A source belongs to the credential name, not to one pool: whatever the
+A source belongs to the credential name across pools: whatever the
 variable holds goes to the agents of every pool that names the credential,
 including pools the tenant is entitled to later. A variable set in a shell is
 often set for another purpose, such as the user's own `GITHUB_TOKEN`, with
@@ -478,6 +474,8 @@ password, nor the path of its password file, to any file. Every other
 `wherry operator` command connects as `wherry.operator` alone, so the super
 user's password can stay with the Kafka administrator after setup, and a
 re-run of `init` to rotate `wherry.operator`'s password needs it again.
+On Strimzi, the User Operator must ignore the principals wherry creates, as
+[Strimzi](operations.md#strimzi) shows.
 
 ### The operator principal
 
@@ -498,9 +496,9 @@ that is missing.
 
 `Alter` on the cluster lets its holder grant itself any ACL, so
 `wherry.operator` is close to the super user in effect: whoever holds
-`operator.password` can take over the cluster. The gain is that the super
-user's credential is neither kept nor used after setup, and that
-`wherry.operator`'s password rotates with a re-run of `init`.
+`operator.password` can take over the cluster. The super user's credential
+is neither kept nor used after setup, and `wherry.operator`'s password
+rotates with a re-run of `init`.
 
 ### The operator working directory
 
@@ -519,7 +517,10 @@ A bundle carries the broker address, the principal and its password, and no
 CA. Every host, receiver and the operator trusts the broker through the
 system's trusted roots, or through the CA file its own configuration names:
 `ca_file` in the host's or receiver's configuration (the host also looks for
-`~/.config/wherry/ca.pem`) and in `operator.yaml`. The Kafka platform issues
+`ca.pem` in its [configuration directory](configuration.md#client-configuration),
+by default `~/.config/wherry/ca.pem`) and in `operator.yaml`. `wherry host init`
+asks for the CA only on a terminal, so a host without one has its CA file in
+place before `host init` connects. The Kafka platform issues
 and renews its CA; whoever distributes a private CA keeps each machine's
 file current, and a renewal needs no new bundle. A machine that trusts the
 system roots trusts every CA they hold for the broker's address.

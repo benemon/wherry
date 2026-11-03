@@ -1,14 +1,5 @@
 # Introduction
 
-wherry is an execution fabric for delegated agent work, built on Kafka. It
-hands a coding agent's work to the containers, sandboxes and clusters that
-run agents, across machines, tenants and trust boundaries, and returns the
-result.
-[Why wherry](index.md#why-wherry) sets out what it gives, and
-[Key concepts](concepts.md) explains the model.
-
-## The problem
-
 A coding agent that delegates work runs its subagents on the machine the
 agent itself runs on, or in the agent vendor's cloud. Neither is
 infrastructure its user operates, so a subagent cannot use the user's own
@@ -19,6 +10,15 @@ unmodified agent there, and returns the result to the caller. Every
 exchange is a record on a Kafka cluster the user also runs. Kafka supplies
 identity, authorisation, isolation, history, work distribution and atomic
 writes.
+
+## What wherry is
+
+wherry is an execution fabric for delegated agent work, built on Kafka. It
+hands a coding agent's work to the containers, sandboxes and clusters that
+run agents, across machines, tenants and trust boundaries, and returns the
+result.
+[Why wherry](index.md#why-wherry) sets out what it gives, and
+[Key concepts](concepts.md) explains the model.
 
 wherry is open source under the Mozilla Public License 2.0 and has no
 hosted control plane. The hosts, the receivers, the Kafka cluster and the
@@ -33,16 +33,19 @@ the agent.
 
 ## What ships
 
-One `wherry` binary with three sides:
+One `wherry` binary with four roles:
 
-- **Operator:** `wherry operator` creates pools and their terms, entitles
-  tenants, adds hosts and receivers with their Kafka principals, ACLs and
-  bundles, records receiver configurations, revokes access, suspends and
+- **Operator:** `wherry operator init` delegates provisioning from the Kafka
+  super user to the `wherry.operator` principal. `wherry operator` then
+  creates pools and their terms, entitles tenants, adds hosts and receivers
+  with their Kafka principals, ACLs and bundles, records receiver configurations, revokes access, suspends and
   resumes pools and rotates their keys, and checks the result against the
   broker.
-- **Host:** `wherry host init` registers the host's signing key and prints
-  its key ID. `wherry host receivers` lists the receivers the tenant may use with their plugin
-  profiles and labels. `submit` places a task by agent and label selector and publishes
+- **Host:** `wherry host init` places the host's bundle, registers its
+  signing key, prints its key ID, and asks for a source for each credential
+  the tenant's pools take. `wherry host key rotate` replaces the key.
+  `wherry host receivers` lists the receivers the tenant may use with their
+  plugin profiles and labels. `submit` places a task by agent and label selector and publishes
   it with its credentials in the task's envelope. `wait`, `status`,
   `events` and `cancel` follow and stop a run. `status` without a run ID lists every run the host
   can see, and `logs` prints a run's agent output. `wherry submit`, `wait`,
@@ -56,7 +59,9 @@ One `wherry` binary with three sides:
   [wherry-plugins](https://github.com/benemon/wherry-plugins). The plugin
   protocol is the Go module in
   [`pluginsdk`](https://github.com/benemon/wherry/tree/main/pluginsdk).
+- **Developer:** `wherry dev` runs a whole deployment on one machine, with a
+  Nomad dev agent, a single-broker Kafka and one receiver, for trying wherry
+  and developing against it.
 
-Submissions, statuses, transcript chunks and results are A2A v1.0 objects;
-[the wherry A2A extension](a2a-extension-v1.md) specifies every
-record.
+Submissions, statuses, transcript chunks and results are A2A v1.0 objects.
+[The wherry A2A extension](a2a-extension-v1.md) specifies every record.

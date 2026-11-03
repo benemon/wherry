@@ -12,8 +12,8 @@ model and [what ships](https://benemon.github.io/wherry/introduction#what-ships)
 ## Getting started
 
 The [Quickstart](https://benemon.github.io/wherry/quickstart) installs
-`wherry` from a release, provisions one pool with one receiver, and runs a
-first task.
+`wherry`, runs a whole deployment on one machine with `wherry dev`, then
+provisions one pool with one receiver across machines and runs a first task.
 
 ## Configuration
 
@@ -49,8 +49,8 @@ own `go.mod` and `pluginsdk/v*` tags.
 ## Make targets
 
 `make help` lists the targets. `make check` runs every CI gate: gofmt, vet,
-the unit tests of both modules, the dependency licence check and the
-attribution-marker check.
+the unit tests of both modules, the dependency licence check, the
+attribution-marker check and the old-name check.
 
 ## Tests
 
@@ -76,7 +76,7 @@ run when their variables are set and skip otherwise:
   tests and the S3 leg of the round-trip test.
 
 `test/kafka/up.sh DIR` starts one Kafka 4.3 container serving both brokers
-and writes their variables to `DIR/env`; CI runs these tests against it:
+and writes their variables to `DIR/env`. CI runs these tests against it:
 
 ```sh
 test/kafka/up.sh /tmp/wherry-kafka && . /tmp/wherry-kafka/env
@@ -87,7 +87,7 @@ The packages share the broker's `wherry.operator`, so they run one at a time.
 
 `test/s3/up.sh DIR` starts [ceph-aio](https://github.com/benemon/ceph-aio), a
 single-node Ceph with RGW, creates a user with generated keys and writes the S3
-variables to `DIR/env`; CI runs the S3 tests against it:
+variables to `DIR/env`. CI runs the S3 tests against it:
 
 ```sh
 test/s3/up.sh /tmp/wherry-s3 && . /tmp/wherry-s3/env
@@ -131,3 +131,9 @@ unpublished, writes the archives into `dist` locally:
 ```sh
 goreleaser release --snapshot --clean --skip=sign
 ```
+
+The documentation site embeds the wherry-plugins examples at the commit
+`WHERRY_PLUGINS_REF` names in `.github/workflows/pages.yml`. After a
+wherry-plugins release, set `WHERRY_PLUGINS_REF` to the full SHA of the
+commit its tags were cut from (`git rev-list -n 1 nomad/<version>` in
+wherry-plugins) and merge that change to `main`, which republishes the site.

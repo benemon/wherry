@@ -5,8 +5,8 @@ The files wherry reads and writes, and the environment variables it takes.
 
 ## Client configuration
 
-A YAML file at `~/.config/wherry/config.yaml`, or at the path `WHERRY_CONFIG`
-names when it is set, or at the host command's `--config-file` path, which
+A YAML file, `config.yaml` in the host's configuration directory, or at the
+path `WHERRY_CONFIG` names when it is set, or at the host command's `--config-file` path, which
 wins over both. [`wherry host init`](commands.md#wherry-host-init) writes it;
 a file written in advance is used as written. Unknown and duplicate fields are
 errors, and a decode error names only its line numbers. A leading `~/` is
@@ -14,10 +14,10 @@ expanded in the flag and in every path.
 
 The host's paths are the same on every OS, macOS included:
 
-| Path | Holds |
-| --- | --- |
-| `~/.config/wherry/`, or `$XDG_CONFIG_HOME/wherry/` when that is set | `config.yaml`, `bundle.yaml`, `host.key` and, for a private CA, `ca.pem` |
-| `~/.local/state/wherry/`, or `$XDG_STATE_HOME/wherry/` when that is set | the host's state, `state_dir` |
+| Directory | Path | Holds |
+| --- | --- | --- |
+| configuration directory | `$XDG_CONFIG_HOME/wherry/`, by default `~/.config/wherry/` | `config.yaml`, `bundle.yaml`, `host.key` and, for a private CA, `ca.pem` |
+| state directory | `$XDG_STATE_HOME/wherry/`, by default `~/.local/state/wherry/` | the host's state, `state_dir` |
 
 [`wherry dev up`](commands.md#wherry-dev-up) creates `config.yaml`,
 `bundle.yaml` and `host.key` here for its `default` instance when none of
@@ -29,12 +29,12 @@ instance and prints the `WHERRY_CONFIG` to use.
 
 | Field | Default | Content |
 | --- | --- | --- |
-| `bundle` | required | the host's bundle; `host init <bundle>` places it at `~/.config/wherry/bundle.yaml` and names it here |
-| `ca_file` | `~/.config/wherry/ca.pem` if that file exists, else none | PEM CA certificates the host trusts the broker with; with none, the system's trusted roots |
-| `host_key` | `~/.config/wherry/host.key` | host signing key file |
-| `state_dir` | `~/.local/state/wherry` | run records |
+| `bundle` | required | the host's bundle; `host init <bundle>` places it at `bundle.yaml` in the configuration directory and names it here |
+| `ca_file` | `ca.pem` in the configuration directory if that file exists, else none | PEM CA certificates the host trusts the broker with; with none, the system's trusted roots |
+| `host_key` | `host.key` in the configuration directory | host signing key file, a private JWK; a key file in another format fails to load |
+| `state_dir` | the state directory | run records |
 | `credentials` | none | credential name to its [source](security.md#credential-sources), exactly one of `file: PATH`, `env: VAR` and `command: [PROGRAM, ARG...]` |
-| `git` | none | `{url, credential, host_key}` entries, each giving a task whose git remote starts with `url` the credential `credential` and the OpenSSH `known_hosts` file `host_key`, both optional ([git credentials](security.md#git-credentials)) |
+| `git` | none | `{url, credential, host_key}` entries, each giving a task whose git remote starts with `url` the credential `credential` and the OpenSSH `known_hosts` file `host_key`; `credential` is optional, and `host_key` is required for an `ssh://` remote and refused for an `https://` one ([git credentials](security.md#git-credentials)) |
 | `storage` | none | pool name to `{access_key, secret_key}`: the names of the credentials in `credentials` holding the access key and secret key of the host's S3 credential for that pool's bucket; a pool without an entry has no S3 lane on this host |
 | `input_roots` | the MCP server's working directory | absolute paths of existing directories the MCP server sends inputs from; the CLI reads any path it is given |
 
@@ -42,18 +42,25 @@ instance and prints the `WHERRY_CONFIG` to use.
 `credentials`, `git` and `storage` for each answer, each a reference to a
 source and never a value; a re-run keeps every entry and adds only what a
 newly entitled pool needs. Without a terminal it asks nothing and lists what
-still has no source.
+still has no source. It asks for the CA only on a terminal, so without one a
+broker under a private CA needs `ca.pem` in the configuration directory, or
+`ca_file` in the file, before `host init` runs.
 
-`state_dir` holds `runs/<run>.json` for each run this host submitted,
-readable by its owner alone, with the run's submission without its envelope
-and wrap, kept to [resubmit](concepts.md#lost-pool-keys) the run if its key
-is lost, and `redaction_key`, the run's redaction key, made when this host
-submits the run; a replacement's record also holds its signed bytes,
-envelope included. It holds no credential value in the clear. It also holds `runs/<run>/outputs/` for the outputs
-`wait` writes by default, and `resubmit/<run>.json.lock`, which every
-process sharing the directory holds while it resubmits that run. `submit`
-writes the run's record before it publishes the task, and removes it only
-when publishing fails.
+`state_dir` holds:
+
+- `runs/<run>.json` for each run this host submitted, readable by its owner
+  alone: the run's submission
+  without its envelope and wrap, kept to
+  [resubmit](concepts.md#lost-pool-keys) the run if its key is lost, and
+  `redaction_key`, the run's redaction key, made when this host submits the
+  run. A replacement's record also holds its signed bytes, envelope
+  included. No record holds a credential value in the clear.
+- `runs/<run>/outputs/`, where `wait` writes the run's outputs by default.
+- `resubmit/<run>.json.lock`, which every process sharing the directory
+  holds while it resubmits that run.
+
+`submit` writes the run's record before it publishes the task, and removes
+it only when publishing fails.
 
 ### Client configuration example
 
@@ -133,10 +140,10 @@ the pending transcript of each run still held and releases its task for
 adoption, leaving the job running. The stop fixes one deadline,
 `drain_timeout` plus 5 seconds after the signal: each held run's commit, its
 `released` status and the acknowledgement to the broker, and the key
-custodian's [drain](commands.md#wherry-receiver-run), its re-key
+custodian's [drain](design.md#key-custody), its re-key
 included, all end by it. A run whose commit does not complete by then is
 left unacknowledged, and the broker returns its task when its acquisition
-lock expires. A stop therefore takes at most `drain_timeout` plus 5 seconds.
+lock expires.
 The receiver cannot read the window, so `drain_timeout` plus 5 seconds stays
 a few seconds below it: `20s` ends a stop within 25 seconds, inside
 Kubernetes' default 30-second window. At `0s` the
@@ -220,12 +227,13 @@ operator command takes `--dir DIR`, the current directory by default.
   .gitignore                 operator init appends operator.password and bundles/
 ```
 
-`operator.yaml` is decoded as the client configuration is:
+In `operator.yaml`, unknown and duplicate fields are errors, a decode error
+names only its line numbers, and no `~` is expanded:
 
 | Field | Content |
 | --- | --- |
 | `broker` | Kafka bootstrap address, `host:port`; host bundles name it, and receiver bundles unless the receiver's file names another |
-| `ca_file` | absolute path of the PEM CA certificates the operator trusts the broker with; absent for the system's trusted roots |
+| `ca_file` | path of the PEM CA certificates the operator trusts the broker with, which `operator init` writes absolute; a relative path is in the working directory; absent for the system's trusted roots |
 | `password_file` | `wherry.operator`'s password file, `operator.password`; a relative path is in the working directory |
 
 It holds nothing about the Kafka super user, which only
@@ -279,7 +287,7 @@ the environment variable the agent gets the value in, matching
 the file it gets in `WHERRY_CREDENTIALS_DIR`, a [file
 name](a2a-extension-v1.md#submission). `required` defaults to `true`. An
 agent's credentials have unique names, and no two share a target; `pool
-create` refuses terms that break a rule, naming the agent and credential.
+apply` refuses terms that break a rule, naming the agent and credential.
 
 `submit` refuses a task when its host has no source for a required
 credential of the placed agent. A run goes without an optional credential
@@ -438,9 +446,12 @@ both forms.
 ### Record limit
 
 A record limit is the lower of what the record's producer batches and what
-the topic the record goes to takes: its `max.message.bytes` when the topic
-sets one, and otherwise the lowest `message.max.bytes` across the brokers.
-Submissions go to the pool's tasks topic, from a host that batches at most
+the topic the record goes to takes, which Kafka's
+[`max.message.bytes`](https://kafka.apache.org/documentation/#topicconfigs_max.message.bytes)
+sets. wherry reads the topic's own setting, else the lowest
+`message.max.bytes` across the brokers. Submissions go to the pool's tasks
+topic from a host, which batches at most
+[franz-go's default](https://pkg.go.dev/github.com/twmb/franz-go/pkg/kgo#ProducerBatchMaxBytes),
 1000012 bytes. Receiver records go to the feeds and transcript topics of
 the tenants entitled to the pool, from a receiver that batches at most
 2 MiB (2097152 bytes), the `max.message.bytes` wherry sets on every tenant
@@ -450,9 +461,13 @@ feed and transcript topic. The Kafka cluster must allow a topic
 and [`submit`](commands.md#wherry-host-submit) measures each submission against it. A pool file
 does not set it.
 
-`pool apply`, `pool entitle` and `check` sign four records and measure
-them as record batches: the largest output chunk, of 256 KiB, two largest
-results, and the largest transcript chunk, a line of 512 KiB. Each result
+`pool apply`, `pool entitle` and `check` compare five record-batch sizes
+against the record limits. wherry's tests build and sign each record to pin
+its size. The smallest task a host submits with a maximum envelope and its
+submit wrap, an 89326-byte batch, goes against the tasks topic's limit. Four
+receiver records go against the tenant feeds' limit: the largest output
+chunk, of 256 KiB, two largest results, and the largest transcript chunk, a
+line of 512 KiB. Each result
 has the run's message with its 256 input files named but not carried, and a
 status message and a result text of 64 KiB each, both raw, as an agent's text
 that JSON escaping would lengthen travels, with a `credential` part, a
@@ -462,7 +477,7 @@ chunk, so `reply_limit` has no record-limit check. One result lists
 one also a reference artifact, and is the largest record, a 1259677-byte
 batch; the other lists 256 S3 outputs with their keys. Both carry a plugin's job name at its bound of
 253 bytes. A receiver's labels have no bound and are left empty. Any one over its record limit refuses the terms,
-naming its size and the limit.
+naming the record, its size and the limit.
 
 An input file travels base64-encoded inside the signed record, which is itself
 base64url-encoded, so an inline input takes about 16/9 of its size in the
@@ -775,7 +790,7 @@ default, such as the Nomad plugin's `NOMAD_TOKEN`.
 
 Sources stay on the receiver's host. `wherry.operator`, which every principal
 reads, records the credential's name alone, and the receiver's bundle holds
-its Kafka identity alone. The [Quickstart](quickstart.md#_7-write-the-receiver-s-local-configuration)
+its Kafka identity alone. The [Quickstart](quickstart.md#_5-write-the-receiver-s-local-configuration)
 writes a local configuration with a source for each platform credential its
 receiver configuration names.
 
@@ -867,48 +882,41 @@ of an output name starts with a dot.
 
 A run has two bounds, each a whole second since the epoch in UTC (a JWT
 NumericDate): `task_started_by`, by which its agent job must start, and
-`task_ended_by`, by which it must reach a terminal state. The receiver's
-clock decides both. A bound fails only when that clock is past its second,
-so a job that starts at `task_started_by`, or a terminal state at
-`task_ended_by`, meets it. A run's time is also capped at six hours after
-`task_started_by`. `submit` refuses a `task_ended_by` later than that, and a
-receiver rejects such a run no pool member has claimed with
-`task_ended_by is past task_started_by plus the 6h run cap`.
+`task_ended_by`, by which it must reach a terminal state. `wherry submit`
+and the MCP `submit` tool take them as `--start-by` and `--end-by`, or
+`start_by` and `end_by`, an RFC 3339 time or a Go duration from now, `10m`
+and `2h` by default.
 
-A job starts when the plugin reports it running, at which the receiver
-publishes the run's `started` event. A receiver rejects a run no pool member
-has claimed with `not started by task_started_by (<RFC 3339 time>)` or
-`not ended by task_ended_by (<RFC 3339 time>)` once that bound has passed.
-A claimed run whose job has not started by `task_started_by`, while it waits
-for its envelope to open or for the platform to place its job, ends `TASK_STATE_FAILED`
-with `not started by task_started_by (<RFC 3339 time>)`, and the receiver
-purges any job the run has. A job that has started runs on past
-`task_started_by`. A redelivered run that a member has claimed is not
-rejected: the receiver adopts its job when it finds one, and dispatches the
-run again when it finds none and `task_started_by` has not passed. Past
-`task_ended_by`, the receiver stops any job it finds and ends the run
-`TASK_STATE_FAILED` with `not ended by task_ended_by (<RFC 3339 time>)`.
+A run's time is capped at six hours after `task_started_by`. Before they
+publish, `submit` and the MCP tool refuse a `task_ended_by` later than that,
+and a `task_started_by` later than the pool's `start_by_limit` from now with
+`task_started_by is past the pool's start_by_limit`, the MCP tool with
+`INVALID_ARGUMENT`. Every run ends within six hours after `start_by_limit`.
 
-A receiver measures a run's age from the broker's append time of its
-submission. It rejects a run no pool member has claimed with
-`task_started_by is past the pool's start_by_limit` when that time is more
-than `start_by_limit` ago, or when the run's `task_started_by` falls more
-than `start_by_limit` after it. A redelivered run that a member has claimed
-skips both checks. `wherry submit` and the MCP `submit` tool refuse, before
-publishing, a `task_started_by` later than `start_by_limit` from now with the
-same text, the MCP tool with `INVALID_ARGUMENT`. Every run therefore ends
-within six hours after `start_by_limit`.
+The receiver's clock decides both bounds, and a bound fails only when that
+clock is past its second. [Admission](a2a-extension-v1.md#admission) gives
+the receiver's checks and the texts a run ends with, and
+[Open request](a2a-extension-v1.md#open-request) the bounds of a claimed
+run.
 
 ## Environment variables
 
 | Variable | Read by | Effect |
 | --- | --- | --- |
-| `WHERRY_CONFIG` | host commands | the [client configuration](#client-configuration) path in place of `~/.config/wherry/config.yaml`; `--config-file` wins over it |
-| `XDG_CONFIG_HOME`, `XDG_STATE_HOME` | host commands | when set, the parents of the host's `wherry/` configuration and state directories in place of `~/.config` and `~/.local/state` |
-| `SSL_CERT_FILE` | host commands, `wherry receiver run`, `wherry operator` | PEM CA file that replaces the system roots, for a pool's S3 endpoint under a private CA and for a broker when no `ca_file` is set; include the public roots in it when the process also reaches public endpoints |
+| `WHERRY_CONFIG` | host commands, `wherry dev up` | the [client configuration](#client-configuration) path in place of `config.yaml` in the configuration directory; `--config-file` wins over it. When it is set, `dev up` writes the host's files inside the instance |
+| `XDG_CONFIG_HOME`, `XDG_STATE_HOME` | host commands, `wherry dev` | when set, the parents of the host's `wherry/` configuration and state directories in place of `~/.config` and `~/.local/state` |
+| `XDG_DATA_HOME` | `wherry dev` | when set, the parent of `wherry/dev/`, which holds the [dev instances](commands.md#dev-commands), in place of `~/.local/share` |
 
-`wherry operator` reads no environment variable: its connection is
+wherry reads no other variable of its own. `wherry operator`'s connection is
 [`operator.yaml`](#operator-working-directory).
+
+Go's TLS stack reads `SSL_CERT_FILE` as its
+[crypto/x509](https://pkg.go.dev/crypto/x509#SystemCertPool) package
+documents. On Linux, a broker connection without `ca_file`, in any wherry
+command, trusts the roots it names. macOS ignores it for that connection:
+use `ca_file` there. The host's S3 client adds the certificates in
+`SSL_CERT_FILE` to the system roots for a pool's storage endpoint on every
+OS.
 
 A plugin reads its own variables from the receiver's environment; the
 [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#credentials)

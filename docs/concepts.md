@@ -58,9 +58,12 @@ configuration. The operator hands the bundle to the host or receiver. It never t
 
 Authorisation is
 [Kafka ACLs](https://kafka.apache.org/documentation/#security_authz), enforced
-by the broker. `wherry operator` generates every ACL from the state on
-`wherry.operator`. Each names one resource literally, except one prefixed grant per
-receiver on its pool's transactional IDs. The `wherry operator` command that
+by the broker. `wherry operator` generates every host and receiver ACL from
+the state on `wherry.operator`. Each names one resource literally, except one
+prefixed grant per receiver on its pool's transactional IDs.
+`wherry.operator`'s own grants come from `operator init`, and two of them
+are prefixed: topics `wherry.` and groups `p-`
+([The operator principal](security.md#the-operator-principal)). The `wherry operator` command that
 records a host or receiver on `wherry.operator` also issues its principal and ACLs,
 and `pool entitle` records an entitlement with its ACLs; no other approval step
 exists. [Design](design.md#acls) lists the matrix.
@@ -245,9 +248,9 @@ A receiver assigned the partition that the current snapshot already names,
 and that still holds the snapshot's key, continues with that key. Every
 `takeover` and `contested` snapshot raises
 [WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover), and hosts
-log it: every custodian change, a planned drain's included, raises the
-alert, so a receiver taking custody that should not have is never silent. The group coordinates honest receivers; it does not authenticate
-custody against a malicious member of the pool
+log it. Every custodian change raises the alert, a planned drain's included.
+The group coordinates honest receivers. It does not authenticate custody
+against a malicious member of the pool
 ([What the pool key protects](security.md#what-the-pool-key-protects)).
 
 ### Rotation
@@ -270,7 +273,7 @@ the key outlives every task wrapped to it, and the deadline falls inside the
 pool topics' [retention](operations.md#retention). A receiver holding a
 replaced key answers an open request for a task under that key with a
 re-key wrap to the current key, which the custodian then opens.
-[`wherry receiver run`](commands.md#wherry-receiver-run) states the
+[Key custody](design.md#key-custody) states the
 deadlines a receiver sets after a crash.
 
 ### Planned drain and re-key
@@ -366,7 +369,10 @@ receivers claim nothing from it. The custodian refuses with
 `pool suspended` the open request of a claim with no `adopting` status, so
 that run's task goes back to the queue unstarted. `pool suspend` returns
 once the key custodian has acknowledged the suspension in its snapshot;
-after that no new start opens. It serves adoptions of started jobs. Runs in progress continue to their
+after that no new start opens. Until then a pass that has not read the
+record can still open a first start. A pool with no custodian yet returns
+at once, and a custodian that does not acknowledge within 5 minutes fails
+the command with the suspension not yet in effect. It serves adoptions of started jobs. Runs in progress continue to their
 terminal status. A suspension takes back no
 credential a running job holds: rotating the credential at its issuer does,
 and revoking a receiver stops it. The custodian keeps rotating its key, and
@@ -395,8 +401,9 @@ steps:
 2. Delete its ACLs.
 3. Probe every broker as the principal, with the new password. While any
    broker still authorises it, the step probes again every second for up
-   to 2 minutes, then fails. A failed login or any other probe error fails
-   the step at once.
+   to 2 minutes, then fails. A refused login, as from a broker that has not
+   yet applied the new password, is retried within the same 2 minutes. Any
+   other probe error fails the step at once.
 4. Delete its SCRAM credential.
 5. Wait the longest of the broker's re-authentication, share-group lock
    and transaction timeout intervals. A longer wait can be asked for; a
@@ -425,10 +432,9 @@ same host: the receiver restarted under the same receiver ID adopts its
 jobs, but a member on another host that claims a task starts a second job
 once the [claim check](a2a-extension-v1.md#the-claim-check) no longer counts
 the exited receiver a live claimant, as after a receiver crash. The
-systemd plugin recommends a pool per receiver for this reason. Stopping the
-jobs would bind only an honest receiver; a compromised one ignores it, so
-leaving them for adoption removes no protection. Revocation still ends the
-receiver's access.
+systemd plugin recommends a pool per receiver for this reason. The
+receiver leaves the jobs for adoption: stopping them would bind only an
+honest receiver, and a compromised one would ignore it.
 
 A revoked principal does not return. A host or receiver that comes back is
 provisioned under a new name, with a new principal and key topic.

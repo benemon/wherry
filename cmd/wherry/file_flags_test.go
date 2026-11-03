@@ -81,7 +81,8 @@ func TestPoolConfigExampleParses(t *testing.T) {
 	documented(t, "configuration.md", "example-pool.yaml", "example-pool/pool.yaml", "example-pool/agents/claude.yaml", "example-pool/agents/coder.yaml", "example-pool/agents/codex.yaml")
 }
 
-// documented fails unless the page docs/<page> holds each testdata file as a whole code block.
+// documented fails unless the page docs/<page> holds each testdata file as a whole code block, of its own or indented
+// three spaces in a numbered step.
 func documented(t *testing.T, page string, files ...string) {
 	t.Helper()
 	reference, err := os.ReadFile(filepath.Join("..", "..", "docs", page))
@@ -93,7 +94,8 @@ func documented(t *testing.T, page string, files ...string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(reference), "```yaml\n"+string(example)+"```\n") {
+		block := "```yaml\n" + string(example) + "```\n"
+		if !strings.Contains(string(reference), block) && !strings.Contains(string(reference), inStep(block)) {
 			t.Errorf("docs/%s has no code block holding testdata/%s", page, file)
 		}
 	}
@@ -259,4 +261,15 @@ func TestPoolConfigReadsDurations(t *testing.T) {
 	if _, err := readPoolConfig(file, false); err == nil {
 		t.Fatal("pool config accepted lock_duration_ms")
 	}
+}
+
+// inStep is block indented three spaces, as a code block in a numbered step is.
+func inStep(block string) string {
+	lines := strings.SplitAfter(block, "\n")
+	for i, line := range lines {
+		if line != "\n" && line != "" {
+			lines[i] = "   " + line
+		}
+	}
+	return strings.Join(lines, "")
 }

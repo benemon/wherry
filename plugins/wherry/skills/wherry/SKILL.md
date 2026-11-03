@@ -32,7 +32,9 @@ Do short or interactive work yourself.
 
 Call `receivers` first. For each receiver it returns:
 
-- `profiles`: each with its `plugin`, the `agent` it runs, its `labels`, `credentials`,
+- `profiles`: each with its `plugin`, the `agent` it runs, the agent's
+  `models` and `default_model` when it has them, `inline_limit`, the most
+  inline input bytes the profile delivers, when set, its `labels`, `credentials`,
   the agent's credentials by `name` with their target (`env`, the agent's
   environment variable, or `file`, in its credentials directory), `optional`
   and `configured`, whether this host has a source for each, and `ready`, whether the
@@ -58,7 +60,7 @@ literally and interprets only the agent name.
 A profile whose agent lists `models` runs `default_model` unless you pass
 `model`, one of those `models`, to `submit`; an agent with one model runs
 it, and with two or more and no `default_model` you must pass one. A model outside them, or none where one is required, returns
-`INVALID_ARGUMENT`. `wait` returns the `model` asked for.
+`INVALID_ARGUMENT`. `wait` returns the `model` the run's placement names.
 
 ## Submit, then keep working
 
@@ -69,13 +71,18 @@ and refuses an empty one.
 It returns `id`, `pool` and `wait` straight away. `wait` is a shell
 command, `wherry wait <id>`. Where your harness runs shell
 commands in the background and tells you when they finish, start that command
-in the background now, before anything else: it blocks until the run ends (or
-for 2 hours 10 minutes; `--timeout` changes that), prints the agent's reply
-and a line for each returned output, writes the outputs, and exits 0 for `TASK_STATE_COMPLETED`, 2
-failed, 3 canceled, 4 rejected, 6 timed out, and 1 when it
-could not wait or collect, at once when `task_started_by` passes with no
-receiver claiming the run. Its completion is how you learn the run ended, so
-you skip the `wait` tool loop below. Then carry on with other work.
+in the background now, before anything else. The command:
+
+- blocks until the run ends, or for 2 hours 10 minutes (`--timeout` changes
+  that);
+- prints the agent's reply and a line for each returned output, and writes
+  the outputs;
+- exits 0 for `TASK_STATE_COMPLETED`, 2 failed, 3 canceled, 4 rejected,
+  6 timed out, and 1 when it could not wait or collect. It exits 1 at once
+  when `task_started_by` passes with no receiver claiming the run.
+
+Its completion is how you learn the run ended, so you skip the `wait` tool
+loop below. Then carry on with other work.
 
 `git` names a repository the agent clones itself: `remote` (an `https` or `ssh`
 URL, or `user@host:path`) and `ref` are required. The clone's credential, and an
@@ -160,8 +167,7 @@ and `next_offset` while more remain. Call it again with `next_offset` to read
 on. Use it to follow a long run or to see why one failed. Each line names the
 delivery attempt that published it; a run another receiver took over reads
 from the start, the earlier attempt's lines first. A page stays within 24 KiB,
-which fits a harness's default limit on tool output, such as Claude Code's
-`MAX_MCP_OUTPUT_TOKENS`. A line too long for a page comes back as its start,
+which fits a harness's default limit on tool output. A line too long for a page comes back as its start,
 with `truncated` set and its full size in `bytes`.
 
 ## A run that needs a credential

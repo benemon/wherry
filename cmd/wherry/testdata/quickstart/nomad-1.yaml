@@ -1,14 +1,12 @@
 pool: build
 plugin_sha256:
-  # The SHA-256 of the plugin binary the receiver may run, from the plugin's release.
+  # The SHA-256 of the plugin binary in the receiver image, the one binary the receiver may run.
   nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 capacity: 2
 plugins:
   nomad:
     # Both plugin profiles inherit this config; each states only how it differs.
     config:
-      address: https://nomad.example.com:4646
-      ca_file: /etc/wherry/nomad-ca.pem
       namespace: agents
       credential: nomad-token
       runtime:

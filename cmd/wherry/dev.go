@@ -149,6 +149,10 @@ func runDev(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
+	if slices.Contains([]string{"-h", "-help", "--help"}, args[0]) {
+		fmt.Fprintln(stderr, usage)
+		return flag.ErrHelp
+	}
 	if args[0] == "mock" {
 		return runDevMock(args[1:], stdout)
 	}
