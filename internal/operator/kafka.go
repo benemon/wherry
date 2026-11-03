@@ -605,7 +605,7 @@ func (service *Service) LoadState(ctx context.Context) (State, error) {
 // the most a receiver's producer batches: a result lists a reference artifact for each output it returns.
 const FeedRecordLimit = 2 << 20
 
-// feedConfigs are the configs host add, pool entitle and pool apply set on tenant feeds beyond the
+// feedConfigs are the configs tenant add and pool apply set on tenant feeds beyond the
 // retention they are created with.
 var feedConfigs = map[string]string{"max.message.bytes": strconv.Itoa(FeedRecordLimit)}
 
@@ -620,16 +620,11 @@ func (service *Service) tenantTopics(ctx context.Context, tenant string) error {
 
 // tenantFeeds are the feeds and transcript topics of every tenant with a host or an entitlement.
 func tenantFeeds(state State) []string {
-	tenants := map[string]bool{}
-	for _, host := range state.Hosts {
-		tenants[host.Tenant] = true
-	}
-	for tenant := range state.Entitlements {
-		tenants[tenant] = true
-	}
 	var topics []string
-	for _, tenant := range slices.Sorted(maps.Keys(tenants)) {
-		topics = append(topics, TenantTopic(tenant), TenantTranscriptTopic(tenant))
+	for _, tenant := range slices.Sorted(maps.Keys(state.Tenants)) {
+		if !state.Tenants[tenant] {
+			topics = append(topics, TenantTopic(tenant), TenantTranscriptTopic(tenant))
+		}
 	}
 	return topics
 }
@@ -975,15 +970,16 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 	for receiver := range state.Receivers {
 		topics = append(topics, ReceiverTopic(receiver))
 	}
-	for _, host := range state.Hosts {
-		topics = append(topics, HostTopic(host.Tenant, host.Name))
+	for principal, host := range state.Hosts {
+		if !state.Ended[principal] {
+			topics = append(topics, HostTopic(host.Tenant, host.Name))
+		}
 	}
+	keyTopics := len(topics)
 	for pool := range state.Pools {
 		topics = append(topics, PoolTasksTopic(pool), PoolEventsTopic(pool))
 	}
-	for tenant := range state.Entitlements {
-		topics = append(topics, TenantTopic(tenant), TenantTranscriptTopic(tenant))
-	}
+	topics = append(topics, tenantFeeds(state)...)
 	for receiver := range state.Receivers {
 		if !state.Ended[ReceiverPrincipal(receiver)] {
 			topics = append(topics, ReceiverProgressTopic(receiver))
@@ -993,7 +989,7 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 	if err != nil {
 		return err
 	}
-	for _, topic := range topics[:1+len(state.Receivers)+len(state.Hosts)] {
+	for _, topic := range topics[:keyTopics] {
 		if retentions[topic] != -1 {
 			return fmt.Errorf("topic %s retention.ms is %d, want -1", topic, retentions[topic])
 		}
