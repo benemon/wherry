@@ -1458,7 +1458,7 @@ wherry dev init [--instance NAME] [--runtime podman|docker] [--storage-enabled] 
 Acquires everything `up` runs into `cache/` and records it in
 `cache/manifest.json`:
 
-- Nomad CE 2.0.7, the release the nomad plugin's CI tests. Its
+- Nomad CE 2.1.1, the release the nomad plugin's CI tests. Its
   `SHA256SUMS` must carry a signature by HashiCorp's release key,
   fingerprint `C874 011F 0AB4 0511 0D02 1055 3436 5D94 72D7 468F`, and list
   the pinned SHA-256 of the `linux_amd64` zip. The zip must match

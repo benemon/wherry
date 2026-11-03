@@ -630,6 +630,10 @@ func TestAcquireNomadTakesThePin(t *testing.T) {
 		}
 		return data
 	}
+	// The fixtures are 2.0.7 and a newer 2.1.0, so the test pins 2.0.7 whatever the current pin is.
+	previous := hashicorpPins["nomad"]
+	t.Cleanup(func() { hashicorpPins["nomad"] = previous })
+	hashicorpPins["nomad"] = struct{ version, linuxAMD64 string }{"2.0.7", "4c9b8a0850d6fd9caadbbab09b3e6fdf8b77aa777729543c70c61b85acca68c1"}
 	base := hashicorpReleases + "/nomad/"
 	bodies := map[string][]byte{
 		base + "index.json": []byte(`{"versions": {
@@ -650,8 +654,6 @@ func TestAcquireNomadTakesThePin(t *testing.T) {
 	}
 
 	// A pin the signed SHA256SUMS does not list is refused before the zip.
-	previous := hashicorpPins["nomad"]
-	t.Cleanup(func() { hashicorpPins["nomad"] = previous })
 	hashicorpPins["nomad"] = struct{ version, linuxAMD64 string }{"2.0.7", strings.Repeat("0", 64)}
 	fake = fakeHTTP(t, bodies)
 	if _, err := acquireHashiCorp(context.Background(), "nomad", t.TempDir(), "nomad", nil, io.Discard); err == nil || !strings.Contains(err.Error(), "pinned SHA-256") {
@@ -915,5 +917,24 @@ func TestDevKafkaIsTheTestedImage(t *testing.T) {
 	_, digest, _ := strings.Cut(kafkaReference, "@")
 	if !strings.Contains(string(script), "image=docker.io/apache/kafka:4.3.1@"+digest+"\n") {
 		t.Fatalf("test/kafka/up.sh pins no docker.io/apache/kafka image with dev's digest %s", digest)
+	}
+}
+
+// The Nomad pin is the linux_amd64 zip its release's signed SHA256SUMS lists, kept in testdata with the bump.
+func TestNomadPinIsInItsSignedSums(t *testing.T) {
+	pin := hashicorpPins["nomad"]
+	sums, err := os.ReadFile("testdata/dev/nomad_" + pin.version + "_SHA256SUMS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature, err := os.ReadFile("testdata/dev/nomad_" + pin.version + "_SHA256SUMS.sig")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyHashiCorp(sums, signature); err != nil {
+		t.Fatal(err)
+	}
+	if sum, err := listedSHA256(sums, "nomad_"+pin.version+"_linux_amd64.zip"); err != nil || sum != pin.linuxAMD64 {
+		t.Fatalf("SHA256SUMS lists %q, %v for the linux_amd64 zip; the pin is %s", sum, err, pin.linuxAMD64)
 	}
 }

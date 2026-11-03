@@ -72,7 +72,7 @@ production: Nomad's ACLs are off and every agent runs with your rights.
 wherry dev init
 ```
 
-`init` downloads Nomad 2.0.7, the newest nomad plugin release and Kafka's
+`init` downloads Nomad 2.1.1, the newest nomad plugin release and Kafka's
 image, checks their signatures and checksums, and records them in the
 instance's manifest. It asks for the default agent when it finds more than
 one harness; `--agent NAME` chooses it. `--storage-enabled` adds S3
@@ -89,7 +89,7 @@ wherry dev up
 once, and prints:
 
 ```
-ready: instance default (nomad 2.0.7, kafka 1a2b3c4d5e6f, plugin nomad/v0.1.0-rc.16, wherry v0.1.0-rc.24)
+ready: instance default (nomad 2.1.1, kafka 1a2b3c4d5e6f, plugin nomad/v0.1.0-rc.18, wherry v0.1.0-rc.27)
 config: /home/me/.config/wherry/config.yaml
 submit: wherry submit --prompt "..."
 claude: claude mcp add wherry-default -- wherry host mcp

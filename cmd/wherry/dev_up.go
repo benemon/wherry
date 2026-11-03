@@ -62,7 +62,7 @@ const (
 // devPorts are the fixed ports of an instance, all on 127.0.0.1; storage adds 18080.
 var devPorts = []int{4646, 4647, 4648, 9093}
 
-// nomadDenylist is Nomad 2.0.7's default env.denylist, which setting the option replaces.
+// nomadDenylist is Nomad 2.1.1's default env.denylist (command/agent/host DefaultEnvDenyList), which setting the option replaces.
 var nomadDenylist = []string{
 	"CONSUL_TOKEN", "CONSUL_HTTP_TOKEN", "CONSUL_HTTP_TOKEN_FILE", "NOMAD_TOKEN", "VAULT_TOKEN",
 	"CONSUL_LICENSE", "NOMAD_LICENSE", "VAULT_LICENSE", "CONSUL_LICENSE_PATH", "NOMAD_LICENSE_PATH", "VAULT_LICENSE_PATH",
