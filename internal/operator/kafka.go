@@ -451,7 +451,11 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 		if current.Revoking[principal] {
 			return errors.New("host is revoking")
 		}
-		return service.reissue(ctx, principal, service.Broker, bundlePath)
+		// --force also repairs a host add whose quota failed after its record was appended.
+		if err := service.reissue(ctx, principal, service.Broker, bundlePath); err != nil {
+			return err
+		}
+		return service.applyQuota(ctx, current, tenant, principal)
 	}
 	if force {
 		if bundle, err = createBundle(bundlePath, true); err != nil {

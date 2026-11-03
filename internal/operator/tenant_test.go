@@ -266,6 +266,16 @@ func TestTenantPoolQuotaRetries(t *testing.T) {
 	if err != nil || state.EndedEntitlements["t"]["p2"] {
 		t.Fatalf("re-add state=%+v err=%v", state, err)
 	}
+	bundle := filepath.Join(t.TempDir(), "bundle")
+	failQuota()
+	if err := service.HostAdd(ctx, "t", "h2", bundle, false); err == nil {
+		t.Fatal("expected post-append host quota failure")
+	}
+	if err := service.HostAdd(ctx, "t", "h2", bundle, true); err != nil {
+		t.Fatal(err)
+	}
+	principal = TenantPrincipal("t", "h2")
+	quota(200)
 }
 
 func TestTenantFeedsOnlyLiveTenants(t *testing.T) {
