@@ -79,8 +79,8 @@ user; commands then use the new password.
 
 ### Concurrent operator commands
 
-Operator commands do not lock each other. Each one that changes anything
-ends with passes that read `wherry.operator` to its end and make Kafka match
+Operator commands do not lock each other. Each one that writes a record to
+`wherry.operator` ends with passes that read `wherry.operator` to its end and make Kafka match
 those records, not the ones it read when it started: a pass grants what they
 call for, deletes every other grant of a `wherry.tnt.*` or `wherry.rcv.*`
 principal on a `wherry.` topic, a `p-` group or a `p.` transactional ID,
@@ -858,7 +858,9 @@ restored.
    ends in ` error=<cause>`. Check what that step depends on (the broker
    connection, the broker settings), then run the command again. It starts
    again from step 1 and continues from the revoking record the failed run
-   left; the principal holds no ACL meanwhile. Step 3 already retries for up to 2 minutes while a
+   left. Once that record is written, the principal holds no ACL meanwhile;
+   a run that failed in step 1 before writing it left the principal as it
+   was. Step 3 already retries for up to 2 minutes while a
    broker still authorises the principal.
 
 3. For a receiver, rotate at its source each credential of the runs it

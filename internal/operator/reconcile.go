@@ -79,9 +79,9 @@ func (service *Service) converged(ctx context.Context) (State, error) {
 // Tests replace converging to act, as a concurrent operator command would, between a pass's read and its changes.
 var converging = func() {}
 
-// operatorEnd is wherry.operator's end offset, which grows with each record appended.
+// operatorEnd is wherry.operator's last stable offset, the bound LoadState reads to.
 func (service *Service) operatorEnd(ctx context.Context) (int64, error) {
-	listed, err := ListOffsets(ctx, kadm.NewClient(service.Operator).ListEndOffsets, OperatorTopic)
+	listed, err := ListOffsets(ctx, kadm.NewClient(service.Operator).ListCommittedOffsets, OperatorTopic)
 	if err != nil {
 		return 0, err
 	}
