@@ -84,10 +84,12 @@ long.
 
 ## What you need
 
-wherry is self-hosted and needs Kafka. An operator runs a Kafka 4.3 cluster
+wherry is self-hosted and needs Kafka. To try it, `wherry dev` runs a whole
+deployment on one machine with Docker or Podman and an agent harness. In
+production, an operator runs a Kafka 4.3 cluster
 with share groups, SCRAM over TLS and an authoriser, creates pools and
 grants access with `wherry operator`, and runs receivers with the plugins
 for the target platforms. A coding agent's harness talks to wherry
 through the `wherry` CLI or its MCP server. [Prepare Kafka](operations.md#prepare-kafka)
 lists the cluster settings, [Why Kafka](design.md#why-kafka) explains the
-choice, and the [Quickstart](quickstart.md) runs a first task.
+choice, and the [Quickstart](quickstart.md) runs a first task both ways.

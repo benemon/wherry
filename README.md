@@ -12,8 +12,8 @@ model and [what ships](https://benemon.github.io/wherry/introduction#what-ships)
 ## Getting started
 
 The [Quickstart](https://benemon.github.io/wherry/quickstart) installs
-`wherry` from a release, provisions one pool with one receiver, and runs a
-first task.
+`wherry`, runs a whole deployment on one machine with `wherry dev`, then
+provisions one pool with one receiver across machines and runs a first task.
 
 ## Configuration
 
@@ -49,8 +49,8 @@ own `go.mod` and `pluginsdk/v*` tags.
 ## Make targets
 
 `make help` lists the targets. `make check` runs every CI gate: gofmt, vet,
-the unit tests of both modules, the dependency licence check and the
-attribution-marker check.
+the unit tests of both modules, the dependency licence check, the
+attribution-marker check and the old-name check.
 
 ## Tests
 

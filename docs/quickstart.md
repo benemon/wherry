@@ -10,6 +10,18 @@ cluster. [Key concepts](concepts.md) explains the parts involved.
 
 ## Install wherry
 
+Install wherry with [Homebrew](https://brew.sh/), on macOS or Linux:
+
+```sh
+brew install benemon/tap/wherry
+```
+
+The `benemon/tap` formula installs the release archive for the machine's OS
+and architecture, and Homebrew checks the archive against the SHA-256 the
+formula names. Every release updates the formula.
+
+### Install a release archive
+
 Each [release](https://github.com/benemon/wherry/releases) carries
 `wherry_<version>_<os>_<arch>.tar.gz` for `linux` and `darwin` on `amd64` and
 `arm64`, `checksums.txt` with each archive's SHA-256,
@@ -40,8 +52,7 @@ checksum steps:
 gh attestation verify "$archive" -R benemon/wherry
 ```
 
-Install wherry this way on the operator's machine before the operator's
-steps.
+Install wherry on the operator's machine before the operator's steps.
 
 ## Try it on one machine
 
@@ -72,8 +83,8 @@ production: Nomad's ACLs are off and every agent runs with your rights.
 wherry dev init
 ```
 
-`init` downloads Nomad 2.1.1, the newest nomad plugin release and Kafka's
-image, checks their signatures and checksums, and records them in the
+`init` downloads Nomad 2.1.1, the newest nomad plugin release whose plugin
+protocol this wherry speaks, and Kafka's image, checks their signatures and checksums, and records them in the
 instance's manifest. It asks for the default agent when it finds more than
 one harness; `--agent NAME` chooses it. `--storage-enabled` adds S3
 storage on 127.0.0.1:18080, a ceph-aio job whose data lives in the
@@ -137,8 +148,9 @@ wherry dev down
 ```
 
 `down` stops everything, deletes the environment's data and credentials,
-and removes the host files `up` created at the standard paths. `wherry dev
-down --reset` deletes the downloads.
+and removes the host files `up` created at the standard paths. Once the
+instance is down, `wherry dev down --reset` deletes the downloads in its
+cache; it refuses while the instance is up.
 
 ## Operator
 
@@ -180,7 +192,9 @@ On the Kafka cluster, enable share groups, a TLS listener with
 SCRAM-SHA-512, an authoriser, and the settings
 [Prepare Kafka](operations.md#prepare-kafka) lists, and create the Kafka
 super user's SCRAM credential, here `kafka-admin`. This step happens once per
-cluster.
+cluster. On a Strimzi cluster, set the User Operator's ignored-users pattern
+before `operator init`, as [Strimzi](operations.md#strimzi) shows, so that it
+keeps the principals wherry creates.
 
 On the operator's machine, put the super user's password in
 `/etc/wherry/admin-password`, mode 0600. The listener's certificate here
@@ -252,7 +266,8 @@ wherry operator pool apply build
 ```
 
 `pool apply` reads `pools/build.yaml` and creates the pool: it records the
-terms on `wherry.operator` and creates the pool's topics and share group.
+terms on `wherry.operator`, creates the pool's topics, and sets the
+configuration of its share group.
 Without that file, on a terminal, it asks for the agents, their models and
 credentials, the quotas and the start-by limit, writes `pools/build.yaml`,
 then applies it.
@@ -485,8 +500,8 @@ the plugin later, install the new version's binary, then record its pin in
 ### 5. Place the bundle
 
 On the receiver host, put the bundle where the local configuration names it,
-readable by the receiver's user alone, and the broker's CA certificate,
-`kafka-ca.pem`, beside it:
+readable by the receiver's user alone. Copy the broker's CA certificate,
+`/etc/wherry/kafka-ca.pem` on the operator's machine, beside it:
 
 ```sh
 install -m 0600 nomad-1.bundle /etc/wherry/nomad-1.bundle
@@ -533,7 +548,7 @@ profile container: credential "nomad-token" has no source in the receiver's conf
 ```
 
 `state_dir` keeps the receiver's signing key, and the pool keys while the
-receiver is its pool's key custodian, and survives restarts. The
+receiver is or was its pool's key custodian, and survives restarts. The
 receiver reads the token on this host, and neither `wherry.operator` nor the
 bundle holds it.
 
@@ -662,7 +677,12 @@ On `laptop`, install wherry as in [Install wherry](#install-wherry).
 
 ### 3. Initialise the host
 
-On `laptop`, keep the Claude Code OAuth token in a file readable by its owner
+On `laptop`, put the broker's CA certificate, `/etc/wherry/kafka-ca.pem` on
+the operator's machine, at `~/kafka-ca.pem`. `host init` asks for it only on
+a terminal. Without one, place it at `~/.config/wherry/ca.pem` before
+`host init` runs.
+
+Keep the Claude Code OAuth token in a file readable by its owner
 alone. The command reads the token from standard input:
 
 ```sh
@@ -687,9 +707,9 @@ wrote /home/me/.config/wherry/config.yaml
 `host init` copies the bundle to `~/.config/wherry/bundle.yaml`, mode 0600 in
 a directory of mode 0700, creates `~/.config/wherry/host.key`, registers it on
 the host's key topic, and prints its key ID, its RFC 7638 thumbprint in
-base64url. It asks for a CA file only when its configuration names none and
-`~/.config/wherry/ca.pem` is absent; leave it blank for a broker whose
-certificate the system's roots trust. It then reads the terms of every pool
+base64url. On a terminal, it asks for a CA file when its configuration names
+none and `~/.config/wherry/ca.pem` is absent; leave it blank for a broker
+whose certificate the system's roots trust. It then reads the terms of every pool
 `acme` is entitled to and asks for a source for each credential their agents
 take that the configuration lacks: here `claude-oauth-token`, which the pool
 terms name in [Operator step 3](#_3-write-the-pool-terms). It writes
