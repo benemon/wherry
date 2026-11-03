@@ -1283,7 +1283,7 @@ Readers fold the records in order. A reader loads no state when:
 - a tenant or entitlement end names an absent subject;
 - a tenant end has a live entitlement or host, including a revoking host that has not ended (a revoking and ended host is allowed);
 - a record fails to decode;
-- two of the Kafka names that pools, receivers and hosts derive (topics,
+- two of the Kafka names that pools, receivers, hosts and tenants derive (topics,
   share groups, principals and transactional prefixes) collide.
 
 Readers ignore unknown members on a record and reject duplicate names. A

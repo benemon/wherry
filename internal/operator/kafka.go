@@ -622,7 +622,7 @@ func (service *Service) tenantTopics(ctx context.Context, tenant string) error {
 	return service.configureTopics(ctx, feedConfigs, topics...)
 }
 
-// tenantFeeds are the feeds and transcript topics of every tenant with a host or an entitlement.
+// tenantFeeds are the feeds and transcript topics of every live tenant.
 func tenantFeeds(state State) []string {
 	var topics []string
 	for _, tenant := range slices.Sorted(maps.Keys(state.Tenants)) {

@@ -294,9 +294,9 @@ which `operator init` gives ([The operator principal](security.md#the-operator-p
 | receiver | topic `wherry.pool.<own pool>.custodian` | Read, Write, Describe |
 | receiver | group `p-<own pool>.custodian` | Read, Describe |
 | receiver | transactional ID prefix `p.<own pool>.` | Write, Describe |
-| receiver | topic `wherry.tenant.<t>`, each tenant entitled to its pool | Write, Describe |
-| receiver | topic `wherry.tenant.<t>.transcript`, each tenant entitled to its pool | Write, Describe |
-| receiver | topic `wherry.host.<t>.<h>`, each host of those tenants | Read, Describe |
+| receiver | topic `wherry.tenant.<t>`, each tenant entitled to its pool now or before | Write, Describe |
+| receiver | topic `wherry.tenant.<t>.transcript`, each tenant entitled to its pool now or before | Write, Describe |
+| receiver | topic `wherry.host.<t>.<h>`, each host of those tenants, live or ended | Read, Describe |
 
 A principal whose membership has ended, or whose revocation is under way,
 has no grants. While a pool is [suspended](commands.md#wherry-operator-pool-suspend-pool),

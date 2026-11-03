@@ -11,7 +11,7 @@ Every command but `version` and the shortcuts runs under its role's word:
 
 | Role | Commands |
 | --- | --- |
-| Operator | `wherry operator init`; `wherry operator pool apply`, `suspend`, `resume` and `rotate-key`; `wherry operator tenant add`, `list`, `remove`, `pool add`, `pool remove`, `host add` and `host remove`; `wherry operator tenant host add` and `remove`; `wherry operator receiver apply`, `show` and `remove`; `wherry operator check` |
+| Operator | `wherry operator init`; `wherry operator pool apply`, `suspend`, `resume` and `rotate-key`; `wherry operator tenant add`, `list` and `remove`; `wherry operator tenant pool add` and `remove`; `wherry operator tenant host add` and `remove`; `wherry operator receiver apply`, `show` and `remove`; `wherry operator check` |
 | Receiver | `wherry receiver run` |
 | Host user | `wherry host init`, `key rotate`, `receivers`, `mcp`, `submit`, `wait`, `status`, `events`, `logs` and `cancel` |
 | Developer | `wherry dev init`, `up` and `down` |
@@ -132,8 +132,8 @@ takes with `flag provided but not defined: -<name>`, and one the command does
 not take with `unknown option --<name>`. `--suspect-key` is given once per key;
 any other repeated option takes its last value.
 
-Every operator command other than `init`, `check`, `receiver show` and a
-`--dry-run` ends by converging Kafka on `wherry.operator`. A pass reads
+Every operator command other than `init`, `check`, `receiver show`, `tenant list`
+and a `--dry-run` ends by converging Kafka on `wherry.operator`. A pass reads
 `wherry.operator` to its end and creates every ACL those records call for. It
 re-reads them and fails with `ACL plan incomplete` when one is missing. It
 deletes every other grant of a host or receiver principal on wherry's topics,
@@ -424,6 +424,42 @@ other than the task's `unsupplied_credentials`. The
 list can name a credential the envelope did not hold; it never omits one it
 did, so rotating every listed credential covers the exposure.
 
+### `wherry operator tenant add TENANT`
+
+Records a new tenant and creates its feed and transcript topics at 2 MiB per record batch. Refuses a tenant that exists or has ended: a tenant name can never return.
+
+### `wherry operator tenant list`
+
+Lists live tenants with their pools and live hosts, in deterministic name order, as plain text. Revoking and ended hosts are omitted.
+
+### `wherry operator tenant pool remove TENANT POOL`
+
+Ends the entitlement immediately and converges access grants. Recomputes each live host's minimum
+quotas across its remaining pools, deleting quotas when none remain. An absent or ended entitlement
+converges and applies quotas again, reports `not entitled`, and exits zero. Both pool commands
+refuse absent tenants (use `tenant add`) and ended tenants.
+
+### `wherry operator tenant remove TENANT`
+
+Ends every entitlement, deletes live hosts' quotas, revokes the tenant's hosts, then ends the tenant
+and removes `bundles/hosts/<tenant>/`. Each host revocation waits for its broker-derived minimum;
+removing a tenant with hosts takes time. Record appends and final convergences are sequential;
+hosts' revocation steps 2-5 run in parallel. Re-run after failure to continue, including on a
+revoking host. On an ended tenant, converges and retries bundle directory removal. Refuses an absent
+tenant. Removal revokes access; retained data and receiver grants remain. There is no `--wait`
+option on tenant removal.
+
+Tenant command states:
+
+| Command | Absent tenant | Live tenant | Ended tenant |
+| --- | --- | --- | --- |
+| `tenant add` | Create | Refuse: exists | Refuse: final |
+| `tenant pool add` | Refuse; use `tenant add` | Add or converge and apply quotas when already entitled | Refuse |
+| `tenant pool remove` | Refuse | End or converge and apply quotas when not entitled | Refuse |
+| `tenant host add` | Refuse | Add; reissue a live host with `--force`; refuse revoking or ended hosts | Refuse |
+| `tenant host remove` | Refuse | Revoke; retry from its record; converge when already ended | Refuse |
+| `tenant remove` | Refuse | End entitlements, revoke hosts, end tenant, remove bundles | Converge and retry bundle removal |
+
 ### `wherry operator tenant host add TENANT HOST`
 
 ```sh
@@ -434,9 +470,10 @@ Records a host of an existing live tenant, creates its principal and key topic, 
 its bundle to `bundles/hosts/<tenant>/<host>.bundle`, naming the broker in
 `operator.yaml`. It refuses a host that exists, and an existing bundle file,
 unless given [`--force`](#operator-commands). For a host that exists,
-`--force` reissues its identity: it records nothing and sets no topic or
-quota, and [converges](#operator-commands) the ACLs as every operator command
-does. A revoking host or a host whose membership ended is refused, including with `--force`. Host names are unique
+`--force` reissues its identity: it records nothing and creates no topic. It
+reapplies the host's quotas and [converges](#operator-commands) the ACLs as
+every operator command does, so it also repairs a host add that failed after
+its record was written. A revoking host or a host whose membership ended is refused, including with `--force`. Host names are unique
 within a tenant; hosts of the same name in other tenants have bundles of
 their own.
 
@@ -1559,39 +1596,3 @@ git tag, such as `v0.1.0-rc.9`. A build from an untagged commit prints a Go
 pseudo-version, and a build without git information prints `(devel)` and an
 empty revision. A build from a working tree with uncommitted changes adds
 `modified=true`. It takes no flags and reads no configuration.
-
-### `wherry operator tenant add TENANT`
-
-Records a new tenant and creates its feed and transcript topics at 2 MiB per record batch. Refuses a tenant that exists or has ended: a tenant name can never return.
-
-### `wherry operator tenant list`
-
-Lists live tenants with their pools and live hosts, in deterministic name order, as plain text. Revoking and ended hosts are omitted.
-
-### `wherry operator tenant pool remove TENANT POOL`
-
-Ends the entitlement immediately and converges access grants. Recomputes each live host's minimum
-quotas across its remaining pools, deleting quotas when none remain. An absent or ended entitlement
-converges and applies quotas again, reports `not entitled`, and exits zero. Both pool commands
-refuse absent tenants (use `tenant add`) and ended tenants.
-
-### `wherry operator tenant remove TENANT`
-
-Ends every entitlement, deletes live hosts' quotas, revokes the tenant's hosts, then ends the tenant
-and removes `bundles/hosts/<tenant>/`. Each host revocation waits for its broker-derived minimum;
-removing a tenant with hosts takes time. Record appends and final convergences are sequential;
-hosts' revocation steps 2–5 run in parallel. Re-run after failure to continue, including on a
-revoking host. On an ended tenant, converges and retries bundle directory removal. Refuses an absent
-tenant. Removal revokes access; retained data and receiver grants remain. There is no `--wait`
-option on tenant removal.
-
-Tenant command states:
-
-| Command | Absent tenant | Live tenant | Ended tenant |
-| --- | --- | --- | --- |
-| `tenant add` | Create | Refuse: exists | Refuse: final |
-| `tenant pool add` | Refuse; use `tenant add` | Add or converge and apply quotas when already entitled | Refuse |
-| `tenant pool remove` | Refuse | End or converge and apply quotas when not entitled | Refuse |
-| `tenant host add` | Refuse | Add; reissue a live host with `--force`; refuse revoking or ended hosts | Refuse |
-| `tenant host remove` | Refuse | Revoke; retry from its record; converge when already ended | Refuse |
-| `tenant remove` | Refuse | End entitlements, revoke hosts, end tenant, remove bundles | Converge and retry bundle removal |

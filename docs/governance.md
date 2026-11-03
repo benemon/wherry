@@ -12,7 +12,9 @@ generates each host and receiver ACL from the state on `wherry.operator`,
 `operator init` gives `wherry.operator` its own, and no other approval step
 exists. A tenant's hosts reach only the pools the tenant is entitled to. A
 receiver reaches its own pool, and the feeds, transcript topics and host key
-topics of the tenants entitled to it.
+topics of the tenants entitled to it now or before: it keeps them after a
+removal so that runs it already holds can finish
+([Removal and retained data](security.md#removal-and-retained-data)).
 [Identity and authorisation](concepts.md#identity-and-authorisation)
 describes the principals and [ACLs](design.md#acls) lists the matrix.
 
