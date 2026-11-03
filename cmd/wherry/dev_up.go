@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -17,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"maps"
 	"math/big"
@@ -35,8 +37,8 @@ import (
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/operator"
-	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
+	jose "github.com/go-jose/go-jose/v4"
 	"github.com/hashicorp/nomad/api"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -923,30 +925,78 @@ func devBootstrap(ctx context.Context, env devEnv, agents []string, service oper
 	return writeYAML(instance.env("receiver", "config.yaml"), local)
 }
 
-// placeHost writes the host's bundle, config.yaml and key, and registers the host. The default instance writes them at
-// the standard host paths unless something there is not what an earlier up recorded writing and left unchanged, which
-// is never overwritten; each other instance writes them in env/host. At the standard paths, the manifest records each
-// file before it is written, so that down removes only what up wrote.
+// devHostStep runs after up's check of the standard host paths, with "", and after each file it creates there, with its
+// path; a variable so tests can race and interrupt up.
+var devHostStep = func(path string) {}
+
+// placeHost writes the host's bundle, config.yaml and key, and registers the host. The default instance, without
+// WHERRY_CONFIG set, creates them at the standard host paths when nothing is there, and falls back to env/host when
+// anything is or appears there; it never replaces a file. Each other instance writes them in env/host.
 func placeHost(ctx context.Context, env *devEnv, sources map[string]credential.Source, stderr io.Writer) (busclient.Config, string, error) {
 	instance := env.instance
-	dir, stateDir := instance.env("host"), instance.env("host", "state")
 	if instance.name == "default" {
 		if err := removeHostFiles(instance, stderr); err != nil {
 			return busclient.Config{}, "", err
 		}
 		env.manifest.HostFiles = nil
-		standard, standardState, err := standardHostDirs()
-		if err != nil {
-			return busclient.Config{}, "", err
-		}
-		taken := slices.ContainsFunc([]string{filepath.Join(standard, "config.yaml"), filepath.Join(standard, "bundle.yaml"), filepath.Join(standard, "host.key"), standardState}, func(path string) bool {
-			_, err := os.Lstat(path)
-			return !errors.Is(err, os.ErrNotExist)
-		})
-		if !taken {
-			dir, stateDir = standard, standardState
+		if os.Getenv("WHERRY_CONFIG") == "" {
+			dir, stateDir, err := standardHostDirs()
+			if err != nil {
+				return busclient.Config{}, "", err
+			}
+			taken := slices.ContainsFunc([]string{filepath.Join(dir, "config.yaml"), filepath.Join(dir, "bundle.yaml"), filepath.Join(dir, "host.key"), stateDir}, func(path string) bool {
+				_, err := os.Lstat(path)
+				return !errors.Is(err, os.ErrNotExist)
+			})
+			devHostStep("")
+			if !taken {
+				host, config, err := writeHost(env, sources, dir, stateDir, true)
+				if err == nil {
+					return registerHost(ctx, host, config)
+				}
+				if !errors.Is(err, fs.ErrExist) {
+					return busclient.Config{}, "", err
+				}
+				if err := removeHostFiles(instance, stderr); err != nil {
+					return busclient.Config{}, "", err
+				}
+				env.manifest.HostFiles = nil
+			}
 		}
 	}
+	host, config, err := writeHost(env, sources, instance.env("host"), instance.env("host", "state"), false)
+	if err != nil {
+		return busclient.Config{}, "", err
+	}
+	return registerHost(ctx, host, config)
+}
+
+func registerHost(ctx context.Context, host busclient.Config, config string) (busclient.Config, string, error) {
+	if _, _, err := busclient.Init(ctx, host); err != nil {
+		return busclient.Config{}, "", fmt.Errorf("init: %w", err)
+	}
+	return host, config, nil
+}
+
+// writeHost creates the host's config.yaml, bundle and key in dir and its state directory, each failing if anything is
+// there. When record is set, the manifest records each path and SHA-256 before its create, and its device and inode
+// after, so that down removes only what up created.
+func writeHost(env *devEnv, sources map[string]credential.Source, dir, stateDir string, record bool) (busclient.Config, string, error) {
+	instance := env.instance
+	for _, path := range []string{dir, filepath.Dir(stateDir)} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			return busclient.Config{}, "", err
+		}
+	}
+	dir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return busclient.Config{}, "", err
+	}
+	stateParent, err := filepath.EvalSymlinks(filepath.Dir(stateDir))
+	if err != nil {
+		return busclient.Config{}, "", err
+	}
+	stateDir = filepath.Join(stateParent, filepath.Base(stateDir))
 	source, err := bundlePath(instance.env("operator"), "hosts", false, devTenant, devHost)
 	if err != nil {
 		return busclient.Config{}, "", err
@@ -965,44 +1015,101 @@ func placeHost(ctx context.Context, env *devEnv, sources map[string]credential.S
 	if err != nil {
 		return busclient.Config{}, "", err
 	}
-	configPath := filepath.Join(dir, "config.yaml")
-	files := map[string][]byte{host.Bundle: bundle, configPath: config}
-	standard := dir != instance.env("host")
-	if standard {
-		env.manifest.HostFiles = &devHostFiles{Files: map[string]string{}, StateDir: stateDir}
-		for path, data := range files {
-			sum := sha256.Sum256(data)
-			env.manifest.HostFiles.Files[path] = hex.EncodeToString(sum[:])
-		}
-		if err := writeManifest(instance, env.manifest); err != nil {
-			return busclient.Config{}, "", err
-		}
-	}
-	for _, path := range []string{dir, stateDir} {
-		if err := os.MkdirAll(path, 0o700); err != nil {
-			return busclient.Config{}, "", err
-		}
-	}
-	for path, data := range files {
-		if err := writeFileAtomic(path, data, 0o600); err != nil {
-			return busclient.Config{}, "", err
-		}
-	}
-	if _, err := trust.GenerateSigningKeyFile(host.HostKey); err != nil {
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
 		return busclient.Config{}, "", err
 	}
-	if standard {
-		if env.manifest.HostFiles.Files[host.HostKey], err = fileSHA256(host.HostKey); err != nil {
+	jwk, err := (&jose.JSONWebKey{Key: key}).MarshalJSON()
+	if err != nil {
+		return busclient.Config{}, "", err
+	}
+	save := func() error { return nil }
+	if record {
+		env.manifest.HostFiles = &devHostFiles{Files: map[string]devHostFile{}}
+		save = func() error { return writeManifest(instance, env.manifest) }
+	}
+	recorded := env.manifest.HostFiles
+	configPath := filepath.Join(dir, "config.yaml")
+	for _, file := range []struct {
+		path string
+		data []byte
+	}{{configPath, config}, {host.Bundle, bundle}, {host.HostKey, jwk}} {
+		sum := sha256.Sum256(file.data)
+		entry := devHostFile{SHA256: hex.EncodeToString(sum[:])}
+		if record {
+			recorded.Files[file.path] = entry
+			if err := save(); err != nil {
+				return busclient.Config{}, "", err
+			}
+		}
+		id, err := createFile(file.path, file.data)
+		if err != nil {
+			if record && errors.Is(err, fs.ErrExist) {
+				delete(recorded.Files, file.path)
+				err = errors.Join(err, save())
+			}
 			return busclient.Config{}, "", err
 		}
-		if err := writeManifest(instance, env.manifest); err != nil {
+		if record {
+			devHostStep(file.path)
+			entry.Device, entry.Inode = id.Device, id.Inode
+			recorded.Files[file.path] = entry
+			if err := save(); err != nil {
+				return busclient.Config{}, "", err
+			}
+		}
+	}
+	if record {
+		recorded.StateDir = stateDir
+		if err := save(); err != nil {
 			return busclient.Config{}, "", err
 		}
 	}
-	if _, _, err := busclient.Init(ctx, host); err != nil {
-		return busclient.Config{}, "", fmt.Errorf("init: %w", err)
+	if err := os.Mkdir(stateDir, 0o700); err != nil {
+		if record {
+			recorded.StateDir = ""
+			err = errors.Join(err, save())
+		}
+		return busclient.Config{}, "", err
+	}
+	if record {
+		info, err := os.Lstat(stateDir)
+		if err != nil {
+			return busclient.Config{}, "", err
+		}
+		recorded.State = fileID(info)
+		if err := save(); err != nil {
+			return busclient.Config{}, "", err
+		}
 	}
 	return host, configPath, nil
+}
+
+// createFile creates path with data, mode 0600, failing if anything is there, a dangling symlink included, and returns
+// the device and inode of the file it created.
+func createFile(path string, data []byte) (devHostFile, error) {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return devHostFile{}, err
+	}
+	defer file.Close()
+	if _, err := file.Write(data); err != nil {
+		return devHostFile{}, err
+	}
+	if err := file.Sync(); err != nil {
+		return devHostFile{}, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return devHostFile{}, err
+	}
+	return fileID(info), file.Close()
+}
+
+// fileID is the device and inode info names.
+func fileID(info os.FileInfo) devHostFile {
+	stat := info.Sys().(*syscall.Stat_t)
+	return devHostFile{Device: uint64(stat.Dev), Inode: stat.Ino}
 }
 
 // standardHostDirs are the host's standard config and state directories.
@@ -1015,36 +1122,80 @@ func standardHostDirs() (string, string, error) {
 	return config, state, err
 }
 
-// removeHostFiles removes each file the instance's manifest records up writing at the standard host paths that is
-// unchanged since, and the state directory when every one was, then clears the record. A file changed since may be a
-// real host's, so it stays.
+// removeHostFiles removes what the instance's manifest records up creating at the standard host paths, then clears the
+// record. It removes a file only while it is the one up created, and the state directory only when up created it and
+// removed every file. What it leaves it names. A manifest it cannot read may record files, so it refuses.
 func removeHostFiles(instance devInstance, stderr io.Writer) error {
-	// A manifest this wherry cannot read records nothing it can remove; down --reset still clears it.
-	manifest, _ := readManifest(instance)
+	manifest, err := readManifest(instance)
+	if err != nil {
+		config, state, _ := standardHostDirs()
+		return fmt.Errorf("%w; it may record host files wherry dev up created: check %s, %s, %s and %s by hand, then remove %s",
+			err, filepath.Join(config, "config.yaml"), filepath.Join(config, "bundle.yaml"), filepath.Join(config, "host.key"), state, instance.cache("manifest.json"))
+	}
 	if manifest == nil || manifest.HostFiles == nil {
 		return nil
 	}
+	recorded := manifest.HostFiles
 	var failures []error
-	unchanged := true
-	for _, path := range slices.Sorted(maps.Keys(manifest.HostFiles.Files)) {
-		sum, err := fileSHA256(path)
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-		case err == nil && sum == manifest.HostFiles.Files[path]:
-			failures = append(failures, os.Remove(path))
-		default:
-			unchanged = false
-			fmt.Fprintf(stderr, "left %s: it changed after wherry dev up wrote it\n", path)
+	removed := true
+	for _, path := range slices.Sorted(maps.Keys(recorded.Files)) {
+		if err := notCreated(path, recorded.Files[path], false); err != nil {
+			removed = false
+			fmt.Fprintf(stderr, "left %s: %v\n", path, err)
+			continue
 		}
+		failures = append(failures, os.Remove(path))
 	}
-	if unchanged && manifest.HostFiles.StateDir != "" {
-		failures = append(failures, os.RemoveAll(manifest.HostFiles.StateDir))
+	if recorded.StateDir != "" {
+		err := notCreated(recorded.StateDir, recorded.State, true)
+		if !removed {
+			err = errors.New("a host file wherry dev up created was not removed")
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "left %s: %v\n", recorded.StateDir, err)
+		} else {
+			failures = append(failures, os.RemoveAll(recorded.StateDir))
+		}
 	}
 	if err := errors.Join(failures...); err != nil {
 		return err
 	}
 	manifest.HostFiles = nil
 	return writeManifest(instance, *manifest)
+}
+
+// notCreated says why path is not the file, or directory, up created as entry records, nil when it is. Without a
+// device and inode, which a crash before their record leaves, a file's SHA-256 identifies it.
+func notCreated(path string, entry devHostFile, dir bool) error {
+	if real, err := filepath.EvalSymlinks(filepath.Dir(path)); err != nil || real != filepath.Dir(path) {
+		return errors.New("its directory is no longer the one wherry dev up created it in")
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return errors.New("it is gone")
+	}
+	if err != nil {
+		return err
+	}
+	if dir && !info.IsDir() || !dir && !info.Mode().IsRegular() {
+		return errors.New("it is not what wherry dev up created")
+	}
+	if entry.Inode != 0 && fileID(info) != (devHostFile{Device: entry.Device, Inode: entry.Inode}) {
+		return errors.New("it was replaced after wherry dev up created it")
+	}
+	if dir {
+		if entry.Inode == 0 {
+			return errors.New("wherry dev up did not record creating it")
+		}
+		return nil
+	}
+	if entry.SHA256 == "" {
+		return errors.New("wherry dev up did not record creating it")
+	}
+	if sum, err := fileSHA256(path); err != nil || sum != entry.SHA256 {
+		return errors.New("it changed after wherry dev up created it")
+	}
+	return nil
 }
 
 // hostConfigFile is config as its YAML file holds it, with only the set fields.

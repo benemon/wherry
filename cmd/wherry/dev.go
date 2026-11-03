@@ -27,7 +27,7 @@ import (
 )
 
 // devManifestVersion is the manifest layout this build reads and writes.
-const devManifestVersion = 1
+const devManifestVersion = 2
 
 // devHarnesses are the agent CLIs init looks for on PATH, in profile order.
 var devHarnesses = []string{"claude", "codex", "gemini"}
@@ -47,17 +47,25 @@ type devManifest struct {
 	Agents       []string            `json:"agents"`
 	DefaultAgent string              `json:"default_agent"`
 	Storage      *devImage           `json:"storage"`
-	// HostFiles is what up wrote at the standard host paths; init keeps it.
+	// HostFiles is what up created at the standard host paths; init keeps it.
 	HostFiles *devHostFiles `json:"host_files,omitzero"`
 	// EnvDenylist holds the names in the user's environment at init that end _TOKEN, _KEY, _SECRET or _PASSWORD.
 	EnvDenylist []string `json:"env_denylist"`
 }
 
-// devHostFiles are the files up wrote at the standard host paths, each with its SHA-256 as written, and the state
-// directory it gave the host there.
+// devHostFiles are what up created at the standard host paths, by their resolved paths: each file, and the state
+// directory.
 type devHostFiles struct {
-	Files    map[string]string `json:"files"`
-	StateDir string            `json:"state_dir"`
+	Files    map[string]devHostFile `json:"files"`
+	StateDir string                 `json:"state_dir,omitzero"`
+	State    devHostFile            `json:"state,omitzero"`
+}
+
+// devHostFile is a file's SHA-256 as up created it, and the device and inode it created it as.
+type devHostFile struct {
+	SHA256 string `json:"sha256,omitzero"`
+	Device uint64 `json:"device,omitzero"`
+	Inode  uint64 `json:"inode,omitzero"`
 }
 
 type devArtefact struct {
@@ -226,12 +234,18 @@ func readManifest(instance devInstance) (*devManifest, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Another version's layout may not decode as this one's.
 	var manifest devManifest
-	if err := json.Unmarshal(encoded, &manifest); err != nil {
+	if err := json.Unmarshal(encoded, &struct {
+		Version *int `json:"version"`
+	}{&manifest.Version}); err != nil {
 		return nil, fmt.Errorf("manifest %s: %w", path, err)
 	}
 	if manifest.Version != devManifestVersion {
 		return nil, fmt.Errorf("manifest %s has version %d, which this wherry does not read; run wherry dev down --reset", path, manifest.Version)
+	}
+	if err := json.Unmarshal(encoded, &manifest); err != nil {
+		return nil, fmt.Errorf("manifest %s: %w", path, err)
 	}
 	return &manifest, nil
 }

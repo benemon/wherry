@@ -1443,6 +1443,13 @@ An instance is up while its `env/up.json` names a live Nomad agent that
 `up` started. Every step prints its name on standard error, and a failed
 step fails with `step <name>: <cause>`.
 
+`dev` is one developer's tool, and two of its limits follow from that.
+Commands run at once on one instance are not serialized: run one at a
+time. And `XDG_DATA_HOME`, or `HOME` without it, must be the same for `up`
+and `down`, since it locates the instance and its record of the host files
+`up` created; `XDG_CONFIG_HOME` and `XDG_STATE_HOME` may change, since the
+record holds absolute paths.
+
 ### `wherry dev init`
 
 ```sh
@@ -1536,14 +1543,19 @@ returns once a run of the mock agent completes. Its steps:
    profile per agent, their bundles under `env/operator/bundles/`. The
    receiver's `config.yaml` names the instance CA as `ca_file`.
 9. `host` writes the host's `config.yaml`, bundle and key, and registers
-   the key. For instance `default` they go at the standard
-   [host paths](configuration.md#client-configuration), its state in
-   `$XDG_STATE_HOME/wherry`, by default `~/.local/state/wherry`, and
-   `cache/manifest.json` records each file's SHA-256. If a file is there
-   that `up` did not write, or one changed since, `up` leaves it, as it
-   does for every other instance, and writes them in `env/host/`. The
-   config names the instance CA as `ca_file`, and the dev pool's
-   [storage](configuration.md#client-configuration) credentials with storage.
+   the key. For instance `default`, unless `WHERRY_CONFIG` is set, they go
+   at the standard [host paths](configuration.md#client-configuration), its
+   state in `$XDG_STATE_HOME/wherry`, by default `~/.local/state/wherry`.
+   `up` creates each file exclusively, and the state directory with
+   `mkdir`, so it never replaces anything there. `cache/manifest.json`
+   records each path, the directories resolved through symlinks, with the
+   file's SHA-256 before `up` creates it, and its device and inode after.
+   If the config, bundle, key or state is already there, or appears while
+   `up` creates them, `up` removes what it created there and, as for every
+   other instance and with `WHERRY_CONFIG` set, writes them in
+   `env/host/`. The config names the instance CA as `ca_file`, and the dev
+   pool's [storage](configuration.md#client-configuration) credentials
+   with storage.
 10. `receiver` runs `wherry receiver run` from the copy as a `raw_exec` job
     and waits for `dev-1` to be live with every profile ready.
 11. `smoke` runs the mock agent and checks the output it returns. `ready`
@@ -1588,11 +1600,16 @@ Its steps, each run after a failed one:
    `SIGKILL` after 30 seconds.
 4. `ports` checks that the ports are free.
 5. `data` removes `env/`.
-6. `host` removes each file the manifest records `up` writing at the
-   standard host paths whose SHA-256 is unchanged, and the state directory
-   when every one was, so a stale default never shadows a real host's. A
-   file changed since may be a real host's: `down` leaves it and prints
-   `left <path>: it changed after wherry dev up wrote it`.
+6. `host` removes each file the manifest records `up` creating at the
+   standard host paths while it is still that file: a regular file, not a
+   symlink, with the recorded device, inode and SHA-256, in a directory
+   that still resolves to the recorded one. It removes the state directory
+   only when `up` created it and `down` removed every recorded file. So a
+   stale default never shadows a real host's, and a real host's file stays.
+   Anything else, a missing file included, it leaves and names:
+   `left <path>: <reason>`. One window remains: a file replaced between
+   this check and its removal is removed, since the operating system
+   offers no removal conditional on identity.
 
 `down` fails naming every failed step. It keeps `cache/` and prints a
 `mcp remove` line for each harness, since the registration names a
@@ -1601,8 +1618,11 @@ configuration that is gone. An instance that is not up prints
 in step 6, and exits 0.
 
 With `--reset`, `down` removes the host files as in step 6, then
-`cache/`. It refuses `--reset` while the instance is up. The images stay in the runtime's store. Remove
-`wherry-dev/kafka:<id12>` with the runtime.
+`cache/`. It refuses `--reset` while the instance is up, and when it
+cannot read the manifest, which may record host files: it names the
+standard paths to check by hand before you remove the manifest. The
+images stay in the runtime's store. Remove `wherry-dev/kafka:<id12>` with
+the runtime.
 
 ## Version command
 

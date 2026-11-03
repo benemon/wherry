@@ -19,12 +19,13 @@ The host's paths are the same on every OS, macOS included:
 | `~/.config/wherry/`, or `$XDG_CONFIG_HOME/wherry/` when that is set | `config.yaml`, `bundle.yaml`, `host.key` and, for a private CA, `ca.pem` |
 | `~/.local/state/wherry/`, or `$XDG_STATE_HOME/wherry/` when that is set | the host's state, `state_dir` |
 
-[`wherry dev up`](commands.md#wherry-dev-up) writes `config.yaml`,
+[`wherry dev up`](commands.md#wherry-dev-up) creates `config.yaml`,
 `bundle.yaml`, `host.key` and the state directory here for its `default`
-instance when nothing is there that it did not write, and records each
-file's SHA-256; `wherry dev down` removes those still unchanged. It never
-overwrites a real host's files: otherwise, and for every other instance, it
-writes them inside the instance and prints the `WHERRY_CONFIG` to use.
+instance when none of them is there and `WHERRY_CONFIG` is not set, and
+records what it created; `wherry dev down` removes only those, while each
+is still the file `up` created. It never replaces a real host's files:
+otherwise, and for every other instance, it writes them inside the
+instance and prints the `WHERRY_CONFIG` to use.
 
 | Field | Default | Content |
 | --- | --- | --- |

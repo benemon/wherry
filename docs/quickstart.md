@@ -97,9 +97,10 @@ claude: claude mcp add wherry-default -- wherry host mcp
 
 `up` writes the host's config, bundle and key at the standard host paths,
 where every host command reads them, so the commands below take no flags.
-If a host config that `up` did not write is already there, `up` leaves it
-and prints `export WHERRY_CONFIG=<path>` for the instance's own config
-instead ([`wherry dev up`](commands.md#wherry-dev-up)). The `claude:` line
+If a host config, bundle, key or state that `up` did not create is already
+there, or `WHERRY_CONFIG` is set, `up` leaves them and writes the host
+inside the instance, and prints `export WHERRY_CONFIG=<path>` for its config
+([`wherry dev up`](commands.md#wherry-dev-up)). The `claude:` line
 registers the MCP server with Claude Code, so a session submits through the
 `wherry-default` tools. `up` copies
 `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CODEX_API_KEY` (or
@@ -136,7 +137,7 @@ wherry dev down
 ```
 
 `down` stops everything, deletes the environment's data and credentials,
-and removes the host files `up` wrote at the standard paths. `wherry dev
+and removes the host files `up` created at the standard paths. `wherry dev
 down --reset` deletes the downloads.
 
 ## Operator

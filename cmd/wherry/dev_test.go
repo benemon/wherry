@@ -31,7 +31,7 @@ import (
 
 // manifestFixture is section 2's manifest with every field set.
 const manifestFixture = `{
-  "version": 1,
+  "version": 2,
   "updated": "2026-10-28T10:00:00Z",
   "os": "linux",
   "arch": "amd64",
@@ -47,7 +47,7 @@ const manifestFixture = `{
   "default_agent": "claude",
   "storage": {"reference": "quay.io/benjamin_holmes/ceph-aio:v21", "digest": "sha256:11", "id": "sha256:22", "tag": "wherry-dev/ceph-aio:22"},
   "env_denylist": ["CODEX_API_KEY"],
-  "host_files": {"files": {"/home/u/.config/wherry/config.yaml": "33"}, "state_dir": "/home/u/.local/state/wherry"}
+  "host_files": {"files": {"/home/u/.config/wherry/config.yaml": {"sha256": "33", "device": 44, "inode": 55}}, "state_dir": "/home/u/.local/state/wherry", "state": {"device": 44, "inode": 66}}
 }`
 
 // devFixture points HOME, the XDG directories and so the dev root and the standard host paths at temporary
@@ -101,11 +101,11 @@ func TestDevManifestRoundTrip(t *testing.T) {
 	if info, err := os.Stat(instance.cache("manifest.json")); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("manifest mode %v, %v", info.Mode(), err)
 	}
-	if err := os.WriteFile(instance.cache("manifest.json"), []byte(strings.Replace(manifestFixture, `"version": 1,`, `"version": 2,`, 1)), 0o600); err != nil {
+	if err := os.WriteFile(instance.cache("manifest.json"), []byte(strings.Replace(manifestFixture, `"version": 2,`, `"version": 3,`, 1)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readManifest(instance); err == nil || !strings.Contains(err.Error(), instance.cache("manifest.json")) {
-		t.Fatalf("version 2 read with %v; want a refusal naming the path", err)
+		t.Fatalf("version 3 read with %v; want a refusal naming the path", err)
 	}
 }
 
