@@ -46,13 +46,18 @@ const manifestFixture = `{
   "agents": ["claude", "codex"],
   "default_agent": "claude",
   "storage": {"reference": "quay.io/benjamin_holmes/ceph-aio:v21", "digest": "sha256:11", "id": "sha256:22", "tag": "wherry-dev/ceph-aio:22"},
-  "env_denylist": ["CODEX_API_KEY"]
+  "env_denylist": ["CODEX_API_KEY"],
+  "host_files": {"files": {"/home/u/.config/wherry/config.yaml": "33"}, "state_dir": "/home/u/.local/state/wherry"}
 }`
 
-// devFixture points the dev root at a temporary directory and returns the default instance.
+// devFixture points HOME, the XDG directories and so the dev root and the standard host paths at temporary
+// directories, and returns the default instance.
 func devFixture(t *testing.T) devInstance {
 	t.Helper()
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, variable := range []string{"HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"} {
+		t.Setenv(variable, t.TempDir())
+	}
+	t.Setenv("WHERRY_CONFIG", "")
 	instance, err := openInstance("default")
 	if err != nil {
 		t.Fatal(err)

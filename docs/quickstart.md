@@ -90,13 +90,18 @@ once, and prints:
 
 ```
 ready: instance default (nomad 2.0.7, kafka 1a2b3c4d5e6f, plugin nomad/v0.1.0-rc.16, wherry v0.1.0-rc.24)
-config: /home/me/.local/share/wherry/dev/default/env/host/config.yaml
-submit: wherry submit --config-file /home/me/.local/share/wherry/dev/default/env/host/config.yaml --prompt "..."
-claude: claude mcp add wherry-default -- /home/me/.local/share/wherry/dev/default/cache/wherry host mcp --config-file /home/me/.local/share/wherry/dev/default/env/host/config.yaml
+config: /home/me/.config/wherry/config.yaml
+submit: wherry submit --prompt "..."
+claude: claude mcp add wherry-default -- wherry host mcp
 ```
 
-The `claude:` line registers the MCP server with Claude Code, so a session
-submits through the `wherry-default` tools. `up` copies
+`up` writes the host's config, bundle and key at the standard host paths,
+where every host command reads them, so the commands below take no flags.
+If a host config that `up` did not write is already there, `up` leaves it
+and prints `export WHERRY_CONFIG=<path>` for the instance's own config
+instead ([`wherry dev up`](commands.md#wherry-dev-up)). The `claude:` line
+registers the MCP server with Claude Code, so a session submits through the
+`wherry-default` tools. `up` copies
 `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CODEX_API_KEY` (or
 `OPENAI_API_KEY`) and `GEMINI_API_KEY` from its environment into the host's
 credential files when they are set, and Nomad keeps them out of the agents'
@@ -108,8 +113,7 @@ builds.
 ### 3. Submit
 
 ```sh
-config=~/.local/share/wherry/dev/default/env/host/config.yaml
-wherry submit --config-file "$config" --prompt "List the files in your input directory."
+wherry submit --prompt "List the files in your input directory."
 ```
 
 `submit` prints `run_id=run-<id> pool=dev`. Each harness runs its own
@@ -119,7 +123,7 @@ default model. `wherry submit` is a [shortcut](commands.md#shortcuts) for
 ### 4. Wait
 
 ```sh
-wherry wait run-<id> --config-file "$config"
+wherry wait run-<id>
 ```
 
 `wait` prints the agent's message once the run ends. `wherry logs run-<id>`
@@ -131,8 +135,9 @@ prints its transcript.
 wherry dev down
 ```
 
-`down` stops everything and deletes the environment's data and
-credentials. `wherry dev down --reset` deletes the downloads.
+`down` stops everything, deletes the environment's data and credentials,
+and removes the host files `up` wrote at the standard paths. `wherry dev
+down --reset` deletes the downloads.
 
 ## Operator
 

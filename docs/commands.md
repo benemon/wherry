@@ -1511,11 +1511,10 @@ returns once a run of the mock agent completes. Its steps:
    `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CODEX_API_KEY` (else
    `OPENAI_API_KEY`), `GEMINI_API_KEY` and `WHERRY_DEV_MOCK_TOKEN` are
    copied into `env/host/credentials/`, mode 0600.
-3. `tls`, `passwords`: an instance CA, the broker's certificate for
-   127.0.0.1, and the SCRAM passwords of `wherry-admin` and
-   `wherry.operator`. `env/admin` is an operator
-   [working directory](configuration.md#operator-working-directory) for the
-   instance: `wherry operator --dir <instance>/env/admin` runs against it.
+3. `tls`, `super-user`: an instance CA, the broker's certificate for
+   127.0.0.1, and the password of the Kafka super user `wherry-admin`, the
+   only SCRAM credential the broker starts with. These are the Kafka
+   administrator's part.
 4. `image` checks that the manifest's tags are still in the runtime, and
    fails with `image TAG is no longer in the runtime; run wherry dev init`.
 5. `nomad` starts `nomad agent -dev` as you, detached, its log in
@@ -1526,16 +1525,33 @@ returns once a run of the mock agent completes. Its steps:
    them. On Linux without a Podman socket it starts `podman system
    service` beside Nomad.
 6. `kafka` runs the broker as a Nomad job from the local tag and waits for
-   a metadata request over SCRAM. `operator-acl` delegates to
-   `wherry.operator` as [`operator init`](#wherry-operator-init) does.
-7. `bootstrap` makes the admin calls of the operator's steps: pool `dev`,
-   tenant `dev`, host `dev` and receiver `dev-1` with a plugin profile per
-   agent, and registers the host key. The host's and the receiver's
-   configurations name the instance CA as `ca_file`.
-8. `receiver` runs `wherry receiver run` from the copy as a `raw_exec` job
-   and waits for `dev-1` to be live with every profile ready.
-9. `smoke` runs the mock agent and checks the output it returns. `ready`
-   writes `env/up.json` and prints the summary.
+   a metadata request over SCRAM.
+7. `operator` runs [`operator init`](#wherry-operator-init) with
+   `wherry-admin` given as flags, never prompting, on `env/operator`, the
+   instance's operator
+   [working directory](configuration.md#operator-working-directory):
+   `wherry operator --dir <instance>/env/operator check` runs against it.
+8. `bootstrap` makes the operator's calls through that directory: pool
+   `dev`, tenant `dev`, host `dev` and receiver `dev-1` with a plugin
+   profile per agent, their bundles under `env/operator/bundles/`. The
+   receiver's `config.yaml` names the instance CA as `ca_file`.
+9. `host` writes the host's `config.yaml`, bundle and key, and registers
+   the key. For instance `default` they go at the standard
+   [host paths](configuration.md#client-configuration), its state in
+   `$XDG_STATE_HOME/wherry`, by default `~/.local/state/wherry`, and
+   `cache/manifest.json` records each file's SHA-256. If a file is there
+   that `up` did not write, or one changed since, `up` leaves it, as it
+   does for every other instance, and writes them in `env/host/`. The
+   config names the instance CA as `ca_file`, and the dev pool's
+   [storage](configuration.md#client-configuration) credentials with storage.
+10. `receiver` runs `wherry receiver run` from the copy as a `raw_exec` job
+    and waits for `dev-1` to be live with every profile ready.
+11. `smoke` runs the mock agent and checks the output it returns. `ready`
+    writes `env/up.json` and prints the summary, a `submit:` line and an
+    `mcp add` line for each harness. When the config is in `env/host/`, it
+    prints `export WHERRY_CONFIG=<path>` first, and each `mcp add` line
+    passes `WHERRY_CONFIG` to the server; otherwise neither names the
+    config.
 
 The harness profiles and `mock` run under `raw_exec` with label
 `isolation: host`. `--agent-image NAME=IMAGE` splits at the first `=`. It
@@ -1572,14 +1588,20 @@ Its steps, each run after a failed one:
    `SIGKILL` after 30 seconds.
 4. `ports` checks that the ports are free.
 5. `data` removes `env/`.
+6. `host` removes each file the manifest records `up` writing at the
+   standard host paths whose SHA-256 is unchanged, and the state directory
+   when every one was, so a stale default never shadows a real host's. A
+   file changed since may be a real host's: `down` leaves it and prints
+   `left <path>: it changed after wherry dev up wrote it`.
 
 `down` fails naming every failed step. It keeps `cache/` and prints a
 `mcp remove` line for each harness, since the registration names a
 configuration that is gone. An instance that is not up prints
-`instance NAME is not up`, removes a leftover `env/` and exits 0.
+`instance NAME is not up`, removes a leftover `env/` and the host files as
+in step 6, and exits 0.
 
-With `--reset`, `down` removes `cache/`. It refuses `--reset` while
-the instance is up. The images stay in the runtime's store. Remove
+With `--reset`, `down` removes the host files as in step 6, then
+`cache/`. It refuses `--reset` while the instance is up. The images stay in the runtime's store. Remove
 `wherry-dev/kafka:<id12>` with the runtime.
 
 ## Version command

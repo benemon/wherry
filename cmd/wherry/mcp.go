@@ -84,8 +84,13 @@ func waitCommand(configFile string) (func(id string) string, error) {
 	if path, err = filepath.Abs(path); err != nil {
 		return nil, err
 	}
-	quoted := "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+	quoted := shellQuote(path)
 	return func(id string) string { return "wherry wait " + id + " --config-file " + quoted }, nil
+}
+
+// shellQuote quotes s as one POSIX shell word.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // sharedHost returns a connect that opens one host on its first successful call and returns it to every later call, and

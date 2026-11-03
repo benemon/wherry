@@ -7,6 +7,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
@@ -17,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -33,6 +35,7 @@ import (
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/operator"
+	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/hashicorp/nomad/api"
 	"github.com/minio/minio-go/v7"
@@ -157,7 +160,7 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 	if err := os.RemoveAll(instance.env()); err != nil {
 		return err
 	}
-	for _, dir := range []string{"nomad/data", "kafka/cfg", "kafka/data", "tls", "admin", "receiver/state", "host/state", "host/credentials"} {
+	for _, dir := range []string{"nomad/data", "kafka/cfg", "kafka/data", "tls", "receiver/state", "host/credentials"} {
 		if err := os.MkdirAll(instance.env(dir), 0o700); err != nil {
 			return err
 		}
@@ -194,19 +197,11 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 		return err
 	}
 
-	step("passwords")
-	passwords := map[string]string{}
-	for _, user := range []string{"admin", "operator"} {
-		secret := make([]byte, 24)
-		rand.Read(secret)
-		passwords[user] = hex.EncodeToString(secret)
-		for _, dir := range []string{"kafka/cfg", "admin"} {
-			if err := os.WriteFile(instance.env(dir, user+"-password"), []byte(passwords[user]), 0o600); err != nil {
-				return err
-			}
-		}
-	}
-	if err := writeYAML(instance.env("admin", "operator.yaml"), operatorConfig{devBroker, "ca.pem", "operator-password"}); err != nil {
+	step("super-user")
+	secret := make([]byte, 24)
+	rand.Read(secret)
+	superPassword := hex.EncodeToString(secret)
+	if err := os.WriteFile(instance.env("kafka", "cfg", "super-user-password"), []byte(superPassword), 0o600); err != nil {
 		return err
 	}
 
@@ -236,7 +231,7 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 
 	step("kafka")
 	stopWait = waiting(stderr, "kafka")
-	kafkaAlloc, err := startKafka(ctx, nomad, env, ca, passwords["admin"])
+	kafkaAlloc, err := startKafka(ctx, nomad, env, ca, superPassword)
 	stopWait()
 	if err != nil {
 		return err
@@ -268,19 +263,20 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 		}
 	}
 
-	step("operator-acl")
-	root, operatorClient, err := devAdminClients(ca, passwords)
+	step("operator")
+	service, err := devOperator(ctx, instance, devBroker)
 	if err != nil {
 		return err
 	}
-	defer root.Close()
-	defer operatorClient.Close()
-	if err := operator.Delegate(ctx, root, passwords["operator"]); err != nil {
+	defer service.Operator.Close()
+
+	step("bootstrap")
+	if err := devBootstrap(ctx, env, agents, *service); err != nil {
 		return err
 	}
 
-	step("bootstrap")
-	hostConfig, err := devBootstrap(ctx, env, agents, operator.Service{Operator: operatorClient, Broker: devBroker, CA: ca}, sources)
+	step("host")
+	hostConfig, configPath, err := placeHost(ctx, &env, sources, stderr)
 	if err != nil {
 		return err
 	}
@@ -311,7 +307,7 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 		return err
 	}
 	current = ""
-	printReady(stdout, env)
+	printReady(stdout, env, configPath)
 	return nil
 }
 
@@ -443,7 +439,7 @@ func devTLS(instance devInstance) ([]byte, error) {
 	brokerPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: brokerDER})
 	files := map[string][]byte{
 		"tls/ca.key": keyPEM(caKey), "tls/ca.pem": caPEM, "tls/broker.key": keyPEM(brokerKey), "tls/broker.pem": brokerPEM,
-		"kafka/cfg/server.pem": append(slices.Clone(brokerPEM), keyPEM(brokerKey)...), "kafka/cfg/ca.pem": caPEM, "admin/ca.pem": caPEM,
+		"kafka/cfg/server.pem": append(slices.Clone(brokerPEM), keyPEM(brokerKey)...), "kafka/cfg/ca.pem": caPEM,
 	}
 	for path, data := range files {
 		if err := os.WriteFile(instance.env(path), data, 0o600); err != nil {
@@ -508,11 +504,11 @@ log.dirs=/data/kraft
 `
 }
 
-// kafkaScript reads the passwords as $(cat /cfg/...) from the read-only bind mount, so they never enter the job spec.
+// kafkaScript reads the super user's password as $(cat /cfg/...) from the read-only bind mount, so it never enters the
+// job spec.
 func kafkaScript(clusterID string) string {
 	return "/opt/kafka/bin/kafka-storage.sh format --standalone -t " + clusterID + " -c /cfg/server.properties --ignore-formatted" +
-		` --add-scram "SCRAM-SHA-512=[name=wherry-admin,password=$(cat /cfg/admin-password)]"` +
-		` --add-scram "SCRAM-SHA-512=[name=wherry.operator,password=$(cat /cfg/operator-password)]"` +
+		` --add-scram "SCRAM-SHA-512=[name=wherry-admin,password=$(cat /cfg/super-user-password)]"` +
 		" && exec /opt/kafka/bin/kafka-server-start.sh /cfg/server.properties"
 }
 
@@ -698,7 +694,7 @@ func poll(ctx context.Context, bound time.Duration, check func() error) error {
 
 // startKafka waits for an authenticated metadata request, since rootless podman's port forwarder accepts connections
 // while the container is down.
-func startKafka(ctx context.Context, nomad *api.Client, env devEnv, ca []byte, adminPassword string) (string, error) {
+func startKafka(ctx context.Context, nomad *api.Client, env devEnv, ca []byte, superPassword string) (string, error) {
 	raw := make([]byte, 16)
 	clusterID := "-"
 	for strings.HasPrefix(clusterID, "-") {
@@ -712,7 +708,7 @@ func startKafka(ctx context.Context, nomad *api.Client, env devEnv, ca []byte, a
 	if err != nil {
 		return "", err
 	}
-	opts, err := operator.KafkaOpts(devBroker, ca, devSuperUser, adminPassword)
+	opts, err := operator.KafkaOpts(devBroker, ca, devSuperUser, superPassword)
 	if err != nil {
 		return alloc, err
 	}
@@ -839,23 +835,6 @@ func createBucket(ctx context.Context, keys [2]string) error {
 	return poll(ctx, time.Minute, func() error { return store.MakeBucket(ctx, devBucket, minio.MakeBucketOptions{}) })
 }
 
-// devAdminClients connect to the broker as wherry-admin and as the operator.
-func devAdminClients(ca []byte, passwords map[string]string) (*kgo.Client, *kgo.Client, error) {
-	var clients []*kgo.Client
-	for _, user := range [][2]string{{devSuperUser, passwords["admin"]}, {operator.OperatorPrincipal, passwords["operator"]}} {
-		opts, err := operator.KafkaOpts(devBroker, ca, user[0], user[1])
-		if err != nil {
-			return nil, nil, err
-		}
-		client, err := kgo.NewClient(append(opts, kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
-		if err != nil {
-			return nil, nil, err
-		}
-		clients = append(clients, client)
-	}
-	return clients[0], clients[1], nil
-}
-
 // devTerms are pool dev's terms: each agent with its credentials, every one optional.
 func devTerms(agents []string, defaultAgent string, storage bool) operator.Terms {
 	optional := false
@@ -903,40 +882,169 @@ func devProfiles(env devEnv, agents []string) []operator.ProfileSettings {
 	return profiles
 }
 
-// devBootstrap makes the operator's admin calls for the instance and registers its host.
-func devBootstrap(ctx context.Context, env devEnv, agents []string, service operator.Service, sources map[string]credential.Source) (busclient.Config, error) {
-	instance := env.instance
+// devOperator provisions as operator init does, on the instance's operator working directory env/operator, and
+// connects as wherry.operator through it.
+func devOperator(ctx context.Context, instance devInstance, broker string) (*operator.Service, error) {
+	dir := instance.env("operator")
+	options := map[string]string{"broker": broker, "ca-file": instance.env("tls", "ca.pem"), "super-user": devSuperUser, "super-user-password-file": instance.env("kafka", "cfg", "super-user-password")}
+	if err := operatorInit(ctx, dir, options, io.Discard); err != nil {
+		return nil, err
+	}
+	return operatorService(dir)
+}
+
+// devBootstrap makes the operator's calls for the instance, its bundles in the operator working directory, and gives
+// the receiver its config.yaml.
+func devBootstrap(ctx context.Context, env devEnv, agents []string, service operator.Service) error {
+	instance, dir := env.instance, env.instance.env("operator")
 	if err := service.PoolApply(ctx, devPool, devTerms(agents, env.manifest.DefaultAgent, env.storage()), false); err != nil {
-		return busclient.Config{}, fmt.Errorf("pool apply: %w", err)
+		return fmt.Errorf("pool apply: %w", err)
 	}
 	if err := service.TenantAdd(ctx, devTenant, devPool); err != nil {
-		return busclient.Config{}, fmt.Errorf("pool entitle: %w", err)
+		return fmt.Errorf("pool entitle: %w", err)
 	}
-	if err := service.HostAdd(ctx, devTenant, devHost, instance.env("host", "dev.bundle"), false); err != nil {
-		return busclient.Config{}, fmt.Errorf("host add: %w", err)
+	hostBundle, err := bundlePath(dir, "hosts", true, devTenant, devHost)
+	if err != nil {
+		return err
+	}
+	if err := service.HostAdd(ctx, devTenant, devHost, hostBundle, false); err != nil {
+		return fmt.Errorf("host add: %w", err)
+	}
+	receiverBundle, err := bundlePath(dir, "receivers", true, devReceiver)
+	if err != nil {
+		return err
 	}
 	receiver := operator.ReceiverConfig{Receiver: devReceiver, Pool: devPool, Capacity: 2, Profiles: devProfiles(env, agents),
 		PluginSHA256: map[string]string{"nomad": env.manifest.Plugin.SHA256}}
-	if err := service.ReceiverAdd(ctx, receiver, devBroker, instance.env("receiver", "dev-1.bundle")); err != nil {
-		return busclient.Config{}, fmt.Errorf("receiver apply: %w", err)
+	if err := service.ReceiverAdd(ctx, receiver, service.Broker, receiverBundle); err != nil {
+		return fmt.Errorf("receiver apply: %w", err)
+	}
+	local := map[string]string{"bundle": receiverBundle, "ca_file": instance.env("tls", "ca.pem"), "state_dir": instance.env("receiver", "state"), "plugin_dir": instance.cache("plugins")}
+	return writeYAML(instance.env("receiver", "config.yaml"), local)
+}
+
+// placeHost writes the host's bundle, config.yaml and key, and registers the host. The default instance writes them at
+// the standard host paths unless something there is not what an earlier up recorded writing and left unchanged, which
+// is never overwritten; each other instance writes them in env/host. At the standard paths, the manifest records each
+// file before it is written, so that down removes only what up wrote.
+func placeHost(ctx context.Context, env *devEnv, sources map[string]credential.Source, stderr io.Writer) (busclient.Config, string, error) {
+	instance := env.instance
+	dir, stateDir := instance.env("host"), instance.env("host", "state")
+	if instance.name == "default" {
+		if err := removeHostFiles(instance, stderr); err != nil {
+			return busclient.Config{}, "", err
+		}
+		env.manifest.HostFiles = nil
+		standard, standardState, err := standardHostDirs()
+		if err != nil {
+			return busclient.Config{}, "", err
+		}
+		taken := slices.ContainsFunc([]string{filepath.Join(standard, "config.yaml"), filepath.Join(standard, "bundle.yaml"), filepath.Join(standard, "host.key"), standardState}, func(path string) bool {
+			_, err := os.Lstat(path)
+			return !errors.Is(err, os.ErrNotExist)
+		})
+		if !taken {
+			dir, stateDir = standard, standardState
+		}
+	}
+	source, err := bundlePath(instance.env("operator"), "hosts", false, devTenant, devHost)
+	if err != nil {
+		return busclient.Config{}, "", err
+	}
+	bundle, err := os.ReadFile(source)
+	if err != nil {
+		return busclient.Config{}, "", err
 	}
 	host := busclient.Config{
-		Bundle: instance.env("host", "dev.bundle"), CAFile: instance.env("tls", "ca.pem"), HostKey: instance.env("host", "host.key"), StateDir: instance.env("host", "state"), Credentials: sources,
+		Bundle: filepath.Join(dir, "bundle.yaml"), CAFile: instance.env("tls", "ca.pem"), HostKey: filepath.Join(dir, "host.key"), StateDir: stateDir, Credentials: sources,
 	}
 	if env.storage() {
 		host.Storage = map[string]busclient.StorageConfig{devPool: {AccessKey: "s3-access-key", SecretKey: "s3-secret-key"}}
 	}
-	if err := writeYAML(instance.env("host", "config.yaml"), hostConfigFile(host)); err != nil {
-		return busclient.Config{}, err
+	config, err := yaml.Marshal(hostConfigFile(host))
+	if err != nil {
+		return busclient.Config{}, "", err
 	}
-	local := map[string]string{"bundle": instance.env("receiver", "dev-1.bundle"), "ca_file": instance.env("tls", "ca.pem"), "state_dir": instance.env("receiver", "state"), "plugin_dir": instance.cache("plugins")}
-	if err := writeYAML(instance.env("receiver", "config.yaml"), local); err != nil {
-		return busclient.Config{}, err
+	configPath := filepath.Join(dir, "config.yaml")
+	files := map[string][]byte{host.Bundle: bundle, configPath: config}
+	standard := dir != instance.env("host")
+	if standard {
+		env.manifest.HostFiles = &devHostFiles{Files: map[string]string{}, StateDir: stateDir}
+		for path, data := range files {
+			sum := sha256.Sum256(data)
+			env.manifest.HostFiles.Files[path] = hex.EncodeToString(sum[:])
+		}
+		if err := writeManifest(instance, env.manifest); err != nil {
+			return busclient.Config{}, "", err
+		}
+	}
+	for _, path := range []string{dir, stateDir} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			return busclient.Config{}, "", err
+		}
+	}
+	for path, data := range files {
+		if err := writeFileAtomic(path, data, 0o600); err != nil {
+			return busclient.Config{}, "", err
+		}
+	}
+	if _, err := trust.GenerateSigningKeyFile(host.HostKey); err != nil {
+		return busclient.Config{}, "", err
+	}
+	if standard {
+		if env.manifest.HostFiles.Files[host.HostKey], err = fileSHA256(host.HostKey); err != nil {
+			return busclient.Config{}, "", err
+		}
+		if err := writeManifest(instance, env.manifest); err != nil {
+			return busclient.Config{}, "", err
+		}
 	}
 	if _, _, err := busclient.Init(ctx, host); err != nil {
-		return busclient.Config{}, fmt.Errorf("init: %w", err)
+		return busclient.Config{}, "", fmt.Errorf("init: %w", err)
 	}
-	return host, nil
+	return host, configPath, nil
+}
+
+// standardHostDirs are the host's standard config and state directories.
+func standardHostDirs() (string, string, error) {
+	config, err := busclient.ConfigDir()
+	if err != nil {
+		return "", "", err
+	}
+	state, err := busclient.StateDir()
+	return config, state, err
+}
+
+// removeHostFiles removes each file the instance's manifest records up writing at the standard host paths that is
+// unchanged since, and the state directory when every one was, then clears the record. A file changed since may be a
+// real host's, so it stays.
+func removeHostFiles(instance devInstance, stderr io.Writer) error {
+	// A manifest this wherry cannot read records nothing it can remove; down --reset still clears it.
+	manifest, _ := readManifest(instance)
+	if manifest == nil || manifest.HostFiles == nil {
+		return nil
+	}
+	var failures []error
+	unchanged := true
+	for _, path := range slices.Sorted(maps.Keys(manifest.HostFiles.Files)) {
+		sum, err := fileSHA256(path)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+		case err == nil && sum == manifest.HostFiles.Files[path]:
+			failures = append(failures, os.Remove(path))
+		default:
+			unchanged = false
+			fmt.Fprintf(stderr, "left %s: it changed after wherry dev up wrote it\n", path)
+		}
+	}
+	if unchanged && manifest.HostFiles.StateDir != "" {
+		failures = append(failures, os.RemoveAll(manifest.HostFiles.StateDir))
+	}
+	if err := errors.Join(failures...); err != nil {
+		return err
+	}
+	manifest.HostFiles = nil
+	return writeManifest(instance, *manifest)
 }
 
 // hostConfigFile is config as its YAML file holds it, with only the set fields.
@@ -1061,20 +1169,25 @@ func smoke(ctx context.Context, env devEnv, hostConfig busclient.Config) error {
 	return nil
 }
 
-func printReady(stdout io.Writer, env devEnv) {
+// printReady names config in the commands it prints unless up wrote it at the standard path, where every host command
+// reads it by default.
+func printReady(stdout io.Writer, env devEnv, config string) {
 	m := env.manifest
-	config := env.instance.env("host", "config.yaml")
-	binary := env.instance.cache("wherry")
 	fmt.Fprintf(stdout, "ready: instance %s (nomad %s, kafka %s, plugin %s, wherry %s)\n",
 		env.instance.name, m.Nomad.Version, strings.TrimPrefix(m.Images["kafka"].Digest, "sha256:")[:12], m.Plugin.Tag, m.Snapshot.Version)
 	fmt.Fprintf(stdout, "config: %s\n", config)
-	fmt.Fprintf(stdout, "submit: wherry submit --config-file %s --prompt \"...\"\n", config)
+	variable := ""
+	if m.HostFiles == nil {
+		variable = "--env WHERRY_CONFIG=" + shellQuote(config) + " "
+		fmt.Fprintf(stdout, "export WHERRY_CONFIG=%s\n", shellQuote(config))
+	}
+	fmt.Fprintln(stdout, `submit: wherry submit --prompt "..."`)
 	for _, harness := range m.Agents {
 		switch harness {
 		case "claude", "codex":
-			fmt.Fprintf(stdout, "%-7s %s mcp add wherry-%s -- %s host mcp --config-file %s\n", harness+":", harness, env.instance.name, binary, config)
+			fmt.Fprintf(stdout, "%-7s %s mcp add wherry-%s %s-- wherry host mcp\n", harness+":", harness, env.instance.name, variable)
 		case "gemini":
-			fmt.Fprintf(stdout, "%-7s gemini mcp add wherry-%s %s host mcp --config-file %s\n", "gemini:", env.instance.name, binary, config)
+			fmt.Fprintf(stdout, "%-7s gemini mcp add %swherry-%s wherry host mcp\n", "gemini:", variable, env.instance.name)
 		}
 	}
 }
@@ -1093,7 +1206,7 @@ func devDown(ctx context.Context, instance devInstance, stdout, stderr io.Writer
 	}
 	if state == nil {
 		fmt.Fprintf(stdout, "instance %s is not up\n", instance.name)
-		return os.RemoveAll(instance.env())
+		return errors.Join(removeHostFiles(instance, stderr), os.RemoveAll(instance.env()))
 	}
 	if state.Runtime == "" && manifest != nil {
 		state.Runtime = manifest.Runtime
@@ -1134,6 +1247,7 @@ func devDown(ctx context.Context, instance devInstance, stdout, stderr io.Writer
 	}
 	fmt.Fprintln(stderr, "data")
 	fail("data", os.RemoveAll(instance.env()))
+	fail("host", removeHostFiles(instance, stderr))
 	fmt.Fprintf(stdout, "down: instance %s\n", instance.name)
 	if manifest != nil {
 		for _, harness := range manifest.Agents {

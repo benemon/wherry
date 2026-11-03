@@ -1,0 +1,248 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"maps"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/benemon/wherry/internal/operator"
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kfake"
+)
+
+// devProvision runs up's provisioning steps, operator to host, for instance on a TLS fake broker whose super user is
+// dev's, and returns the ready output and the host config's path. kfake's handshake names 4096 iterations, so each
+// password up sets at 8192 is re-salted before its principal logs in.
+func devProvision(t *testing.T, instance devInstance) (string, string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	cluster, ca := tlsBroker(t, kfake.Superuser("SCRAM-SHA-512", devSuperUser, "super-secret"))
+	address := cluster.ListenAddrs()[0]
+	root := connectTLS(t, address, ca, devSuperUser, "super-secret")
+	shareCeilings(t, root)
+	for _, dir := range []string{"tls", "kafka/cfg", "receiver/state"} {
+		if err := os.MkdirAll(instance.env(dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, contents := range map[string]string{instance.env("tls", "ca.pem"): ca, instance.env("kafka", "cfg", "super-user-password"): "super-secret"} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest := writeCache(t, instance, []byte("snapshot"))
+	env := devEnv{instance: instance, manifest: manifest, driver: "docker"}
+	service, err := devOperator(ctx, instance, address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Operator.Close()
+	upsert := kadm.UpsertSCRAM{User: operator.OperatorPrincipal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: operatorPassword(t, instance.env("operator"))}
+	if altered, err := kadm.NewClient(root).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
+		t.Fatal(err, altered.Error())
+	}
+	if err := devBootstrap(ctx, env, devAgents(manifest, nil), *service); err != nil {
+		t.Fatal(err)
+	}
+	resalt(t, service, filepath.Join(instance.env("operator"), "bundles", "hosts", devTenant, devHost+".bundle"))
+	_, config, err := placeHost(ctx, &env, nil, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ready bytes.Buffer
+	printReady(&ready, env, config)
+	return ready.String(), config
+}
+
+// standardHostPaths are the default instance's host files at the standard paths and its state directory.
+func standardHostPaths(t *testing.T) ([]string, string) {
+	t.Helper()
+	config, state, err := standardHostDirs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []string{filepath.Join(config, "config.yaml"), filepath.Join(config, "bundle.yaml"), filepath.Join(config, "host.key")}, state
+}
+
+// up's operator working directory is operator init's, and operator check passes on it.
+func TestDevUpProvisionsThroughOperatorInit(t *testing.T) {
+	instance := devFixture(t)
+	devProvision(t, instance)
+	dir := instance.env("operator")
+	if err := runOperator([]string{"check", "--dir", dir}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("operator check on %s: %v", dir, err)
+	}
+	if _, err := os.Stat(instance.env("admin")); err == nil {
+		t.Fatal("up wrote env/admin")
+	}
+	b, _ := kfakeInitBroker(t)
+	initDir := t.TempDir()
+	if err := b.init(t, initDir); err != nil {
+		t.Fatal(err)
+	}
+	shape := func(dir string) map[string]string {
+		files := map[string]string{}
+		for _, name := range []string{"operator.yaml", "operator.password", ".gitignore"} {
+			info, err := os.Stat(filepath.Join(dir, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			files[name] = info.Mode().String()
+		}
+		ignored, _ := os.ReadFile(filepath.Join(dir, ".gitignore"))
+		files[".gitignore contents"] = string(ignored)
+		var config map[string]any
+		if err := readYAML(filepath.Join(dir, "operator.yaml"), &config); err != nil {
+			t.Fatal(err)
+		}
+		for key := range config {
+			files["operator.yaml "+key] = "set"
+		}
+		return files
+	}
+	if got, want := shape(dir), shape(initDir); !maps.Equal(got, want) {
+		t.Fatalf("env/operator %v; want operator init's %v", got, want)
+	}
+	for _, bundle := range []string{filepath.Join("bundles", "hosts", devTenant, devHost+".bundle"), filepath.Join("bundles", "receivers", devReceiver+".bundle")} {
+		if info, err := os.Stat(filepath.Join(dir, bundle)); err != nil || info.Mode().Perm() != 0o600 {
+			t.Errorf("%s: %v, %v; want a 0600 bundle", bundle, info, err)
+		}
+	}
+}
+
+// The default instance writes the standard host paths when none is there, and down, or down --reset, removes them.
+func TestDevUpWritesTheStandardHostPaths(t *testing.T) {
+	for _, down := range [][]string{{"dev", "down"}, {"dev", "down", "--reset"}} {
+		t.Run(strings.Join(down, " "), func(t *testing.T) {
+			instance := devFixture(t)
+			ready, config := devProvision(t, instance)
+			files, state := standardHostPaths(t)
+			if config != files[0] {
+				t.Fatalf("config at %s; want the standard path %s", config, files[0])
+			}
+			for _, path := range append(slices.Clone(files), state) {
+				if _, err := os.Stat(path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, want := range []string{"submit: wherry submit --prompt \"...\"\n", "claude: claude mcp add wherry-default -- wherry host mcp\n"} {
+				if !strings.Contains(ready, want) {
+					t.Errorf("ready output\n%s\nlacks %q", ready, want)
+				}
+			}
+			if strings.Contains(ready, "--config-file") || strings.Contains(ready, "WHERRY_CONFIG") {
+				t.Errorf("ready output names the config:\n%s", ready)
+			}
+			if _, _, err := runCapture(down...); err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range append(files, state) {
+				if _, err := os.Stat(path); err == nil {
+					t.Errorf("%v left %s", down, path)
+				}
+			}
+		})
+	}
+}
+
+// A host file changed after up wrote it may be a real host's: down leaves it, and the state, and removes the rest.
+func TestDevDownLeavesAChangedHostFile(t *testing.T) {
+	instance := devFixture(t)
+	devProvision(t, instance)
+	files, state := standardHostPaths(t)
+	changed := []byte("bundle: /elsewhere/bundle.yaml\n")
+	if err := os.WriteFile(files[0], changed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err := runCapture("dev", "down")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept, err := os.ReadFile(files[0]); err != nil || !bytes.Equal(kept, changed) {
+		t.Fatalf("changed config after down: %q, %v; want it left", kept, err)
+	}
+	if !strings.Contains(stderr, "left "+files[0]) {
+		t.Errorf("down said\n%s\nwant it to name the file it left", stderr)
+	}
+	for _, path := range files[1:] {
+		if _, err := os.Stat(path); err == nil {
+			t.Errorf("down left %s, unchanged since up wrote it", path)
+		}
+	}
+	if _, err := os.Stat(state); err != nil {
+		t.Errorf("down removed the state beside a changed config: %v", err)
+	}
+	if manifest, err := readManifest(instance); err != nil || manifest.HostFiles != nil {
+		t.Fatalf("manifest after down: %+v, %v; want no host files recorded", manifest, err)
+	}
+}
+
+// A host config up did not write is left byte for byte, and up writes inside the instance and names its config.
+func TestDevUpLeavesAnotherHostConfig(t *testing.T) {
+	instance := devFixture(t)
+	files, state := standardHostPaths(t)
+	real := []byte("bundle: /home/someone/.config/wherry/bundle.yaml\n")
+	if err := os.MkdirAll(filepath.Dir(files[0]), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(files[0], real, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ready, config := devProvision(t, instance)
+	if config != instance.env("host", "config.yaml") {
+		t.Fatalf("config at %s; want it inside the instance", config)
+	}
+	if kept, err := os.ReadFile(files[0]); err != nil || !bytes.Equal(kept, real) {
+		t.Fatalf("existing config after up: %q, %v; want it unchanged", kept, err)
+	}
+	for _, path := range append(files[1:], state) {
+		if _, err := os.Stat(path); err == nil {
+			t.Errorf("up wrote %s beside a config it did not write", path)
+		}
+	}
+	for _, want := range []string{"export WHERRY_CONFIG=" + shellQuote(config) + "\n", "claude mcp add wherry-default --env WHERRY_CONFIG=" + shellQuote(config) + " -- wherry host mcp\n"} {
+		if !strings.Contains(ready, want) {
+			t.Errorf("ready output\n%s\nlacks %q", ready, want)
+		}
+	}
+	if _, _, err := runCapture("dev", "down"); err != nil {
+		t.Fatal(err)
+	}
+	if kept, err := os.ReadFile(files[0]); err != nil || !bytes.Equal(kept, real) {
+		t.Fatalf("existing config after down: %q, %v; want it unchanged", kept, err)
+	}
+}
+
+// An instance other than default never writes the standard host paths.
+func TestDevUpOtherInstanceKeepsItsHost(t *testing.T) {
+	devFixture(t)
+	instance, err := openInstance("other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, config := devProvision(t, instance)
+	if config != instance.env("host", "config.yaml") {
+		t.Fatalf("config at %s; want it inside the instance", config)
+	}
+	configDir, state, err := standardHostDirs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{configDir, state} {
+		if entries, err := os.ReadDir(dir); !errors.Is(err, os.ErrNotExist) || len(entries) != 0 {
+			t.Errorf("instance other wrote %s: %v, %v", dir, entries, err)
+		}
+	}
+	if !strings.Contains(ready, "export WHERRY_CONFIG=") {
+		t.Errorf("ready output\n%s\nlacks WHERRY_CONFIG", ready)
+	}
+}

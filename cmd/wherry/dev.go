@@ -47,8 +47,17 @@ type devManifest struct {
 	Agents       []string            `json:"agents"`
 	DefaultAgent string              `json:"default_agent"`
 	Storage      *devImage           `json:"storage"`
+	// HostFiles is what up wrote at the standard host paths; init keeps it.
+	HostFiles *devHostFiles `json:"host_files,omitzero"`
 	// EnvDenylist holds the names in the user's environment at init that end _TOKEN, _KEY, _SECRET or _PASSWORD.
 	EnvDenylist []string `json:"env_denylist"`
+}
+
+// devHostFiles are the files up wrote at the standard host paths, each with its SHA-256 as written, and the state
+// directory it gave the host there.
+type devHostFiles struct {
+	Files    map[string]string `json:"files"`
+	StateDir string            `json:"state_dir"`
 }
 
 type devArtefact struct {
@@ -176,7 +185,7 @@ func runDev(args []string, stdout, stderr io.Writer) error {
 		return devUp(ctx, instance, *runtimeName, images, stdout, stderr)
 	case "down":
 		if *reset {
-			return devReset(instance, stdout)
+			return devReset(instance, stdout, stderr)
 		}
 		return devDown(ctx, instance, stdout, stderr)
 	}
@@ -382,7 +391,7 @@ func devInit(ctx context.Context, instance devInstance, runtimeName string, stor
 	next := devManifest{
 		Version: devManifestVersion, OS: runtime.GOOS, Arch: runtime.GOARCH, Runtime: runtimeName,
 		Agents: append([]string{}, detected...), DefaultAgent: defaultAgent, Images: map[string]devImage{},
-		EnvDenylist: credentialNames(os.Environ()),
+		EnvDenylist: credentialNames(os.Environ()), HostFiles: prev.HostFiles,
 	}
 	step("nomad")
 	if next.Nomad, err = devSources.hashicorp(ctx, "nomad", instance.cache(), "nomad", prev.Nomad, stderr); err != nil {
@@ -544,8 +553,11 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(sum.Sum(nil)), nil
 }
 
-func devReset(instance devInstance, stdout io.Writer) error {
+func devReset(instance devInstance, stdout, stderr io.Writer) error {
 	if err := refuseUp(instance); err != nil {
+		return err
+	}
+	if err := removeHostFiles(instance, stderr); err != nil {
 		return err
 	}
 	if err := os.RemoveAll(instance.cache()); err != nil {
