@@ -2,12 +2,21 @@
 
 ## Client configuration
 
-A YAML file, `config.yaml` in the host's configuration directory, or at the
-path `WHERRY_CONFIG` names when it is set, or at the host command's `--config-file` path, which
-wins over both. [`wherry host init`](commands.md#wherry-host-init) writes it;
-a file written in advance is used as written. Unknown and duplicate fields are
-errors, and a decode error names only its line numbers. A leading `~/` is
-expanded in the flag and in every path.
+A host reads its settings from `config.yaml`.
+`wherry host init` writes this file for you.
+You can also write it yourself.
+
+### Where wherry looks for the file
+
+wherry uses the first path that is set:
+
+1. The path you pass with `--config-file`.
+2. The path in `WHERRY_CONFIG`.
+3. `config.yaml` in the configuration directory, `~/.config/wherry/` by default.
+
+Unknown and duplicate fields are errors.
+A decode error reports line numbers without field values.
+A leading `~/` expands in the flag and configuration paths.
 
 The host's paths are the same on every OS, macOS included:
 
@@ -16,16 +25,16 @@ The host's paths are the same on every OS, macOS included:
 | configuration directory | `$XDG_CONFIG_HOME/wherry/`, by default `~/.config/wherry/` | `config.yaml`, `bundle.yaml`, `host.key` and, for a private CA, `ca.pem` |
 | state directory | `$XDG_STATE_HOME/wherry/`, by default `~/.local/state/wherry/` | the host's state, `state_dir` |
 
-| Field | Default | Content |
-| --- | --- | --- |
-| `bundle` | required | the host's bundle; `host init <bundle>` places it at `bundle.yaml` in the configuration directory and names it here |
-| `ca_file` | `ca.pem` in the configuration directory if that file exists, else none | PEM CA certificates the host trusts the broker with; with none, the system's trusted roots |
-| `host_key` | `host.key` in the configuration directory | host signing key file, a private JWK; a key file in another format fails to load |
-| `state_dir` | the state directory | run records |
-| `credentials` | none | credential name to its [source](security.md#credential-sources), exactly one of `file: PATH`, `env: VAR` and `command: [PROGRAM, ARG...]` |
-| `git` | none | `{url, credential, host_key}` entries, each giving a task whose git remote starts with `url` the credential `credential` and the OpenSSH `known_hosts` file `host_key`; `credential` is optional, and `host_key` is required for an `ssh://` remote and refused for an `https://` one ([git credentials](security.md#git-credentials)) |
-| `storage` | none | pool name to `{access_key, secret_key}`: the names of the credentials in `credentials` holding the access key and secret key of the host's S3 credential for that pool's bucket; a pool without an entry has no S3 lane on this host |
-| `input_roots` | the MCP server's working directory | absolute paths of existing directories the MCP server sends inputs from; the CLI reads any path it is given |
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `bundle` | string | required | the host's bundle; `host init <bundle>` places it at `bundle.yaml` in the configuration directory and names it here |
+| `ca_file` | string | `ca.pem` in the configuration directory if that file exists, else none | PEM CA certificates the host trusts the broker with; with none, the system's trusted roots |
+| `host_key` | string | `host.key` in the configuration directory | host signing key file, a private JWK; a key file in another format fails to load |
+| `state_dir` | string | the state directory | run records |
+| `credentials` | mapping | none | credential name to its [source](security.md#credential-sources), exactly one of `file: PATH`, `env: VAR` and `command: [PROGRAM, ARG...]` |
+| `git` | list | none | `{url, credential, host_key}` entries, each giving a task whose git remote starts with `url` the credential `credential` and the OpenSSH `known_hosts` file `host_key`; `credential` is optional, and `host_key` is required for an `ssh://` remote and refused for an `https://` one ([git credentials](security.md#git-credentials)) |
+| `storage` | mapping | none | pool name to `{access_key, secret_key}`: the names of the credentials in `credentials` holding the access key and secret key of the host's S3 credential for that pool's bucket; a pool without an entry has no S3 lane on this host |
+| `input_roots` | list | the MCP server's working directory | absolute paths of existing directories the MCP server sends inputs from; the CLI reads any path it is given |
 
 `host init` writes `bundle`, a `ca_file` it asked for, and an entry in
 `credentials`, `git` and `storage` for each answer, each a reference to a
@@ -107,11 +116,11 @@ directory's `bundles/`. Unknown fields are errors, so a bundle carrying a
 decode error names only its line numbers. A trailing line break ends the
 password and is not part of it, and a password of nothing else is refused.
 
-| Field | Content |
-| --- | --- |
-| `broker` | Kafka bootstrap address, `host:port` |
-| `principal` | SCRAM-SHA-512 user name |
-| `password` | SCRAM password |
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `broker` | string | none | Kafka bootstrap address, `host:port` |
+| `principal` | string | none | SCRAM-SHA-512 user name |
+| `password` | string | none | SCRAM password |
 
 A bundle carries nothing about the broker's TLS CA. The Kafka platform owns
 and renews its CA; each host and receiver trusts the broker through the
@@ -126,7 +135,7 @@ whoever distributes the Kafka CA. A `ca_file` with no certificate fails with
 | `WHERRY_CONFIG` | host commands | the [client configuration](#client-configuration) path in place of `config.yaml` in the configuration directory; `--config-file` takes precedence |
 | `XDG_CONFIG_HOME`, `XDG_STATE_HOME` | host commands | when set, the parents of the host's `wherry/` configuration and state directories in place of `~/.config` and `~/.local/state` |
 
-wherry reads no other variable of its own. `wherry operator`'s connection is
+ `wherry operator`'s connection is
 [`operator.yaml`](configuration-operator.md#operator-working-directory).
 
 Go's TLS stack reads `SSL_CERT_FILE` as its

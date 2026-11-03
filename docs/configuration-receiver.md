@@ -8,15 +8,15 @@ client configuration is: unknown and duplicate fields are errors, a decode
 error names only its line numbers, and a leading `~/` is expanded in the
 flag and in every path.
 
-| Field | Default | Content |
-| --- | --- | --- |
-| `bundle` | required | the receiver's bundle |
-| `ca_file` | none | PEM CA certificates the receiver trusts the broker with; with none, the system's trusted roots |
-| `state_dir` | `state` in the bundle file's directory | the receiver's signing key and, while it holds any, its pool's keys in `pool-keys/` ([Pool keys](concepts.md#pool-keys-and-the-key-custodian)) |
-| `plugin_dir` | `/usr/local/libexec/wherry/plugins` | the directory holding the `wherry-plugin-<type>` binaries, or symbolic links to them; each starts only when its SHA-256 is the receiver record's pin for its type |
-| `metrics_addr` | none | `HOST:PORT` to serve [`/metrics`](operations-receivers.md#metrics) on; without it the receiver serves no metrics |
-| `drain_timeout` | `0s` | how long the runs the receiver holds may go on after `SIGINT` or `SIGTERM` before it releases their tasks for adoption, a duration such as `20s`; [set it with the platform's stop window](#drain-timeout-and-the-stop-window) |
-| `credentials` | none | [platform credential](#platform-credentials) name to its [source](security.md#credential-sources), exactly one of `file: PATH`, `env: VAR` and `command: [PROGRAM, ARG...]`, validated and resolved as the host's |
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `bundle` | string | required | the receiver's bundle |
+| `ca_file` | string | none | PEM CA certificates the receiver trusts the broker with; with none, the system's trusted roots |
+| `state_dir` | string | `state` in the bundle file's directory | the receiver's signing key and, while it holds any, its pool's keys in `pool-keys/` ([Pool keys](concepts.md#pool-keys-and-the-key-custodian)) |
+| `plugin_dir` | string | `/usr/local/libexec/wherry/plugins` | the directory holding the `wherry-plugin-<type>` binaries, or symbolic links to them; each starts only when its SHA-256 is the receiver record's pin for its type |
+| `metrics_addr` | string | none | `HOST:PORT` to serve [`/metrics`](operations-receivers.md#metrics) on; without it the receiver serves no metrics |
+| `drain_timeout` | duration | `0s` | how long the runs the receiver holds may go on after `SIGINT` or `SIGTERM` before it releases their tasks for adoption, a duration such as `20s`; [set it with the platform's stop window](#drain-timeout-and-the-stop-window) |
+| `credentials` | mapping | none | [platform credential](#platform-credentials) name to its [source](security.md#credential-sources), exactly one of `file: PATH`, `env: VAR` and `command: [PROGRAM, ARG...]`, validated and resolved as the host's |
 
 ### Drain timeout and the stop window
 
@@ -101,20 +101,20 @@ A plugin entry's key is a [plugin](plugins.md) name; the receiver
 runs `wherry-plugin-<type>` from its plugin directory for it. Each plugin
 entry:
 
-| Field | Content |
-| --- | --- |
-| `labels` | optional; [labels](commands.md#labels) every plugin profile of the plugin inherits |
-| `config` | optional; settings every plugin profile of the plugin inherits |
-| `profiles` | one or more plugin profile entries, in routing order |
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `labels` | mapping | none | optional; [labels](commands.md#labels) every plugin profile of the plugin inherits |
+| `config` | string | none | optional; settings every plugin profile of the plugin inherits |
+| `profiles` | list | none | one or more plugin profile entries, in routing order |
 
 Each profile entry:
 
-| Field | Content |
-| --- | --- |
-| `name` | profile name, unique in the receiver |
-| `agent` | the agent it launches, from the pool's terms |
-| `labels` | optional; [labels](commands.md#labels) for placement |
-| `config` | the plugin's settings for this profile |
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `name` | string | none | profile name, unique in the receiver |
+| `agent` | string | none | the agent it launches, from the pool's terms |
+| `labels` | mapping | none | optional; [labels](commands.md#labels) for placement |
+| `config` | string | none | the plugin's settings for this profile |
 
 A plugin profile's `config` and `labels` are its plugin's merged with its
 own, as [Plugin profile merge](#plugin-profile-merge) describes. A
