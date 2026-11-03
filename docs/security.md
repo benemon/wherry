@@ -89,49 +89,22 @@ from the platform, and files and task credentials from the task.
 
 ## The claim check
 
-The key custodian serves an open request only when all of these hold, and
-otherwise refuses it with the reason the
-[claim check](a2a-extension-v1.md#the-claim-check) names:
+The custodian checks an open request before releasing an attempt wrap.
+It verifies all of these:
 
-- the request is signed by the live member of the pool it names;
-- it names the run's task, the hash of the run's first status other than
-  `rejected`, of any kind, among the statuses of live pool members, and the
-  run has no terminal status and no cancel. Revoking the member that wrote
-  that status makes the next one first and can move the run's task: an
-  accepted residual;
-- the record at its claim's task offset is that task, signed by an
-  authorised host for the run under its derived run ID, with bounds that hold
-  at its append time;
-- the run's latest ownership status is the requester's `claimed` for the
-  request's attempt;
-- the run is within its open bound: `task_started_by` for a first start,
-  `task_ended_by` once the run has started or the claimant is adopting its
-  job;
-- the claim has an `adopting` status, which its receiver writes once
-  `Lookup` finds the job, or the pool is not suspended in the read of
-  `wherry.operator` the custodian makes at the start of its pass, so on a
-  suspended pool the custodian serves adoptions of running jobs and no first
-  start, even to a receiver that has not yet read the suspension.
-  `wherry operator pool suspend` returns once the key custodian has
-  acknowledged the suspension with `suspended_for` in its snapshot, which a
-  pass publishes before it decides any request and after every attempt wrap
-  of the previous pass committed: after that no new start opens. A pool
-  with no snapshot has no custodian to open anything, and the command
-  returns at once. With no acknowledgement within 5 minutes the command
-  fails with `... it is not yet in effect`, and a first start can still
-  open until the custodian reads the record;
-- when the claim changed receivers, it has no previous holder, or the
-  previous holder's membership ended or its latest advertisement in the pool
-  appended at or before the claim is more than 120 seconds old. The previous
-  holder is the receiver of the latest earlier `claimed` that the custodian
-  served and that the same receiver has not followed with its own
-  `released`; a refused claimant holds nothing, and its `released` ends only
-  its own claim.
+1. The request comes from a live receiver in the pool.
+2. The request names the run's admitted task and current claim.
+3. The task came from an authorised host and has valid bounds.
+4. The run has no terminal status or cancellation.
+5. The request is within its start bound or adoption end bound.
+6. The pool permits the start or the claimant is adopting an existing job.
+7. Any previous holder released its claim, ended its membership or passed its advertisement lease.
 
-The custodian serves a new claimant once the previous holder has
-released the task or gone silent, and refuses it with `two live claimants`
-while the previous holder is live. It records each decision on a claim
-durably and reuses it.
+The custodian records its claim decision durably.
+It refuses a competing claim with `two live claimants` while the previous holder remains live.
+The advertisement lease is 120 seconds.
+The [claim-check specification](a2a-extension-v1.md#the-claim-check) defines ordering, task hashes and evidence checks.
+[Pool suspension](concepts.md#suspension) explains the acknowledgement boundary.
 
 A refused claimant acts on the reason:
 
@@ -262,23 +235,16 @@ pool whose terms list the agent's credentials.
 
 ## A model credential per pool
 
-An agent runs commands, and holds every credential its run delivers while
-it runs; a hostile or prompt-injected agent can send a credential anywhere
-its network allows. A model credential issued for one pool's agents and
-used nowhere else bounds that exposure: a leaked key reaches only that
-pool's model usage, the provider's usage and limits for the key show that
-pool's runs alone, and revoking it stops that pool's agents without
-touching another pool or the tenant's own use of the model. A dedicated,
-revocable credential per pool is an operator choice. wherry does not check
-it: it delivers whatever value the host's source for the credential's name
-resolves, and does not know which key that is.
+An agent holds the credentials delivered to its run.
+It can send them anywhere its network permits.
+Use a dedicated, revocable model credential for each tenant's use of a pool.
+You can then revoke that credential without affecting other pools.
+Your provider controls its scope and usage limits.
 
-The pool's terms name each agent's credentials, and a host's
-[client configuration](configuration-host.md#client-configuration) maps each
-name to one source for every pool. A credential name used by one pool alone
-gives that pool its own source on every host. Each tenant's runs use that
-tenant's credential, so each tenant entitled to the pool holds its own key
-for it.
+wherry delivers the value resolved by the host's source.
+It does not check the provider account or key scope.
+Choose a credential name used by that pool alone.
+Map it to the tenant's source on each host.
 
 ### Give a pool's agents a dedicated credential
 
