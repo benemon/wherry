@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/twmb/franz-go/pkg/kadm"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/operator"
+	"github.com/twmb/franz-go/pkg/kadm"
 )
 
 func localFixture(t *testing.T, dir, name string) {
@@ -75,6 +75,21 @@ func TestReceiverLocalPrompts(t *testing.T) {
 			if local.CAFile != wantCA || local.MetricsAddr != metrics {
 				t.Fatalf("config = %+v", local)
 			}
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := writeYAML(path, local); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadReceiverLocalConfig(path); err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if wantCA == "" && bytes.Contains(encoded, []byte("ca_file:")) {
+				t.Fatalf("CA field present: %s", encoded)
+			}
+
 			order := []string{"read its bundle?", "broker's CA?", "keep its state?", "its plugins?", "stop before killing it?", "serve metrics?", "Credential nomad-token:"}
 			previous := -1
 			for _, question := range order {
