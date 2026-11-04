@@ -43,7 +43,10 @@ The defaults are `10m` and `2h`.
   resolved when the server starts; an input that spells a root in different case,
   even on a case-insensitive file system, is refused. It must resolve to none of `state_dir`,
   `host_key`, `bundle`, a file a `file` source names or a storage key file; a relative
-  path is taken from the server's working directory.
+  path is taken from the server's working directory. Keep `state_dir` outside every
+  input root. With the default `state_dir`, `~/.local/state/wherry`, a root of `~`,
+  `~/.local`, `~/.local/state` or `~/.local/state/wherry` holds it; `XDG_STATE_HOME`
+  moves it.
 - `status` returns the latest verified state of a run without
   waiting. `runs` holds one entry for the run `id` names, or,
   without `id`, one per run `wherry status` lists, latest update first.
