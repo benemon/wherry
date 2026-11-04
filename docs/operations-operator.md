@@ -352,7 +352,7 @@ A receiver runs a pool's tasks on the plugin profiles of its
 Give a host-local receiver, such as a systemd one, a pool of its own, as
 [systemd](plugins.md#systemd) explains.
 The [Quickstart](quickstart-production.md#_5-add-the-receiver) adds receiver `nomad-1`, and its
-[Part 2](quickstart-production.md#part-2-on-the-nomad-cluster) starts it on Nomad.
+[Part 2](quickstart-production.md#part-2-start-the-receiver-on-nomad) starts it on Nomad.
 
 Prerequisites: the working directory
 ([Set up `wherry operator`](#set-up-wherry-operator)), the pool, and a receiver
