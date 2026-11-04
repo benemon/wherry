@@ -476,11 +476,27 @@ func (value *Snapshot) version() *int      { return &value.V }
 // p.<pool>.admission.<receiver>, and a run ID is safe in logs and job names.
 var runID = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-var namePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`)
+// nameBody is the grammar of the names wherry operator issues.
+const nameBody = `[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?`
+
+var namePattern = regexp.MustCompile(`^` + nameBody + `$`)
 
 // ValidName reports whether name follows the grammar of the names wherry operator issues, which a pool's credentials
 // follow too.
 func ValidName(name string) bool { return namePattern.MatchString(name) }
+
+// taskTopic is a signature task topic, wherry.pool.<pool>.tasks.<agent>.<hex>: the one parser of a task topic read
+// back, so no reader splits one on dots.
+var taskTopic = regexp.MustCompile(`^wherry\.pool\.(` + nameBody + `)\.tasks\.(` + nameBody + `)\.[0-9a-f]{64}$`)
+
+// ParseTaskTopic returns the pool and agent a signature task topic names, or false when topic is not one.
+func ParseTaskTopic(topic string) (pool, agent string, ok bool) {
+	match := taskTopic.FindStringSubmatch(topic)
+	if match == nil {
+		return "", "", false
+	}
+	return match[1], match[2], true
+}
 
 // TaskHash is the SHA-256, in lowercase hex, of a task record's encoded value.
 func TaskHash(encoded []byte) string {

@@ -39,9 +39,9 @@ var (
 	labelPrefix = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
 )
 
-// validKey accepts Kubernetes-style keys: an optional DNS-subdomain prefix
+// ValidLabelKey accepts Kubernetes-style keys: an optional DNS-subdomain prefix
 // and a slash, then a name of at most 63 characters.
-func validKey(key string) bool {
+func ValidLabelKey(key string) bool {
 	prefix, name, prefixed := strings.Cut(key, "/")
 	if !prefixed {
 		return labelName.MatchString(key)
@@ -52,7 +52,7 @@ func validKey(key string) bool {
 // ValidateLabels checks label keys and values.
 func ValidateLabels(labels map[string]string) error {
 	for key, value := range labels {
-		if !validKey(key) || !labelName.MatchString(value) {
+		if !ValidLabelKey(key) || !labelName.MatchString(value) {
 			return fmt.Errorf("label %q must have a valid key and value", key)
 		}
 	}
@@ -63,7 +63,7 @@ func ValidateLabels(labels map[string]string) error {
 func ValidateRequirements(requirements []Requirement) error {
 	keys := make(map[string]bool, len(requirements))
 	for _, requirement := range requirements {
-		if !validKey(requirement.Key) {
+		if !ValidLabelKey(requirement.Key) {
 			return errors.New("invalid requirement key")
 		}
 		if keys[requirement.Key] {
