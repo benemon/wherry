@@ -815,8 +815,7 @@ sample, and counts it in `wherry_metrics_dropped_total` by reason, when:
 - it has a label key the family lacks (`unknown_label`);
 - a label value is outside the family's set (`label_value`);
 - its kind is not the family's (`kind`);
-- its value is not finite, a counter is negative, or a histogram has other
-  buckets (`value`);
+- its value is not finite, or a counter is negative (`value`);
 - it repeats a series of the same answer (`duplicate`).
 
 It sets every sample's `profile` label to the name of the profile it
