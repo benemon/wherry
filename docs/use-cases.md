@@ -21,7 +21,7 @@ The credentials the run needs travel encrypted, and only the attempt that runs t
 [Placement](concepts.md#placement) explains how a task reaches a receiver.
 [Credential envelopes](security.md#credential-envelopes) explains how credentials travel.
 
-## Run where the hardware, operating system or isolation is different
+## Run where the hardware, OS or isolation is different
 
 Some tasks need a GPU, another architecture, or stronger isolation than your machine gives.
 Your operator labels each receiver's profiles with what they offer.
