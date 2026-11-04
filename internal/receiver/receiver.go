@@ -899,17 +899,16 @@ type runKey struct{ tenant, run string }
 func (r *Receiver) cancelledRun(ctx context.Context, events poolEvents, run, tenant string) bool {
 	found := false
 	for _, encoded := range events.others[run] {
-		err := r.authorizeHost(ctx, encoded, func(state operator.State, hosts signed.Keys) error {
+		// A record that is not an authorised cancel changes nothing.
+		if r.authorizeHost(ctx, encoded, func(state operator.State, hosts signed.Keys) error {
 			cancel, err := operator.AuthorizeCancel(state, hosts, encoded, r.config.Pool, tenant)
 			if err == nil && cancel.Run != run {
 				return errors.New("cancel names another run than its key")
 			}
-			if err == nil {
-				found = true
-			}
 			return err
-		})
-		_ = err // a record that is not an authorised cancel changes nothing
+		}) == nil {
+			found = true
+		}
 	}
 	return found
 }
