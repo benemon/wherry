@@ -105,20 +105,6 @@ func (f fixture) awaitSessions(d time.Duration, ok func(int) bool) bool {
 	return false
 }
 
-// awaitFollow waits for the fake plugin's first Follow, the run's start.
-func (f fixture) awaitFollow(t *testing.T) {
-	t.Helper()
-	for {
-		if _, _, follows, _ := f.plugin.counts(); follows == 1 {
-			return
-		}
-		if f.ctx.Err() != nil {
-			t.Fatalf("run never started; logs:\n%s", f.logs.String())
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
-
 // (a) A receiver whose offers are empty from the start opens no share client: no session, no join, no share fetch.
 func TestNoReadyOfferOpensNoPoll(t *testing.T) {
 	f := gateFixture(t, resultStream)
@@ -136,6 +122,10 @@ func TestNoReadyOfferOpensNoPoll(t *testing.T) {
 	}
 	if joined := joins(); joined != 0 {
 		t.Errorf("%d share group joins while no offer is ready, want none", joined)
+	}
+	f.setReady(t, true)
+	if !f.awaitSessions(1500*time.Millisecond, func(n int) bool { return n > 0 }) {
+		t.Errorf("no share session once an offer was ready; logs:\n%s", f.logs.String())
 	}
 }
 
@@ -195,7 +185,15 @@ func TestHeldRunIsNotGatedByNoOffer(t *testing.T) {
 		renewals := f.renewals(t)
 		f.submit(t, f.host, nil)
 		f.run(t, f.ctx)
-		f.awaitFollow(t)
+		for {
+			if _, _, follows, _ := f.plugin.counts(); follows == 1 {
+				break
+			}
+			if f.ctx.Err() != nil {
+				t.Fatalf("run never started; logs:\n%s", f.logs.String())
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 		f.setReady(t, false)
 		gated := time.Now()
 		f.await(t, testRun("run-a"), func(task wire.Task) bool { return task.Status.State == wire.TaskStateCompleted })
@@ -219,7 +217,15 @@ func TestHeldRunIsNotGatedByNoOffer(t *testing.T) {
 		f.plugin.endDelay = 30 * time.Second
 		f.submit(t, f.host, nil)
 		f.run(t, f.ctx)
-		f.awaitFollow(t)
+		for {
+			if _, _, follows, _ := f.plugin.counts(); follows == 1 {
+				break
+			}
+			if f.ctx.Err() != nil {
+				t.Fatalf("run never started; logs:\n%s", f.logs.String())
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 		f.setReady(t, false)
 		f.publishCancel(t, testRun("run-a"), 1, f.host, nil)
 		// A 200 ms cancel read, then the run's 1 s state check, then its stop.
@@ -388,6 +394,6 @@ func TestNoReadyOfferOpensNoPollOnRealBroker(t *testing.T) {
 		}
 	}
 	if !slices.Equal(claims, []int64{1}) {
-		t.Fatalf("claimed at attempts %v, want once at attempt 1: the gated receiver acquired the task nothing; logs:\n%s", claims, logs.String())
+		t.Fatalf("claimed at attempts %v, want once at attempt 1: the task was not claimed once, at its first delivery, after the offer became ready; logs:\n%s", claims, logs.String())
 	}
 }

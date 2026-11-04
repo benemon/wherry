@@ -146,7 +146,7 @@ receiver: <date> <time> profile <name> readiness: not ready
 
 When every member of a pool has no ready offer, you see these consequences:
 
-- Queued tasks wait in the queue and spend none of their delivery budget.
+- Queued tasks wait in the queue and spend no more of their delivery budget.
 - A task whose `task_started_by` passes while it waits is rejected when a ready member fetches it.
 - Adopting or stopping an orphaned job waits until a member is ready again.
 - Ending a run that is past its bounds waits until a member is ready again.

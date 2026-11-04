@@ -81,9 +81,8 @@ func (r *Receiver) claimLoop(claiming, running context.Context, idle func()) {
 	}
 }
 
-// claimGated reports that no new poll of the pool may open: a suspended pool, no ready offer or an active back-off each
-// close it alone, so clearing one never opens it while another holds. r.mu must be held, and never across a poll, a
-// client close, a sleep or a plugin call.
+// claimGated reports that no new poll of the pool may open: a suspended pool, no ready offer or an active back-off. r.mu
+// must be held, and never across a poll, a client close, a sleep or a plugin call.
 func (r *Receiver) claimGated() bool {
 	return r.state.Suspended[r.config.Pool] || len(r.offers) == 0 || time.Now().Before(r.backoffUntil)
 }
@@ -99,7 +98,10 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 	// The check and the count share the lock, so a slot releasing a task for another member knows every session that
 	// could fetch it again.
 	r.mu.Lock()
-	wait, gated := time.Until(r.backoffUntil), r.claimGated()
+	// claimGated reads the clock first, so a back-off with time left always gates: otherwise one expiring between the
+	// two reads would count a session that is never uncounted.
+	gated := r.claimGated()
+	wait := time.Until(r.backoffUntil)
 	if !gated {
 		r.fetching++
 	}
