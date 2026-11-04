@@ -1,6 +1,7 @@
 # Set up a host
 
-Set up your laptop as host `laptop` of tenant `acme`, then check that it sees your receiver.
+Set up your laptop as host `laptop` of tenant `acme`.
+Then check that it sees your receiver.
 You work on your laptop throughout this page.
 
 ## Before you start

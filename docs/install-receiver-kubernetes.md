@@ -25,5 +25,9 @@ Choose a Kubernetes plugin release that pairs with your wherry release.
   Take the steps' lines for a private broker CA.
 - The last step runs `wherry host receivers` from your laptop.
   You run it first on [Set up a host](install-host.md#_3-see-the-receiver).
+- The steps copy the example `config.yaml` to `receivers/kubernetes-1.config.yaml`.
+  Without this file, `receiver apply` asks for each value instead.
+  [Receiver local configuration](configuration-receiver.md#receiver-local-configuration) lists the questions and each
+  plugin example's answers.
 
 <!--@include: ./plugins/kubernetes/README.md#install-->

@@ -44,4 +44,5 @@ On macOS, use `shasum -a 256 -c -` in place of `sha256sum -c -`.
 wherry version
 ```
 
-It prints the release you installed as `version=<release>`, and its commit as `revision=<commit>`.
+It prints the release you installed as `version=<release>`.
+It prints the release's commit as `revision=<commit>`.
