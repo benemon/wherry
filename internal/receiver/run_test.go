@@ -943,7 +943,7 @@ func TestStartFailureWriteDenialStopsTheReceiver(t *testing.T) {
 
 func TestFollowErrorReasonIsFixed(t *testing.T) {
 	f := newFixture(t, nil)
-	f.plugin.followErr = errors.New("upstream detail")
+	f.plugin.followErr, f.plugin.followedJob = errors.New("upstream detail"), new(pluginsdk.JobAbsent)
 	task := runToTask(t, f)
 	if got := task.Artifacts[0].Parts[0].Text; got != "log stream failed" {
 		t.Fatalf("result reason %q, want fixed reason", got)
@@ -1010,8 +1010,9 @@ func TestFollowErrorResumesFromOffsetByJobState(t *testing.T) {
 			froms, lookups := f.plugin.froms, f.plugin.lookups
 			f.plugin.mu.Unlock()
 			first := int64(len(resultStream[0]) + 1)
-			if !slices.Equal(froms, []int64{0, first}) || lookups != 1 {
-				t.Fatalf("follows from %v after %d lookups; want 0, then the offset after the line taken before the failure, after one", froms, lookups)
+			// One Lookup finds the job started, one after the failure.
+			if !slices.Equal(froms, []int64{0, first}) || lookups != 2 {
+				t.Fatalf("follows from %v after %d lookups; want 0, then the offset after the line taken before the failure, after two", froms, lookups)
 			}
 			var transcript strings.Builder
 			for _, chunk := range f.chunks(t) {
@@ -1053,7 +1054,7 @@ func TestFollowFailureRetriesUntilTaskEndedBy(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, noResultStream)
-			f.plugin.linkLost, f.plugin.lostErr, f.plugin.job, f.plugin.lookupErr = 1<<20, test.lostErr, pluginsdk.JobRunning, test.lookupErr
+			f.plugin.linkLost, f.plugin.lostErr, f.plugin.job, f.plugin.followedErr = 1<<20, test.lostErr, pluginsdk.JobRunning, test.lookupErr
 			shortLock(f, time.Second)
 			endBy := time.Now().Add(4 * time.Second).Unix()
 			f.submit(t, f.host, func(task *wire.Submission) {
@@ -1105,13 +1106,14 @@ func TestFollowRetriesAreSpacedByTheRetryInterval(t *testing.T) {
 // A Follow that fails for a job Lookup reports absent fails the run at once, with no Follow after it.
 func TestFollowErrorOnAnAbsentJobFailsTheRun(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.plugin.linkLost, f.plugin.lostErr, f.plugin.job = 1, errors.New("stream reset"), pluginsdk.JobAbsent
+	f.plugin.linkLost, f.plugin.lostErr, f.plugin.followedJob = 1, errors.New("stream reset"), new(pluginsdk.JobAbsent)
 	task := runToTask(t, f)
 	if task.Status.State != wire.TaskStateFailed || task.Artifacts[0].Parts[0].Text != "log stream failed" {
 		t.Fatalf("task %#v; want FAILED log stream failed; logs:\n%s", task.Status, f.logs.String())
 	}
-	if _, lookups, follows, _ := f.plugin.counts(); follows != 1 || lookups != 1 {
-		t.Fatalf("followed %d times after %d lookups; want no follow after the one lookup", follows, lookups)
+	// One Lookup finds the job started, one after the failure.
+	if _, lookups, follows, _ := f.plugin.counts(); follows != 1 || lookups != 2 {
+		t.Fatalf("followed %d times after %d lookups; want no follow after the failure's lookup", follows, lookups)
 	}
 }
 
@@ -1150,7 +1152,7 @@ func TestFollowRetryChecksTheRunDeadline(t *testing.T) {
 
 func TestFollowErrorRetriesAFailedLookup(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.plugin.linkLost, f.plugin.lostErr, f.plugin.job, f.plugin.lookupFailures = 1, errors.New("stream reset"), pluginsdk.JobRunning, 2
+	f.plugin.linkLost, f.plugin.lostErr, f.plugin.job, f.plugin.followedErr, f.plugin.followedFailures = 1, errors.New("stream reset"), pluginsdk.JobRunning, errors.New("lookup down"), 2
 	shortLock(f, time.Millisecond)
 	if task := runToTask(t, f); task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "done" {
 		t.Fatalf("task %#v after failed lookups; want the run completed; logs:\n%s", task.Status, f.logs.String())
@@ -1158,14 +1160,15 @@ func TestFollowErrorRetriesAFailedLookup(t *testing.T) {
 	f.plugin.mu.Lock()
 	froms, lookups := f.plugin.froms, f.plugin.lookups
 	f.plugin.mu.Unlock()
-	if first := int64(len(resultStream[0]) + 1); !slices.Equal(froms, []int64{0, first}) || lookups != 3 {
-		t.Fatalf("follows from %v after %d lookups; want 0, then the offset after the line taken, after three", froms, lookups)
+	// One Lookup finds the job started, three after the failure.
+	if first := int64(len(resultStream[0]) + 1); !slices.Equal(froms, []int64{0, first}) || lookups != 4 {
+		t.Fatalf("follows from %v after %d lookups; want 0, then the offset after the line taken, after four", froms, lookups)
 	}
 }
 
 func TestFollowErrorOnANeverStartedJobIsAStartFailure(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.plugin.linkLost, f.plugin.lostErr, f.plugin.job = 1, errors.New("stream reset"), pluginsdk.JobNeverStarted
+	f.plugin.linkLost, f.plugin.lostErr, f.plugin.followedJob = 1, errors.New("stream reset"), new(pluginsdk.JobNeverStarted)
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release; logs:\n%s", status, f.logs.String())
 	}
@@ -1585,7 +1588,8 @@ func TestReceiverFirstAttemptSkipsLookup(t *testing.T) {
 	}
 	labDispatches, labLookups, _, _ := m.lab.counts()
 	_, cloudLookups, _, _ := m.cloud.counts()
-	if labLookups != 0 || cloudLookups != 0 || labDispatches != 1 {
+	// The one Lookup is the dispatching profile's, which finds the dispatched job started.
+	if labLookups != 1 || cloudLookups != 0 || labDispatches != 1 {
 		t.Fatalf("lookups lab=%d cloud=%d, lab dispatches=%d", labLookups, cloudLookups, labDispatches)
 	}
 }

@@ -30,7 +30,7 @@ type metrics struct {
 	register   sync.Once
 
 	claims, admissions, rejections, runs, adoptions, redeliveries *prometheus.CounterVec
-	runDuration, queueWait, openWait                              *prometheus.HistogramVec
+	runDuration, queueWait, openWait, placement                   *prometheus.HistogramVec
 	inFlight, pastDeadline                                        *prometheus.GaugeVec
 	capacity, advertised                                          prometheus.Gauge
 	startFailures, dispatchOutcomes, stopFailures, purgeFailures  *prometheus.CounterVec
@@ -85,6 +85,11 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m.collectionFailures = counters("collection_failures_total", "Runs whose outputs were not collected, by reason.", "profile", "reason")
 	m.openWaits = counters("open_waits_total", "Open requests waited on, by outcome.", "tenant", "outcome")
 	m.openWait = histograms("open_wait_seconds", "Time a run waited for its attempt wrap or refusal.", "tenant")
+	m.placement = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "wherry_plugin_placement_seconds", Help: "Time from Dispatch returning to the first observation of the agent task started, by the receiver's clock.",
+		Buckets: pluginsdk.PlacementBuckets,
+	}, []string{"profile"})
+	m.collectors = append(m.collectors, m.placement)
 	m.redactions = counters("redactions_total", "Credential values replaced in published output.", "tenant", "profile")
 	m.busErrors = counters("bus_errors_total", "Kafka operation errors, by operation.", "op")
 	m.denials = counters("denials_total", "Kafka authorisation errors, by the capability denied.", "op")
@@ -124,7 +129,6 @@ var pluginFamilies = []pluginFamily{
 	{"wherry_plugin_platform_errors_total", "Platform API errors, by class.", pluginsdk.KindCounter, "class", []string{"unavailable", "denied", "conflict", "timeout", "other"}},
 	{"wherry_plugin_cleanup_pending", "Ended jobs awaiting cleanup.", pluginsdk.KindGauge, "", nil},
 	{"wherry_plugin_sweep_deletions_total", "Material a sweep deleted, by kind.", pluginsdk.KindCounter, "kind", []string{"job", "variable", "directory"}},
-	{"wherry_plugin_placement_seconds", "Time from dispatch to the agent task starting.", pluginsdk.KindHistogram, "", nil},
 	{"wherry_plugin_storage_free_bytes", "Free bytes of the storage the profile's runs share.", pluginsdk.KindGauge, "", nil},
 }
 
@@ -226,21 +230,6 @@ func pluginLabels(name string, sample pluginsdk.Sample) ([]string, string) {
 
 func (m *metrics) pluginMetric(sample pluginsdk.Sample, labels []string) (prometheus.Metric, string) {
 	desc := m.pluginDescs[sample.Family]
-	if sample.Kind == pluginsdk.KindHistogram {
-		histogram := sample.Histogram
-		if len(histogram.Buckets) != len(pluginsdk.PlacementBuckets) || math.IsNaN(histogram.Sum) || math.IsInf(histogram.Sum, 0) {
-			return nil, "value"
-		}
-		buckets := map[float64]uint64{}
-		previous := uint64(0)
-		for i, count := range histogram.Buckets {
-			if count < previous || count > histogram.Count {
-				return nil, "value"
-			}
-			buckets[pluginsdk.PlacementBuckets[i]], previous = count, count
-		}
-		return prometheus.MustNewConstHistogram(desc, histogram.Count, histogram.Sum, buckets, labels...), ""
-	}
 	if math.IsNaN(sample.Value) || math.IsInf(sample.Value, 0) || sample.Kind == pluginsdk.KindCounter && sample.Value < 0 {
 		return nil, "value"
 	}

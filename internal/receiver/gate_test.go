@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"slices"
@@ -406,5 +407,122 @@ func TestNoReadyOfferOpensNoPollOnRealBroker(t *testing.T) {
 	}
 	if !slices.Equal(claims, []int64{1}) {
 		t.Fatalf("claimed at attempts %v, want once at attempt 1: the task was not claimed once, at its first delivery, after the offer became ready; logs:\n%s", claims, logs.String())
+	}
+}
+
+// TestPendingRunOpensNoPollOnRealBroker runs a member whose plugin keeps its job pending beside a ready member in a
+// broker pool; kfake does not model share-group acquisition. While its run is pending the first member has no share
+// session polling the pool and claims nothing more; the ready member claims the task queued meanwhile at its first
+// delivery.
+func TestPendingRunOpensNoPollOnRealBroker(t *testing.T) {
+	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
+	if address == "" {
+		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
+	}
+	shortIntervals(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	b := newBrokerPool(t, ctx, address)
+	b.configure(t, ctx, 2)
+	second := b.receiver + "-b"
+	b.member(t, ctx, second)
+	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
+	registration, err := signed.RegisterKey(signed.HostOwner(b.tenant, b.host), hostKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.HostTopic(b.tenant, b.host), Value: registration}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	keys := signed.Keys{}
+	member := func(id string, plugin *fakePlugin) (*Receiver, *syncBuffer) {
+		base, err := kgo.NewClient(b.opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, signing, _ := ed25519.GenerateKey(rand.Reader)
+		keys[id] = signed.KeyState{Current: signing.Public().(ed25519.PublicKey)}
+		logs := &syncBuffer{}
+		return &Receiver{id: id, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+			factory: func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
+				return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
+			}}, logs
+	}
+	runMember := func(r *Receiver) {
+		runCtx, stop := context.WithCancel(ctx)
+		done := make(chan error, 1)
+		go func() { done <- r.Run(runCtx) }()
+		t.Cleanup(func() { stop(); <-done })
+	}
+	submit := func(name string) string {
+		submission := testSubmission(name)
+		submission.Wherry.Tenant, submission.Wherry.Host, submission.Wherry.Pool = b.tenant, b.host, b.pool
+		run := wire.RunID(b.tenant, b.host, submission.Wherry.RunNonce)
+		submission.Wherry.Run, submission.Message.TaskID, submission.Message.ContextID = run, run, run
+		b.seal(t, ctx, submission)
+		value, err := wire.SignRecord(submission, hostKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.PoolTasksTopic(b.pool), Key: []byte(run), Value: value}).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+		return run
+	}
+	claims := func(run string) []string {
+		records, err := readTopic(ctx, b.kafka, operator.PoolEventsTopic(b.pool))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var claimed []string
+		for _, record := range records {
+			var status wire.RunStatus
+			if wire.ParseRecord(record.Value, keys, &status) == nil && status.Wherry.Run == run && status.Wherry.Kind == "claimed" {
+				claimed = append(claimed, fmt.Sprintf("%s@%d", status.Wherry.Receiver, status.Wherry.Attempt))
+			}
+		}
+		return claimed
+	}
+	first, firstLogs := member(b.receiver, &fakePlugin{stream: resultStream, placing: true, placingReason: "queued"})
+	later, laterLogs := member(second, &fakePlugin{stream: resultStream})
+	runMember(first)
+	b.joined(t, ctx, firstLogs)
+	submit("run-pending")
+	for {
+		first.mu.Lock()
+		pending := len(first.pending)
+		first.mu.Unlock()
+		if pending == 1 {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("the first member's run never turned pending; logs:\n%s", firstLogs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// The watcher's 100 ms, then the client's close, which waits out a pending fetch of up to its 1 s FetchMaxWait.
+	for closed := time.Now(); first.sessions() != 0; time.Sleep(10 * time.Millisecond) {
+		if time.Since(closed) > 100*time.Millisecond+time.Second+500*time.Millisecond {
+			t.Fatalf("%d share sessions polling 1.6 s after the run turned pending; logs:\n%s", first.sessions(), firstLogs.String())
+		}
+	}
+	queued := submit("run-queued")
+	for end := time.Now().Add(3 * time.Second); time.Now().Before(end); time.Sleep(100 * time.Millisecond) {
+		if first.sessions() != 0 || len(claims(queued)) != 0 {
+			t.Fatalf("the pending member polled or claimed the queued task; logs:\n%s", firstLogs.String())
+		}
+	}
+	runMember(later)
+	for {
+		if claimed := claims(queued); len(claimed) > 0 {
+			if !slices.Equal(claimed, []string{second + "@1"}) {
+				t.Fatalf("claimed as %v, want once by the ready member at the first delivery", claimed)
+			}
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("the ready member never claimed the queued task; logs:\n%s", laterLogs.String())
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }

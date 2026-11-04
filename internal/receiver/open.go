@@ -67,6 +67,8 @@ func (run *activeRun) awaitOpen(ctx, bound context.Context, job *pluginsdk.Handl
 			return signed.EnvelopeValues{}, run.fail(ctx, reason, nil), false
 		case job != nil && requested == 0:
 			r.logger.Printf("run %s: refused %s; requesting once more", task.Wherry.Run, reason)
+		case job != nil && run.unplaced():
+			return signed.EnvelopeValues{}, run.purgeKeyLost(ctx), false
 		case job != nil:
 			return signed.EnvelopeValues{}, run.stopAndFail(ctx, *job, keyLostReason, nil), false
 		case run.firstDelivery:
@@ -233,8 +235,16 @@ func (run *activeRun) keyLost(ctx context.Context) kgo.AckStatus {
 	return run.fail(ctx, keyLostReason, nil)
 }
 
-// reconcileKey ends a run refused key unavailable from its job's state: key-lost only for a job absent or never
-// started, and past its bound once task_ended_by passes with Lookup unresolved.
+// purgeKeyLost removes a job that never started, or is not placed, and ends its run key-lost.
+func (run *activeRun) purgeKeyLost(ctx context.Context) kgo.AckStatus {
+	if err := run.purge(ctx); err != nil {
+		return run.returnTask(ctx, nil)
+	}
+	return run.keyLost(ctx)
+}
+
+// reconcileKey ends a run refused key unavailable from its job's state: key-lost only for a job absent, never started
+// or not placed, and past its bound once task_ended_by passes with Lookup unresolved.
 func (run *activeRun) reconcileKey(ctx context.Context) kgo.AckStatus {
 	written := false
 	for {
@@ -244,11 +254,8 @@ func (run *activeRun) reconcileKey(ctx context.Context) kgo.AckStatus {
 		switch {
 		case err == nil && !found:
 			return run.keyLost(ctx)
-		case err == nil && job.State == pluginsdk.JobNeverStarted:
-			if err := run.purge(ctx); err != nil {
-				return run.returnTask(ctx, nil)
-			}
-			return run.keyLost(ctx)
+		case err == nil && (job.State == pluginsdk.JobNeverStarted || job.State == pluginsdk.JobPending):
+			return run.purgeKeyLost(ctx)
 		case err == nil:
 			return run.stopAndFail(ctx, job.Handle, keyLostReason, nil)
 		case ctx.Err() != nil:

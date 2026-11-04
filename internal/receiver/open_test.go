@@ -1550,8 +1550,9 @@ func TestRedeliveryAfterAReleaseWithNoJobIsAFirstStart(t *testing.T) {
 	if kinds := f.kinds(t); slices.Contains(kinds, "adopting") {
 		t.Fatalf("statuses %v, want no adoption", kinds)
 	}
-	if dispatches, lookups, _, _ := f.plugin.counts(); dispatches != 1 || lookups != 1 {
-		t.Fatalf("dispatches %d, lookups %d; want the job looked up and then dispatched", dispatches, lookups)
+	// The second Lookup is the one that finds the dispatched job started.
+	if dispatches, lookups, _, _ := f.plugin.counts(); dispatches != 1 || lookups != 2 {
+		t.Fatalf("dispatches %d, lookups %d; want the job looked up, then dispatched and looked up once more", dispatches, lookups)
 	}
 }
 

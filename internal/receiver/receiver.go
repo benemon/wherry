@@ -96,6 +96,9 @@ type Receiver struct {
 	// fetching counts the share sessions polling the pool for a task.
 	backoffUntil time.Time
 	fetching     int
+	// pending holds each execution whose latest observation of its job found it not placed, keyed by execution so an
+	// old attempt clears only its own entry.
+	pending map[*activeRun]struct{}
 	// admissionMu serialises the admission transactional ID, which one producer at a time may hold.
 	admissionMu sync.Mutex
 	// cancelled holds the runs cancelled by a host of their tenant.
