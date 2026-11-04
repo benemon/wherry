@@ -2,7 +2,5 @@ bundle: /secrets/receiver.bundle
 ca_file: /secrets/kafka-ca.pem
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
+metrics_addr: ":9464"
 drain_timeout: 20s
-credentials:
-  nomad-token:
-    env: NOMAD_TOKEN

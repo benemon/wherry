@@ -456,9 +456,9 @@ default, such as the Nomad plugin's `NOMAD_TOKEN`.
 
 Sources stay on the receiver's host. `wherry.operator`, which every principal
 reads, records the credential's name alone, and the receiver's bundle holds
-its Kafka identity alone. The [Quickstart](quickstart-production.md#_5-write-the-receiver-s-local-configuration)
-writes a local configuration with a source for each platform credential its
-receiver configuration names.
+its Kafka identity alone. The [Quickstart](quickstart-production.md#_5-add-the-receiver)
+uses the Nomad example's local configuration, which names no platform
+credential: its receiver takes the Nomad token from the job's workload identity.
 
 From the moment it resolves a value until it exits, the receiver replaces
 the value in the plugin lines and plugin standard error it logs and in the
