@@ -127,6 +127,9 @@ type fakePlugin struct {
 	lostErr   error
 	froms     []int64
 	delivered int
+	// followStarts records when each Follow began, and deadFollows counts the Follows begun under an ended context.
+	followStarts []time.Time
+	deadFollows  int
 	// hang makes Sweep and Ready block until their context ends.
 	hang bool
 	// outputs are what Collect streams after the outcome file, unless collectErr fails it, or collectFailures fails that many
@@ -226,6 +229,10 @@ func (f *fakePlugin) Follow(ctx context.Context, _ pluginsdk.Handle, from int64,
 	f.mu.Lock()
 	f.follows++
 	f.froms = append(f.froms, from)
+	f.followStarts = append(f.followStarts, time.Now())
+	if ctx.Err() != nil {
+		f.deadFollows++
+	}
 	f.lastDeadline, _ = ctx.Deadline()
 	lost, lostErr := f.follows <= f.linkLost, cmp.Or(f.lostErr, pluginsdk.ErrLinkLost)
 	stream, followErr, endDelay, pauses, neverStarted, neverClass, neverReason, ended := append([]string(nil), f.stream...), f.followErr, f.endDelay, f.pauses, f.neverStarted, f.neverClass, f.neverReason, f.ended
