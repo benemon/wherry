@@ -167,6 +167,7 @@ func operatorPassword(t *testing.T, dir string) string {
 func operatorCommands(t *testing.T, root *kgo.Client, dir, suffix string, check, removes bool) error {
 	t.Helper()
 	pool, tenant, host, receiver := "p"+suffix, "t"+suffix, "h"+suffix, "r"+suffix
+	localFixture(t, dir, receiver)
 	files := writeTree(t, map[string]string{
 		"pool.yaml":     "agents:\n  - name: claude\nproducer_byte_rate: 1048576\nrequest_percentage: 10\n",
 		"receiver.yaml": "pool: " + pool + "\nplugin_sha256: {nomad: " + fakeSHA256 + "}\n" + basePlugin + item("name: claude\nagent: claude\n", "      "),
@@ -569,6 +570,7 @@ func TestKafkaOptsTrustTheSystemRootsWithoutACA(t *testing.T) {
 // naming the fields a file gives. The guided path writes the file before applying it, so a refused apply leaves it.
 func TestPoolApplyGuidedPath(t *testing.T) {
 	service := operatorEnv(t)
+	localFixture(t, ".", "receiver-a")
 	shareCeilings(t, service.Operator)
 	if err := os.Mkdir("pools", 0o755); err != nil {
 		t.Fatal(err)
@@ -607,6 +609,7 @@ func TestPoolApplyGuidedPath(t *testing.T) {
 // and applies it; without a file or a terminal it refuses naming the fields.
 func TestReceiverApplyGuidedPath(t *testing.T) {
 	service := operatorEnv(t)
+	localFixture(t, ".", "receiver-a")
 	ctx := context.Background()
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
@@ -640,12 +643,13 @@ func TestReceiverApplyGuidedPath(t *testing.T) {
 // password.
 func TestReceiverApplyNewBrokerKeepsThePassword(t *testing.T) {
 	service := operatorEnv(t)
+	localFixture(t, ".", "receiver-a")
 	ctx := context.Background()
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir("receivers", 0o755); err != nil {
+	if err := os.MkdirAll("receivers", 0o755); err != nil {
 		t.Fatal(err)
 	}
 	kept := filepath.Join("receivers", "receiver-a.yaml")
@@ -685,6 +689,7 @@ func TestReceiverApplyNewBrokerKeepsThePassword(t *testing.T) {
 // anything: the new broker could reach the receiver only in a bundle.
 func TestReceiverApplyWithoutItsBundleIsRefused(t *testing.T) {
 	service := operatorEnv(t)
+	localFixture(t, ".", "receiver-a")
 	ctx := context.Background()
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
@@ -726,6 +731,7 @@ func TestReceiverApplyWithoutItsBundleIsRefused(t *testing.T) {
 // names.
 func TestReceiverApplyForceKeepsTheBundlesBroker(t *testing.T) {
 	service := operatorEnv(t)
+	localFixture(t, ".", "receiver-a")
 	ctx := context.Background()
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
@@ -777,6 +783,7 @@ func TestHostAddRestrictsExistingBundleDirectories(t *testing.T) {
 // kept file from prompts.
 func TestDryRunWritesNothingToTheWorkingDirectory(t *testing.T) {
 	service := operatorEnv(t)
+	localFixture(t, ".", "receiver-a")
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	if err := service.PoolApply(context.Background(), "pool-a", terms, false); err != nil {
 		t.Fatal(err)
@@ -809,6 +816,7 @@ func TestDryRunWritesNothingToTheWorkingDirectory(t *testing.T) {
 // receiver apply --force takes the broker from the receiver's kept file over the one in its existing bundle.
 func TestReceiverApplyForceTakesTheKeptFilesBroker(t *testing.T) {
 	service := operatorEnv(t)
+	localFixture(t, ".", "receiver-a")
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	if err := service.PoolApply(context.Background(), "pool-a", terms, false); err != nil {
 		t.Fatal(err)

@@ -108,6 +108,7 @@ func TestQuickstartOperatorOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := operatorEnv(t)
+	localFixture(t, ".", "receiver-a")
 	wherry := func(args ...string) string {
 		t.Helper()
 		var stdout bytes.Buffer
@@ -122,12 +123,13 @@ func TestQuickstartOperatorOutput(t *testing.T) {
 	wherry("tenant", "add", "acme")
 	wherry("tenant", "pool", "add", "acme", "build")
 	// The quickstart keeps the receiver's file in the working directory, where apply finds it.
-	if err := os.Mkdir("receivers", 0o755); err != nil {
+	if err := os.MkdirAll("receivers", 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(receiverFile, filepath.Join("receivers", "nomad-1.yaml")); err != nil {
 		t.Fatal(err)
 	}
+	localFixture(t, ".", "nomad-1")
 	dryRun := wherry("receiver", "apply", "nomad-1", "--dry-run")
 	wherry("receiver", "apply", "nomad-1")
 	shown := wherry("receiver", "show", "nomad-1")
