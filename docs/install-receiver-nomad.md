@@ -1,7 +1,8 @@
 # Receiver on Nomad
 
 Run receiver `nomad-1` on your Nomad cluster.
-The three receiver pages are alternatives, so follow this one only if your receiver runs on Nomad.
+The three receiver pages are alternatives.
+Follow this one only if your receiver runs on Nomad.
 
 ## Before you start
 

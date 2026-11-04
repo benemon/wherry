@@ -26,7 +26,7 @@ Follow one of them.
 
 The names used throughout are pool `build`, agent `claude`, tenant `acme` and host `laptop`.
 
-### The files you'll make
+## The files you'll make
 
 | File | Made by | Lives in | What it is |
 | --- | --- | --- | --- |
