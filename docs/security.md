@@ -1,20 +1,20 @@
 # Security
 
-How a run's credentials travel from the host to one attempt of one
-receiver, what the pool key that carries them protects, where the host
-takes their values from, and how they reach the agent: the agent holds each
-value at its target while it runs.
-[Governance](governance.md) covers identity, grants, signed records and
-the audit trail.
+Your host resolves credentials when you submit a task.
+The credential envelope carries their values to the run's receiver.
+This page explains credential delivery and its trust boundaries.
+[Governance](governance.md) covers identity, grants and the audit trail.
 
 ## Credential envelopes
+
+![Credential delivery from a host through an encrypted envelope and the pool key custodian to an attempt](diagrams/credential-envelope.svg)
 
 The agent usually needs a model credential, and each tenant's work runs on
 that tenant's own credential. Every credential has a **source** on the
 host and a **target** in the agent. The pool's terms list each agent's
 credentials, each with its target: an environment variable or a file in
 the directory `WHERRY_CREDENTIALS_DIR` names, and whether the agent
-requires it. The host's [client configuration](configuration.md#client-configuration)
+requires it. The host's [client configuration](configuration-host.md#client-configuration)
 maps each credential name to one [source](#credential-sources). A task can
 also declare **task credentials**: credentials of the host, such as a
 deploy key, that the agent gets at the target the task's parent chooses.
@@ -89,49 +89,22 @@ from the platform, and files and task credentials from the task.
 
 ## The claim check
 
-The key custodian serves an open request only when all of these hold, and
-otherwise refuses it with the reason the
-[claim check](a2a-extension-v1.md#the-claim-check) names:
+The custodian checks an open request before releasing an attempt wrap.
+It verifies all of these:
 
-- the request is signed by the live member of the pool it names;
-- it names the run's task, the hash of the run's first status other than
-  `rejected`, of any kind, among the statuses of live pool members, and the
-  run has no terminal status and no cancel. Revoking the member that wrote
-  that status makes the next one first and can move the run's task: an
-  accepted residual;
-- the record at its claim's task offset is that task, signed by an
-  authorised host for the run under its derived run ID, with bounds that hold
-  at its append time;
-- the run's latest ownership status is the requester's `claimed` for the
-  request's attempt;
-- the run is within its open bound: `task_started_by` for a first start,
-  `task_ended_by` once the run has started or the claimant is adopting its
-  job;
-- the claim has an `adopting` status, which its receiver writes once
-  `Lookup` finds the job, or the pool is not suspended in the read of
-  `wherry.operator` the custodian makes at the start of its pass, so on a
-  suspended pool the custodian serves adoptions of running jobs and no first
-  start, even to a receiver that has not yet read the suspension.
-  `wherry operator pool suspend` returns once the key custodian has
-  acknowledged the suspension with `suspended_for` in its snapshot, which a
-  pass publishes before it decides any request and after every attempt wrap
-  of the previous pass committed: after that no new start opens. A pool
-  with no snapshot has no custodian to open anything, and the command
-  returns at once. With no acknowledgement within 5 minutes the command
-  fails with `... it is not yet in effect`, and a first start can still
-  open until the custodian reads the record;
-- when the claim changed receivers, it has no previous holder, or the
-  previous holder's membership ended or its latest advertisement in the pool
-  appended at or before the claim is more than 120 seconds old. The previous
-  holder is the receiver of the latest earlier `claimed` that the custodian
-  served and that the same receiver has not followed with its own
-  `released`; a refused claimant holds nothing, and its `released` ends only
-  its own claim.
+1. The request comes from a live receiver in the pool.
+2. The request names the run's admitted task and current claim.
+3. The task came from an authorised host and has valid bounds.
+4. The run has no terminal status or cancellation.
+5. The request is within its start bound or adoption end bound.
+6. The pool permits the start or the claimant is adopting an existing job.
+7. Any previous holder released its claim, ended its membership or passed its advertisement lease.
 
-The custodian serves a new claimant once the previous holder has
-released the task or gone silent, and refuses it with `two live claimants`
-while the previous holder is live. It records each decision on a claim
-durably and reuses it.
+The custodian records its claim decision durably.
+It refuses a competing claim with `two live claimants` while the previous holder remains live.
+The advertisement lease is 120 seconds.
+The [claim-check specification](a2a-extension-v1.md#the-claim-check) defines ordering, task hashes and evidence checks.
+[Pool suspension](concepts.md#suspension) explains the acknowledgement boundary.
 
 A refused claimant acts on the reason:
 
@@ -175,7 +148,7 @@ admission: a malformed first task can win its run and then fail at open with
 - **Size.** An envelope is at most 64 KiB, and the signed task with its
   envelope must fit the pool's record limit; `submit` measures the actual
   record. `pool apply` sizes the pool against a task with a maximum
-  envelope ([Size a pool against the broker](operations.md#size-a-pool-against-the-broker)).
+  envelope ([Size a pool against the broker](operations-operator.md#size-a-pool-against-the-broker)).
 - **Time on the broker.** The pool's tasks and events topics keep records for
   `start_by_limit` plus six hours plus a day, or longer after `pool apply`
   shortens `start_by_limit`, since it never lowers their retention, and roll a segment every hour,
@@ -204,7 +177,7 @@ reason, or withholding re-key wraps is out of scope.
 | --- | --- |
 | Kafka operators and broker storage | ciphertext only, without a pool private key |
 | another tenant or pool | nothing: the platform's ACLs, TLS and SCRAM keep them apart, and only the pool's receivers and `wherry.operator` can write its snapshot |
-| a compromised receiver that is not the key custodian | the credentials of the runs it claims; it can become custodian through the custodian group as an honest receiver would, which raises [WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover), as every custodian change does |
+| a compromised receiver that is not the key custodian | the credentials of the runs it claims; it can become custodian through the custodian group as any pool member can, which raises [WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover), as every custodian change does |
 | the key custodian, or anyone who copies its keys | every retained envelope under those keys, without claiming |
 
 Daily [rotation](concepts.md#rotation) stops a silently copied key from
@@ -232,7 +205,7 @@ no attempt needs an answer from the submitting host. Custody in the pool:
 ## Run credentialed tasks
 
 Prerequisites: a host with its
-[client configuration](configuration.md#client-configuration), entitled to a
+[client configuration](configuration-host.md#client-configuration), entitled to a
 pool whose terms list the agent's credentials.
 
 1. Map each credential the agent takes, and each task credential, to a
@@ -262,27 +235,20 @@ pool whose terms list the agent's credentials.
 
 ## A model credential per pool
 
-An agent runs commands, and holds every credential its run delivers while
-it runs; a hostile or prompt-injected agent can send a credential anywhere
-its network allows. A model credential issued for one pool's agents and
-used nowhere else bounds that exposure: a leaked key reaches only that
-pool's model usage, the provider's usage and limits for the key show that
-pool's runs alone, and revoking it stops that pool's agents without
-touching another pool or the tenant's own use of the model. A dedicated,
-revocable credential per pool is an operator choice. wherry does not check
-it: it delivers whatever value the host's source for the credential's name
-resolves, and does not know which key that is.
+An agent holds the credentials delivered to its run.
+It can send them anywhere its network permits.
+Use a dedicated, revocable model credential for each tenant's use of a pool.
+You can then revoke that credential without affecting other pools.
+Your provider controls its scope and usage limits.
 
-The pool's terms name each agent's credentials, and a host's
-[client configuration](configuration.md#client-configuration) maps each
-name to one source for every pool. A credential name used by one pool alone
-gives that pool its own source on every host. Each tenant's runs use that
-tenant's credential, so each tenant entitled to the pool holds its own key
-for it.
+wherry delivers the value resolved by the host's source.
+It does not check the provider account or key scope.
+Choose a credential name used by that pool alone.
+Map it to the tenant's source on each host.
 
 ### Give a pool's agents a dedicated credential
 
-Prerequisites: the [operator working directory](operations.md#set-up-wherry-operator),
+Prerequisites: the [operator working directory](operations-operator.md#set-up-wherry-operator),
 the pool's terms in `pools/<pool>.yaml`, and, for each tenant entitled to the pool, a model
 provider account that issues and revokes API keys, such as per-project or
 per-workspace keys.
@@ -305,7 +271,7 @@ per-workspace keys.
 
 4. Name the credential in the pool's terms, at the target the agent reads
    it from, and record the terms as in
-   [Change a pool's terms](operations.md#change-a-pool-s-terms):
+   [Change a pool's terms](operations-operator.md#change-a-pool-s-terms):
 
    ```yaml
    agents:
@@ -351,7 +317,7 @@ Prerequisites: the tenant's account at the model provider.
    resolves, `submit` refuses runs that deliver the credential.
 
 When a receiver is revoked, rotate each credential it could open, as in
-[Revoke a host or receiver](operations.md#revoke-a-host-or-receiver).
+[Revoke a host or receiver](operations-operator.md#revoke-a-host-or-receiver).
 
 A revoked or denied receiver leaves the jobs it held running for adoption,
 as [Revocation](concepts.md#revocation) describes.
@@ -424,7 +390,7 @@ A receiver takes the credential a plugin authenticates to its platform
 with, such as a Nomad token, from a source on the receiver's host. A
 plugin profile's `config` names the credential with `credential: <name>`, and the
 `credentials` of the receiver's [local
-configuration](configuration.md#receiver-local-configuration) map the name
+configuration](configuration-receiver.md#receiver-local-configuration) map the name
 to a `file`, `env` or `command` source. The receiver resolves it with the
 host's implementation and under the host's rules: the same file mode rule,
 the same 60-second command timeout with standard error discarded, and
@@ -433,7 +399,7 @@ receiver's environment. The receiver trims a trailing CR and LF from the
 value and passes it to the plugin when it configures the profile, at start
 and after a configuration change.
 
-[Platform credentials](configuration.md#platform-credentials) states what
+[Platform credentials](configuration-receiver.md#platform-credentials) states what
 `wherry.operator` and the bundle hold of it. A rotated platform token takes
 effect on the receiver's next start without a new bundle.
 
@@ -445,7 +411,7 @@ longest matching prefix, as git's `credential.<url>` settings do. The entry's
 credential joins the task as a task credential the agent gets as the file
 `git-credential` in `WHERRY_CREDENTIALS_DIR`, and the contents of its
 `host_key` file become the git input's host key. A remote no entry matches
-clones without a credential. The pool's [`vcs`](configuration.md#pool-terms) hosts still
+clones without a credential. The pool's [`vcs`](configuration-operator.md#pool-terms) hosts still
 decide which hosts a remote may name.
 
 The `url` prefix is the credential's scope: every task cloning under it
@@ -462,7 +428,7 @@ fails names the credential and the cause:
 `read storage credential <name>: its environment variable is unset or empty`.
 The credential never leaves the host: receivers and agents get only the URLs it presigns.
 Scope it to `wherry/<tenant>/` in each pool's bucket
-([Operations](operations.md#s3-storage)).
+([Operations](operations-hosts.md#s3-storage)).
 
 ## The Kafka super user
 
@@ -475,7 +441,7 @@ password, nor the path of its password file, to any file. Every other
 user's password can stay with the Kafka administrator after setup, and a
 re-run of `init` to rotate `wherry.operator`'s password needs it again.
 On Strimzi, the User Operator must ignore the principals wherry creates, as
-[Strimzi](operations.md#strimzi) shows.
+[Strimzi](operations-operator.md#strimzi) shows.
 
 ### The operator principal
 
@@ -502,7 +468,7 @@ rotates with a re-run of `init`.
 
 ### The operator working directory
 
-The operator's [working directory](configuration.md#operator-working-directory)
+The operator's [working directory](configuration-operator.md#operator-working-directory)
 holds `operator.password` and every bundle `tenant host add` and `receiver apply`
 write, so it holds the Kafka password of every principal wherry made. Keep it
 on the operator's machine, readable by the operator alone: `bundles/` is
@@ -517,7 +483,7 @@ A bundle carries the broker address, the principal and its password, and no
 CA. Every host, receiver and the operator trusts the broker through the
 system's trusted roots, or through the CA file its own configuration names:
 `ca_file` in the host's or receiver's configuration (the host also looks for
-`ca.pem` in its [configuration directory](configuration.md#client-configuration),
+`ca.pem` in its [configuration directory](configuration-host.md#client-configuration),
 by default `~/.config/wherry/ca.pem`) and in `operator.yaml`. `wherry host init`
 asks for the CA only on a terminal, so a host without one has its CA file in
 place before `host init` connects. The Kafka platform issues
@@ -527,19 +493,25 @@ system roots trusts every CA they hold for the broker's address.
 
 ## Removal and retained data
 
-Tenant and entitlement removal revoke access and do not erase data. Receivers keep Write and
-Describe on ended entitlements' tenant feed and transcript and Read and Describe on every host key
-topic of that tenant, including ended hosts. Only the receiver's own revocation removes all its
-grants. These grants come from current pool membership: a receiver joining later receives them, and
-a host added later is readable by those receivers. This documented over-grant permits writes to a
-feed the tenant's hosts ignore for that pool and reads of public keys.
+Removing a tenant or an entitlement revokes access. Run data stays where it is; tenant removal deletes only the
+tenant's bundle files.
 
-After an entitlement ends, unclaimed tasks and claimed-task redeliveries fail admission without
-writes. Running jobs finish normally into the tenant feed, but hosts cannot read their pool's runs
-or cancel them. Pool-event readers drop their terminal statuses; the receiver still settles its
-claim. A run awaiting a pool key has its open refused and releases its task; its next admission
-rejects it. If an adopter's job already runs, or a receiver restarts mid-run, the job is left to the
-plugin's sweep. Receiver restarts reject redelivery rather than adopting the job.
+The pool's receivers keep some grants after an entitlement ends, so runs they already hold can finish:
+
+- Write and Describe on the tenant's feed and transcript topics.
+- Read and Describe on every host key topic of the tenant, including ended hosts.
+
+Only a receiver's own revocation removes these grants. They follow current pool membership, so a receiver that joins
+the pool later also gets them, and those receivers can read the key topic of a host added later. The over-grant
+allows writes to a feed the tenant's hosts ignore for that pool, and reads of public keys.
+
+What happens to work after an entitlement ends:
+
+- Unclaimed tasks, and redeliveries of claimed ones, fail admission. The receiver writes nothing for them.
+- Running jobs finish normally into the tenant's feed. The tenant's hosts can no longer read or cancel them.
+- A run waiting for its pool key is refused its open, and the receiver releases the task. Its next admission
+  rejects it.
+- A job whose run was released or whose receiver restarted mid-run is not adopted. The plugin's sweep cleans it up.
 
 Residue and manual cleanup after revocation:
 
@@ -550,4 +522,4 @@ Residue and manual cleanup after revocation:
 - Receivers' kept grants above remain until manually deleted with the Admin API; operator convergence restores grants derived from the log. Coordinate cleanup with stopping retained work and removing receivers.
 - Host removal leaves its client quota; delete its user quota with the Admin API. Tenant removal deletes live hosts' quotas before revoking them; previously ended hosts' quotas require manual cleanup.
 
-Only bundle files are erased by tenant removal. Comprehensive erasure and automated topic cleanup are future work.
+Tenant removal erases only the tenant's bundle files.

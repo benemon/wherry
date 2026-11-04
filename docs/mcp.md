@@ -1,10 +1,12 @@
 # MCP tools
 
-`wherry host mcp` serves seven tools over stdio. Each takes and returns JSON with
-a declared schema and uses the server's one host. `start_by` and `end_by`
-set the task's `task_started_by` and `task_ended_by`, each an RFC 3339 time
-or a Go duration from now, such as `90m`; omitted, they take the CLI
-defaults, `10m` and `2h`.
+Run `wherry host mcp` to serve seven tools over stdio.
+Each tool takes and returns JSON with a declared schema.
+All tools use the server's host identity.
+
+`start_by` and `end_by` set `task_started_by` and `task_ended_by`.
+Pass an RFC 3339 time or a Go duration from now, such as `90m`.
+The defaults are `10m` and `2h`.
 
 | Tool | Input | Output |
 | --- | --- | --- |
@@ -35,7 +37,7 @@ defaults, `10m` and `2h`.
   as `--input`, `--credential` and `--output` take them;
   `storage` is `s3` or absent, and `s3` is `:s3`. An input must resolve, through any
   symbolic links, to a regular file beneath one of the
-  [`input_roots`](configuration.md#client-configuration), and opens through that
+  [`input_roots`](configuration-host.md#client-configuration), and opens through that
   root, so a link that leads out of it, even one that appears after the path
   resolves, is refused. An input root is matched by its path with symbolic links
   resolved when the server starts; an input that spells a root in different case,

@@ -1,39 +1,40 @@
 # Plugin protocol
 
-What a plugin implements and how the receiver talks to it, for authors of a
-`wherry-plugin-<type>` binary.
-[Plugins](commands.md#plugins) gives what a receiver operator sees: binary
-discovery, the pin, process death, stream recovery and the errors it logs.
-[Plugins](plugins.md) lists the plugins wherry-plugins maintains.
+Implement this protocol to write a `wherry-plugin-<type>` binary.
+Use [Plugins](plugins.md) to find existing implementations.
+[Command reference](commands.md#plugins) explains discovery, pins and process recovery.
 
 ## Module
 
-The protocol is the Go module `github.com/benemon/wherry/pluginsdk` in the
-wherry repository, versioned by its `pluginsdk/v*` tags.
-[`plugin.proto`](https://github.com/benemon/wherry/blob/main/pluginsdk/proto/wherry/plugin/v1/plugin.proto)
-defines the service. `pluginsdk.Serve` runs a plugin and gives its factory
-the logger whose JSON lines the receiver relays at their level. A plugin sets
-`pluginsdk.Version` before `Serve`, and the receiver logs it when it starts
-the plugin. `pluginsdktest` is the conformance suite a plugin runs against
-its platform.
+Use the Go module `github.com/benemon/wherry/pluginsdk`.
+Its releases use `pluginsdk/v*` tags.
+[`plugin.proto`](https://github.com/benemon/wherry/blob/main/pluginsdk/proto/wherry/plugin/v1/plugin.proto) defines the service.
+
+1. Set `pluginsdk.Version` to your plugin's version.
+2. Call `pluginsdk.Serve` with your factory.
+3. Run `pluginsdktest` against your target platform.
+
+The factory receives a logger.
+The receiver relays its JSON log lines at their original level.
+The receiver logs your plugin's version at startup.
 
 ## Transport
 
-The receiver and a plugin talk gRPC over
-[go-plugin](https://github.com/hashicorp/go-plugin) with mutual TLS on a
-certificate pair made for each start, plugin protocol version 10. The
-receiver refuses a plugin of any other protocol version and a plugin that
-offers no TLS certificate. Every call names its profile. A plugin accepts
-messages up to 64 MiB.
+The receiver and plugin use gRPC over [go-plugin](https://github.com/hashicorp/go-plugin).
+Each start creates a certificate pair for mutual TLS.
+The protocol version is 10.
+The receiver refuses other protocol versions and plugins without a TLS certificate.
+Every call names its profile.
+The maximum plugin message size is 64 MiB.
 
 ## Profiles
 
-A plugin inherits the receiver's environment. Configure carries each
-profile's name, pool, agent and merged `config` section, less the
-`credential` key, and the value of the profile's
-[platform credential](configuration.md#platform-credentials) when it names
-one. It carries no agent credential. A plugin checks the profile's `config`
-section in Configure, within 30 seconds.
+Your plugin inherits the receiver's environment.
+`Configure` supplies the profile's name, pool, agent and merged `config`.
+The receiver removes the `credential` key from that mapping.
+It supplies the resolved [platform credential](configuration-receiver.md#platform-credentials) separately.
+`Configure` carries no agent credential.
+Validate the profile configuration within 30 seconds.
 
 A plugin reports, for each profile, the paths of the input, output and
 credentials directories as its agent sees them, which the receiver writes
@@ -55,7 +56,7 @@ that cannot deliver an input reports it.
 A plugin gives each agent the `git` environment that
 [Git input](a2a-extension-v1.md#git-input) specifies, through
 `pluginsdk.AgentEnvironment` and `pluginsdk.AgentUnset`.
-[Git repositories](operations.md#git-repositories) states its limits.
+[Git repositories](operations-hosts.md#git-repositories) states its limits.
 
 Once the job ends the receiver stops it and asks the plugin to collect its
 outputs, which arrive over the link in pieces of at most 1 MiB. The plugin

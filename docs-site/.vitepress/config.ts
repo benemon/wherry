@@ -3,41 +3,131 @@ import { defineConfig } from 'vitepress'
 
 const sidebar = [
   {
-    text: 'Get started',
-    items: [
-      { text: 'Introduction', link: '/introduction' },
-      { text: 'Quickstart', link: '/quickstart' },
-      { text: 'Use cases', link: '/use-cases' },
-    ],
+    "text": "Get started",
+    "items": [
+      {
+        "text": "Introduction",
+        "link": "/introduction"
+      },
+      {
+        "text": "Use cases",
+        "link": "/use-cases"
+      },
+      {
+        "text": "Quickstart: development",
+        "link": "/quickstart-development"
+      },
+      {
+        "text": "Quickstart: production",
+        "link": "/quickstart-production"
+      },
+      {
+        "text": "Upgrading",
+        "link": "/upgrading"
+      }
+    ]
   },
   {
-    text: 'Docs',
-    items: [
-      { text: 'Key concepts', link: '/concepts' },
-      { text: 'Design', link: '/design' },
+    "text": "Docs",
+    "items": [
       {
-        text: 'Governance and security',
-        items: [
-          { text: 'Governance', link: '/governance' },
-          { text: 'Security', link: '/security' },
-        ],
+        "text": "Key concepts",
+        "link": "/concepts"
       },
-      { text: 'Configuration', link: '/configuration' },
-      { text: 'Operations', link: '/operations' },
-      { text: 'Runbooks', link: '/runbooks' },
-      { text: 'Plugins', link: '/plugins' },
       {
-        text: 'Reference',
-        items: [
-          { text: 'Commands', link: '/commands' },
-          { text: 'MCP tools', link: '/mcp' },
-          { text: 'Metrics', link: '/metrics' },
-          { text: 'Plugin protocol', link: '/plugin-protocol' },
-          { text: 'The wherry A2A extension', link: '/a2a-extension-v1' },
-        ],
+        "text": "Design",
+        "link": "/design"
       },
-    ],
+      {
+        "text": "Governance and security",
+        "items": [
+          {
+            "text": "Governance",
+            "link": "/governance"
+          },
+          {
+            "text": "Security",
+            "link": "/security"
+          }
+        ]
+      },
+      {
+        "text": "Configuration",
+        "items": [
+          {
+            "text": "Operator",
+            "link": "/configuration-operator"
+          },
+          {
+            "text": "Receiver",
+            "link": "/configuration-receiver"
+          },
+          {
+            "text": "Host",
+            "link": "/configuration-host"
+          },
+          {
+            "text": "Development instance",
+            "link": "/configuration-development"
+          }
+        ]
+      },
+      {
+        "text": "Operations",
+        "items": [
+          {
+            "text": "Operator",
+            "link": "/operations-operator"
+          },
+          {
+            "text": "Receivers",
+            "link": "/operations-receivers"
+          },
+          {
+            "text": "Hosts",
+            "link": "/operations-hosts"
+          },
+          {
+            "text": "Runbooks",
+            "link": "/runbooks"
+          }
+        ]
+      },
+      {
+        "text": "Plugins",
+        "link": "/plugins"
+      }
+    ]
   },
+  {
+    "text": "Reference",
+    "items": [
+      {
+        "text": "Commands",
+        "link": "/commands"
+      },
+      {
+        "text": "Development commands",
+        "link": "/commands-dev"
+      },
+      {
+        "text": "MCP tools",
+        "link": "/mcp"
+      },
+      {
+        "text": "Metrics",
+        "link": "/metrics"
+      },
+      {
+        "text": "Plugin protocol",
+        "link": "/plugin-protocol"
+      },
+      {
+        "text": "The wherry A2A extension",
+        "link": "/a2a-extension-v1"
+      }
+    ]
+  }
 ]
 
 const check = (items) => {
@@ -73,8 +163,8 @@ export default defineConfig({
     // The lockup carries the wordmark.
     siteTitle: false,
     nav: [
-      { text: 'Quickstart', link: '/quickstart' },
-      { text: 'Configuration', link: '/configuration' },
+      { text: 'Quickstart', link: '/quickstart-production' },
+      { text: 'Configuration', link: '/configuration-host' },
       { text: 'Commands', link: '/commands' },
       { text: 'GitHub', link: 'https://github.com/benemon/wherry' },
     ],

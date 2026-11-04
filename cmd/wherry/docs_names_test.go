@@ -32,7 +32,7 @@ func docSection(t *testing.T, doc, heading string) string {
 	if !ok {
 		t.Fatalf("missing section %s", heading)
 	}
-	section, _, _ = strings.Cut(section, "\n#")
+	section, _, _ = strings.Cut(section, "\n## ")
 	return section
 }
 
@@ -165,24 +165,29 @@ func TestAgentDocumentedNames(t *testing.T) {
 }
 
 func TestConfigurationDocumentedFields(t *testing.T) {
-	doc := docRead(t, "../../docs/configuration.md")
 	for _, tc := range []struct {
-		heading string
-		value   any
+		page, heading string
+		value         any
 	}{
-		{"## Client configuration", busclient.Config{}},
-		{"## Receiver local configuration", receiverLocalConfig{}},
+		{"configuration-host.md", "## Client configuration", busclient.Config{}},
+		{"configuration-receiver.md", "## Receiver local configuration", receiverLocalConfig{}},
 	} {
 		var fields []string
-		for _, row := range docTable(docSection(t, doc, tc.heading)) {
+		for _, row := range docTable(docSection(t, docRead(t, "../../docs/"+tc.page), tc.heading)) {
 			fields = append(fields, docNames(row[1])...)
 		}
 		docEqual(t, tc.heading, fields, docTags(reflect.TypeOf(tc.value)))
 	}
 	var variables []string
-	for _, row := range docTable(docSection(t, doc, "## Environment variables")) {
-		variables = append(variables, docNames(row[1])...)
+	for _, table := range []struct{ page, heading string }{
+		{"configuration-host.md", "## Environment variables"},
+		{"configuration-development.md", "## Which environment variables apply"},
+	} {
+		for _, row := range docTable(docSection(t, docRead(t, "../../docs/"+table.page), table.heading)) {
+			variables = append(variables, docNames(row[1])...)
+		}
 	}
+	variables = slices.Compact(slices.Sorted(slices.Values(variables)))
 	var reads []string
 	for _, path := range []string{"command.go", "dev.go", "../../internal/client/config.go"} {
 		ast.Inspect(docAST(t, path), func(n ast.Node) bool {

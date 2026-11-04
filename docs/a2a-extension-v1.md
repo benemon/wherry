@@ -264,7 +264,7 @@ A submission is the task of one run.
   `s3_inputs` number at most 256 together.
 - `git` is the run's [git input](#git-input), optional. With a `host_key`,
   no input file or S3 input is named `known_hosts`. A host fills its
-  `credential` and `host_key` from the [git entry](configuration.md#client-configuration)
+  `credential` and `host_key` from the [git entry](configuration-host.md#client-configuration)
   of its configuration that the remote falls under, and adds that credential
   to `credentials` at the file `git-credential`.
 
@@ -379,7 +379,7 @@ A `terminal` status's `wherry` object adds the attempt's chunk count:
 | `claimed` | `TASK_STATE_WORKING` | the receiver admits the run | `task_offset` |
 | `started` | `TASK_STATE_WORKING` | the job has started | |
 | `rejected` | `TASK_STATE_REJECTED` | the receiver refuses the submission | the reason as message text |
-| `terminal` | `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED` or `TASK_STATE_CANCELED` | the run has ended | the agent's message from its [outcome file](configuration.md#agent-contract), or the reason as message text |
+| `terminal` | `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED` or `TASK_STATE_CANCELED` | the run has ended | the agent's message from its [outcome file](configuration-receiver.md#agent-contract), or the reason as message text |
 | `released` | `TASK_STATE_SUBMITTED` | the receiver gives back its claim, before it returns the task to the pool | |
 | `adopting` | `TASK_STATE_WORKING` | the receiver found the run's job running or ended, before its [open request](#open-request) | |
 | `reconciling` | `TASK_STATE_WORKING` | the receiver, refused `key unavailable`, holds the claim while Lookup does not answer ([Open refusal](#open-refusal)) | |
@@ -463,7 +463,7 @@ status message names each credential in a data part:
 `credential` is a credential name: at most 32 lowercase letters, digits and
 hyphens. The receiver writes one part for the credential an agent names when
 its
-[outcome file](configuration.md#agent-contract) reports
+[outcome file](configuration-receiver.md#agent-contract) reports
 `TASK_STATE_AUTH_REQUIRED`. The agent's credential name is redacted like any
 agent text. It names one of the credentials the prompt lists, including an
 optional one the prompt marks `(not supplied)`, or another the run needs and
@@ -1259,14 +1259,14 @@ writes, each with `v`, `kind` and `at_ms` (Unix milliseconds).
 | `resume` | `pool` | resumes a suspended pool |
 | `rotate-key` | `pool` | asks the pool's key custodian for a new key ([Custodian snapshot](#custodian-snapshot)) |
 
-`terms` has the members of the [pool terms](configuration.md#pool-terms) file
+`terms` has the members of the [pool terms](configuration-operator.md#pool-terms) file
 and `record_limit`, the tasks topic's record limit that `pool apply` reads
 from the broker, with `start_by_limit_ms` and `lock_duration_ms` in milliseconds for its
 `start_by_limit` and `lock_duration`. `config` holds `receiver` and `pool`,
 which equal the record's, the receiver's `capacity`, `plugin_sha256`, the
 lowercase hex SHA-256 pinned for each plugin type, and its `profiles` in
 routing order, the plugins in the order of their names. Each plugin profile is the
-[profile entry](configuration.md#receiver-configuration) as `name`, `plugin`
+[profile entry](configuration-receiver.md#receiver-configuration) as `name`, `plugin`
 naming its plugin, `agent`, `labels` when set, and the merged
 `config`, which keeps a `credential` name and never a credential value. An `end` names
 exactly one subject: `receiver`, `tenant` and `host`, `tenant` and `pool`, or `tenant` alone. Tenant and entitlement ends use keys `end.tenant.<T>` and `end.entitlement.<T>.<P>` and live outside principal revocation sets. A `revoking` names exactly one of `receiver`, or
@@ -1414,7 +1414,7 @@ hold `/`. It cannot hold `..` or `//`, or end in `/`, `.` or `.lock`.
 Readers reject a submission that breaks these rules.
 
 The remote's host must be one of the pool's
-[`vcs`](configuration.md#pool-terms) hosts: its host name in lowercase, with
+[`vcs`](configuration-operator.md#pool-terms) hosts: its host name in lowercase, with
 `:port` when the remote names a port other than its scheme's default, 443
 for `https` and 22 for `ssh`. A pool without `vcs` accepts no git input.
 Clients refuse a git input outside the VCS hosts before they publish, and
@@ -1469,7 +1469,7 @@ environment it configures the variables no value switches off
 redirect, record or trace the clone. The operator keeps the platform's own
 environment and the image's free of them.
 
-[Operations](operations.md#git-repositories) states the limits
+[Operations](operations-hosts.md#git-repositories) states the limits
 of these settings against an agent that runs commands.
 
 ## Inputs and outputs
@@ -1497,7 +1497,7 @@ directory, of each input file, of each credential file and of each expected
 output, with `(required)` after a required one, so an agent without a shell
 finds them, the environment variables that hold credentials, the commands of
 the [git input](#git-input), and the
-[outcome contract](configuration.md#agent-contract) with the run's credential
+[outcome contract](configuration-receiver.md#agent-contract) with the run's credential
 names, an optional credential its host did not supply marked
 `(not supplied)`. The lines name S3 inputs by path and carry no URL. The plugin reports the
 directories' paths as its agent sees them; a directory it does not report

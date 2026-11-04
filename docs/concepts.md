@@ -38,7 +38,7 @@
   headless command. wherry does not modify it. The receiver passes it a
   prompt file and reads its standard output.
 
-One person can hold every role in a development setup.
+A pool can name several agents, each launched through its own harness.
 
 ## Identity and authorisation
 
@@ -204,184 +204,97 @@ redelivery and an adoption enter](diagrams/run-lifecycle.svg)
 
 ## Pool keys and the key custodian
 
-A run's credentials have to reach whichever receiver of the pool claims
-it, at any attempt, after the submitting host may have gone offline, and
-the broker must not hold them in the clear. Each pool therefore has a key
-pair held by one of its receivers, the pool's **key custodian**.
+![Pool public keys, key custody and attempt key wrapping](diagrams/pool-keys.svg)
 
-At submit the host encrypts the run's credentials, its presigned S3 links
-and its redaction key in the task's envelope, and wraps the envelope's
-content key to the pool's current public key
-([Credential envelopes](security.md#credential-envelopes)). A receiver that
-claims the task asks the key custodian to open it. The custodian checks the
-claim and wraps the content key to a key the receiver made for that one
-attempt. No host answers anything after submit.
+Each pool has a P-256 key pair.
+One receiver holds the current private key as the pool's **key custodian**.
+Your host encrypts credentials and presigned S3 links in a task envelope.
+It wraps the envelope's content key to the pool's public key.
+Your host can go offline after submission.
 
-**Selection.** Every receiver of the pool joins the pool's custodian group,
-`p-<pool>.custodian`, a Kafka consumer group on the pool's snapshot topic,
-`wherry.pool.<pool>.custodian`, which has one partition. The group assigns
-the partition to one member, and that member is the key custodian; any
-receiver of the pool can become it. Each receiver joins as a
-[static member](https://cwiki.apache.org/confluence/display/KAFKA/KIP-345%3A+Introduce+static+membership+protocol+to+reduce+consumer+rebalances)
-under its receiver ID, so a custodian that crashes and restarts within the
-group's 45-second session timeout keeps the assignment, and with its state
-directory keeps its key. A receiver that stops on a signal or a
-configuration change leaves the group instead, so the group assigns the
-partition to another member at once. The custodian holds the pool's P-256 private keys in its
-state directory. It publishes the current public key in a signed
-**snapshot** on the snapshot topic, through the transactional ID
-`p.<pool>.custodian` that every receiver of the pool shares, so a new
-custodian's first transaction fences the previous custodian's writes. A host
-encrypts to the key in the latest committed snapshot. Custody follows the
-custodian group's session alone: a custodian whose session ends, after the
-group's 45-second session timeout for a crash, is replaced, and
-advertisements only place tasks.
+The claiming receiver requests the content key for its attempt.
+The custodian checks the task and claim before releasing an attempt wrap.
+[Credential envelopes](security.md#credential-envelopes) explains the checks.
 
-Each snapshot states why it was published:
+All pool receivers join consumer group `p-<pool>.custodian`.
+The member assigned the snapshot topic's partition becomes custodian.
+It publishes signed public-key snapshots on `wherry.pool.<pool>.custodian`.
+It stores private keys in its state directory.
+Keep that directory across restarts.
 
-| Reason | Published when |
-| --- | --- |
-| `bootstrap` | the pool's first custodian publishes its first key |
-| `rotation` | the custodian rotates its key, daily or on `wherry operator pool rotate-key` |
-| `takeover` | a receiver becomes custodian after another: the previous custodian drained, crashed, or came back without its state directory |
-| `contested` | the custodian finds its writes fenced while the group still assigns it the partition |
-
-A receiver assigned the partition that the current snapshot already names,
-and that still holds the snapshot's key, continues with that key. Every
-`takeover` and `contested` snapshot raises
-[WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover), and hosts
-log it. Every custodian change raises the alert, a planned drain's included.
-The group coordinates honest receivers. It does not authenticate custody
-against a malicious member of the pool
-([What the pool key protects](security.md#what-the-pool-key-protects)).
+A custodian crash can take the group's 45-second session timeout to detect.
+A signalled stop leaves the group immediately.
+A replacement publishes a `takeover` snapshot.
+A fenced custodian can publish a `contested` snapshot.
+Both raise [WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover).
+All receivers in a pool must trust each other.
+[Key custody](design.md#key-custody) gives the election and transaction details.
 
 ### Rotation
 
-The custodian rotates the pool key daily, at the append time of the
-snapshot that first published the key plus 24 hours plus a jitter under one
-hour derived from the pool and the key ID. A suspended pool's key also
-rotates at once on
-[`wherry operator pool rotate-key`](commands.md#wherry-operator-pool-rotate-key-pool-suspect-key-kid).
-A rotation publishes a `rotation` snapshot with a new key, and hosts encrypt
-to the new key once they read it.
+The custodian rotates the pool key 24 hours after its first published snapshot, plus jitter under one hour.
+Hosts use the new public key after reading its snapshot.
+Queued tasks can still open under retained keys.
 
-Tasks already queued under a replaced key still open. The custodian, and
-every former custodian that did not re-key its tasks in a drain, keeps each key it held until
-that key's deadline:
-the append time of the snapshot that replaced it plus the pool's
-`start_by_limit` plus 7 hours, the six-hour run cap and an hour's margin. A
-task's `task_started_by` is within `start_by_limit` of its submission, so
-the key outlives every task wrapped to it, and the deadline falls inside the
-pool topics' [retention](operations.md#retention). A receiver holding a
-replaced key answers an open request for a task under that key with a
-re-key wrap to the current key, which the custodian then opens.
-[Key custody](design.md#key-custody) states the
-deadlines a receiver sets after a crash.
+A replaced key is retained until its replacing snapshot's append time plus `start_by_limit` plus seven hours.
+[Key custody](design.md#key-custody) explains restart deadlines.
+For incident response, suspend the pool before using `wherry operator pool rotate-key`.
+See [Respond to a compromised receiver or pool key](operations-operator.md#respond-to-a-compromised-receiver-or-pool-key).
 
 ### Planned drain and re-key
 
-A receiver that stops on `SIGINT` or `SIGTERM`, or for a configuration
-change, leaves the custodian group, so the group assigns the partition to
-another member. A stopping custodian with a `drain_timeout` over `0s` leaves
-the group and waits up to `drain_timeout` for a successor's snapshot. The
-successor publishes a `takeover`, as for any custodian change, and raises
-[WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover). The draining custodian
-then re-keys to the successor's key, in one transaction, every task its keys
-open that is its run's task, or any admissible task of a run that has none, not
-terminal and not past its `task_ended_by`, once for each task hash, and deletes
-its pool keys. Every step of the drain ends
-within `drain_timeout` plus 5 seconds of the stop, so the stop fits the
-platform's kill window as
-[Drain timeout and the stop window](configuration.md#drain-timeout-and-the-stop-window)
-describes.
+A stopping custodian leaves the group and waits for a successor's snapshot.
+`drain_timeout` bounds that wait.
+With a successor, it re-keys eligible tasks in one transaction and deletes its keys.
+A failed scan or write keeps the keys until their deadlines.
+A suspended pool keeps its keys without scanning tasks.
 
-A task appended under the draining custodian's key after its re-key
-scan is not re-keyed: it fails before it starts and its host resubmits it,
-as for a [lost key](#lost-pool-keys). A scan or write error keeps the keys
-to their deadlines, and so does a drain while the pool is suspended, which
-scans nothing.
-
-With `drain_timeout` at `0s`, or with no successor's snapshot by the
-deadline, the custodian exits with its keys and the next custodian
-publishes a `takeover`. The custodian does not know whether a successor
-will come: with no other member, as in a one-receiver pool, a scale to zero
-or a whole-pool stop, it waits out `drain_timeout` within the stop window and
-then exits with its keys, and its restart continues as custodian.
-Permanently removing a pool's only receiver loses its keys. A former custodian that stays up answers open
-requests for tasks under its keys with re-key wraps until their deadlines.
-[Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian)
-gives the procedure.
+The stop finishes within `drain_timeout` plus five seconds.
+With no successor, the receiver exits with its keys.
+This includes a pool with only one receiver.
+Tasks appended after the re-key scan can still fail under the old key.
+Follow [Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian).
 
 ### Lost pool keys
 
-A task wrapped to a key that no running receiver holds cannot open: its
-custodian lost its state directory, was killed before its drain re-keyed its tasks, or was
-the pool's only receiver and was removed. The next custodian publishes a
-`takeover` with a new key. When the task is claimed, the custodian waits up
-to 5 minutes for a holder's re-key wrap and then refuses the open request
-`key unavailable`. The claimant decides from the run's job:
+A task cannot open if no running receiver holds its pool key.
+This can happen when a custodian loses its state directory.
+Removing a pool's only receiver can also lose the keys.
+The next custodian publishes a new key with reason `takeover`.
+It waits up to five minutes for a re-key wrap before refusing an open request with `key unavailable`.
 
-- A run that never started, on its first delivery or when the plugin's
-  Lookup finds no job or one that never started, ends `TASK_STATE_FAILED`
-  with `cannot be opened: the pool's custodian changed and its key was lost`
-  and the wherry event `key-lost`, and raises
-  [WherryRunsKeyLost](runbooks.md#wherryrunskeylost).
-- A run whose job exists has its job stopped and ends with the same
-  message, without `key-lost`. An adopter asks once more before it stops
-  the job.
-- While Lookup cannot answer, the run is reconciling: the claimant records a
-  `reconciling` status and keeps asking while it holds the claim, until
-  Lookup answers or `task_ended_by` passes. A later claimant continues the
-  same way and never dispatches.
+1. A job that has never started ends with `TASK_STATE_FAILED` and event `key-lost`.
+2. An existing job is stopped and fails without `key-lost`.
+3. A job whose lookup cannot answer stays reconciling until lookup succeeds or its end bound passes.
 
-The host that submitted a `key-lost` run resubmits it, until the run's
-`task_started_by`. `submit` and `status` without a run ID, and the MCP
-server's `submit` and `status` without one, resubmit every such run of the
-host; `status RUN_ID`, `wait RUN_ID` and `logs -f RUN_ID`, and the MCP
-server's `status` and `wait` for a run, resubmit the run they name. The replacement is a new
-run under the pool's current key, with the credentials resolved again from
-the host's sources, the same message, placement, outputs and absolute
-bounds, and `replaces` naming the failed run. `wait` and the MCP server
-follow the chain of replacements and report every run ID, and
-`wherry status RUN_ID` shows `replaced_by=<run>`.
-[Resubmission](a2a-extension-v1.md#resubmission) specifies it. To resubmit,
-the host keeps each run's task content in its state directory: the
-submission without its envelope and wrap, and the run's redaction key. It
-keeps no credential value in the clear and no content key.
+The submitting host can resubmit a `key-lost` run before its original `task_started_by`.
+It resolves credentials again and creates a replacement run under the current key.
+It preserves the original task content and absolute bounds.
+`wait` follows the replacement chain.
+[Resubmission](a2a-extension-v1.md#resubmission) lists the commands that trigger this recovery.
 
-Custodian loss gives a weaker guarantee than receiver loss:
-
-- a never-started task under a lost key runs only when its host comes back
-  before the task's `task_started_by`; a host that never returns loses it;
-- a running task under a lost key whose receiver dies fails, since no
-  adopter can open its envelope;
-- between a custodian crashing and its successor's snapshot, up to the
-  group's 45-second session timeout, hosts still submit under the crashed
-  custodian's key, and those tasks fail key-lost and are resubmitted as
-  above.
+Recovery requires the submitting host's state and credential sources.
+A host that never returns cannot recover a never-started task under a lost key.
+A running job under a lost key cannot be adopted after its receiver fails.
+Tasks submitted before a crash is detected can use the lost key and need resubmission too.
 
 ### Suspension
 
-Suspending a pool stops new work on it while its running jobs complete and
-its key custody keeps working, so an operator can contain a compromise.
-[`wherry operator pool suspend`](commands.md#wherry-operator-pool-suspend-pool)
-withdraws the hosts' Write on the pool's tasks topic. The receivers keep
-Read, and every other grant stays. Hosts refuse to submit to the pool, and
-receivers claim nothing from it. The custodian refuses with
-`pool suspended` the open request of a claim with no `adopting` status, so
-that run's task goes back to the queue unstarted. `pool suspend` returns
-once the key custodian has acknowledged the suspension in its snapshot;
-after that no new start opens. Until then a pass that has not read the
-record can still open a first start. A pool with no custodian yet returns
-at once, and a custodian that does not acknowledge within 5 minutes fails
-the command with the suspension not yet in effect. It serves adoptions of started jobs. Runs in progress continue to their
-terminal status. A suspension takes back no
-credential a running job holds: rotating the credential at its issuer does,
-and revoking a receiver stops it. The custodian keeps rotating its key, and
-`rotate-key` runs only on a suspended pool. `wherry operator pool resume`
-restores the grants, and queued tasks run.
-[Respond to a compromised receiver or pool key](operations.md#respond-to-a-compromised-receiver-or-pool-key)
-gives the procedure.
+Use `wherry operator pool suspend POOL` to stop new starts.
+The operator withdraws host Write access to the tasks topic.
+Receivers stop claiming new work.
+The custodian refuses first starts and continues serving adoptions.
+Running jobs can finish.
+
+The command waits for the custodian to acknowledge suspension in its snapshot.
+A pool without a custodian returns immediately.
+If acknowledgement does not arrive within five minutes, the command fails.
+New starts can still open until the custodian reads the suspension.
+
+Suspension does not take credentials back from running jobs.
+Rotate credentials at their issuer to invalidate them.
+`wherry operator pool resume POOL` restores the grants and queued work can run.
+See [Incident response](operations-operator.md#respond-to-a-compromised-receiver-or-pool-key).
 
 ## Cancellation
 
@@ -434,18 +347,40 @@ same host: the receiver restarted under the same receiver ID adopts its
 jobs, but a member on another host that claims a task starts a second job
 once the [claim check](a2a-extension-v1.md#the-claim-check) no longer counts
 the exited receiver a live claimant, as after a receiver crash. The
-systemd plugin recommends a pool per receiver for this reason. The
-receiver leaves the jobs for adoption: stopping them would bind only an
-honest receiver, and a compromised one would ignore it.
+systemd plugin recommends a pool per receiver for this reason.
+The receiver leaves jobs running for adoption.
 
 A revoked principal does not return. A host or receiver that comes back is
 provisioned under a new name, with a new principal and key topic.
 
 A compromised key calls for revocation. A
-[key rotation](operations.md#rotate-a-key) keeps the retired key
+[key rotation](operations-hosts.md#rotate-a-key) keeps the retired key
 verifying the owner's feed and transcript records from before the
 rotation.
 
 ## Tenants
 
-A tenant groups hosts and their access to pools. Create it explicitly with `tenant add`; only that command creates its feed and transcript topics. An entitlement is a tenant's membership of a pool, managed with `tenant pool add` and `tenant pool remove`. Removing an entitlement immediately stops new admissions and placement for that tenant in that pool; it can be added again. A tenant moves from absent to live to ended. Ending a tenant is final: its name cannot return because retained data and host keys outlive it.
+![Tenants and their hosts entitled to shared receiver pools](diagrams/tenants.svg)
+
+A tenant groups hosts and their access to pools.
+Create it explicitly with `wherry operator tenant add TENANT`.
+That command creates its feed and transcript topics.
+Host creation and entitlement changes require a live tenant.
+
+An **entitlement** gives a tenant access to a pool.
+Add it with `wherry operator tenant pool add TENANT POOL`.
+Remove it with `wherry operator tenant pool remove TENANT POOL`.
+Removal stops new admissions and placement for that tenant in the pool.
+You can add the entitlement again.
+
+A tenant moves through three states:
+
+1. Absent: no tenant record exists.
+2. Live: hosts and entitlements can belong to it.
+3. Ended: its name cannot be reused.
+
+Remove a tenant with `wherry operator tenant remove TENANT`.
+The operator ends its entitlements first.
+It then revokes its hosts before recording the tenant's end.
+Removal keeps retained data and host keys.
+See [Removal and retained data](security.md#removal-and-retained-data).

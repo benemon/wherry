@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 600" font-family="Outfit, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="title desc">
+  <title id="title">Tenants, hosts, pools and receivers</title>
+  <desc id="desc">The operator adds tenants, adds each tenant's hosts, and entitles each tenant to the pools it may use. Here tenant alice has two hosts, a laptop and a CI runner, and is entitled to pools build and gpu. Tenant bob has one host and is entitled to pool build. Each pool has its own receivers: build has nomad-1 and openshift-1, gpu has gpu-1. A host can submit only to the pools its tenant is entitled to, and its tenant's feed carries the results back. Removing a pool from a tenant stops that tenant's hosts submitting to it at once; runs already going finish. Removing a host revokes that host alone. Removing a tenant removes all its pools, then all its hosts.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2e4a35"/>
+    </marker>
+  </defs>
+
+  <rect width="1180" height="600" fill="#f4f1e8"/>
+
+  <g font-size="12" fill="#00290b">
+    <text x="60" y="44" font-size="14" font-weight="600">Tenants and their hosts</text>
+    <text x="760" y="44" font-size="14" font-weight="600">Pools and their receivers</text>
+
+    <!-- tenant alice -->
+    <rect x="40" y="62" width="380" height="150" rx="10" fill="#fffdf7" stroke="#3f6b4a" stroke-width="1.5"/>
+    <text x="60" y="88" font-weight="600">Tenant alice</text>
+    <text x="60" y="106" font-size="10" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#2e4a35">wherry operator tenant add alice</text>
+    <rect x="60" y="122" width="160" height="70" rx="6" fill="#e6ede2" stroke="#3f6b4a"/>
+    <text x="74" y="146" font-weight="600">Host laptop</text>
+    <text x="74" y="166" font-size="10.5">its own key and bundle</text>
+    <rect x="240" y="122" width="160" height="70" rx="6" fill="#e6ede2" stroke="#3f6b4a"/>
+    <text x="254" y="146" font-weight="600">Host ci</text>
+    <text x="254" y="166" font-size="10.5">its own key and bundle</text>
+
+    <!-- tenant bob -->
+    <rect x="40" y="250" width="380" height="150" rx="10" fill="#fffdf7" stroke="#3f6b4a" stroke-width="1.5"/>
+    <text x="60" y="276" font-weight="600">Tenant bob</text>
+    <text x="60" y="294" font-size="10" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#2e4a35">wherry operator tenant add bob</text>
+    <rect x="60" y="310" width="160" height="70" rx="6" fill="#e6ede2" stroke="#3f6b4a"/>
+    <text x="74" y="334" font-weight="600">Host workstation</text>
+    <text x="74" y="354" font-size="10.5">its own key and bundle</text>
+
+    <!-- pool build -->
+    <rect x="740" y="62" width="400" height="150" rx="10" fill="#fffdf7" stroke="#3f6b4a" stroke-width="1.5"/>
+    <text x="760" y="88" font-weight="600">Pool build</text>
+    <rect x="760" y="122" width="170" height="70" rx="6" fill="#efeadb" stroke="#b7c0b0"/>
+    <text x="774" y="146" font-weight="600">Receiver nomad-1</text>
+    <text x="774" y="166" font-size="10.5">Nomad</text>
+    <rect x="950" y="122" width="170" height="70" rx="6" fill="#efeadb" stroke="#b7c0b0"/>
+    <text x="964" y="146" font-weight="600">Receiver openshift-1</text>
+    <text x="964" y="166" font-size="10.5">OpenShift</text>
+
+    <!-- pool gpu -->
+    <rect x="740" y="250" width="400" height="150" rx="10" fill="#fffdf7" stroke="#3f6b4a" stroke-width="1.5"/>
+    <text x="760" y="276" font-weight="600">Pool gpu</text>
+    <rect x="760" y="310" width="170" height="70" rx="6" fill="#efeadb" stroke="#b7c0b0"/>
+    <text x="774" y="334" font-weight="600">Receiver gpu-1</text>
+    <text x="774" y="354" font-size="10.5">systemd, GPU host</text>
+  </g>
+
+  <!-- entitlements -->
+  <g font-size="11" fill="#00290b">
+    <line x1="420" y1="120" x2="734" y2="120" stroke="#2e4a35" stroke-width="1.8" marker-end="url(#arrow)"/>
+    <text x="577" y="112" text-anchor="middle">tenant pool add alice build</text>
+    <line x1="420" y1="180" x2="734" y2="290" stroke="#2e4a35" stroke-width="1.8" marker-end="url(#arrow)"/>
+    <text x="728" y="306" text-anchor="end">tenant pool add alice gpu</text>
+    <line x1="420" y1="330" x2="734" y2="190" stroke="#2e4a35" stroke-width="1.8" marker-end="url(#arrow)"/>
+    <text x="430" y="352">tenant pool add bob build</text>
+  </g>
+
+  <!-- removal key -->
+  <g font-size="12" fill="#00290b">
+    <rect x="40" y="440" width="1100" height="130" rx="10" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
+    <text x="60" y="466" font-weight="600">What each removal cuts</text>
+    <text x="60" y="492" font-size="11.5"><tspan font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5">tenant pool remove alice gpu</tspan>  removes one arrow: alice's hosts stop submitting to gpu at once; runs already going finish.</text>
+    <text x="60" y="518" font-size="11.5"><tspan font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5">tenant host remove alice ci</tspan>  revokes one host: its key and bundle stop working; alice's other hosts carry on.</text>
+    <text x="60" y="544" font-size="11.5"><tspan font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5">tenant remove alice</tspan>  removes every arrow from alice, then revokes each of alice's hosts, then ends the tenant.</text>
+  </g>
+</svg>

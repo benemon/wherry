@@ -1,61 +1,49 @@
 # Use cases
 
-## Offload a long build from a laptop
+## Hand off work and walk away
 
-A task that takes minutes or hours runs on a receiver while the laptop
-carries on with other work. The agent clones the repository itself and
-returns its commits as a patch or a bundle, which the laptop applies. The
-run goes on whether or not the caller is watching, and the caller can
-follow it or collect its result later. [Quickstart](quickstart.md) runs a
-first task, and [Git repositories](operations.md#git-repositories) covers
-the clone and the changes it returns.
+Submit a task and close your laptop.
+The run outlasts the session that starts it.
+Use `wherry host wait RUN_ID` in a later session to collect its result.
+Keep the host configuration and state available to that session.
+[Runs and attempts](concepts.md#runs-and-attempts) explains recovery limits.
+[Git repositories](operations-hosts.md#git-repositories) explains how to return changes.
 
-## Delegate work into controlled environments
+## Reach systems only a particular network can reach
 
-A coding agent needs a repository or a service that only a particular
-network can reach. The task runs on a receiver inside that network, so the
-developer's machine never needs the access. The operator decides which
-tenants may use the pool, the broker enforces it, and the receiver gets
-only the credentials its run declares, in an envelope that opens for that
-attempt and for the pool's key custodian, which checks it against the task.
-[Identity and grants](governance.md#identity-and-grants),
-[Placement](concepts.md#placement) and
-[Credential envelopes](security.md#credential-envelopes) describe access,
-placement and credential delivery.
+Place a receiver inside the network that can reach your repository or service.
+Select its profile when you submit the task.
+The operator controls your tenant's access to the pool.
+[Placement](concepts.md#placement) explains selectors.
+[Credential envelopes](security.md#credential-envelopes) explains how the run receives credentials.
 
-## Run on another OS, architecture or isolation level
+## Run where the hardware, OS or isolation is different
 
-Some tasks need specialised hardware, such as a GPU or another
-architecture, or a stronger isolation level than the developer's machine
-gives. The operator labels each plugin profile with what it offers, and a task's
-selector picks among them. [Placement](concepts.md#placement) explains the
-labels and selectors, and the
-[receiver configuration example](configuration.md#receiver-configuration-example)
-declares two profiles with different isolation.
+Choose a profile with the hardware, operating system or isolation your task needs.
+The operator labels each profile with the capabilities it offers.
+[Receiver configuration](configuration-receiver.md#receiver-configuration-example) shows profiles for container and host isolation.
 
 ## Fan out independent tasks
 
-A harness splits work into independent tasks, submits each as its own run
-and waits for each one. The pool's receivers claim them as their capacity
-allows, so the tasks run side by side. The harness does the splitting and
-combines the results. [MCP tools](mcp.md) lists the `submit` and `wait`
-tools a harness calls.
+Submit each independent task as its own run.
+Receivers claim the tasks as their capacity allows.
+Your harness splits the work and combines the results.
+[MCP tools](mcp.md) describes the tools it can call.
 
-## Follow delegated work across machines
+## Share agent compute across teams
 
-A delegated task runs on another machine and can outlast the session that
-started it. The caller sees whether the run was claimed, which receiver
-handled each attempt, every status it reported and its transcript, and
-receives its result with the output files checked against their digests.
-[Runs and attempts](concepts.md#runs-and-attempts) explains a run's
-lifecycle, and [Run history](governance.md#run-history) describes which
-records are kept and for how long.
+Use one set of receivers for several tenants.
+Entitle each tenant to the pools it may use.
+Remove a tenant to end its entitlements and revoke its hosts.
+Removal waits for host revocation and keeps retained data.
+[Tenants](concepts.md#tenants) explains the lifecycle.
+[Operator operations](operations-operator.md#tenant-onboarding-and-offboarding) gives the procedure.
 
-## Compare agent harnesses
+## Audit what delegated agents did
 
-A pool's terms can name several agents, each launched by its own harness.
-Submitting the same prompt once per agent, with `--agent`, runs the same task
-through each harness, to check behaviour that should not depend on the
-harness. The [pool terms example](configuration.md#pool-terms-example) names
-three agents, and [`wherry submit`](commands.md#wherry-host-submit) takes the
-agent.
+Every record of a run is signed by the host or receiver that wrote it.
+See which receiver ran each attempt with `wherry host events`.
+Read the run's status history and transcript.
+Collect outputs with their digests checked before they are written.
+[Run history](governance.md#run-history) explains retention.
+[Host commands](commands.md#host-commands) lists the inspection commands.

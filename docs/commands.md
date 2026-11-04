@@ -2,8 +2,9 @@
 
 [Key concepts](concepts.md) explains the model. The
 [wherry A2A extension](a2a-extension-v1.md) specifies the records.
-[Configuration](configuration.md) lists the files the commands read, and
-[MCP tools](mcp.md) the tools `wherry host mcp` serves.
+Use the configuration guide for your role:
+[operator](configuration-operator.md), [receiver](configuration-receiver.md) or [host](configuration-host.md).
+[MCP tools](mcp.md) lists the tools served by `wherry host mcp`.
 
 ## Command tree
 
@@ -14,7 +15,7 @@ Every command but `version` and the shortcuts runs under its role's word:
 | Operator | `wherry operator init`; `wherry operator pool apply`, `suspend`, `resume` and `rotate-key`; `wherry operator tenant add`, `list` and `remove`; `wherry operator tenant pool add` and `remove`; `wherry operator tenant host add` and `remove`; `wherry operator receiver apply`, `show` and `remove`; `wherry operator check` |
 | Receiver | `wherry receiver run` |
 | Host user | `wherry host init`, `key rotate`, `receivers`, `mcp`, `submit`, `wait`, `status`, `events`, `logs` and `cancel` |
-| Developer | `wherry dev init`, `up` and `down` |
+| Development | [Development commands](commands-dev.md) |
 | None | `wherry version` |
 
 `wherry submit`, `wait`, `status`, `events`, `logs` and `cancel` are
@@ -28,13 +29,13 @@ Every command but `version` and the shortcuts runs under its role's word:
   shape freezes at 1.0. The CLI's text output may change. `wherry host receivers
   --json` is the one CLI JSON form, and it prints the objects the MCP
   `receivers` tool returns.
-- `wherry operator`, `wherry dev`, `wherry receiver run` and `wherry version` read no client
+- `wherry operator`, `wherry receiver run` and `wherry version` read no client
   configuration. Every `wherry host` command reads it first, and every one except `host mcp`
   then connects to Kafka.
 - Every `wherry host` command takes `--config-file FILE`. Without it, the
   command reads the file `WHERRY_CONFIG` names, else `config.yaml` in
   `$XDG_CONFIG_HOME/wherry/`, by default `~/.config/wherry/`
-  ([paths](configuration.md#client-configuration)).
+  ([paths](configuration-host.md#client-configuration)).
   A leading `~/` is expanded.
 - A command's flags may come before or after its `RUN_ID`.
 - A failed command prints `wherry: <error>` on standard error and exits
@@ -70,8 +71,7 @@ A key ID is the RFC 7638 SHA-256 thumbprint of the public key's JWK,
 unpadded base64url.
 
 wherry's own key files, the host key, `signing.key` and their `.next`
-files, are private JWKs (RFC 7517) with mode 0600. The TLS keys `wherry dev`
-writes for its Kafka broker are PEM, the format the broker reads.
+files, are private JWKs (RFC 7517) with mode 0600.
 
 ### Labels
 
@@ -116,7 +116,7 @@ installation: `--dir DIR`, the current directory by default. `operator init`
 writes its `operator.yaml`; every other command reads it and connects as
 `wherry.operator` alone, with the password in its `password_file`. A missing
 `operator.yaml` fails with `<dir>/operator.yaml does not exist; run wherry
-operator init`. [Working directory](configuration.md#operator-working-directory)
+operator init`. [Working directory](configuration-operator.md#operator-working-directory)
 lists what the directory holds.
 
 `wherry operator` writes every `wherry.operator` record as
@@ -143,15 +143,15 @@ receiver whose membership ended. When `wherry.operator` grows during a pass,
 the command makes another, and after 5 such passes it fails with
 `wherry.operator moved during each of 5 convergence passes`. Once a command
 has written a record, it converges on every return, failed or not.
-[Concurrent operator commands](operations.md#concurrent-operator-commands)
+[Concurrent operator commands](operations-operator.md#concurrent-operator-commands)
 states what this guarantees.
 
 `pool apply` and `receiver apply` read the object's file: `-f PATH`, else
 `pools/<pool>.yaml` or `receivers/<receiver>.yaml` in the working directory.
 Either applies without a prompt. `-f PATH` names a file, or a directory,
 which selects the directory form of the
-[pool terms](configuration.md#pool-terms) or
-[receiver configuration](configuration.md#receiver-configuration). With
+[pool terms](configuration-operator.md#pool-terms) or
+[receiver configuration](configuration-receiver.md#receiver-configuration). With
 neither, on a terminal, the command asks for the object's real choices, with
 defaults shown, writes the file, then applies it; a refused apply leaves the
 file to correct and apply again. With neither and no terminal it refuses,
@@ -229,7 +229,7 @@ wherry operator pool apply POOL [-f PATH] [--dry-run]
 ```
 
 Creates the pool, or records new terms for it, from the
-[pool terms](configuration.md#pool-terms) at `PATH` or in
+[pool terms](configuration-operator.md#pool-terms) at `PATH` or in
 `pools/<pool>.yaml`. The [guided path](#operator-commands) asks for the
 agents, each one's models and credentials (`NAME=ENV_VAR` or
 `NAME=file:FILE_NAME`), the default agent, `producer_byte_rate` (default
@@ -253,14 +253,14 @@ It sets these on new and existing topics. [Topics](design.md#topics-1) gives
 the reasons.
 
 It refuses, before it reads the broker, terms whose agent credentials
-break the [pool terms](configuration.md#pool-terms) rules, and a
+break the [pool terms](configuration-operator.md#pool-terms) rules, and a
 `start_by_limit` above 29 days and 18 hours. For a pool with `storage` it
 refuses a `start_by_limit` that with six hours added exceeds 7 days, the
 longest an S3 SigV4 presigned URL lasts, with `start_by_limit plus the 6h
 run cap exceeds 7 days, the longest an S3 SigV4 presigned URL lasts`. It
 refuses a delivery limit above the lowest
 `group.share.max.delivery.count.limit` across the brokers, and terms whose
-[records do not fit the broker](configuration.md#record-limit). Before it
+[records do not fit the broker](configuration-operator.md#record-limit). Before it
 records anything it refuses a `lock_duration` above the brokers'
 `group.share.max.record.lock.duration.ms`, naming the field and the ceiling,
 and a `start_by_limit` that with six hours added exceeds the `retention.ms`
@@ -287,7 +287,7 @@ of `wherry.operator`, within 15 seconds, without a restart. A lowered
 With a pool of that name and the terms recorded, it completes the pool,
 creating any missing topics, as after an `apply` that failed once it
 recorded them. When the tasks topic's
-[record limit](configuration.md#record-limit) has changed since, it records
+[record limit](configuration-operator.md#record-limit) has changed since, it records
 the terms again with the new limit.
 
 With `--dry-run`, it makes the same checks, among them the stranded
@@ -304,10 +304,10 @@ wherry operator tenant pool add TENANT POOL
 ```
 
 Entitles an existing live tenant to an existing pool and grants the tenant's hosts and the pool's receivers their ACLs. An ended entitlement can be added again. A live entitlement converges, applies quotas and reports `already entitled` with exit status zero. It refuses when the pool's records do not fit the
-[record limit](configuration.md#record-limit) with the tenant's feed and
+[record limit](configuration-operator.md#record-limit) with the tenant's feed and
 transcript topic counted, or when the `retention.ms` of either is below the
 pool's `start_by_limit` plus six hours, and records nothing. It applies
-each host's [quotas](configuration.md#quotas).
+each host's [quotas](configuration-operator.md#quotas).
 
 ### `wherry operator pool suspend POOL`
 
@@ -484,12 +484,12 @@ wherry operator receiver apply RECEIVER [-f PATH] [--dry-run]
 wherry operator receiver apply RECEIVER --force
 ```
 
-Reads the [receiver configuration](configuration.md#receiver-configuration)
+Reads the [receiver configuration](configuration-receiver.md#receiver-configuration)
 from `PATH` or `receivers/<receiver>.yaml`, a directory or a single file, and
 validates it against the pool's terms. Its `pool` names the receiver's pool;
 its `plugin_sha256` pins, for each plugin type, the SHA-256 of that type's
 binary as lowercase hex: the line for the binary in the plugin release's
-signed `checksums.txt` ([Install plugins](operations.md#install-plugins)).
+signed `checksums.txt` ([Install plugins](operations-receivers.md#install-plugins)).
 Every plugin type in the configuration needs a pin, and a pin that is not 64
 lowercase hex digits is an error; either refusal writes nothing. Its
 `broker` is the address the receiver's bundle names, the broker in
@@ -507,8 +507,8 @@ bundle to `bundles/receivers/<receiver>.bundle`. The file must name a
 pool that lacks one, and sets the
 [progress topic configuration](design.md#topics-1) on each existing one, never lowering its `retention.ms`.
 The bundle holds the receiver's Kafka identity alone; the receiver's [local
-configuration](configuration.md#receiver-local-configuration) gives the
-sources of its [platform credentials](configuration.md#platform-credentials)
+configuration](configuration-receiver.md#receiver-local-configuration) gives the
+sources of its [platform credentials](configuration-receiver.md#platform-credentials)
 and the CA it trusts the broker with.
 With `--dry-run`, it makes the same checks and prints each plugin profile as
 the record would hold it, with the pins, in the format of `receiver show`, and creates and
@@ -552,7 +552,7 @@ Prints the receiver's recorded configuration as YAML: `capacity`, then
 `plugin_sha256`, the SHA-256 pinned for each plugin type, then
 `profiles`, each plugin profile resolved, in routing order, with its
 `name`, `plugin`, `agent`, `labels` and merged `config`
-([Plugin profile merge](configuration.md#plugin-profile-merge)):
+([Plugin profile merge](configuration-receiver.md#plugin-profile-merge)):
 
 ```yaml
 capacity: 3
@@ -623,7 +623,7 @@ Loads `wherry.operator` and checks, in order:
 
 - that no two names collide;
 - every receiver configuration against its pool's terms;
-- that every pool's [records still fit the broker](configuration.md#record-limit);
+- that every pool's [records still fit the broker](configuration-operator.md#record-limit);
 - topic retention and timestamp type against the [bounds](design.md#topics-1):
   `retention.ms=-1` on `wherry.operator` and every host and receiver key
   topic, and `message.timestamp.type=LogAppendTime` on each pool's tasks and
@@ -656,7 +656,7 @@ wherry receiver run [--config-file FILE] [--rotate-key]
 ```
 
 Runs a receiver as the principal of the bundle its [local
-configuration](configuration.md#receiver-local-configuration) names,
+configuration](configuration-receiver.md#receiver-local-configuration) names,
 trusting the broker through the configuration's `ca_file` or, without one,
 the system roots.
 `--config-file` defaults to `/etc/wherry/config.yaml`. It creates the
@@ -677,7 +677,7 @@ On start it:
 4. waits for its configuration record on `wherry.operator` and validates it
    against the pool's terms;
 5. for each plugin profile in turn, resolves its [platform
-   credential](configuration.md#platform-credentials), starts its
+   credential](configuration-receiver.md#platform-credentials), starts its
    [plugin](#plugins) from `plugin_dir` when no earlier profile has, and
    configures the profile;
 6. reads its pool's events once, and starts advertising and claiming;
@@ -693,11 +693,11 @@ plugin's raw standard error that go-plugin relays, and profile configure,
 sweep and readiness errors carry the
 [marker](security.md#credential-envelopes) of each credential value
 delivered to a run the receiver holds, and of each [platform
-credential](configuration.md#platform-credentials) value, in place of the
+credential](configuration-receiver.md#platform-credentials) value, in place of the
 value. On
 `SIGINT` or `SIGTERM` it stops claiming, closes its idle claims and lets
 each held run go on for up to the local configuration's
-[`drain_timeout`](configuration.md#drain-timeout-and-the-stop-window),
+[`drain_timeout`](configuration-receiver.md#drain-timeout-and-the-stop-window),
 default `0s`. It then commits the pending transcript of each run still
 held, releases their tasks and exits, leaving their jobs running. Those
 commits, releases and acknowledgements and the key custodian's drain all end
@@ -705,7 +705,7 @@ within `drain_timeout` plus 5 seconds of the signal, so a stop takes at most
 that; a run whose commit does not complete by then is left unacknowledged
 for its acquisition lock to return. Set the
 platform's stop window as in
-[Drain timeout and the stop window](configuration.md#drain-timeout-and-the-stop-window).
+[Drain timeout and the stop window](configuration-receiver.md#drain-timeout-and-the-stop-window).
 When a
 configuration record that differs from its own appears, it stops claiming,
 lets each held run end with no time limit and fails with
@@ -769,7 +769,7 @@ receiver exits with `profile <name>: no plugin for type <type>`. A plugin checks
 A plugin inherits the receiver's environment. The receiver passes each
 profile's name, pool, agent and merged `config` section to the plugin, less
 the `credential` key, and the value of the profile's [platform
-credential](configuration.md#platform-credentials) when it names one. A
+credential](configuration-receiver.md#platform-credentials) when it names one. A
 profile with a `credential` name its local configuration has no source for
 fails its configuration with an error naming the profile and the
 credential.
@@ -901,7 +901,7 @@ Sets the host up from its bundle, and configures it for every pool its tenant
 is entitled to:
 
 1. With `BUNDLE`, it reads the bundle and copies it to `bundle.yaml` in the
-   [configuration directory](configuration.md#client-configuration),
+   [configuration directory](configuration-host.md#client-configuration),
    `$XDG_CONFIG_HOME/wherry/` or by default `~/.config/wherry/`, mode 0600 in
    a directory of mode 0700,
    replacing any file there atomically, and names it as `bundle` in the
@@ -989,7 +989,7 @@ receiver=<id> pool=<pool> capacity=<n> in_flight=<n> advertisement_age=<age> sta
 seconds of now, either side, `stale` otherwise, `silent` when there is none,
 and `ended` after the receiver's membership end. Plugin profiles, their plugins and their labels come from the
 receiver's configuration record, and an agent's `models` and
-`default_model` from the pool's [terms](configuration.md#pool-terms) when it has them.
+`default_model` from the pool's [terms](configuration-operator.md#pool-terms) when it has them.
 `ready` is true when the receiver is live
 and its advertisement offers the profile. A live receiver with no ready
 profile lists each profile with `ready=false`. `inline_limit`, when set, is
@@ -997,7 +997,7 @@ the most inline input bytes the offered profile delivers. `credentials` names
 the agent's credentials in the pool's terms, each with its target, the
 agent's environment variable or the file in its credentials directory,
 marking `missing` each this host's configuration has no
-[source](configuration.md#client-configuration) for and `optional` each a run
+[source](configuration-host.md#client-configuration) for and `optional` each a run
 goes without, as in
 `credentials=openai-api-key:env=OPENAI_API_KEY,github-token:env=GH_TOKEN(missing,optional)`.
 
@@ -1065,14 +1065,14 @@ need `--git`, which splits at its last `@`. `submit` writes a
 `user@host:path` remote as `ssh://user@host/path`. The
 [extension](a2a-extension-v1.md#git-input) gives the rules for the remote,
 ref, path and host key. `submit` refuses, before it publishes, a remote
-whose host is not one of the pool's [`vcs`](configuration.md#pool-terms) hosts:
+whose host is not one of the pool's [`vcs`](configuration-operator.md#pool-terms) hosts:
 
 ```
 invalid input: git remote host github.com is not in pool build's vcs hosts
 ```
 
 The clone's credential and host key come from the client configuration's
-[`git`](configuration.md#client-configuration) entry whose `url` is the longest prefix of the
+[`git`](configuration-host.md#client-configuration) entry whose `url` is the longest prefix of the
 remote. The entry's credential joins the task as a task credential the agent
 gets as the file `git-credential` in `WHERRY_CREDENTIALS_DIR`, so no
 `--credential` may name it as well, and `submit` reads at most one byte over
@@ -1091,7 +1091,7 @@ first is the smallest `inline_limit` declared for a profile among the chosen
 pool's receivers' profiles that launch the placed agent and satisfy the
 selector, read from each receiver's last advertisement, live or stale; an
 ended receiver does not count, and an undeclared profile limit is zero and
-sets none. The second is the pool's [record limit](configuration.md#record-limit), which
+sets none. The second is the pool's [record limit](configuration-operator.md#record-limit), which
 `pool apply` records in the terms: `submit` measures the signed submission
 record against it. `submit` applies the profile limit to the input files
 together, then the record limit to the record. Over either, a pool with
@@ -1116,7 +1116,7 @@ and is delivered at both targets.
 
 `submit` refuses, before it publishes, a task credential or a required
 credential of the placed agent that the client configuration has no
-[source](configuration.md#client-configuration) for:
+[source](configuration-host.md#client-configuration) for:
 
 ```
 invalid input: auth required: credential openai-api-key is not in this host's configuration
@@ -1124,12 +1124,12 @@ invalid input: auth required: credential openai-api-key is not in this host's co
 
 An optional credential of the agent without a source is named in the
 submission's `unsupplied_credentials`; the run goes without it, and its
-[prompt](configuration.md#agent-contract) names it as not supplied.
+[prompt](configuration-receiver.md#agent-contract) names it as not supplied.
 
 `--input FILE:s3` and `--output NAME:s3` use the pool's [S3 lane](a2a-extension-v1.md#s3-inputs-and-outputs).
 `submit` refuses them, before it uploads or publishes anything, when the
-client configuration has no [`storage`](configuration.md#client-configuration) or the
-pool's terms no [`storage`](configuration.md#pool-terms):
+client configuration has no [`storage`](configuration-host.md#client-configuration) or the
+pool's terms no [`storage`](configuration-operator.md#pool-terms):
 
 ```
 invalid input: pool build has no storage for S3 inputs and outputs
@@ -1186,7 +1186,7 @@ own line, then the `output=` lines. `wait` prints no transcript;
 keeps it. Standard error carries errors and the diagnostics below.
 
 The status message's parts are the agent's answer or what went wrong, as its
-[outcome file](configuration.md#agent-contract) reports it, or the
+[outcome file](configuration-receiver.md#agent-contract) reports it, or the
 receiver's reason, for every state. A part prints as its text, its JSON
 data, `[url <url>]`, or `[raw <media type> <n> bytes]`. For a
 [reply](a2a-extension-v1.md#the-reply) over 64 KiB, the reply chunks'
@@ -1381,210 +1381,7 @@ echo on the tenant feed. They fail with `run not found` when there is neither.
 Serves the [MCP tools](mcp.md) over stdio, logging to standard error.
 The packaged MCP launch uses `["host", "mcp"]` and the default configuration path.
 A server that runs `wherry host mcp --config-file PATH` uses another, as
-[Harness integration](operations.md#harness-integration) shows.
-
-## Dev commands
-
-`wherry dev` runs a whole deployment on one machine for trying wherry and
-developing against it, as [Try it on one machine](quickstart.md#try-it-on-one-machine)
-walks through. Each command takes `--instance NAME`, default `default`, a
-[name](#names). An instance lives in `$XDG_DATA_HOME/wherry/dev/NAME`, by
-default `~/.local/share/wherry/dev/NAME`, mode 0700, in two parts:
-`cache/`, which `init` fills and `down --reset` removes, and `env/`, which `up`
-creates and `down` removes. The ports are fixed, so one instance is up at
-a time: Nomad on 4646, 4647 and 4648, Kafka on 9093 and, with storage, S3
-on 18080, all on 127.0.0.1.
-
-An instance is up while its `env/up.json` names a live Nomad agent that
-`up` started. Every step prints its name on standard error, and a failed
-step fails with `step <name>: <cause>`, with two exceptions: a `preflight`
-refusal of `up` is the whole error, and the `host` step of `down` prints no
-name.
-
-Commands run at once on one instance are not serialized: run one at a
-time. `XDG_DATA_HOME`, or `HOME` without it, must be the same for `up` and
-`down`, since it locates the instance and its record of the host files `up`
-created. `XDG_CONFIG_HOME` may change, since the record holds absolute
-paths.
-
-### `wherry dev init`
-
-```sh
-wherry dev init [--instance NAME] [--runtime podman|docker] [--storage-enabled] [--agent NAME]
-```
-
-Acquires everything `up` runs into `cache/` and records it in
-`cache/manifest.json`:
-
-- Nomad CE 2.1.1, the release the nomad plugin's CI tests. Its
-  `SHA256SUMS` must carry a signature by HashiCorp's release key,
-  fingerprint `C874 011F 0AB4 0511 0D02 1055 3436 5D94 72D7 468F`, and list
-  the pinned SHA-256 of the `linux_amd64` zip. The zip must match
-  `SHA256SUMS`.
-- On Linux with Podman, the newest `nomad-driver-podman`, checked the same
-  way.
-- The newest `nomad/v*` release of the nomad plugin that passes three
-  checks: its `checksums.txt` verifies against its sigstore bundle from the
-  plugin's release workflow, its archive matches `checksums.txt`, and its
-  binary speaks this wherry's plugin protocol. A binary that speaks another
-  is dropped for the next older release.
-- Kafka 4.3.1, the `docker.io/apache/kafka` image the real-broker tests
-  pin by digest, pulled and tagged
-  `wherry-dev/kafka:<id12>` in the runtime's own store. With
-  `--storage-enabled`, also `quay.io/benjamin_holmes/ceph-aio:v21`, tagged
-  `wherry-dev/ceph-aio:<id12>`. Under Podman the tags start `localhost/`.
-- A copy of the running wherry binary, which the receiver job runs.
-
-`--runtime` is required when both `docker` and `podman` answer `version`,
-and found otherwise. `init` looks for `claude`, `codex` and `gemini` on
-`PATH`. One found is the default agent. With several it asks on a
-terminal, and fails with `found claude and codex; choose the default with
---agent` without one. With none and no `--agent` it fails with
-`no agent harness found on PATH (looked for claude, codex, gemini); install one, or choose --agent mock`
-before it downloads anything. `--agent NAME` takes a harness it found or
-`mock`. `init` without `--storage-enabled` drops storage from an instance
-that has it.
-
-`init` sends `GH_TOKEN`, else `GITHUB_TOKEN`, to GitHub's API as a bearer
-token when one is set. Without one, GitHub allows 60 API requests an hour
-from an address, and a spent limit fails naming the time it resets.
-
-`init` downloads only what changed and prints `instance NAME: unchanged`
-when nothing did. A harness installed later needs `init` again. It refuses
-while the instance is up with `instance NAME is up; run wherry dev down
-first`. A manifest of another layout version is refused naming its path.
-
-### `wherry dev up`
-
-```sh
-wherry dev up [--instance NAME] [--runtime podman|docker] [--agent-image NAME=IMAGE]...
-```
-
-Builds and starts the environment from `cache/`, downloading nothing, and
-returns once a run of the mock agent completes. Its steps:
-
-1. `preflight` refuses while this instance is up (`instance NAME is
-   already up`) or another is (`instance OTHER is up; run wherry dev down
-   --instance OTHER first`), without a manifest (`nothing acquired for
-   instance NAME; run wherry dev init first`), with a cached file whose
-   SHA-256 differs from the manifest's, with a `--runtime` other than the
-   manifest's, with a port in use (`port 9093 is in use`), and when the
-   running binary differs from the copy (`the running wherry differs from
-   the snapshot; run wherry dev init`).
-2. `harnesses`, `credentials`: the agents are the harnesses `init` found,
-   the `--agent-image` names and `mock`. For each, the set variables of
-   `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CODEX_API_KEY` (else
-   `OPENAI_API_KEY`), `GEMINI_API_KEY` and `WHERRY_DEV_MOCK_TOKEN` are
-   copied into `env/host/credentials/`, mode 0600.
-3. `tls`, `super-user`: an instance CA, the broker's certificate for
-   127.0.0.1, and the password of the Kafka super user `wherry-admin`, the
-   only SCRAM credential the broker starts with. These are the Kafka
-   administrator's part.
-4. `image` checks that the manifest's tags are still in the runtime, and
-   fails with `image TAG is no longer in the runtime; run wherry dev init`.
-5. `nomad` starts `nomad agent -dev` as you, detached, its log in
-   `env/nomad/nomad.log` and its data directory mode 0700. Its
-   `env.denylist` holds Nomad's default list, the copied variables and
-   every variable whose name ends `_TOKEN`, `_KEY`, `_SECRET` or
-   `_PASSWORD` when `init` ran, so the agents' environment carries none of
-   them. On Linux without a Podman socket it starts `podman system
-   service` beside Nomad.
-6. `kafka` runs the broker as a Nomad job from the local tag and waits for
-   a metadata request over SCRAM.
-7. `operator` runs [`operator init`](#wherry-operator-init) with
-   `wherry-admin` given as flags, never prompting, on `env/operator`, the
-   instance's operator
-   [working directory](configuration.md#operator-working-directory):
-   `wherry operator --dir <instance>/env/operator check` runs against it.
-8. `bootstrap` makes the operator's calls through that directory: pool
-   `dev`, tenant `dev`, host `dev` and receiver `dev-1` with a plugin
-   profile per agent, their bundles under `env/operator/bundles/`. The
-   receiver's `config.yaml` names the instance CA as `ca_file`.
-9. `host` writes the host's `config.yaml`, bundle and key, and registers
-   the key. For instance `default`, unless `WHERRY_CONFIG` is set, they go
-   at the standard [host paths](configuration.md#client-configuration);
-   the config names `env/host/state` as `state_dir`, so dev writes no state
-   at the standard state path. `up` creates each file exclusively, so it
-   never replaces anything there. `cache/manifest.json` records each path,
-   its directory resolved through symlinks, before `up` creates it, and the
-   file's device, inode, size and modification time after; no digest of a
-   file holding a credential is kept.
-   If the config, bundle or key is already there, or appears while
-   `up` creates them, `up` removes what it created there and, as for every
-   other instance and with `WHERRY_CONFIG` set, writes them in
-   `env/host/`. The config names the instance CA as `ca_file`, and the dev
-   pool's [storage](configuration.md#client-configuration) credentials
-   with storage.
-10. `receiver` runs `wherry receiver run` from the copy as a `raw_exec` job
-    and waits for `dev-1` to be live with every profile ready.
-11. `smoke` runs the mock agent and checks the output it returns. `ready`
-    writes `env/up.json` and prints the summary, a `submit:` line and an
-    `mcp add` line for each harness. When the config is in `env/host/`, it
-    prints `export WHERRY_CONFIG=<path>` first, and each `mcp add` line
-    passes `WHERRY_CONFIG` to the server; otherwise neither names the
-    config.
-
-The harness profiles and `mock` run under `raw_exec` with label
-`isolation: host`. `--agent-image NAME=IMAGE` splits at the first `=`. It
-runs agent `NAME` in `IMAGE` with label `isolation: container`, never
-pulled, so the image must be in the runtime. For `claude`, `codex` and
-`gemini` the profile runs the harness from `/local`. Any other `NAME` runs
-the image's entrypoint, which meets the
-[agent contract](configuration.md#agent-contract).
-[`agent.Containerfile`](https://github.com/benemon/wherry/blob/main/docs/agent.Containerfile) builds one for `claude`.
-
-With storage, `storage`, `s3-user` and `bucket` run after `kafka`. ceph-aio
-serves S3 on `http://127.0.0.1:18080`. `s3-user` has `radosgw-admin`
-generate the user's keys and writes them to `env/host/credentials/`. Pool
-`dev` takes the endpoint as its [storage](configuration.md#pool-terms), and
-the smoke run sends an S3 input and returns its output through the bucket.
-The ceph-aio job reserves 2048 MB of memory, and its data lives in the
-container, so `down` removes it.
-
-A failed step leaves the environment for `down` to remove.
-
-### `wherry dev down`
-
-```sh
-wherry dev down [--instance NAME] [--reset]
-```
-
-Its steps, each run after a failed one:
-
-1. `jobs` deregisters the receiver, every agent job, storage and Kafka,
-   waits up to 60 seconds for their allocations to end, and purges them.
-2. `containers` waits up to 60 seconds for the runtime to list no
-   container of theirs, then removes those left by ID.
-3. `nomad` stops Nomad and the Podman service with `SIGTERM`, and
-   `SIGKILL` after 30 seconds.
-4. `ports` checks that the ports are free.
-5. `data` removes `env/`.
-6. `host` removes each file the manifest records `up` creating at the
-   standard host paths while it is still that file: a regular file, not a
-   symlink, with the recorded device, inode, size and modification time, in a directory
-   that still resolves to the recorded one. So a stale default never
-   shadows a real host's, and a real host's file stays. Anything else, a
-   missing file or one whose device and inode a crash kept `up` from
-   recording included, it leaves and names:
-   `left <path>: <reason>`. Two cases remain: a file replaced between
-   this check and its removal is removed, since the operating system
-   offers no removal conditional on identity; and a file edited in place
-   that keeps its size and has its modification time set back is removed,
-   since `down` keeps no digest of a file holding a credential.
-
-`down` fails naming every failed step. It keeps `cache/`, prints
-`down: instance NAME` on standard output, and then prints a
-`mcp remove` line for each harness, since the registration names a
-configuration that is gone. An instance that is not up prints
-`instance NAME is not up`, removes a leftover `env/` and the host files as
-in step 6, and exits 0.
-
-With `--reset`, `down` removes the host files as in step 6, then
-`cache/`. It refuses `--reset` while the instance is up, and when it
-cannot read the manifest, which may record host files: it names the
-standard paths to check by hand before you remove the manifest. The
-images stay in the runtime's store. Remove `wherry-dev/kafka:<id12>`, and
-`wherry-dev/ceph-aio:<id12>` with storage, with the runtime.
+[Harness integration](operations-hosts.md#harness-integration) shows.
 
 ## Version command
 

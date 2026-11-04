@@ -1,59 +1,47 @@
 # Plugins
 
-A plugin is the binary `wherry-plugin-<type>` that supplies
-support for one kind of platform, which the receiver starts from its plugin
-directory and talks to over the plugin protocol. A receiver runs each task
-on a plugin profile, a named, configured use of a plugin with its agent, labels
-and runtime, and one plugin process serves every one of its profiles in the
-receiver's [configuration](configuration.md#receiver-configuration).
-[Plugin protocol](plugin-protocol.md) specifies what a plugin implements,
-and [Plugins](commands.md#plugins) what a receiver does with it.
+A plugin runs jobs on one kind of platform.
+The receiver starts its `wherry-plugin-<type>` binary from the plugin directory.
+One plugin process serves all of that plugin's profiles on the receiver.
+Each profile names an agent, labels and runtime settings.
+See [Receiver configuration](configuration-receiver.md#receiver-configuration).
 
-The plugins live in
-[wherry-plugins](https://github.com/benemon/wherry-plugins), each with its
-own README covering installation, settings and the platform's
-permissions:
+## Which platform do you use?
 
-- [Nomad](https://github.com/benemon/wherry-plugins/tree/main/nomad)
-- [Kubernetes](https://github.com/benemon/wherry-plugins/tree/main/kubernetes),
-  OpenShift included
-- [systemd](https://github.com/benemon/wherry-plugins/tree/main/systemd)
+The [wherry-plugins repository](https://github.com/benemon/wherry-plugins) maintains these plugins.
+Use each plugin's guide for installation, settings and platform permissions.
+
+| Plugin | Guide |
+| --- | --- |
+| Nomad | [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad). |
+| Kubernetes and OpenShift | [Kubernetes plugin](https://github.com/benemon/wherry-plugins/tree/main/kubernetes). |
+| systemd | [systemd plugin](https://github.com/benemon/wherry-plugins/tree/main/systemd). |
 
 ## Why Nomad
 
-One Nomad cluster runs many kinds of workload, each through a
-[task driver](https://developer.hashicorp.com/nomad/docs/deploy/task-driver).
-
-A plugin profile of the Nomad plugin names one driver and its configuration, and
-the receiver's configuration can hold several profiles of the Nomad
-plugin, each with its own driver and labels. So one receiver can offer containers, host
-processes and virtual machines side by side, and a task chooses between
-them by its agent and label selector, the way it chooses anything else.
-The Nomad plugin hands the driver to Nomad unchanged.
-
-The
-[Nomad plugin's README](https://github.com/benemon/wherry-plugins/tree/main/nomad)
-gives the settings for each driver.
+The Nomad plugin passes each profile's driver settings to Nomad.
+You can define several profiles for the same plugin.
+Give each profile labels that describe its capabilities.
+Your tasks select profiles by agent and label selector.
+Use the [Nomad plugin settings](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings) to configure each driver.
 
 ## Running a receiver
 
-The [receiver examples](https://github.com/benemon/wherry-plugins/tree/main/examples) in wherry-plugins show ways to
-run a receiver with its plugins. [Run a receiver](operations.md#run-a-receiver)
-lists what every receiver needs, and each plugin's README gives the full
-instructions.
+Follow [Run a receiver](operations-receivers.md#run-a-receiver) for wherry's requirements.
+The examples below are imported from the plugin repository.
+[Plugin protocol](plugin-protocol.md) describes the authoring interface.
+[Command reference](commands.md#plugins) explains pins and process recovery.
 
 ### systemd
 
 [Run the receiver as a systemd service](https://github.com/benemon/wherry-plugins/tree/main/systemd#run-the-receiver-as-a-systemd-service)
 describes these files and installs them.
 
-A systemd receiver adopts only the jobs on its own host. In a pool with
-receivers on several hosts, a task whose holder is lost, the latest receiver
-the key custodian served it to that has not since released it, starts again
-on another host once the lease lapses, 120 seconds after the holder's last
-advertisement, or once its membership ends, while the first job may still
-run. Give each systemd
-receiver a pool of its own.
+A systemd receiver adopts jobs only on its own host.
+Give each systemd receiver its own pool.
+With receivers on several hosts, redelivery can start another job while the first still runs.
+This can happen after the previous holder's lease expires or its membership ends.
+The lease expires 120 seconds after its last advertisement.
 
 `config.yaml`:
 
