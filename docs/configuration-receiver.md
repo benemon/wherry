@@ -424,7 +424,7 @@ selector. Each profile here launches a different agent, so a task for
 `claude`, the pool's default agent, runs on `container`, and
 `--selector isolation=host` leaves it no profile.
 
-### Profile settings
+### Plugin profile settings
 
 A plugin profile's `config` section belongs to its plugin. The
 [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
