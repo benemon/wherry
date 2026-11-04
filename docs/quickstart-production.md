@@ -38,8 +38,9 @@ On the operator machine:
 
 - `git`, and Docker with push access to a registry your Nomad clients pull from. This guide uses
   `registry.example.com`.
-- The `nomad` CLI, set up to reach your cluster: `NOMAD_ADDR`, and `NOMAD_CACERT` if the API uses TLS. With ACLs
-  enabled, `NOMAD_TOKEN` must be a management token, because step 3 of Part 2 applies an ACL policy.
+- The `nomad` CLI, set up to reach your cluster: `NOMAD_ADDR`, and whatever
+  [TLS settings](https://developer.hashicorp.com/nomad/docs/commands#environment-variables) your cluster needs. With
+  ACLs enabled, `NOMAD_TOKEN` must be a management token, because step 3 of Part 2 applies an ACL policy.
 - A Kafka cluster that meets the [Kafka prerequisites](operations-operator.md#prepare-kafka), with a super user's
   SCRAM credential. This guide calls it `kafka-admin`. On Strimzi, set the
   [ignored-users pattern](operations-operator.md#strimzi) first.
@@ -70,7 +71,7 @@ a signature over the checksums. Verify the signature with
 [cosign](https://docs.sigstore.dev/cosign/system_config/installation/), then the archive against the checksums:
 
 ```sh
-version=<version> os=linux arch=amd64
+version=v0.1.0-rc.28 os=linux arch=amd64
 base=https://github.com/benemon/wherry/releases/download/$version
 archive=wherry_${version}_${os}_${arch}.tar.gz
 curl -fsSL --remote-name-all "$base/$archive" "$base/checksums.txt" "$base/checksums.txt.sigstore.json"
@@ -101,10 +102,11 @@ Put the super user's password in a private temporary file.
 `read -rs` keeps it off the screen, and `printf %s` writes it without a trailing newline:
 
 ```sh
-password_file=$(mktemp)
+password_file=$(mktemp) && trap 'rm -f "$password_file"' EXIT
 printf "Kafka super user's password: " && read -rs password && printf %s "$password" > "$password_file" && unset password
 ```
 
+The `trap` deletes the file when this shell exits, even if a step fails.
 Initialise the directory, then delete the password file:
 
 ```sh
@@ -157,13 +159,12 @@ wherry operator tenant pool add acme build
 ### 4. Build and push the receiver image
 
 The receiver runs from an image that holds wherry and the Nomad plugin.
-Pick the latest `nomad/v*` release of [wherry-plugins](https://github.com/benemon/wherry-plugins/releases).
-Its release notes name the wherry release it works with.
-Set both versions, and the image name, once:
+Each [wherry release](https://github.com/benemon/wherry/releases)'s notes name the plugin releases that pair with it.
+Set both versions, and the image name, once. These values are the current pair:
 
 ```sh
-plugin_version=<nomad plugin release, such as v0.1.0-rc.18>
-wherry_version=<wherry release, such as v0.1.0-rc.28>
+wherry_version=v0.1.0-rc.28
+plugin_version=v0.1.0-rc.18
 image=registry.example.com/wherry-receiver:$wherry_version
 ```
 
@@ -348,9 +349,11 @@ mkdir -p -m 0700 ~/.config/wherry
 mv kafka-ca.pem ~/.config/wherry/ca.pem
 ```
 
-Save your Claude Code token in a file only you can read, without a trailing newline:
+Save your Claude Code token in a new file only you can read, without a trailing newline.
+The first command removes any old copy, so the new file gets the private mode:
 
 ```sh
+rm -f ~/claude-oauth-token
 (umask 077 && printf "Claude Code token: " && read -rs token && printf %s "$token" > ~/claude-oauth-token)
 ```
 
