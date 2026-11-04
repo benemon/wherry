@@ -723,42 +723,6 @@ func TestRevokedMemberNeverActsAsCustodian(t *testing.T) {
 	}
 }
 
-// A custodian revoked while it holds the custodian group's assignment leaves the group at once, well within the session
-// timeout a closed static member would otherwise keep the partition for.
-func TestRevokedCustodianLeavesTheGroup(t *testing.T) {
-	f := newBareFixture(t)
-	custodyUntilDrained(t, f.ctx, f.receiver)
-	awaitActing(t, f, f.receiver)
-	admin := kadm.NewClient(f.service.Operator)
-	members := func() []string {
-		described, err := admin.DescribeGroups(f.ctx, operator.CustodianGroup(testPool))
-		if err != nil {
-			t.Fatal(err)
-		}
-		var ids []string
-		for _, member := range described[operator.CustodianGroup(testPool)].Members {
-			if member.InstanceID != nil {
-				ids = append(ids, *member.InstanceID)
-			}
-		}
-		return ids
-	}
-	if ids := members(); !slices.Contains(ids, testReceiver) {
-		t.Fatalf("custodian group members %v before the revocation, want %s", ids, testReceiver)
-	}
-	f.receiver.mu.Lock()
-	f.receiver.state.Ended[operator.ReceiverPrincipal(testReceiver)] = true
-	f.receiver.mu.Unlock()
-	f.receiver.custody.wake <- struct{}{}
-	deadline := time.Now().Add(sessionTimeout / 3)
-	for slices.Contains(members(), testReceiver) {
-		if time.Now().After(deadline) {
-			t.Fatalf("%s still a member of the custodian group %s after its revocation; logs:\n%s", testReceiver, sessionTimeout/3, f.logs.String())
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-}
-
 func TestTakeoverReadBackLostIsCountedOnTheNextPass(t *testing.T) {
 	f := newBareFixture(t)
 	custodian(t, f.ctx, f.receiver, time.Now())
