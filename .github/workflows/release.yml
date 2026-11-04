@@ -88,7 +88,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$RUNNER_TEMP/known_hosts"
       # The deploy key has write access to benemon/homebrew-tap alone; without the secret the formula is left alone.
+      # A prerelease tag (v0.1.0-rc.1) leaves the formula on the last release.
       - name: Push the Homebrew formula
+        if: ${{ !contains(github.ref_name, '-') }}
         env:
           HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
           RELEASE_TAG: ${{ github.ref_name }}
@@ -162,9 +164,10 @@ jobs:
         run: for archive in wherry_*.tar.gz; do gh attestation verify "$archive" -R benemon/wherry; done
 
   # Installs the release from the tap as the README does, on Apple silicon, and runs the formula's test, which checks
-  # the installed binary's version.
+  # the installed binary's version. A prerelease does not move the formula, so there is nothing to install.
   verify-brew:
     needs: publish
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: macos-latest
     steps:
       - name: Install wherry from benemon/tap and test it
