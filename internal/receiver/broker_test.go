@@ -28,6 +28,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"gopkg.in/yaml.v3"
 )
 
 // brokerPool is a pool of its own on the plaintext broker named by WHERRY_KAFKA_TEST_BROKER, with one receiver, one
@@ -53,7 +54,10 @@ func newBrokerPool(t *testing.T, ctx context.Context, address string) brokerPool
 	b := brokerPool{opts: opts, kafka: kafka, receiver: "receiver-" + suffix, pool: "pool-" + suffix, tenant: "tenant-" + suffix, host: "host-" + suffix}
 	b.service = &operator.Service{Operator: kafka, Broker: address}
 	b.applyTerms(t, ctx, testTerms())
-	if err := b.service.TenantAdd(ctx, b.tenant, b.pool); err != nil {
+	if err := b.service.TenantAdd(ctx, b.tenant); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.service.TenantPoolAdd(ctx, b.tenant, b.pool); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.service.HostAdd(ctx, b.tenant, b.host, filepath.Join(t.TempDir(), "host.bundle"), false); err != nil {
@@ -669,5 +673,141 @@ func TestBrokerPoolPassesOperatorCheck(t *testing.T) {
 	b.member(t, ctx, b.receiver+"-b")
 	if err := b.service.Check(ctx); err != nil {
 		t.Fatalf("operator check after the fixture = %v", err)
+	}
+}
+
+// tenantEndReceiver authenticates as a receiver, so broker authorization is exercised.
+func tenantEndReceiver(t *testing.T, ctx context.Context, b brokerPool) *Receiver {
+	t.Helper()
+	ca, err := os.ReadFile(os.Getenv("WHERRY_TRUST_CA"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := testConfig("auth-" + strings.TrimPrefix(b.receiver, "receiver-"))
+	config.Pool = b.pool
+	path := filepath.Join(t.TempDir(), "receiver.bundle")
+	if err := b.service.ReceiverAdd(ctx, config, os.Getenv("WHERRY_TRUST_BROKER"), path); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundle operator.Bundle
+	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(bundle, ca, t.TempDir(), false, time.Second, nil, log.New(&syncBuffer{}, "", 0), prometheus.NewRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.base.Close)
+	t.Cleanup(r.reader.Close)
+	// configure requires a factory for the configured profile.
+	r.factory = func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
+		return Named{Name: settings.Name, Agent: settings.Agent, Plugin: &fakePlugin{stream: resultStream}}, nil
+	}
+	if err := r.register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.configure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestHeldRunFinishesAfterEntitlementEndOnRealBroker(t *testing.T) {
+	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
+	if address == "" || os.Getenv("WHERRY_TRUST_BROKER") == "" {
+		t.Skip("real broker listeners are not configured")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
+	defer cancel()
+	b := newBrokerPool(t, ctx, address)
+	r := tenantEndReceiver(t, ctx, b)
+	task := testSubmission("run-a")
+	task.Wherry.Tenant, task.Wherry.Host, task.Wherry.Pool = b.tenant, b.host, b.pool
+	task.Wherry.Run = wire.RunID(b.tenant, b.host, task.Wherry.RunNonce)
+	task.Message.TaskID, task.Message.ContextID = task.Wherry.Run, task.Wherry.Run
+	producer, err := r.newProducer(task.Wherry.Run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer producer.Close()
+	run := &activeRun{receiver: r, producer: producer, task: task, taskHash: wire.Digest([]byte("held-task")), attempt: 1, history: []wire.Message{task.Message}, redactionKey: testRedactionKey}
+	if err := r.transact(ctx, producer, run.statusRecords("started", taskStatus(wire.TaskStateWorking, ""), nil, nil)...); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.service.TenantPoolRemove(ctx, b.tenant, b.pool); err != nil {
+		t.Fatal(err)
+	}
+	halted := make(chan error, 1)
+	r.halt = func(err error) { halted <- err }
+	if ack := run.end(ctx, taskStatus(wire.TaskStateCompleted, ""), "done", nil, kgo.AckAccept); ack != kgo.AckAccept {
+		t.Fatalf("held run ack=%v", ack)
+	}
+	if err := r.refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-halted:
+		t.Fatalf("receiver halted: %v", err)
+	default:
+	}
+	reader := operator.NewReader(b.kafka)
+	defer reader.Close()
+	records, err := reader.ReadFrom(ctx, operator.TenantTopic(b.tenant), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) < 2 {
+		t.Fatalf("held run did not finish into feed: %d records", len(records))
+	}
+}
+
+func TestEndedHostKeyReadsOnRealBroker(t *testing.T) {
+	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
+	if address == "" || os.Getenv("WHERRY_TRUST_BROKER") == "" {
+		t.Skip("real broker listeners are not configured")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
+	defer cancel()
+	b := newBrokerPool(t, ctx, address)
+	_, hostKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration, err := signed.RegisterKey(signed.HostOwner(b.tenant, b.host), hostKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.HostTopic(b.tenant, b.host), Value: registration}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	r := tenantEndReceiver(t, ctx, b)
+	// Hold the state from before the end, as a refresh straddling it would.
+	state, err := b.service.LoadState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := operator.EncodeRecord(operator.Record{Kind: "end", Tenant: b.tenant, Host: b.host})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.OperatorTopic, Key: []byte("end." + operator.TenantPrincipal(b.tenant, b.host)), Value: encoded}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	// Any operator command converges the recorded end.
+	if err := b.service.TenantPoolAdd(ctx, b.tenant, b.pool); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.reader.ReadKeys(ctx, operator.HostKeyTopics(state, b.pool)); err != nil {
+		t.Fatalf("straddled refresh: %v", err)
+	}
+	if _, err := r.rereadKey(ctx, &r.hosts, signed.HostOwner(b.tenant, b.host), operator.HostTopic(b.tenant, b.host)); err != nil {
+		t.Fatalf("reread ended key: %v", err)
+	}
+	if err := r.refresh(ctx); err != nil {
+		t.Fatal(err)
 	}
 }

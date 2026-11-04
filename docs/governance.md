@@ -12,7 +12,9 @@ generates each host and receiver ACL from the state on `wherry.operator`,
 `operator init` gives `wherry.operator` its own, and no other approval step
 exists. A tenant's hosts reach only the pools the tenant is entitled to. A
 receiver reaches its own pool, and the feeds, transcript topics and host key
-topics of the tenants entitled to it.
+topics of the tenants entitled to it now or before: it keeps them after a
+removal so that runs it already holds can finish
+([Removal and retained data](security.md#removal-and-retained-data)).
 [Identity and authorisation](concepts.md#identity-and-authorisation)
 describes the principals and [ACLs](design.md#acls) lists the matrix.
 
@@ -61,3 +63,5 @@ operator runs, no component sends data to a third party, and the Kafka
 clients' telemetry to the broker is disabled. The agent's own calls, such as those to its model provider, go
 where the agent sends them; wherry does not route them. wherry and its
 plugins are open source under the Mozilla Public License 2.0.
+
+Tenants are created explicitly with `wherry operator tenant add`. Pool entitlements and hosts belong to an existing live tenant. Tenant removal revokes access and permanently ends its name; it does not erase retained data.

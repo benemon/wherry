@@ -1250,9 +1250,10 @@ writes, each with `v`, `kind` and `at_ms` (Unix milliseconds).
 | --- | --- | --- |
 | `pool` | `pool`, `terms` | records or replaces the pool's terms |
 | `receiver` | `pool`, `receiver`, `config` | records or replaces the receiver's configuration |
+| `tenant` | `tenant` | records a new tenant |
 | `host` | `tenant`, `host` | records a host of the tenant |
 | `entitlement` | `tenant`, `pool` | entitles the tenant to the pool |
-| `end` | `receiver`, or `tenant` and `host` | records a membership end |
+| `end` | `receiver`; `tenant` and `host`; `tenant` and `pool`; or `tenant` alone | ends a principal, entitlement or tenant |
 | `revoking` | `receiver`, or `tenant` and `host` | records a revocation in progress: the principal is granted no ACL and stays a member until its `end` |
 | `suspend` | `pool` | suspends the pool ([Suspension](concepts.md#suspension)) |
 | `resume` | `pool` | resumes a suspended pool |
@@ -1268,7 +1269,7 @@ routing order, the plugins in the order of their names. Each plugin profile is t
 [profile entry](configuration.md#receiver-configuration) as `name`, `plugin`
 naming its plugin, `agent`, `labels` when set, and the merged
 `config`, which keeps a `credential` name and never a credential value. An `end` names
-exactly one of `receiver`, or `tenant` and `host`. A `revoking` names exactly one of `receiver`, or
+exactly one subject: `receiver`, `tenant` and `host`, `tenant` and `pool`, or `tenant` alone. Tenant and entitlement ends use keys `end.tenant.<T>` and `end.entitlement.<T>.<P>` and live outside principal revocation sets. A `revoking` names exactly one of `receiver`, or
 `tenant` and `host`, and no other member.
 Readers fold the records in order. A reader loads no state when:
 
@@ -1277,8 +1278,12 @@ Readers fold the records in order. A reader loads no state when:
 - a `receiver` or `host` record follows that member's `end`;
 - an `entitlement`, `suspend`, `resume` or `rotate-key` record names an
   unknown pool;
+- an entitlement or host precedes its tenant record or follows its tenant end;
+- a tenant record repeats a name, even an ended one;
+- a tenant or entitlement end names an absent subject;
+- a tenant end has a live entitlement or host, including a revoking host that has not ended (a revoking and ended host is allowed);
 - a record fails to decode;
-- two of the Kafka names that pools, receivers and hosts derive (topics,
+- two of the Kafka names that pools, receivers, hosts and tenants derive (topics,
   share groups, principals and transactional prefixes) collide.
 
 Readers ignore unknown members on a record and reject duplicate names. A
@@ -1700,3 +1705,5 @@ a submission a receiver admits. `params` names the binding URI. Activation
 is implicit: every `Message` and `Artifact` wherry writes lists the
 extension URI in its `extensions`, and readers reject one that does not, so
 no request activates the extension and no response confirms it.
+
+An entitlement end deletes both the pool key and any empty outer tenant key. It joins the ended entitlement set; a later entitlement removes it from that set. Repeated entitlement lifecycles are permitted. Tenant ends are final.

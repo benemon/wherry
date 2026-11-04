@@ -59,15 +59,21 @@ func ACLs(state State) []ACL {
 					}
 				}
 			}
-			for receiver, config := range state.Receivers {
-				principal := ReceiverPrincipal(receiver)
-				if config.Pool != pool || state.Ended[principal] || state.Revoking[principal] {
-					continue
-				}
-				acls = append(acls, ACL{principal, "topic", TenantTopic(tenant), false, writeDescribe}, ACL{principal, "topic", TenantTranscriptTopic(tenant), false, writeDescribe})
-				for hostPrincipal, host := range state.Hosts {
-					if host.Tenant == tenant && !state.Ended[hostPrincipal] {
-						acls = append(acls, ACL{principal, "topic", HostTopic(host.Tenant, host.Name), false, readDescribe})
+		}
+	}
+	for _, entitlements := range []map[string]map[string]bool{state.Entitlements, state.EndedEntitlements} {
+		for tenant, pools := range entitlements {
+			for pool := range pools {
+				for receiver, config := range state.Receivers {
+					principal := ReceiverPrincipal(receiver)
+					if config.Pool != pool || state.Ended[principal] || state.Revoking[principal] {
+						continue
+					}
+					acls = append(acls, ACL{principal, "topic", TenantTopic(tenant), false, writeDescribe}, ACL{principal, "topic", TenantTranscriptTopic(tenant), false, writeDescribe})
+					for _, host := range state.Hosts {
+						if host.Tenant == tenant {
+							acls = append(acls, ACL{principal, "topic", HostTopic(host.Tenant, host.Name), false, readDescribe})
+						}
 					}
 				}
 			}

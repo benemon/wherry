@@ -15,7 +15,7 @@ import (
 // ended host and two receivers: a principal, a resource type, a resource (a prefix with *) and its operations.
 func TestACLMatrix(t *testing.T) {
 	terms := modelTerms()
-	records := []Record{
+	records := []Record{{Version: 1, Kind: "tenant", Tenant: "tenant-a", AtMS: 1}, {Version: 1, Kind: "tenant", Tenant: "tenant-b", AtMS: 1},
 		{Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}, {Version: 1, Kind: "pool", Pool: "pool-b", Terms: &terms, AtMS: 1},
 		{Version: 1, Kind: "host", Tenant: "tenant-a", Host: "host-a", AtMS: 1}, {Version: 1, Kind: "host", Tenant: "tenant-b", Host: "host-b", AtMS: 1},
 		{Version: 1, Kind: "host", Tenant: "tenant-a", Host: "host-c", AtMS: 1},
@@ -46,6 +46,7 @@ func TestACLMatrix(t *testing.T) {
 		"wherry.rcv.receiver-a group p-pool-a READ,DESCRIBE,DESCRIBE_CONFIGS",
 		"wherry.rcv.receiver-a group p-pool-a.custodian READ,DESCRIBE",
 		"wherry.rcv.receiver-a topic wherry.host.tenant-a.host-a READ,DESCRIBE",
+		"wherry.rcv.receiver-a topic wherry.host.tenant-a.host-c READ,DESCRIBE",
 		"wherry.rcv.receiver-a topic wherry.host.tenant-b.host-b READ,DESCRIBE",
 		"wherry.rcv.receiver-a topic wherry.operator READ,DESCRIBE",
 		"wherry.rcv.receiver-a topic wherry.pool.pool-a.custodian READ,WRITE,DESCRIBE",
@@ -64,6 +65,7 @@ func TestACLMatrix(t *testing.T) {
 		"wherry.rcv.receiver-b group p-pool-a READ,DESCRIBE,DESCRIBE_CONFIGS",
 		"wherry.rcv.receiver-b group p-pool-a.custodian READ,DESCRIBE",
 		"wherry.rcv.receiver-b topic wherry.host.tenant-a.host-a READ,DESCRIBE",
+		"wherry.rcv.receiver-b topic wherry.host.tenant-a.host-c READ,DESCRIBE",
 		"wherry.rcv.receiver-b topic wherry.host.tenant-b.host-b READ,DESCRIBE",
 		"wherry.rcv.receiver-b topic wherry.operator READ,DESCRIBE",
 		"wherry.rcv.receiver-b topic wherry.pool.pool-a.custodian READ,WRITE,DESCRIBE",

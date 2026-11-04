@@ -65,7 +65,7 @@ prefixed grant per receiver on its pool's transactional IDs.
 are prefixed: topics `wherry.` and groups `p-`
 ([The operator principal](security.md#the-operator-principal)). The `wherry operator` command that
 records a host or receiver on `wherry.operator` also issues its principal and ACLs,
-and `pool entitle` records an entitlement with its ACLs; no other approval step
+and `tenant pool add` records an entitlement with its ACLs; no other approval step
 exists. [Design](design.md#acls) lists the matrix.
 
 ## Placement
@@ -198,7 +198,9 @@ run before a receiver claims it.
 
 A run passes through these records from submission to result.
 
-![A run's lifecycle: submission with the host then free to go offline, claim, open request, attempt wrap, re-key wrap or open refusal, dispatch, statuses and transcript, result and wait, with where a redelivery and an adoption enter](diagrams/run-lifecycle.svg)
+![A run's lifecycle: submission with the host then free to go offline, claim, open request, attempt
+wrap, re-key wrap or open refusal, dispatch, statuses and transcript, result and wait, with where a
+redelivery and an adoption enter](diagrams/run-lifecycle.svg)
 
 ## Pool keys and the key custodian
 
@@ -443,3 +445,7 @@ A compromised key calls for revocation. A
 [key rotation](operations.md#rotate-a-key) keeps the retired key
 verifying the owner's feed and transcript records from before the
 rotation.
+
+## Tenants
+
+A tenant groups hosts and their access to pools. Create it explicitly with `tenant add`; only that command creates its feed and transcript topics. An entitlement is a tenant's membership of a pool, managed with `tenant pool add` and `tenant pool remove`. Removing an entitlement immediately stops new admissions and placement for that tenant in that pool; it can be added again. A tenant moves from absent to live to ended. Ending a tenant is final: its name cannot return because retained data and host keys outlive it.

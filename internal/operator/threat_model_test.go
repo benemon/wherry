@@ -654,7 +654,7 @@ func modelConfig(receiver, pool string) ReceiverConfig {
 
 func modelState(t *testing.T) State {
 	terms := modelTerms()
-	records := []Record{{Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}, {Version: 1, Kind: "pool", Pool: "pool-b", Terms: &terms, AtMS: 1}, {Version: 1, Kind: "host", Tenant: "tenant-a", Host: "host-a", AtMS: 1}, {Version: 1, Kind: "host", Tenant: "tenant-b", Host: "host-b", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-a", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-b", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-a", AtMS: 1}}
+	records := []Record{{Version: 1, Kind: "tenant", Tenant: "tenant-a", AtMS: 1}, {Version: 1, Kind: "tenant", Tenant: "tenant-b", AtMS: 1}, {Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}, {Version: 1, Kind: "pool", Pool: "pool-b", Terms: &terms, AtMS: 1}, {Version: 1, Kind: "host", Tenant: "tenant-a", Host: "host-a", AtMS: 1}, {Version: 1, Kind: "host", Tenant: "tenant-b", Host: "host-b", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-a", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-b", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-a", AtMS: 1}}
 	for _, config := range []ReceiverConfig{modelConfig("receiver-a", "pool-a"), modelConfig("receiver-b", "pool-b")} {
 		copy := config
 		records = append(records, Record{Version: 1, Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &copy, AtMS: 1})
@@ -850,7 +850,11 @@ func TestDecodeRecordToleratesUnknownMembers(t *testing.T) {
 		t.Fatal(err)
 	}
 	extra := append([]byte(`{"later_member":true,`), encoded[1:]...)
-	state, err := load([]rawRecord{{Offset: 0, Value: extra}})
+	tenant, err := EncodeRecord(Record{Kind: "tenant", Tenant: "tenant-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := load([]rawRecord{{Offset: 0, Value: tenant}, {Offset: 1, Value: extra}})
 	if err != nil || state.Hosts[TenantPrincipal("tenant-a", "host-a")].Name != "host-a" {
 		t.Fatalf("unknown member at v1: %v, %v; want it folded", state.Hosts, err)
 	}

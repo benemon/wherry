@@ -37,7 +37,7 @@ One `wherry` binary with four roles:
 
 - **Operator:** `wherry operator init` delegates provisioning from the Kafka
   super user to the `wherry.operator` principal. `wherry operator` then
-  creates pools and their terms, entitles tenants, adds hosts and receivers
+  creates pools and their terms, creates and entitles tenants, adds hosts and receivers
   with their Kafka principals, ACLs and bundles, records receiver configurations, revokes access, suspends and
   resumes pools and rotates their keys, and checks the result against the
   broker.
@@ -65,3 +65,5 @@ One `wherry` binary with four roles:
 
 Submissions, statuses, transcript chunks and results are A2A v1.0 objects.
 [The wherry A2A extension](a2a-extension-v1.md) specifies every record.
+
+Tenants are created explicitly with `wherry operator tenant add`. Pool entitlements and hosts belong to an existing live tenant. Tenant removal revokes access and permanently ends its name; it does not erase retained data.

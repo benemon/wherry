@@ -26,7 +26,7 @@ func fakeStorageFixture(t *testing.T) (*fixture, *uploadOracle, *testReceiver) {
 	if err := f.service.PoolApply(f.ctx, "pool-s3", terms, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-s3"); err != nil {
+	if err := f.service.TenantPoolAdd(f.ctx, "tenant-a", "pool-s3"); err != nil {
 		t.Fatal(err)
 	}
 	receiver := f.addReceiver(t, "receiver-s3", "pool-s3")

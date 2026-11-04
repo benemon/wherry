@@ -1,7 +1,7 @@
 # Operations
 
 Before a tenant can submit, an operator prepares the Kafka cluster,
-creates a pool with its terms, entitles the tenant, adds its hosts, and
+creates a pool with its terms, creates the tenant, entitles it, adds its hosts, and
 adds and runs at least one receiver. Later the operator reconfigures
 receivers, revokes access and recovers from faults. This guide covers each
 task. [Key concepts](concepts.md) explains the model,
@@ -92,6 +92,8 @@ broker's: run `init` again with the Kafka super user.
 
 ### Concurrent operator commands
 
+Do not run two operator commands at once. Concurrent operator commands are not supported.
+
 Operator commands do not lock each other. Each one that changes Kafka, except `operator init`, ends
 by converging Kafka on the records of `wherry.operator` as read to its end,
 not on the ones it read when it started
@@ -104,7 +106,7 @@ on `wherry.operator` when its last pass ended. A command still running can
 change Kafka after that, but its own passes then follow. A command that
 fails before it writes a record writes nothing to `wherry.operator`. Topics,
 a new host's or receiver's credential, or a new receiver's grants it made
-first stay, the grants until the next command's pass. A `host add --force`
+first stay, the grants until the next command's pass. A `tenant host add --force`
 or receiver reissue that a revocation overtakes refuses with `cannot return
 after its membership end` and writes no bundle. A command's pass deletes the
 grants a concurrent command adding a receiver makes before its record. That
@@ -248,7 +250,7 @@ and six hours, after which a run's prompts leave the broker. Tenant feeds keep
 statuses and results, and tenant transcript topics transcripts, outputs and
 replies over 64 KiB, for 30 days, and both must keep them for at least `start_by_limit` plus six
 hours, so `pool apply` refuses a limit above 29 days and 18 hours, and
-`pool entitle` refuses a feed or transcript topic that keeps less. Identity and
+`tenant pool add` refuses a feed or transcript topic that keeps less. Identity and
 configuration topics stay forever. `wherry operator check` reports a topic whose
 retention drops below its bound, a pool topic whose timestamp type is not
 `LogAppendTime`, and a tasks or events topic without the hourly
@@ -269,9 +271,8 @@ the broker's record limit bounds what a pool can carry. The Kafka cluster
 must allow a topic `max.message.bytes` of 2 MiB (2097152): every tenant
 feed and transcript topic has it, and receivers batch up to it. A result
 names each output the run returned, so the largest result is a
-1259677-byte record batch, over a broker's default limit. `host add` and
-`pool entitle` create a tenant's feed and transcript topic at 2 MiB, and
-`pool entitle` and `pool apply` set existing ones to it. A
+1259677-byte record batch, over a broker's default limit. `tenant add` creates a tenant's feed and transcript topic at 2 MiB, and
+`pool apply` sets existing ones to it. A
 cluster policy that refuses the setting fails the command, and
 `wherry operator check` reports a tenant topic below 2 MiB.
 
@@ -302,7 +303,7 @@ new limit. An output chunk holds
 as it needs and the record limit does not bound it. A reply chunk is an
 output chunk, so the same holds for `reply_limit`.
 
-`pool entitle` makes the same check with the new tenant's feed and
+`tenant pool add` makes the same check with the new tenant's feed and
 transcript topic counted.
 Lowering a broker or topic limit later can leave a pool's terms too large;
 [`wherry operator check`](#check-a-deployment) reports it. Receivers read
@@ -316,16 +317,17 @@ Prerequisites: the working directory
 [Quickstart: Host](quickstart.md#host) walks through these steps for host
 `laptop` of tenant `acme`, with its complete configuration.
 
-1. Entitle the tenant to a pool:
+1. Create the tenant and entitle it to a pool:
 
    ```sh
-   wherry operator pool entitle build --tenant acme
+   wherry operator tenant add acme
+   wherry operator tenant pool add acme build
    ```
 
 2. Add each host the tenant submits from:
 
    ```sh
-   wherry operator host add laptop --tenant acme
+   wherry operator tenant host add acme laptop
    ```
 
 3. Hand the bundle, `bundles/hosts/acme/laptop.bundle`, to the host's user over
@@ -343,10 +345,10 @@ bundle, registers the host key and writes the
 for each credential the tenant's pools take, as in
 [Quickstart](quickstart.md#_3-initialise-the-host).
 
-A tenant can be entitled to several pools; run `pool entitle` once per pool.
+A tenant can be entitled to several pools; run `tenant pool add` once per pool.
 
 To rotate a host's Kafka password, replace a lost bundle or change the
-broker address a host uses, run `host add` again with `--force`. It writes a
+broker address a host uses, run `tenant host add` again with `--force`. It writes a
 new bundle over the old one, and the old password stops working at once, so
 the host is offline until its user puts the new bundle in place.
 `receiver apply RECEIVER --force` does the same for a receiver.
@@ -859,7 +861,7 @@ restored.
 1. Run the revocation:
 
    ```sh
-   wherry operator host remove laptop --tenant alice
+   wherry operator tenant host remove alice laptop
    wherry operator receiver remove nomad-1
    ```
 
@@ -1480,3 +1482,16 @@ can send to remote agents; list only directories meant for that.
 - Other harnesses take `mcp.json` and `skills/wherry` directly.
 
 `plugins/AGENTS.snippet.md` covers harnesses without skills, using the CLI.
+
+## Tenant onboarding and offboarding
+
+Do not run two operator commands at once. To onboard a tenant and laptop, run `wherry operator
+tenant add acme`, `wherry operator tenant pool add acme build`, then `wherry operator tenant host
+add acme laptop`. Deliver the bundle and run `wherry host init` on the laptop.
+
+Collect results before removing a pool: `wherry operator tenant pool remove acme build` withdraws
+the hosts' pool access immediately. Hosts no longer see those runs through status, wait or logs and
+cannot cancel them. A host command whose state load straddles removal may fail once reading receiver
+keys; run the next command with fresh state.
+
+Offboard a laptop with `wherry operator tenant host remove acme laptop`; its six-step revocation waits for the broker-derived minimum. Offboard the tenant with `wherry operator tenant remove acme`; it ends all entitlements first, then revokes hosts and removes their bundle directory. With hosts this waits for revocation, even though entitlement removal itself is instant. Retry either command after a failure. Tenant names cannot be reused. Removal does not erase retained data; see [security](security.md#removal-and-retained-data).

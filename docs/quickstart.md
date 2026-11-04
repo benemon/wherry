@@ -290,7 +290,8 @@ then applies it.
 In the working directory:
 
 ```sh
-wherry operator pool entitle build --tenant acme
+wherry operator tenant add acme
+wherry operator tenant pool add acme build
 ```
 
 Tenant `acme` may now submit to `build` from any host the operator adds for
@@ -588,10 +589,10 @@ set up, `wherry host receivers` shows the receiver `live`, as
 In the working directory:
 
 ```sh
-wherry operator host add laptop --tenant acme
+wherry operator tenant host add acme laptop
 ```
 
-`host add` records host `laptop` of tenant `acme`, creates its Kafka
+`tenant host add` records host `laptop` of tenant `acme`, creates its Kafka
 principal and key topic, and writes its bundle,
 `bundles/hosts/acme/laptop.bundle`, mode 0600. Hand the bundle to `laptop`'s user
 over a channel you trust. It holds the host's Kafka password. The bundle

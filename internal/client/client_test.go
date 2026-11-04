@@ -113,6 +113,9 @@ func newFixtureNoHost(t *testing.T, opts ...kfake.Opt) *fixture {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 	f := &fixture{ctx: ctx, cluster: cluster, service: &operator.Service{Operator: operatorClient, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10, LockCeilingMS: 60000}, receivers: map[string]*testReceiver{}, poolKeys: map[string]*ecdsa.PrivateKey{}, logs: &syncBuffer{}}
+	if err := f.service.TenantAdd(f.ctx, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
 	f.pool(t, "pool-a")
 	return f
 }
@@ -134,7 +137,7 @@ func (f *fixture) pool(t *testing.T, pool string) {
 	if err := f.service.PoolApply(f.ctx, pool, testTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.TenantAdd(f.ctx, "tenant-a", pool); err != nil {
+	if err := f.service.TenantPoolAdd(f.ctx, "tenant-a", pool); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -614,7 +617,7 @@ func (f *fixture) modelPool(t *testing.T, defaultModel string) *testReceiver {
 	if err := f.service.PoolApply(f.ctx, "pool-b", terms, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-b"); err != nil {
+	if err := f.service.TenantPoolAdd(f.ctx, "tenant-a", "pool-b"); err != nil {
 		t.Fatal(err)
 	}
 	receiver := f.addReceiver(t, "receiver-b", "pool-b")
@@ -2192,4 +2195,19 @@ func readTopic(ctx context.Context, client *kgo.Client, topic string) ([]*kgo.Re
 	reader := operator.NewReader(client)
 	defer reader.Close()
 	return reader.ReadFrom(ctx, topic, 0)
+}
+
+func TestPlacementSkipsRemovedEntitlement(t *testing.T) {
+	f := newFixture(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	if err := f.service.TenantPoolRemove(f.ctx, "tenant-a", "pool-a"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := f.host.Submit(f.ctx, SubmitInput{Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
+	if !errors.Is(err, ErrNoMatchingReceiver) {
+		t.Fatalf("submit after pool removal: %v", err)
+	}
+	if n := f.tasksEnd(t, "pool-a"); n != 0 {
+		t.Fatalf("removed pool received %d tasks", n)
+	}
 }

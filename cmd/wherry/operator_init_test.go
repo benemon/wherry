@@ -184,8 +184,9 @@ func operatorCommands(t *testing.T, root *kgo.Client, dir, suffix string, check,
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{
-		{"pool", "entitle", pool, "--tenant", tenant},
-		{"host", "add", host, "--tenant", tenant},
+		{"tenant", "add", tenant},
+		{"tenant", "pool", "add", tenant, pool},
+		{"tenant", "host", "add", tenant, host},
 		{"receiver", "apply", receiver, "-f", filepath.Join(files, "receiver.yaml")},
 		{"receiver", "show", receiver},
 		{"pool", "suspend", pool},
@@ -208,12 +209,10 @@ func operatorCommands(t *testing.T, root *kgo.Client, dir, suffix string, check,
 	if !removes {
 		return nil
 	}
-	errs := make([]error, 2)
-	var wg sync.WaitGroup
-	for i, args := range [][]string{{"host", "remove", host, "--tenant", tenant}, {"receiver", "remove", receiver}} {
-		wg.Go(func() { errs[i] = wherry(args...) })
+	var errs []error
+	for _, args := range [][]string{{"tenant", "host", "remove", tenant, host}, {"receiver", "remove", receiver}} {
+		errs = append(errs, wherry(args...))
 	}
-	wg.Wait()
 	return errors.Join(errs...)
 }
 
@@ -751,7 +750,10 @@ func TestReceiverApplyForceKeepsTheBundlesBroker(t *testing.T) {
 
 // host add makes existing bundle directories mode 0700, as it creates new ones.
 func TestHostAddRestrictsExistingBundleDirectories(t *testing.T) {
-	operatorEnv(t)
+	service := operatorEnv(t)
+	if err := service.TenantAdd(t.Context(), "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
 	directories := []string{"bundles", filepath.Join("bundles", "hosts"), filepath.Join("bundles", "hosts", "tenant-a")}
 	for _, directory := range directories {
 		if err := os.Mkdir(directory, 0o755); err != nil {
@@ -761,7 +763,7 @@ func TestHostAddRestrictsExistingBundleDirectories(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := runOperator([]string{"host", "add", "host-a", "--tenant", "tenant-a"}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"tenant", "host", "add", "tenant-a", "host-a"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	for _, directory := range directories {

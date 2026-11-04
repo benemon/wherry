@@ -901,15 +901,18 @@ func devBootstrap(ctx context.Context, env devEnv, agents []string, service oper
 	if err := service.PoolApply(ctx, devPool, devTerms(agents, env.manifest.DefaultAgent, env.storage()), false); err != nil {
 		return fmt.Errorf("pool apply: %w", err)
 	}
-	if err := service.TenantAdd(ctx, devTenant, devPool); err != nil {
-		return fmt.Errorf("pool entitle: %w", err)
+	if err := service.TenantAdd(ctx, devTenant); err != nil {
+		return fmt.Errorf("tenant add: %w", err)
+	}
+	if err := service.TenantPoolAdd(ctx, devTenant, devPool); err != nil {
+		return fmt.Errorf("tenant pool add: %w", err)
 	}
 	hostBundle, err := bundlePath(dir, "hosts", true, devTenant, devHost)
 	if err != nil {
 		return err
 	}
 	if err := service.HostAdd(ctx, devTenant, devHost, hostBundle, false); err != nil {
-		return fmt.Errorf("host add: %w", err)
+		return fmt.Errorf("tenant host add: %w", err)
 	}
 	receiverBundle, err := bundlePath(dir, "receivers", true, devReceiver)
 	if err != nil {

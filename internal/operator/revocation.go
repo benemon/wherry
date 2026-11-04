@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -37,23 +40,54 @@ func (service *Service) RevokeReceiver(ctx context.Context, receiver string, wai
 }
 
 func (service *Service) RevokeHost(ctx context.Context, tenant, host string, wait time.Duration, probe func(context.Context, string, string) error) RevocationResult {
+	state, err := service.LoadState(ctx)
+	if err == nil {
+		err = state.LiveTenant(tenant)
+	}
+	if err != nil {
+		return RevocationResult{Steps: []RevocationStep{{Number: 1, Err: err}}}
+	}
+	if state.Ended[TenantPrincipal(tenant, host)] {
+		err = service.converge(ctx)
+		return RevocationResult{Complete: err == nil, Steps: []RevocationStep{{Number: 6, Name: "already ended", Complete: err == nil, Err: err}}}
+	}
+	if _, exists := state.Hosts[TenantPrincipal(tenant, host)]; !exists {
+		return RevocationResult{Steps: []RevocationStep{{Number: 1, Err: errors.New("unknown host")}}}
+	}
 	return service.revoke(ctx, Record{Kind: "end", Tenant: tenant, Host: host}, TenantPrincipal(tenant, host), wait, probe)
 }
 
 func (service *Service) revoke(ctx context.Context, end Record, principal string, wait time.Duration, probe func(context.Context, string, string) error) RevocationResult {
-	result := RevocationResult{}
-	recorded := false
+	r := &revocation{service: service, end: end, principal: principal, wait: wait, probe: probe}
+	return r.steps(ctx, 1, 6)
+}
+
+type revocation struct {
+	service   *Service
+	end       Record
+	principal string
+	wait      time.Duration
+	probe     func(context.Context, string, string) error
+	password  string
+	recorded  bool
+	result    RevocationResult
+}
+
+func (r *revocation) steps(ctx context.Context, first, last int) RevocationResult {
+	service, end, principal, probe := r.service, r.end, r.principal, r.probe
 	run := func(number int, name string, fn func() error) bool {
+		if number < first || number > last {
+			return true
+		}
 		err := fn()
 		// Once revoking is recorded, a failed step converges: a stale concurrent command may have restored the
 		// principal's grants after step 2. Step 6 converges itself.
-		if err != nil && recorded && number < 6 {
+		if err != nil && r.recorded && number < 6 {
 			err = errors.Join(err, service.converge(ctx))
 		}
-		result.Steps = append(result.Steps, RevocationStep{number, name, err == nil, err})
+		r.result.Steps = append(r.result.Steps, RevocationStep{number, name, err == nil, err})
 		return err == nil
 	}
-	var password string
 	if !run(1, "record revoking, rotate SCRAM password", func() error {
 		// A connection, share lock or transaction from before this step can outlive a shorter wait; refuse one before
 		// changing anything.
@@ -69,10 +103,10 @@ func (service *Service) revoke(ctx context.Context, end Record, principal string
 			}
 			minimum = max(minimum, time.Duration(ms)*time.Millisecond)
 		}
-		if wait > 0 && wait < minimum {
-			return fmt.Errorf("wait %s is below the broker-derived minimum %s", wait, minimum)
+		if r.wait > 0 && r.wait < minimum {
+			return fmt.Errorf("wait %s is below the broker-derived minimum %s", r.wait, minimum)
 		}
-		wait = max(wait, minimum)
+		r.wait = max(r.wait, minimum)
 		state, err := service.LoadState(ctx)
 		if err != nil {
 			return err
@@ -85,14 +119,14 @@ func (service *Service) revoke(ctx context.Context, end Record, principal string
 				return err
 			}
 		}
-		recorded = true
-		password, err = service.upsertUser(ctx, principal)
+		r.recorded = true
+		r.password, err = service.upsertUser(ctx, principal)
 		return err
 	}) {
-		return result
+		return r.result
 	}
 	if !run(2, "delete ACLs", func() error { return service.deletePrincipalACLs(ctx, principal) }) {
-		return result
+		return r.result
 	}
 	if !run(3, "probe every broker", func() error {
 		if probe == nil {
@@ -100,7 +134,7 @@ func (service *Service) revoke(ctx context.Context, end Record, principal string
 		}
 		deadline := time.Now().Add(probeWindow)
 		for {
-			err := probe(ctx, principal, password)
+			err := probe(ctx, principal, r.password)
 			if errors.Is(err, ErrAuthorizationDenied) {
 				return nil
 			}
@@ -116,7 +150,7 @@ func (service *Service) revoke(ctx context.Context, end Record, principal string
 			}
 		}
 	}) {
-		return result
+		return r.result
 	}
 	if !run(4, "delete SCRAM credential", func() error {
 		altered, err := kadm.NewClient(service.Operator).AlterUserSCRAMs(ctx, []kadm.DeleteSCRAM{{User: principal, Mechanism: kadm.ScramSha512}}, nil)
@@ -125,10 +159,10 @@ func (service *Service) revoke(ctx context.Context, end Record, principal string
 		}
 		return altered.Error()
 	}) {
-		return result
+		return r.result
 	}
 	if !run(5, "wait revocation intervals", func() error {
-		timer := time.NewTimer(wait)
+		timer := time.NewTimer(r.wait)
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
@@ -137,7 +171,7 @@ func (service *Service) revoke(ctx context.Context, end Record, principal string
 			return nil
 		}
 	}) {
-		return result
+		return r.result
 	}
 	// A stale concurrent command can restore a grant or credential after steps 2 and 4; the pass after the end record
 	// deletes it again.
@@ -145,10 +179,10 @@ func (service *Service) revoke(ctx context.Context, end Record, principal string
 		_, err := service.appendChecked(ctx, []byte("end."+principal), end)
 		return errors.Join(err, service.converge(ctx))
 	}) {
-		return result
+		return r.result
 	}
-	result.Complete = true
-	return result
+	r.result.Complete = last == 6
+	return r.result
 }
 
 // Probe asks every broker, as the revoked principal, for metadata on topic:
@@ -188,4 +222,74 @@ func (service *Service) Probe(topic string) func(context.Context, string, string
 		}
 		return ErrAuthorizationDenied
 	}
+}
+
+func (service *Service) TenantRemove(ctx context.Context, tenant string) error {
+	return service.removeTenant(ctx, tenant, service.Probe)
+}
+
+func (service *Service) removeTenant(ctx context.Context, tenant string, probe func(string) func(context.Context, string, string) error) error {
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return err
+	}
+	ended, exists := state.Tenants[tenant]
+	if !exists {
+		return errors.New("tenant absent; use tenant add first")
+	}
+	if ended {
+		return service.converge(ctx)
+	}
+	for _, pool := range slices.Sorted(maps.Keys(state.Entitlements[tenant])) {
+		if err := service.TenantPoolRemove(ctx, tenant, pool); err != nil {
+			return err
+		}
+	}
+	state, err = service.LoadState(ctx)
+	if err != nil {
+		return err
+	}
+	if err := service.tenantQuotas(ctx, state, tenant); err != nil {
+		return err
+	}
+	var revocations []*revocation
+	for _, principal := range slices.Sorted(maps.Keys(state.Hosts)) {
+		host := state.Hosts[principal]
+		if host.Tenant != tenant || state.Ended[principal] {
+			continue
+		}
+		r := &revocation{service: service, principal: principal, end: Record{Kind: "end", Tenant: tenant, Host: host.Name}, probe: probe(HostTopic(tenant, host.Name))}
+		if result := r.steps(ctx, 1, 1); len(result.Steps) != 1 || !result.Steps[0].Complete {
+			return revocationError(result)
+		}
+		revocations = append(revocations, r)
+	}
+	var group sync.WaitGroup
+	for _, r := range revocations {
+		group.Go(func() { r.steps(ctx, 2, 5) })
+	}
+	group.Wait()
+	for _, r := range revocations {
+		if len(r.result.Steps) != 5 || !r.result.Steps[4].Complete {
+			return revocationError(r.result)
+		}
+	}
+	for _, r := range revocations {
+		if result := r.steps(ctx, 6, 6); !result.Complete {
+			return revocationError(result)
+		}
+	}
+	if _, err := service.appendChecked(ctx, []byte("end.tenant."+tenant), Record{Kind: "end", Tenant: tenant}); err != nil {
+		return err
+	}
+	return service.converge(ctx)
+}
+
+func revocationError(result RevocationResult) error {
+	for _, step := range result.Steps {
+		if step.Err != nil {
+			return step.Err
+		}
+	}
+	return errors.New("revocation incomplete")
 }

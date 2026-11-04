@@ -26,8 +26,10 @@ const usage = `usage: wherry <command>
 
 operator:
   wherry operator init
-  wherry operator pool apply|entitle|suspend|resume|rotate-key
-  wherry operator host add|remove
+  wherry operator pool apply|suspend|resume|rotate-key
+  wherry operator tenant add|list|remove
+  wherry operator tenant pool add|remove
+  wherry operator tenant host add|remove
   wherry operator receiver apply|show|remove
   wherry operator check
 receiver:

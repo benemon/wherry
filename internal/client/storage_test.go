@@ -262,7 +262,7 @@ func storageFixture(t *testing.T) (*fixture, *oracle, *testReceiver) {
 	if err := f.service.PoolApply(f.ctx, "pool-s3", terms, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-s3"); err != nil {
+	if err := f.service.TenantPoolAdd(f.ctx, "tenant-a", "pool-s3"); err != nil {
 		t.Fatal(err)
 	}
 	f.host.storage = map[string]StorageConfig{"pool-s3": *o.config}
@@ -344,7 +344,7 @@ func TestSubmitMovesInputsOverSmallestProfileLimitToS3(t *testing.T) {
 	if err := f.service.PoolApply(f.ctx, "pool-inline", terms, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-inline"); err != nil {
+	if err := f.service.TenantPoolAdd(f.ctx, "tenant-a", "pool-inline"); err != nil {
 		t.Fatal(err)
 	}
 	f.host.storage = map[string]StorageConfig{"pool-inline": *o.config}
@@ -389,7 +389,7 @@ func recordLimitFixture(t *testing.T, stored bool) (*fixture, *uploadOracle, *te
 	if err := f.service.PoolApply(f.ctx, "pool-r", terms, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-r"); err != nil {
+	if err := f.service.TenantPoolAdd(f.ctx, "tenant-a", "pool-r"); err != nil {
 		t.Fatal(err)
 	}
 	receiver := f.addReceiver(t, "receiver-r", "pool-r")
@@ -470,7 +470,7 @@ func TestSubmitAppliesTheProfileLimitOfAStaleReceiver(t *testing.T) {
 	if err := f.service.PoolApply(f.ctx, "pool-inline", terms, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-inline"); err != nil {
+	if err := f.service.TenantPoolAdd(f.ctx, "tenant-a", "pool-inline"); err != nil {
 		t.Fatal(err)
 	}
 	f.host.storage = map[string]StorageConfig{"pool-inline": *o.config}
@@ -897,7 +897,7 @@ func twoPoolS3Fixture(t *testing.T, pool string) (*uploadOracle, *fixture, *test
 			f.host.credentials[key] = credential.Source{Command: []string{"printf", key + "-value"}}
 		}
 	}
-	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-b"); err != nil {
+	if err := f.service.TenantPoolAdd(f.ctx, "tenant-a", "pool-b"); err != nil {
 		t.Fatal(err)
 	}
 	receiver := f.addReceiver(t, "receiver-"+pool, pool)

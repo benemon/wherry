@@ -232,13 +232,15 @@ type Record struct {
 }
 type Host struct{ Tenant, Name string }
 type State struct {
-	Pools        map[string]Terms
-	Receivers    map[string]ReceiverConfig
-	Hosts        map[string]Host
-	Entitlements map[string]map[string]bool
-	Ended        map[string]bool
-	Revoking     map[string]bool
-	Suspended    map[string]bool
+	Tenants           map[string]bool // false is live; true is ended.
+	EndedEntitlements map[string]map[string]bool
+	Pools             map[string]Terms
+	Receivers         map[string]ReceiverConfig
+	Hosts             map[string]Host
+	Entitlements      map[string]map[string]bool
+	Ended             map[string]bool
+	Revoking          map[string]bool
+	Suspended         map[string]bool
 	// RotateRequested is the wherry.operator offset of each pool's latest rotate-key record.
 	RotateRequested map[string]int64
 	// SuspendChanged is the wherry.operator offset of each pool's latest suspend or resume record.
@@ -246,7 +248,7 @@ type State struct {
 }
 
 func NewState() State {
-	return State{map[string]Terms{}, map[string]ReceiverConfig{}, map[string]Host{}, map[string]map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]int64{}, map[string]int64{}}
+	return State{Tenants: map[string]bool{}, EndedEntitlements: map[string]map[string]bool{}, Pools: map[string]Terms{}, Receivers: map[string]ReceiverConfig{}, Hosts: map[string]Host{}, Entitlements: map[string]map[string]bool{}, Ended: map[string]bool{}, Revoking: map[string]bool{}, Suspended: map[string]bool{}, RotateRequested: map[string]int64{}, SuspendChanged: map[string]int64{}}
 }
 
 // RecordVersion is the wherry.operator record version this release writes and the highest it reads.
@@ -301,6 +303,11 @@ func Fold(records []Record) (State, error) {
 
 func apply(state *State, record Record) error {
 	switch record.Kind {
+	case "tenant":
+		if _, exists := state.Tenants[record.Tenant]; exists {
+			return errors.New("tenant exists; a tenant name cannot return")
+		}
+		state.Tenants[record.Tenant] = false
 	case "pool":
 		state.Pools[record.Pool] = withDefaults(*record.Terms)
 	case "receiver":
@@ -312,11 +319,17 @@ func apply(state *State, record Record) error {
 		}
 		state.Receivers[record.Receiver] = *record.Config
 	case "host":
+		if err := state.LiveTenant(record.Tenant); err != nil {
+			return err
+		}
 		if state.Ended[TenantPrincipal(record.Tenant, record.Host)] {
 			return errors.New("host cannot return after its membership end")
 		}
 		state.Hosts[TenantPrincipal(record.Tenant, record.Host)] = Host{record.Tenant, record.Host}
 	case "entitlement":
+		if err := state.LiveTenant(record.Tenant); err != nil {
+			return err
+		}
 		if _, ok := state.Pools[record.Pool]; !ok {
 			return errors.New("entitlement names unknown pool")
 		}
@@ -324,8 +337,41 @@ func apply(state *State, record Record) error {
 			state.Entitlements[record.Tenant] = map[string]bool{}
 		}
 		state.Entitlements[record.Tenant][record.Pool] = true
+		delete(state.EndedEntitlements[record.Tenant], record.Pool)
+		if len(state.EndedEntitlements[record.Tenant]) == 0 {
+			delete(state.EndedEntitlements, record.Tenant)
+		}
 	case "end":
-		state.Ended[subject(record)] = true
+		if record.Receiver == "" && record.Host == "" {
+			if err := state.LiveTenant(record.Tenant); err != nil {
+				return err
+			}
+			if record.Pool != "" {
+				if !state.Entitlements[record.Tenant][record.Pool] {
+					return errors.New("end names absent entitlement")
+				}
+				delete(state.Entitlements[record.Tenant], record.Pool)
+				if len(state.Entitlements[record.Tenant]) == 0 {
+					delete(state.Entitlements, record.Tenant)
+				}
+				if state.EndedEntitlements[record.Tenant] == nil {
+					state.EndedEntitlements[record.Tenant] = map[string]bool{}
+				}
+				state.EndedEntitlements[record.Tenant][record.Pool] = true
+			} else {
+				if len(state.Entitlements[record.Tenant]) != 0 {
+					return errors.New("tenant still has entitlements")
+				}
+				for principal, host := range state.Hosts {
+					if host.Tenant == record.Tenant && !state.Ended[principal] {
+						return errors.New("tenant still has hosts")
+					}
+				}
+				state.Tenants[record.Tenant] = true
+			}
+		} else {
+			state.Ended[subject(record)] = true
+		}
 	case "revoking":
 		state.Revoking[subject(record)] = true
 	case "suspend", "resume", "rotate-key":
@@ -341,6 +387,17 @@ func apply(state *State, record Record) error {
 		default:
 			state.RotateRequested[record.Pool] = record.At
 		}
+	}
+	return nil
+}
+
+func (state State) LiveTenant(tenant string) error {
+	ended, exists := state.Tenants[tenant]
+	if !exists {
+		return errors.New("tenant absent; use tenant add first")
+	}
+	if ended {
+		return errors.New("tenant has ended")
 	}
 	return nil
 }
@@ -374,6 +431,16 @@ func (state State) CheckNames() error {
 			}
 		}
 	}
+	for tenant := range state.Tenants {
+		if err := validateNames(tenant); err != nil {
+			return err
+		}
+		for _, topic := range []string{TenantTopic(tenant), TenantTranscriptTopic(tenant)} {
+			if err := add(topic, "tenant "+tenant); err != nil {
+				return err
+			}
+		}
+	}
 	for _, host := range state.Hosts {
 		if err := validateNames(host.Tenant, host.Name); err != nil {
 			return err
@@ -382,9 +449,6 @@ func (state State) CheckNames() error {
 			if err := add(value, "host "+host.Tenant+"."+host.Name); err != nil {
 				return err
 			}
-		}
-		if _, ok := seen[TenantTopic(host.Tenant)]; !ok {
-			seen[TenantTopic(host.Tenant)] = "tenant " + host.Tenant
 		}
 	}
 	return nil
@@ -620,6 +684,12 @@ func ValidateReceiverRecord(record Record, receiver string, terms Terms) error {
 }
 
 func subject(record Record) string {
+	if record.Receiver == "" && record.Host == "" {
+		if record.Pool != "" {
+			return "entitlement." + record.Tenant + "." + record.Pool
+		}
+		return "tenant." + record.Tenant
+	}
 	if record.Receiver != "" {
 		return ReceiverPrincipal(record.Receiver)
 	}
@@ -631,6 +701,10 @@ func validateRecord(record Record) error {
 		return errors.New("invalid operator record")
 	}
 	switch record.Kind {
+	case "tenant":
+		if validateNames(record.Tenant) != nil || record.Pool != "" || record.Host != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
+			return errors.New("invalid tenant record")
+		}
 	case "pool":
 		if validateNames(record.Pool) != nil || record.Terms == nil || validateTerms(withDefaults(*record.Terms)) != nil {
 			return errors.New("invalid pool record")
@@ -648,11 +722,26 @@ func validateRecord(record Record) error {
 			return errors.New("invalid entitlement record")
 		}
 	case "end":
-		if (record.Receiver == "") == (record.Host == "" || record.Tenant == "") || validateNames(record.Receiver+record.Tenant, record.Host+record.Receiver) != nil {
-			return errors.New("invalid membership end")
+		if record.Terms != nil || record.Config != nil {
+			return errors.New("invalid end record")
+		}
+		switch {
+		case record.Receiver != "":
+			if validateNames(record.Receiver) != nil || record.Tenant != "" || record.Host != "" || record.Pool != "" {
+				return errors.New("invalid receiver end")
+			}
+		case record.Host != "":
+			if validateNames(record.Tenant, record.Host) != nil || record.Pool != "" {
+				return errors.New("invalid host end")
+			}
+		default:
+			if validateNames(record.Tenant) != nil || record.Pool != "" && validateNames(record.Pool) != nil {
+				return errors.New("invalid tenant or entitlement end")
+			}
 		}
 	case "revoking":
-		if (record.Receiver == "") == (record.Host == "" || record.Tenant == "") || validateNames(record.Receiver+record.Tenant, record.Host+record.Receiver) != nil ||
+		if record.Receiver != "" && (record.Tenant != "" || record.Host != "" || validateNames(record.Receiver) != nil) ||
+			record.Receiver == "" && validateNames(record.Tenant, record.Host) != nil ||
 			record.Pool != "" || record.Terms != nil || record.Config != nil {
 			return errors.New("invalid revoking record")
 		}

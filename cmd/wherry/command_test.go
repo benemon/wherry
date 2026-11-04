@@ -118,7 +118,10 @@ func newBus(t *testing.T) *bus {
 	if err := b.service.PoolApply(ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
+	if err := b.service.TenantAdd(ctx, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.service.TenantPoolAdd(ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
 	b.hostBundle = filepath.Join(t.TempDir(), "host.yaml")

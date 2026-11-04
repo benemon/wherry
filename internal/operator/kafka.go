@@ -437,6 +437,9 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	if err != nil {
 		return err
 	}
+	if err := current.LiveTenant(tenant); err != nil {
+		return err
+	}
 	principal := TenantPrincipal(tenant, host)
 	if _, exists := current.Hosts[principal]; exists {
 		if !force {
@@ -444,6 +447,14 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 		}
 		if current.Ended[principal] {
 			return errors.New("host cannot return after its membership end")
+		}
+		if current.Revoking[principal] {
+			return errors.New("host is revoking")
+		}
+		// --force also repairs a host add whose quota failed after its record was appended; the quota comes first so
+		// that a failure leaves no working bundle for an unquoted host.
+		if err := service.applyQuota(ctx, current, tenant, principal); err != nil {
+			return err
 		}
 		return service.reissue(ctx, principal, service.Broker, bundlePath)
 	}
@@ -459,9 +470,6 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 		return err
 	}
 	if err := service.createTopics(ctx, "-1", HostTopic(tenant, host)); err != nil {
-		return err
-	}
-	if err := service.tenantTopics(ctx, tenant); err != nil {
 		return err
 	}
 	password, err := service.upsertUser(ctx, principal)
@@ -481,18 +489,20 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	return writeBundle(bundle, Bundle{service.Broker, principal, password})
 }
 
-func (service *Service) TenantAdd(ctx context.Context, tenant, pool string) error {
+func (service *Service) TenantPoolAdd(ctx context.Context, tenant, pool string) error {
 	current, err := service.LoadState(ctx)
 	if err != nil {
 		return err
 	}
+	if err := current.LiveTenant(tenant); err != nil {
+		return err
+	}
+	if current.Entitlements[tenant][pool] {
+		return service.convergeTenantQuotas(ctx, current, tenant)
+	}
 	terms, ok := current.Pools[pool]
 	if !ok {
 		return errors.New("entitlement names unknown pool")
-	}
-	// The pool's records must fit the tenant's feed, so it exists, at FeedRecordLimit, before the entitlement does.
-	if err := service.tenantTopics(ctx, tenant); err != nil {
-		return err
 	}
 	if current.Entitlements[tenant] == nil {
 		current.Entitlements[tenant] = map[string]bool{}
@@ -513,11 +523,50 @@ func (service *Service) TenantAdd(ctx context.Context, tenant, pool string) erro
 	if err != nil {
 		return err
 	}
+	return service.convergeTenantQuotas(ctx, state, tenant)
+}
+
+func (service *Service) TenantAdd(ctx context.Context, tenant string) error {
+	record := Record{Kind: "tenant", Tenant: tenant}
+	if _, _, err := service.planRecord(ctx, record); err != nil {
+		return err
+	}
+	if err := service.tenantTopics(ctx, tenant); err != nil {
+		return err
+	}
+	if _, err := service.appendChecked(ctx, []byte("tenant."+tenant), record); err != nil {
+		return err
+	}
+	return service.converge(ctx)
+}
+
+func (service *Service) TenantPoolRemove(ctx context.Context, tenant, pool string) error {
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return err
+	}
+	if err := state.LiveTenant(tenant); err != nil {
+		return err
+	}
+	if state.Entitlements[tenant][pool] {
+		state, err = service.appendChecked(ctx, []byte("end.entitlement."+tenant+"."+pool), Record{Kind: "end", Tenant: tenant, Pool: pool})
+		if err != nil {
+			return err
+		}
+	}
+	return service.convergeTenantQuotas(ctx, state, tenant)
+}
+
+func (service *Service) convergeTenantQuotas(ctx context.Context, state State, tenant string) error {
 	if err := service.converge(ctx); err != nil {
 		return err
 	}
+	return service.tenantQuotas(ctx, state, tenant)
+}
+
+func (service *Service) tenantQuotas(ctx context.Context, state State, tenant string) error {
 	for principal, host := range state.Hosts {
-		if host.Tenant == tenant {
+		if host.Tenant == tenant && !state.Ended[principal] {
 			if err := service.applyQuota(ctx, state, tenant, principal); err != nil {
 				return err
 			}
@@ -561,7 +610,7 @@ func (service *Service) LoadState(ctx context.Context) (State, error) {
 // the most a receiver's producer batches: a result lists a reference artifact for each output it returns.
 const FeedRecordLimit = 2 << 20
 
-// feedConfigs are the configs host add, pool entitle and pool apply set on tenant feeds beyond the
+// feedConfigs are the configs tenant add and pool apply set on tenant feeds beyond the
 // retention they are created with.
 var feedConfigs = map[string]string{"max.message.bytes": strconv.Itoa(FeedRecordLimit)}
 
@@ -574,18 +623,13 @@ func (service *Service) tenantTopics(ctx context.Context, tenant string) error {
 	return service.configureTopics(ctx, feedConfigs, topics...)
 }
 
-// tenantFeeds are the feeds and transcript topics of every tenant with a host or an entitlement.
+// tenantFeeds are the feeds and transcript topics of every live tenant.
 func tenantFeeds(state State) []string {
-	tenants := map[string]bool{}
-	for _, host := range state.Hosts {
-		tenants[host.Tenant] = true
-	}
-	for tenant := range state.Entitlements {
-		tenants[tenant] = true
-	}
 	var topics []string
-	for _, tenant := range slices.Sorted(maps.Keys(tenants)) {
-		topics = append(topics, TenantTopic(tenant), TenantTranscriptTopic(tenant))
+	for _, tenant := range slices.Sorted(maps.Keys(state.Tenants)) {
+		if !state.Tenants[tenant] {
+			topics = append(topics, TenantTopic(tenant), TenantTranscriptTopic(tenant))
+		}
 	}
 	return topics
 }
@@ -931,15 +975,16 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 	for receiver := range state.Receivers {
 		topics = append(topics, ReceiverTopic(receiver))
 	}
-	for _, host := range state.Hosts {
-		topics = append(topics, HostTopic(host.Tenant, host.Name))
+	for principal, host := range state.Hosts {
+		if !state.Ended[principal] {
+			topics = append(topics, HostTopic(host.Tenant, host.Name))
+		}
 	}
+	keyTopics := len(topics)
 	for pool := range state.Pools {
 		topics = append(topics, PoolTasksTopic(pool), PoolEventsTopic(pool))
 	}
-	for tenant := range state.Entitlements {
-		topics = append(topics, TenantTopic(tenant), TenantTranscriptTopic(tenant))
-	}
+	topics = append(topics, tenantFeeds(state)...)
 	for receiver := range state.Receivers {
 		if !state.Ended[ReceiverPrincipal(receiver)] {
 			topics = append(topics, ReceiverProgressTopic(receiver))
@@ -949,7 +994,7 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 	if err != nil {
 		return err
 	}
-	for _, topic := range topics[:1+len(state.Receivers)+len(state.Hosts)] {
+	for _, topic := range topics[:keyTopics] {
 		if retentions[topic] != -1 {
 			return fmt.Errorf("topic %s retention.ms is %d, want -1", topic, retentions[topic])
 		}
@@ -1124,10 +1169,7 @@ func (service *Service) applyQuota(ctx context.Context, state State, tenant, pri
 			request = terms.RequestPercentage
 		}
 	}
-	if rate == 0 {
-		return nil
-	}
-	results, err := kadm.NewClient(service.Operator).AlterClientQuotas(ctx, []kadm.AlterClientQuotaEntry{{Entity: kadm.ClientQuotaEntity{{Type: "user", Name: &principal}}, Ops: []kadm.AlterClientQuotaOp{{Key: "producer_byte_rate", Value: float64(rate)}, {Key: "request_percentage", Value: request}}}})
+	results, err := kadm.NewClient(service.Operator).AlterClientQuotas(ctx, []kadm.AlterClientQuotaEntry{{Entity: kadm.ClientQuotaEntity{{Type: "user", Name: &principal}}, Ops: []kadm.AlterClientQuotaOp{{Key: "producer_byte_rate", Value: float64(rate), Remove: rate == 0}, {Key: "request_percentage", Value: request, Remove: rate == 0}}}})
 	if err != nil {
 		return err
 	}
