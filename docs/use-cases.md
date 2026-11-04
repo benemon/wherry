@@ -68,7 +68,7 @@ The host or receiver that wrote each task, status and result signs it.
 `wherry host logs` shows the agent's transcript.
 The receiver redacts the run's credentials from it, by the rules [Credential envelopes](security.md#credential-envelopes) gives.
 Every file the run returns is checked against its digest, and a file that doesn't match is not kept.
-What the agent did inside its job beyond its transcript is in your platform's own logs.
+Anything the agent did inside its job that its transcript doesn't show is visible only if your platform records it.
 
 [Run history](governance.md#run-history) explains what is kept and for how long.
 [Host commands](commands.md#host-commands) lists the commands.
