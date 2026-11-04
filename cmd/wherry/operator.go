@@ -99,7 +99,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		current, exists := state.Receivers[pos[2]]
-		bundle, err := bundlePath(dir, "receivers", !dryRun, pos[2])
+		bundle, err := bundlePath(dir, "receivers", force, pos[2])
 		if err != nil {
 			return err
 		}
@@ -125,19 +125,32 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		config.Receiver, config.Broker = pos[2], cmp.Or(config.Broker, service.Broker)
-		switch {
-		case exists && config.Pool != "" && config.Pool != current.Pool:
+		if exists && config.Pool != "" && config.Pool != current.Pool {
 			return errors.New("receiver cannot move pool")
-		case !exists && config.Pool == "":
+		}
+		if !exists && config.Pool == "" {
 			return fmt.Errorf("%s names no pool", path)
-		case exists:
-			recorded, err := service.ReceiverUpdate(ctx, config, true)
-			if err != nil {
-				return err
-			}
-			if dryRun {
-				return showReceiver(stdout, recorded)
-			}
+		}
+		var recorded operator.ReceiverConfig
+		if exists {
+			recorded, err = service.ReceiverUpdate(ctx, config, true)
+		} else {
+			recorded, err = service.ReceiverCheck(ctx, config)
+		}
+		if err != nil {
+			return err
+		}
+		var localOperator operatorConfig
+		if err := readYAML(filepath.Join(dir, "operator.yaml"), &localOperator); err != nil {
+			return err
+		}
+		if err := receiverLocalFile(dir, pos[2], path, directory, dryRun, stderr, config, localOperator); err != nil {
+			return err
+		}
+		if dryRun {
+			return showReceiver(stdout, recorded)
+		}
+		if exists {
 			// Only the bundle's password can carry a new broker, so a missing bundle is refused before recording.
 			kept, err := operator.ReadBundle(bundle)
 			if errors.Is(err, os.ErrNotExist) {
@@ -149,15 +162,12 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 				return err
 			}
 			return rebroker(bundle, kept, config.Broker)
-		case dryRun:
-			recorded, err := service.ReceiverCheck(ctx, config)
-			if err != nil {
-				return err
-			}
-			return showReceiver(stdout, recorded)
-		default:
-			return service.ReceiverAdd(ctx, config, config.Broker, bundle)
 		}
+		if _, err := bundlePath(dir, "receivers", true, pos[2]); err != nil {
+			return err
+		}
+		return service.ReceiverAdd(ctx, config, config.Broker, bundle)
+
 	case "receiver show":
 		if len(pos) != 3 {
 			return errors.New(operatorUsage[command])
@@ -479,7 +489,7 @@ func readReceiverConfig(path string, directory bool) (operator.ReceiverConfig, e
 		return operator.ReceiverConfig{}, err
 	}
 	for _, entry := range entries {
-		if name := entry.Name(); !strings.HasPrefix(name, ".") && name != "receiver.yaml" && name != "plugins" {
+		if name := entry.Name(); !strings.HasPrefix(name, ".") && name != "receiver.yaml" && name != "config.yaml" && name != "plugins" {
 			return operator.ReceiverConfig{}, fmt.Errorf("%s does not belong in a receiver config directory", filepath.Join(path, name))
 		}
 	}
