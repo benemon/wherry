@@ -147,6 +147,33 @@ Each plugin's README runs the receiver on its platform, with its steps:
 
 [Plugins](plugins.md) embeds each example.
 
+### A receiver with no ready offer
+
+A receiver offers a profile only while the profile's plugin reports it ready.
+A receiver with no ready offer fetches no tasks from its pool.
+It closes any poll it has open, usually within about a second.
+It fetches again within about a second of its next advertisement with a ready offer, unless its pool is suspended or a back-off after a failed start is still running.
+Its held runs keep running, renewing and reading cancels.
+
+Each advertisement logs a line for every profile whose plugin reports it not ready:
+
+```text
+receiver: <date> <time> profile <name> readiness: not ready
+```
+
+When every member of a pool has no ready offer, you see these consequences:
+
+- Queued tasks wait in the queue and spend no more of their delivery budget.
+- A task whose `task_started_by` passes while it waits is rejected when a ready member fetches it.
+- Adopting or stopping an orphaned job waits until a member is ready again.
+- Ending a run that is past its bounds waits until a member is ready again.
+- A queued task that its host cancelled gets its terminal status only once a member is ready again.
+- None of these waits has a fixed bound.
+
+A receiver with at least one ready offer still fetches every task in its pool.
+It releases a task it cannot offer, and each release spends one delivery.
+To keep that from exhausting a task's budget, make sure some member can offer each agent the pool's terms allow.
+
 ### Metrics
 
 Set `metrics_addr` in the receiver's [local

@@ -595,9 +595,11 @@ func (r *Receiver) advertise(ctx context.Context) error {
 			r.logger.Printf("profile %s readiness: %s", named.Name, logText(r.redactLive, err))
 			continue
 		}
-		if ready {
-			offers = append(offers, wire.Offer{Profile: named.Name, Agent: named.Agent, InlineLimit: named.Plugin.InlineLimit()})
+		if !ready {
+			r.logger.Printf("profile %s readiness: not ready", named.Name)
+			continue
 		}
+		offers = append(offers, wire.Offer{Profile: named.Name, Agent: named.Agent, InlineLimit: named.Plugin.InlineLimit()})
 	}
 	r.mu.Lock()
 	r.offers = offers

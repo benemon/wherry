@@ -73,11 +73,6 @@ var (
 func (r *Receiver) claimLoop(claiming, running context.Context, idle func()) {
 	defer idle()
 	for claiming.Err() == nil {
-		// A suspended pool takes no new work: its receivers fetch nothing from it.
-		if r.suspended() {
-			sleep(claiming, time.Second)
-			continue
-		}
 		if err := r.claimOne(claiming, running, idle); err != nil && claiming.Err() == nil {
 			r.deny(err, capClaim)
 			r.logger.Printf("claim: %v", err)
@@ -86,17 +81,37 @@ func (r *Receiver) claimLoop(claiming, running context.Context, idle func()) {
 	}
 }
 
+// claimGated reports that no new poll of the pool may open: a suspended pool, no ready offer or an active back-off. r.mu
+// must be held, and never across a poll, a client close, a sleep or a plugin call.
+func (r *Receiver) claimGated() bool {
+	return r.state.Suspended[r.config.Pool] || len(r.offers) == 0 || time.Now().Before(r.backoffUntil)
+}
+
+// gated is claimGated taking r.mu.
+func (r *Receiver) gated() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.claimGated()
+}
+
 func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 	// The check and the count share the lock, so a slot releasing a task for another member knows every session that
 	// could fetch it again.
 	r.mu.Lock()
+	// claimGated reads the clock first, so a back-off with time left always gates: otherwise one expiring between the
+	// two reads would count a session that is never uncounted.
+	gated := r.claimGated()
 	wait := time.Until(r.backoffUntil)
-	if wait <= 0 {
+	if !gated {
 		r.fetching++
 	}
 	r.mu.Unlock()
 	if wait > 0 {
 		sleep(claiming, wait)
+		return nil
+	}
+	if gated {
+		sleep(claiming, time.Second)
 		return nil
 	}
 	fetched := sync.OnceFunc(func() {
@@ -135,7 +150,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 	for record == nil {
 		pollCtx, cancel := context.WithTimeout(claiming, 30*time.Second)
 		go func() {
-			for pollCtx.Err() == nil && !r.suspended() && r.backoff() <= 0 {
+			for pollCtx.Err() == nil && !r.gated() {
 				sleep(pollCtx, 100*time.Millisecond)
 			}
 			cancel()
@@ -146,7 +161,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		if claiming.Err() != nil {
 			return claiming.Err()
 		}
-		if (r.suspended() || r.backoff() > 0) && len(fetches.Records()) == 0 {
+		if len(fetches.Records()) == 0 && r.gated() {
 			return nil
 		}
 		if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
