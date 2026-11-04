@@ -52,7 +52,7 @@ Terminal runs have their progress records tombstoned for compaction.
 Use `wherry host events RUN_ID` to read status history.
 Use `wherry host logs RUN_ID` to read the transcript.
 Retention limits the available history.
-The platform's own logs cover activity inside the job.
+Activity inside the job that the transcript doesn't show is visible only if the platform records it.
 
 ## Where your data goes
 
