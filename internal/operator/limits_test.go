@@ -1355,13 +1355,28 @@ func TestProgressTopicIsCompactedOnNewAndExistingTopics(t *testing.T) {
 	}
 }
 
-// A pool's receivers topic is created compacted with one partition by pool apply; a later apply, with the same terms or
-// an update, restores its configs and creates it again when missing.
+// A pool's receivers topic is created compacted with one partition by pool apply before the pool's record is appended,
+// on a new pool and on an update; a re-apply with the same terms restores its configs and creates it again when missing.
 func TestPoolReceiversTopicIsCompactedOnNewAndExistingPools(t *testing.T) {
 	cluster, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
 	topic := PoolReceiversTopic("pool-a")
+	exists := func() bool {
+		details, err := kadm.NewClient(service.Operator).ListTopics(ctx, topic)
+		if err != nil {
+			t.Fatal(err)
+		}
+		detail, ok := details[topic]
+		return ok && detail.Err == nil
+	}
+	var appends []bool
+	appended = func(record Record) {
+		if record.Kind == "pool" {
+			appends = append(appends, exists())
+		}
+	}
+	t.Cleanup(func() { appended = func(Record) {} })
 	var mu sync.Mutex
 	created := map[string]string{}
 	cluster.ControlKey(int16(kmsg.CreateTopics), func(request kmsg.Request) (kmsg.Response, error, bool) {
@@ -1379,6 +1394,9 @@ func TestPoolReceiversTopicIsCompactedOnNewAndExistingPools(t *testing.T) {
 	})
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(appends, []bool{true}) {
+		t.Fatalf("%s existed at the new pool's record: %v, want [true]", topic, appends)
 	}
 	want := map[string]string{"cleanup.policy": "compact,delete", "message.timestamp.type": "LogAppendTime", "retention.ms": "604800000", "segment.ms": "3600000", "max.compaction.lag.ms": "3600000"}
 	mu.Lock()
@@ -1415,20 +1433,40 @@ func TestPoolReceiversTopicIsCompactedOnNewAndExistingPools(t *testing.T) {
 	if got := configs(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("existing %s configs %v, want %v", topic, got, want)
 	}
-	responses, err := kadm.NewClient(service.Operator).DeleteTopics(ctx, topic)
-	if err == nil {
-		err = responses.Error()
+	deleteTopic := func() {
+		t.Helper()
+		responses, err := kadm.NewClient(service.Operator).DeleteTopics(ctx, topic)
+		if err == nil {
+			err = responses.Error()
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err != nil {
+	deleteTopic()
+	raised := modelTerms()
+	raised.StartByLimitMS = Millis((10 * 24 * time.Hour).Milliseconds())
+	if err := service.PoolApply(ctx, "pool-a", raised, false); err != nil {
 		t.Fatal(err)
 	}
-	updated := modelTerms()
-	updated.DeliveryLimit = 2
-	if err := service.PoolApply(ctx, "pool-a", updated, false); err != nil {
-		t.Fatal(err)
+	if !reflect.DeepEqual(appends, []bool{true, true}) {
+		t.Fatalf("%s existed at the pool's records: %v, want [true true]", topic, appends)
 	}
 	if got := configs(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("%s configs after an update %v, want %v", topic, got, want)
+	}
+	deleteTopic()
+	if err := service.PoolApply(ctx, "pool-a", raised, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(appends) != 2 {
+		t.Fatalf("a same-terms re-apply appended a pool record: %v", appends)
+	}
+	if !exists() {
+		t.Fatalf("%s missing after a same-terms re-apply", topic)
+	}
+	if got := configs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s configs after a same-terms re-apply %v, want %v", topic, got, want)
 	}
 }
 

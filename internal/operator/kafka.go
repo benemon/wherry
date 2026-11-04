@@ -176,6 +176,15 @@ func (service *Service) PoolApply(ctx context.Context, pool string, terms Terms,
 	} else if err := service.onePartition(ctx, true, PoolTasksTopic(pool), PoolEventsTopic(pool)); err != nil {
 		return err
 	}
+	// A recorded pool always has its receivers topic, which readers of the record expect. Pool names hold no dots, so the
+	// topic cannot collide with another derived name before CheckNames accepts the record.
+	if err := service.createTopicsWith(ctx, receiversConfigs, PoolReceiversTopic(pool)); err != nil {
+		return err
+	}
+	// A topic created with older configs converges on the next apply.
+	if err := service.configureTopics(ctx, receiversConfigs, PoolReceiversTopic(pool)); err != nil {
+		return err
+	}
 	state := current
 	if update || !exists {
 		record := Record{Kind: "pool", Pool: pool, Terms: &terms}
@@ -195,13 +204,6 @@ func (service *Service) PoolApply(ctx context.Context, pool string, terms Terms,
 			return err
 		}
 		if err := service.configureTopics(ctx, custodianConfigs, CustodianTopic(pool)); err != nil {
-			return err
-		}
-		if err := service.createTopicsWith(ctx, receiversConfigs, PoolReceiversTopic(pool)); err != nil {
-			return err
-		}
-		// A topic created with older configs converges on the next apply.
-		if err := service.configureTopics(ctx, receiversConfigs, PoolReceiversTopic(pool)); err != nil {
 			return err
 		}
 		return service.configureGroup(ctx, pool, effective)
