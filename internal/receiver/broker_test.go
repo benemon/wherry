@@ -75,8 +75,8 @@ func (b brokerPool) applyTerms(t *testing.T, ctx context.Context, terms operator
 	}
 }
 
-// joined waits until the receiver holds a partition of its pool's share group, and for the first share fetch that
-// sets the group's start offset; the group starts at the log end, so a task published earlier is never delivered.
+// joined waits until the receiver holds a partition of its pool's share group, and a second more for its first share
+// fetch. The group's share.auto.offset.reset is earliest, so a task published before that fetch is still delivered.
 func (b brokerPool) joined(t *testing.T, ctx context.Context, logs *syncBuffer) {
 	t.Helper()
 	for {
