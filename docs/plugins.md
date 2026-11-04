@@ -9,13 +9,14 @@ See [Receiver configuration](configuration-receiver.md#receiver-configuration).
 ## Which platform do you use?
 
 The [wherry-plugins repository](https://github.com/benemon/wherry-plugins) maintains these plugins.
-Use each plugin's guide for installation, settings and platform permissions.
+Install a receiver with its platform's receiver page.
+Use each plugin's guide for settings and platform permissions.
 
-| Plugin | Guide |
-| --- | --- |
-| Nomad | [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad). |
-| Kubernetes and OpenShift | [Kubernetes plugin](https://github.com/benemon/wherry-plugins/tree/main/kubernetes). |
-| systemd | [systemd plugin](https://github.com/benemon/wherry-plugins/tree/main/systemd). |
+| Plugin | Install | Guide |
+| --- | --- | --- |
+| Nomad | [Receiver on Nomad](install-receiver-nomad.md). | [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad). |
+| Kubernetes and OpenShift | [Receiver on Kubernetes and OpenShift](install-receiver-kubernetes.md). | [Kubernetes plugin](https://github.com/benemon/wherry-plugins/tree/main/kubernetes). |
+| systemd | [Receiver on systemd](install-receiver-systemd.md). | [systemd plugin](https://github.com/benemon/wherry-plugins/tree/main/systemd). |
 
 ## Why Nomad
 
@@ -34,7 +35,7 @@ The examples below are imported from the plugin repository.
 
 ### systemd
 
-[Run the receiver as a systemd service](https://github.com/benemon/wherry-plugins/tree/main/systemd#run-the-receiver-as-a-systemd-service)
+[Receiver on systemd](install-receiver-systemd.md#run-the-receiver-as-a-systemd-service)
 describes these files and installs them.
 
 A systemd receiver adopts jobs only on its own host.
@@ -61,7 +62,7 @@ The lease expires 120 seconds after its last advertisement.
 
 ### Kubernetes
 
-[Run the receiver in the cluster](https://github.com/benemon/wherry-plugins/tree/main/kubernetes#run-the-receiver-in-the-cluster)
+[Receiver on Kubernetes and OpenShift](install-receiver-kubernetes.md#run-the-receiver-in-the-cluster)
 describes these files, on Kubernetes and OpenShift alike, and deploys them.
 
 `config.yaml`:
@@ -86,7 +87,7 @@ describes these files, on Kubernetes and OpenShift alike, and deploys them.
 
 ### Nomad
 
-[Run the receiver in Nomad](https://github.com/benemon/wherry-plugins/tree/main/nomad#run-the-receiver-in-nomad)
+[Receiver on Nomad](install-receiver-nomad.md#run-the-receiver-in-nomad)
 describes these files and runs them.
 
 `config.yaml`:
