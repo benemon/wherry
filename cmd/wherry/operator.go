@@ -140,11 +140,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		var localOperator operatorConfig
-		if err := readYAML(filepath.Join(dir, "operator.yaml"), &localOperator); err != nil {
-			return err
-		}
-		if err := receiverLocalFile(dir, pos[2], path, directory, dryRun, stderr, config, localOperator); err != nil {
+		if err := receiverLocalFile(dir, pos[2], path, directory, dryRun, stderr, config, service.Broker, service.CA != nil); err != nil {
 			return err
 		}
 		if dryRun {

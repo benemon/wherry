@@ -32,7 +32,10 @@ func receiverCredentials(config operator.ReceiverConfig) []string {
 
 const receiverLocalFields = "bundle, ca_file, state_dir, plugin_dir, metrics_addr, drain_timeout and credentials"
 
-func receiverLocalFile(dir, name, receiverPath string, directory, dryRun bool, out io.Writer, config operator.ReceiverConfig, op operatorConfig) error {
+// receiverLocalFile finds, or asks for and writes, the receiver's local configuration and checks it against config.
+// broker and ca are the operator's broker and whether the operator trusts it through a CA file.
+func receiverLocalFile(dir, name, receiverPath string, directory, dryRun bool, out io.Writer, config operator.ReceiverConfig, broker string, ca bool) error {
+	needsCA := config.Broker == broker && ca
 	path := filepath.Join(dir, "receivers", name+".config.yaml")
 	if directory {
 		candidate := filepath.Join(receiverPath, "config.yaml")
@@ -46,7 +49,6 @@ func receiverLocalFile(dir, name, receiverPath string, directory, dryRun bool, o
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	needsCA := config.Broker == op.Broker && op.CAFile != ""
 	var local receiverLocalConfig
 	if err == nil {
 		local, err = loadReceiverLocalConfig(path)

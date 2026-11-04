@@ -110,17 +110,17 @@ func TestReceiverLocalFile(t *testing.T) {
 	noTerminal(t)
 	path := filepath.Join(dir, "receivers", "r.config.yaml")
 	var out bytes.Buffer
-	if err := receiverLocalFile(dir, "r", "outside.yaml", false, false, &out, config, op); err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), receiverLocalFields) {
+	if err := receiverLocalFile(dir, "r", "outside.yaml", false, false, &out, config, op.Broker, op.CAFile != ""); err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), receiverLocalFields) {
 		t.Fatalf("missing: %v", err)
 	}
-	if err := receiverLocalFile(dir, "r", "outside.yaml", false, true, &out, config, op); err != nil {
+	if err := receiverLocalFile(dir, "r", "outside.yaml", false, true, &out, config, op.Broker, op.CAFile != ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
 		t.Fatalf("dry run created files: %v", err)
 	}
 	onTerminal(t, strings.Repeat("\n", 8))
-	if err := receiverLocalFile(dir, "r", "outside.yaml", false, false, &out, config, op); err != nil {
+	if err := receiverLocalFile(dir, "r", "outside.yaml", false, false, &out, config, op.Broker, op.CAFile != ""); err != nil {
 		t.Fatal(err)
 	}
 	local, err := loadReceiverLocalConfig(path)
@@ -133,7 +133,7 @@ func TestReceiverLocalFile(t *testing.T) {
 		t.Fatal(before.Mode())
 	}
 	onTerminal(t, "")
-	if err := receiverLocalFile(dir, "r", "outside.yaml", false, false, io.Discard, config, op); err != nil {
+	if err := receiverLocalFile(dir, "r", "outside.yaml", false, false, io.Discard, config, op.Broker, op.CAFile != ""); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := os.Stat(path)
@@ -146,7 +146,7 @@ func TestReceiverLocalFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	out.Reset()
-	if err := receiverLocalFile(dir, "r", provided, true, true, &out, config, op); err != nil {
+	if err := receiverLocalFile(dir, "r", provided, true, true, &out, config, op.Broker, op.CAFile != ""); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), provided) || !strings.Contains(out.String(), "warning:") {
@@ -311,7 +311,7 @@ func TestReceiverLocalCA(t *testing.T) {
 			op := operatorConfig{Broker: "broker", CAFile: test.ca}
 			dir := t.TempDir()
 			onTerminal(t, strings.Repeat("\n", 8))
-			if err := receiverLocalFile(dir, "r", "external/receiver.yaml", false, false, io.Discard, config, op); err != nil {
+			if err := receiverLocalFile(dir, "r", "external/receiver.yaml", false, false, io.Discard, config, op.Broker, op.CAFile != ""); err != nil {
 				t.Fatal(err)
 			}
 			path := filepath.Join(dir, "receivers/r.config.yaml")
@@ -330,7 +330,7 @@ func TestReceiverLocalCA(t *testing.T) {
 				t.Fatal(err)
 			}
 			var out bytes.Buffer
-			if err := receiverLocalFile(dir, "r", "external/receiver.yaml", false, false, &out, config, op); err != nil {
+			if err := receiverLocalFile(dir, "r", "external/receiver.yaml", false, false, &out, config, op.Broker, op.CAFile != ""); err != nil {
 				t.Fatal(err)
 			}
 			if strings.Contains(out.String(), "warning:") != test.warn {
@@ -345,7 +345,7 @@ func TestReceiverLocalInterruptedAndInvalidAnswers(t *testing.T) {
 		t.Run(fmt.Sprintf("%q", answers), func(t *testing.T) {
 			dir := t.TempDir()
 			onTerminal(t, answers)
-			if err := receiverLocalFile(dir, "r", "outside.yaml", false, false, io.Discard, localReceiver(), operatorConfig{}); err == nil {
+			if err := receiverLocalFile(dir, "r", "outside.yaml", false, false, io.Discard, localReceiver(), "", false); err == nil {
 				t.Fatal("accepted incomplete or invalid answers")
 			}
 			if _, err := os.Stat(filepath.Join(dir, "receivers")); !os.IsNotExist(err) {
