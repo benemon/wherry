@@ -3,6 +3,7 @@ package receiver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -87,6 +88,28 @@ func (f fixture) placement(t *testing.T) (uint64, float64, []string) {
 		}
 	}
 	return count, sum, profiles
+}
+
+// placementBuckets are the upper bounds of the receiver's placement histogram and the cumulative count at each.
+func (f fixture) placementBuckets(t *testing.T) ([]float64, []uint64) {
+	t.Helper()
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(f.receiver.metrics.placement)
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bounds []float64
+	var counts []uint64
+	for _, family := range families {
+		for _, metric := range family.GetMetric() {
+			for _, bucket := range metric.GetHistogram().GetBucket() {
+				bounds = append(bounds, bucket.GetUpperBound())
+				counts = append(counts, bucket.GetCumulativeCount())
+			}
+		}
+	}
+	return bounds, counts
 }
 
 // controlClock replaces the receiver's clock with one that returns now and then advances it an hour, and returns the
@@ -209,7 +232,7 @@ func TestPendingRunStartsOnlyOnceRunning(t *testing.T) {
 }
 
 // Placement runs from Dispatch's return to the completion of the Lookup that found the job running, by the receiver's
-// clock, not to the result's consumption, and carries the profile.
+// clock, not to the result's consumption, carries the profile, and falls in PlacementBuckets.
 func TestPlacementIsTimedFromDispatchToTheRunningLookup(t *testing.T) {
 	f := placingFixture(t, "queued")
 	returned := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
@@ -225,6 +248,14 @@ func TestPlacementIsTimedFromDispatchToTheRunningLookup(t *testing.T) {
 	count, sum, labels := f.placement(t)
 	if count != 1 || sum != 7 || !slices.Equal(labels, []string{"profile=nomad"}) {
 		t.Fatalf("placement count %d sum %v labels %v, want one sample of 7 s for profile nomad", count, sum, labels)
+	}
+	// 7 s falls in every bucket from 10 s up.
+	var want []uint64
+	for _, bound := range pluginsdk.PlacementBuckets {
+		want = append(want, map[bool]uint64{false: 0, true: 1}[bound >= 7])
+	}
+	if bounds, counts := f.placementBuckets(t); !slices.Equal(bounds, pluginsdk.PlacementBuckets) || !slices.Equal(counts, want) {
+		t.Fatalf("placement buckets %v counts %v, want %v counts %v", bounds, counts, pluginsdk.PlacementBuckets, want)
 	}
 }
 
@@ -250,38 +281,55 @@ func TestReconciledPendingDispatchPlacesWithoutASample(t *testing.T) {
 	}
 }
 
-// A job Lookup reports never started takes its class: a fetch failure fails the run with the S3 text and no start
-// failure; any other class is a start failure naming the class and reason.
+// A job Lookup reports never started takes its class, whichever way the attempt reached it: a fresh Dispatch, adoption
+// on redelivery (findJob) or the reconciliation of an unknown Dispatch. A fetch failure fails the run with the S3 text
+// and no start failure; any other class is a start failure naming the class and reason.
 func TestNeverStartedLookupTakesItsClass(t *testing.T) {
-	t.Run("fetch", func(t *testing.T) {
-		f := newFixture(t, resultStream)
-		f.plugin.neverStarted, f.plugin.neverClass, f.plugin.neverReason = true, pluginsdk.ClassFetch, "403 for s3::bucket?X-Amz-Signature=abc"
-		if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckReject {
-			t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
-		}
-		if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != "an S3 input was not fetched, or did not match its size and SHA-256" {
-			t.Fatalf("terminal %s %q", state, reason)
-		}
-		if failures := len(f.startFailures(t)); failures != 0 {
-			t.Fatalf("%d start failures, want none", failures)
-		}
-	})
-	t.Run("driver", func(t *testing.T) {
-		terms := testTerms()
-		terms.DeliveryLimit = 2
-		f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
-		f.plugin.neverStarted, f.plugin.neverClass, f.plugin.neverReason = true, "driver", "image pull failed"
-		if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckReject {
-			t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
-		}
-		want := "delivery budget exhausted after 1 attempts; last: job never started (driver): image pull failed"
-		if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != want {
-			t.Fatalf("terminal %s %q, want %q", state, reason, want)
-		}
-		if failures := len(f.startFailures(t)); failures != 1 {
-			t.Fatalf("%d start failures, want 1", failures)
-		}
-	})
+	for _, entry := range []struct {
+		name    string
+		attempt int64
+		setup   func(p *fakePlugin, class, reason string)
+	}{
+		{"dispatch", 1, func(p *fakePlugin, class, reason string) {
+			p.neverStarted, p.neverClass, p.neverReason = true, class, reason
+		}},
+		{"adoption", 2, func(p *fakePlugin, class, reason string) {
+			p.job, p.neverClass, p.neverReason = pluginsdk.JobNeverStarted, class, reason
+		}},
+		{"reconciliation", 1, func(p *fakePlugin, class, reason string) {
+			p.dispatchErr, p.job, p.neverClass, p.neverReason = errors.New("register response lost"), pluginsdk.JobNeverStarted, class, reason
+		}},
+	} {
+		t.Run(entry.name+"/fetch", func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			entry.setup(f.plugin, pluginsdk.ClassFetch, "403 for s3::bucket?X-Amz-Signature=abc")
+			if status := f.execute(t, f.submit(t, f.host, nil), entry.attempt); status != kgo.AckReject {
+				t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+			}
+			if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != "an S3 input was not fetched, or did not match its size and SHA-256" {
+				t.Fatalf("terminal %s %q", state, reason)
+			}
+			if failures := len(f.startFailures(t)); failures != 0 {
+				t.Fatalf("%d start failures, want none", failures)
+			}
+		})
+		t.Run(entry.name+"/driver", func(t *testing.T) {
+			terms := testTerms()
+			terms.DeliveryLimit = int32(entry.attempt) + 1
+			f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
+			entry.setup(f.plugin, "driver", "image pull failed")
+			if status := f.execute(t, f.submit(t, f.host, nil), entry.attempt); status != kgo.AckReject {
+				t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+			}
+			want := fmt.Sprintf("delivery budget exhausted after %d attempts; last: job never started (driver): image pull failed", entry.attempt)
+			if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != want {
+				t.Fatalf("terminal %s %q, want %q", state, reason, want)
+			}
+			if failures := len(f.startFailures(t)); failures != 1 {
+				t.Fatalf("%d start failures, want 1", failures)
+			}
+		})
+	}
 }
 
 // A job removed before it started is a start failure; a Lookup that fails is asked again, the run staying in the
