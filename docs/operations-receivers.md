@@ -35,11 +35,15 @@ Each receiver identity adds two topics: its key topic and its progress topic.
 Each host adds one key topic.
 wherry never deletes these topics.
 Run each receiver with a stable identity.
-The state directory holds the receiver's identity.
+Keep each receiver's bundle and its state directory.
+The bundle names the receiver.
+The state directory preserves the receiver's signing key.
 On Nomad, the host volume keeps the state directory across restarts.
 On Kubernetes, the PersistentVolumeClaim keeps it.
-When you scale a pool, reuse existing receiver identities.
-Do not create a new receiver for each instance.
+Run one instance per receiver.
+Give each receiver its own bundle and state directory.
+To scale out again, restart the same stopped receivers.
+Do not apply new receiver names to scale out.
 Removing a receiver leaves its topics in Kafka.
 
 ### Install plugins

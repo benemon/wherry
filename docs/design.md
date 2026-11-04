@@ -87,7 +87,8 @@ by default. An update to a shorter `start_by_limit` lowers none of them: they
 keep the longer terms' retention, with the events and progress topics at
 least at the tasks topic's. The tenant feed and transcript topic keep them for 30
 days and a pool's receivers topic for 7. The identity and configuration topics
-keep them forever, and so does a pool's snapshot topic.
+keep them forever and are kept after revocation, and a pool's snapshot topic
+keeps them forever.
 
 A deployment has 1 + 2R + 4P + 2T + H topics for R receivers, P pools, T
 tenants and H hosts. The count depends on configuration alone.
@@ -247,9 +248,9 @@ naming 256 outputs fits.
 | `wherry.pool.<pool>.receivers` | `pool apply` | `604800000` (7 days), outside the pool retention bound |
 | `wherry.tenant.<tenant>` | `tenant add` | `2592000000` (30 days) |
 | `wherry.tenant.<tenant>.transcript` | `tenant add` | as the tenant feed, `2592000000` (30 days) |
-| `wherry.receiver.<receiver>` | `receiver apply` | `-1` |
+| `wherry.receiver.<receiver>` | `receiver apply` | `-1`, kept after revocation |
 | `wherry.receiver.<receiver>.progress` | `receiver apply`, `pool apply` | at least the pool's tasks topic; never lowered |
-| `wherry.host.<tenant>.<host>` | `tenant host add` | `-1` |
+| `wherry.host.<tenant>.<host>` | `tenant host add` | `-1`, kept after revocation |
 
 The tasks retention keeps `start_by_limit`, the six-hour maximum run time,
 and a one-day margin. Events and the pool's progress topics stay at least as
