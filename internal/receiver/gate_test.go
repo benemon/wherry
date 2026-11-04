@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"log"
 	"os"
 	"slices"
@@ -18,6 +19,7 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
@@ -355,7 +357,16 @@ func TestNoReadyOfferOpensNoPollOnRealBroker(t *testing.T) {
 	admin := kadm.NewClient(b.kafka)
 	for end := time.Now().Add(3 * time.Second); time.Now().Before(end); time.Sleep(200 * time.Millisecond) {
 		groups, err := admin.DescribeShareGroups(ctx, operator.PoolGroup(b.pool))
-		if group := groups[operator.PoolGroup(b.pool)]; err == nil && len(group.AssignedPartitions()) > 0 {
+		if err != nil {
+			t.Fatalf("describe the pool's share group: %v", err)
+		}
+		// A group no member has joined yet is reported as not found, which is the absence this window expects.
+		switch group, ok := groups[operator.PoolGroup(b.pool)]; {
+		case !ok:
+			t.Fatalf("describe the pool's share group: no result for %s", operator.PoolGroup(b.pool))
+		case group.Err != nil && !errors.Is(group.Err, kerr.GroupIDNotFound):
+			t.Fatalf("describe the pool's share group: %v", group.Err)
+		case group.Err == nil && len(group.AssignedPartitions()) > 0:
 			t.Fatalf("the pool's share group has assigned partitions while no offer is ready; logs:\n%s", logs.String())
 		}
 		if r.sessions() != 0 {

@@ -134,11 +134,11 @@ Each plugin's README runs the receiver on its platform, with its steps:
 
 A receiver offers a profile only while the profile's plugin reports it ready.
 A receiver with no ready offer fetches no tasks from its pool.
-It closes any poll it has open within about a second.
-It fetches again within about a second of its next advertisement with a ready offer.
+It closes any poll it has open, usually within about a second.
+It fetches again within about a second of its next advertisement with a ready offer, unless its pool is suspended or a back-off after a failed start is still running.
 Its held runs keep running, renewing and reading cancels.
 
-Each advertisement logs a line for every profile that is not ready:
+Each advertisement logs a line for every profile whose plugin reports it not ready:
 
 ```text
 receiver: <date> <time> profile <name> readiness: not ready
