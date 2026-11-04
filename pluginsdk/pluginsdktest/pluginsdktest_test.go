@@ -134,37 +134,74 @@ func (p pendingForever) Lookup(ctx context.Context, runID string) (pluginsdk.Job
 	return job, err
 }
 
-// startsNever waits in Lookup, once the job is placed, until its context ends, as a plugin whose task never starts.
-type startsNever struct{ pluginsdk.Plugin }
+// startsNever reports a placed job pending for one more Lookup, then waits in Lookup until its context ends, as a plugin
+// whose task never starts.
+type startsNever struct {
+	pluginsdk.Plugin
+	pending *int
+}
 
 func (p startsNever) Lookup(ctx context.Context, runID string) (pluginsdk.Job, error) {
 	job, err := p.Plugin.Lookup(ctx, runID)
-	if err == nil && job.State == pluginsdk.JobRunning {
-		<-ctx.Done()
-		return pluginsdk.Job{}, ctx.Err()
+	if err != nil || job.State != pluginsdk.JobRunning {
+		return job, err
 	}
-	return job, err
+	if *p.pending < 1 {
+		*p.pending++
+		job.State, job.Reason = pluginsdk.JobPending, "queued"
+		return job, nil
+	}
+	<-ctx.Done()
+	return pluginsdk.Job{}, ctx.Err()
 }
 
-// broken plugins, each with the failure it causes and, when within is set, the bound on the Completes subtest's
-// duration.
+// decidesOnce answers the first Lookup of a pending job, then waits in every later one until its context ends.
+type decidesOnce struct {
+	pluginsdk.Plugin
+	answered *bool
+}
+
+func (p decidesOnce) Lookup(ctx context.Context, runID string) (pluginsdk.Job, error) {
+	job, err := p.Plugin.Lookup(ctx, runID)
+	if err != nil || job.State != pluginsdk.JobPending || !*p.answered {
+		*p.answered = *p.answered || job.State == pluginsdk.JobPending
+		return job, err
+	}
+	<-ctx.Done()
+	return pluginsdk.Job{}, ctx.Err()
+}
+
+// bounded is the subtest a blocking Lookup fails, which must fail no sooner than at and before before.
+type bounded struct {
+	subtest    string
+	at, before time.Duration
+}
+
 var broken = map[string]struct {
-	wrap   func(pluginsdk.Plugin) pluginsdk.Plugin
-	want   string
-	within time.Duration
+	wrap  func(pluginsdk.Plugin) pluginsdk.Plugin
+	want  string
+	bound *bounded
 }{
-	"redispatches":   {func(p pluginsdk.Plugin) pluginsdk.Plugin { return redispatches{p} }, "lookup after dispatching the ended run", 0},
-	"forgets":        {func(p pluginsdk.Plugin) pluginsdk.Plugin { return forgets{p} }, "after the end = {Started:false", 0},
-	"drifts":         {func(p pluginsdk.Plugin) pluginsdk.Plugin { return drifts{p, new(int)} }, "second lookup while running", 0},
-	"pendingForever": {func(p pluginsdk.Plugin) pluginsdk.Plugin { return pendingForever{p} }, "lookup while running = {State:4", 0},
-	"startsNever":    {func(p pluginsdk.Plugin) pluginsdk.Plugin { return startsNever{p} }, "context deadline exceeded; want running within " + pollDeadline.String(), 2 * pollDeadline},
+	"redispatches":   {func(p pluginsdk.Plugin) pluginsdk.Plugin { return redispatches{p} }, "lookup after dispatching the ended run", nil},
+	"forgets":        {func(p pluginsdk.Plugin) pluginsdk.Plugin { return forgets{p} }, "after the end = {Started:false", nil},
+	"drifts":         {func(p pluginsdk.Plugin) pluginsdk.Plugin { return drifts{p, new(int)} }, "second lookup while running", nil},
+	"pendingForever": {func(p pluginsdk.Plugin) pluginsdk.Plugin { return pendingForever{p} }, "lookup while running = {State:4", nil},
+	// Its Lookup blocks after three delays of the poll, so a deadline per Lookup ends Completes past the bound.
+	"startsNever": {
+		func(p pluginsdk.Plugin) pluginsdk.Plugin { return startsNever{p, new(int)} },
+		"lookup while running = {State:0 Handle:{Data:[] Name:} Attempt:0 Profile: Agent: Class: Reason:}, context deadline exceeded; want running within " + pollDeadline.String(),
+		&bounded{"Completes", pollDeadline, pollDeadline + 2*time.Second},
+	},
+	"decidesOnce": {
+		func(p pluginsdk.Plugin) pluginsdk.Plugin { return decidesOnce{p, new(bool)} },
+		"second lookup of an unplaced job = {State:0",
+		&bounded{"Pending", 30 * time.Second, 35 * time.Second},
+	},
 }
 
-// completesTook is the duration the verbose output reports for the Completes subtest.
-var completesTook = regexp.MustCompile(`--- FAIL: TestBrokenPlugin/Completes \(([0-9.]+)s\)`)
-
-// Each broken plugin fails the suite at the case that guards against it. A Lookup that blocks fails the suite at
-// PollDeadline: one deadline covers every Lookup and every delay of the poll.
+// Each broken plugin fails the suite at the case that guards against it. A Lookup that blocks fails the suite at its
+// bound: PollDeadline, one deadline over every Lookup and every delay of a poll, or the pending profile's 30 s for
+// each of its Lookups.
 func TestConformanceFailsBrokenPlugins(t *testing.T) {
 	for name, b := range broken {
 		t.Run(name, func(t *testing.T) {
@@ -174,16 +211,16 @@ func TestConformanceFailsBrokenPlugins(t *testing.T) {
 			if err == nil || !strings.Contains(string(output), b.want) {
 				t.Fatalf("suite against %s = %v; want a failure naming %q\n%s", name, err, b.want, output)
 			}
-			if b.within == 0 {
+			if b.bound == nil {
 				return
 			}
-			took := completesTook.FindSubmatch(output)
+			took := regexp.MustCompile(`--- FAIL: TestBrokenPlugin/` + b.bound.subtest + ` \(([0-9.]+)s\)`).FindSubmatch(output)
 			if took == nil {
-				t.Fatalf("no Completes failure in the output\n%s", output)
+				t.Fatalf("no %s failure in the output\n%s", b.bound.subtest, output)
 			}
 			seconds, err := strconv.ParseFloat(string(took[1]), 64)
-			if d := time.Duration(seconds * float64(time.Second)); err != nil || d < pollDeadline || d >= b.within {
-				t.Fatalf("Completes failed after %ss, want at PollDeadline %s, before %s", took[1], pollDeadline, b.within)
+			if d := time.Duration(seconds * float64(time.Second)); err != nil || d < b.bound.at || d >= b.bound.before {
+				t.Fatalf("%s failed after %ss, want at %s, before %s", b.bound.subtest, took[1], b.bound.at, b.bound.before)
 			}
 		})
 	}
