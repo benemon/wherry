@@ -52,8 +52,14 @@ jobs:
           against=$(git describe --tags --abbrev=0 --match 'pluginsdk/v*')
           "$RUNNER_TEMP/buf" breaking pluginsdk --against ".git#tag=$against,subdir=pluginsdk"
 
+  # One job per package, each with its own broker: the packages share wherry.operator, so they never share a broker.
   broker:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [./internal/operator/, ./internal/receiver/, ./internal/client/, ./cmd/wherry/]
+    name: broker (${{ matrix.package }})
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -68,11 +74,10 @@ jobs:
             pluginsdk/go.sum
       - name: Start Kafka
         run: test/kafka/up.sh "$RUNNER_TEMP/kafka"
-      # One package at a time: the packages share the broker's wherry.operator.
       - name: Run the real-broker tests
         run: |
           . "$RUNNER_TEMP/kafka/env"
-          go test -p 1 -count=1 -timeout 30m ./internal/operator/ ./internal/receiver/ ./internal/client/ ./cmd/wherry/
+          go test -count=1 -timeout 30m ${{ matrix.package }}
 
   s3:
     runs-on: ubuntu-latest
@@ -101,6 +106,11 @@ jobs:
   # The broker job's suites on a three-node cluster (test/kafka/up-cluster.sh), where the multi-broker tests also run.
   broker-cluster:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [./internal/operator/, ./internal/receiver/, ./internal/client/, ./cmd/wherry/]
+    name: broker-cluster (${{ matrix.package }})
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -115,11 +125,10 @@ jobs:
             pluginsdk/go.sum
       - name: Start a three-broker Kafka cluster
         run: test/kafka/up-cluster.sh "$RUNNER_TEMP/kafka"
-      # One package at a time: the packages share the cluster's wherry.operator and wherry.receivers.
       - name: Run the real-broker tests
         run: |
           . "$RUNNER_TEMP/kafka/env"
-          go test -p 1 -count=1 -timeout 30m ./internal/operator/ ./internal/receiver/ ./internal/client/ ./cmd/wherry/
+          go test -count=1 -timeout 30m ${{ matrix.package }}
       - name: Show the brokers' logs
         if: failure()
         run: for node in 1 2 3; do docker logs --tail 200 "wherry-kafka-$node"; done
