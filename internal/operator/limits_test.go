@@ -1362,13 +1362,13 @@ func TestPoolReceiversTopicIsCompactedOnNewAndExistingPools(t *testing.T) {
 	defer closeFixture()
 	ctx := context.Background()
 	topic := PoolReceiversTopic("pool-a")
+	// kfake still lists a deleted topic; describing its configs does not.
 	exists := func() bool {
-		details, err := kadm.NewClient(service.Operator).ListTopics(ctx, topic)
+		resources, err := kadm.NewClient(service.Operator).DescribeTopicConfigs(ctx, topic)
 		if err != nil {
 			t.Fatal(err)
 		}
-		detail, ok := details[topic]
-		return ok && detail.Err == nil
+		return len(resources) == 1 && resources[0].Err == nil
 	}
 	var appends []bool
 	appended = func(record Record) {

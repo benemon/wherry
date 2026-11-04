@@ -266,9 +266,11 @@ records anything it refuses a `lock_duration` above the brokers'
 and a `start_by_limit` that with six hours added exceeds the `retention.ms`
 of the feed or transcript topic of a tenant entitled to the pool. Before it
 records the terms it refuses a pool name that is not valid and an existing
-tasks or events topic with more than one partition. It creates the topics
-after it records the terms, which is when it checks the pool's names
-against every other recorded name. It fails when a topic configuration it
+tasks or events topic with more than one partition. It creates and
+configures the pool's receivers topic before it records the terms, so a
+recorded pool always has one. It creates the other topics after it records
+the terms, which is when it checks the pool's names against every other
+recorded name. It fails when a topic configuration it
 sets is not applied within 10 seconds, or when a describe of it still fails
 then, naming the describe's error.
 
