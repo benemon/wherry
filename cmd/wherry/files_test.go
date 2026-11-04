@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path"
@@ -342,6 +344,23 @@ func TestMCPInputsStayInTheInputRoots(t *testing.T) {
 		if _, err := read(path, math.MaxInt64); err == nil {
 			t.Errorf("read %s (%s)", name, path)
 		}
+	}
+}
+
+// Without input_roots the working directory is the input root, and one that holds state_dir stops the MCP server at its
+// start: an input opened through it could follow a link swapped in beneath it to the state.
+func TestMCPRefusesAWorkingDirectoryHoldingTheState(t *testing.T) {
+	work, outside := t.TempDir(), t.TempDir()
+	config := filepath.Join(outside, "config.yaml")
+	if err := os.WriteFile(config, []byte("bundle: "+filepath.Join(outside, "bundle.yaml")+"\nhost_key: "+filepath.Join(outside, "host.key")+
+		"\nstate_dir: "+filepath.Join(work, ".wherry", "state")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(work)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := runMCP(ctx, []string{"--config-file", config}, io.Discard); err == nil || !strings.Contains(err.Error(), "a directory of the host's own files") {
+		t.Fatalf("mcp in a working directory holding state_dir: %v, want it refused", err)
 	}
 }
 

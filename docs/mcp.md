@@ -41,7 +41,9 @@ The defaults are `10m` and `2h`.
   root, so a link that leads out of it, even one that appears after the path
   resolves, is refused. An input root is matched by its path with symbolic links
   resolved when the server starts; an input that spells a root in different case,
-  even on a case-insensitive file system, is refused. It must resolve to none of `state_dir`,
+  even on a case-insensitive file system, is refused. An input root that holds
+  `state_dir` or the directory of `host_key`, `bundle` or a `file` source is
+  refused before the server starts. An input must resolve to none of `state_dir`,
   `host_key`, `bundle`, a file a `file` source names or a storage key file; a relative
   path is taken from the server's working directory.
 - `status` returns the latest verified state of a run without

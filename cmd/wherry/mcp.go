@@ -61,6 +61,11 @@ func runMCP(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if len(config.InputRoots) == 0 {
+		if held := busclient.HeldHostPath(dir, config); held != "" {
+			return fmt.Errorf("the working directory %s, the MCP server's input root without input_roots, holds %s, a directory of the host's own files: set input_roots or start the server elsewhere", dir, held)
+		}
+	}
 	connect, closeHost := sharedHost(func() (*busclient.Host, error) { return busclient.Connect(config, logger) })
 	defer closeHost()
 	open := inputOpener(dir, config)
@@ -752,9 +757,11 @@ var resolveInput = filepath.EvalSymlinks
 
 // inputOpener opens an MCP input: a regular file beneath one of the configured input roots, or dir when there are
 // none, and none of the host's own files, so a client steered by its prompt cannot send the host key, the bundle, the
-// state or a credential, the storage keys included. Each input opens through the root containing its resolved path, so a
-// link that escapes it, even one swapped in after resolution, is refused. The host's files are compared by identity,
-// since path strings miss case-insensitive spellings and hard links. Relative paths resolve against dir.
+// state or a credential, the storage keys included. A root holding a directory of the host's files is refused before
+// this is built (busclient.HeldHostPath), since an open through a root follows links anywhere beneath it. Each input
+// opens through the root containing its resolved path, so a link that escapes it, even one swapped in after resolution,
+// is refused. The host's files are compared by identity, since path strings miss case-insensitive spellings and hard
+// links. Relative paths resolve against dir.
 func inputOpener(dir string, config busclient.Config) func(string) (*os.File, error) {
 	configured := config.InputRoots
 	if len(configured) == 0 {
