@@ -35,12 +35,8 @@ func TestQuickstartFiles(t *testing.T) {
 	if err := operator.ValidateConfig(config, terms); err != nil {
 		t.Fatal(err)
 	}
-	if len(config.Profiles) != 2 || config.Profiles[0].Name != "container" || config.Profiles[1].Name != "host" {
-		t.Fatalf("profiles %+v; want container then host", config.Profiles)
-	}
-	runtime := config.Profiles[1].Config["runtime"].(map[string]any)
-	if driver := runtime["config"].(map[string]any); runtime["driver"] != "exec" || driver["image"] != nil || driver["command"] != "/bin/sh" {
-		t.Fatalf("host runtime %+v; want the exec driver with the inherited command and no image", runtime)
+	if len(config.Profiles) != 1 || config.Profiles[0].Name != "container" || config.Profiles[0].Config["credential"] != nil {
+		t.Fatalf("profiles %+v; want container alone, naming no credential so the job's workload identity supplies the token", config.Profiles)
 	}
 	local, err := loadReceiverLocalConfig(quickstart("receiver-config.yaml"))
 	if err != nil {
@@ -58,29 +54,28 @@ func TestQuickstartFiles(t *testing.T) {
 			}
 		}
 	}
-	for _, profile := range config.Profiles {
-		if _, ok := local.Credentials[profile.Config["credential"].(string)]; !ok {
-			t.Errorf("profile %s's credential has no source in the receiver's local configuration", profile.Name)
-		}
+	if local.Bundle == "" || local.CAFile == "" || local.DrainTimeout <= 0 {
+		t.Fatalf("local configuration %+v; want the example's bundle, CA and drain timeout", local)
 	}
 	documented(t, "quickstart-production.md", "quickstart/build-terms.yaml", "quickstart/nomad-1.yaml", "quickstart/receiver-config.yaml", "quickstart/host-config.yaml")
 }
 
-// TestQuickstartMissingSourceError finds in the quickstart, the configuration reference and operations, as a code block
-// of its own or of a numbered step, the line the receiver exits with for a platform credential with no source, as
-// receiver.Run wraps the profile's error.
+// TestQuickstartMissingSourceError finds in the configuration reference and operations, as a code block of its own or of
+// a numbered step, the line the receiver exits with for a platform credential with no source, as receiver.Run wraps the
+// profile's error.
 func TestQuickstartMissingSourceError(t *testing.T) {
 	config, err := readReceiverConfig(quickstart("nomad-1.yaml"), false)
 	if err != nil {
 		t.Fatal(err)
 	}
+	config.Profiles[0].Config["credential"] = "nomad-token"
 	unsourced := &plugins{dir: t.TempDir(), running: map[string]*pluginsdk.Process{}}
 	_, err = unsourced.profile("build", config.Profiles[0], fakeSHA256)
 	if err == nil {
 		t.Fatal("configured a profile whose credential has no source")
 	}
 	line := "profile " + config.Profiles[0].Name + ": " + err.Error() + "\n"
-	for _, page := range []string{"quickstart-production.md", "configuration-receiver.md", "operations-operator.md"} {
+	for _, page := range []string{"configuration-receiver.md", "operations-operator.md"} {
 		doc, err := os.ReadFile(filepath.Join("..", "..", "docs", page))
 		if err != nil {
 			t.Fatal(err)
@@ -91,8 +86,8 @@ func TestQuickstartMissingSourceError(t *testing.T) {
 	}
 }
 
-// TestQuickstartOperatorOutput runs the quickstart's wherry operator commands, pool apply aside, on its files and finds what receiver
-// apply --dry-run and receiver show print, the same YAML, in docs/quickstart-production.md as one YAML code block.
+// TestQuickstartOperatorOutput runs the quickstart's wherry operator commands, pool apply aside, on its files: receiver
+// apply --dry-run prints what receiver show prints once the receiver is recorded.
 func TestQuickstartOperatorOutput(t *testing.T) {
 	receiverFile, err := filepath.Abs(quickstart("nomad-1.yaml"))
 	if err != nil {
@@ -100,10 +95,6 @@ func TestQuickstartOperatorOutput(t *testing.T) {
 	}
 	// kfake reports no group.share.max.delivery.count.limit, so the pool is created on a service that knows its ceiling.
 	terms, err := readPoolConfig(quickstart("build-terms.yaml"), false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "quickstart-production.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,8 +126,5 @@ func TestQuickstartOperatorOutput(t *testing.T) {
 	wherry("tenant", "host", "add", "acme", "laptop")
 	if shown != dryRun {
 		t.Fatalf("show printed\n%s\nwant what the dry run printed\n%s", shown, dryRun)
-	}
-	if count := strings.Count(string(doc), "```yaml\n"+dryRun+"```\n"); count != 1 {
-		t.Errorf("docs/quickstart-production.md holds what receiver apply --dry-run and receiver show print in %d code blocks, want 1:\n%s", count, dryRun)
 	}
 }

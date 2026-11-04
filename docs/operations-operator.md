@@ -305,7 +305,7 @@ output collection use a changed limit within that window.
 
 Prerequisites: the working directory
 ([Set up `wherry operator`](#set-up-wherry-operator)) and the pool.
-[Quickstart: Host](quickstart-production.md#host) walks through these steps for host
+[Quickstart: on your laptop](quickstart-production.md#part-3-on-your-laptop) walks through these steps for host
 `laptop` of tenant `acme`, with its complete configuration.
 
 1. Create the tenant and entitle it to a pool:
@@ -334,7 +334,7 @@ The host's user then runs `wherry host init <bundle>`, which places the
 bundle, registers the host key and writes the
 [client configuration](configuration-host.md#client-configuration) with a source
 for each credential the tenant's pools take, as in
-[Quickstart](quickstart-production.md#_3-initialise-the-host).
+[Quickstart](quickstart-production.md#_2-initialise-the-host).
 
 A tenant can be entitled to several pools; run `tenant pool add` once per pool.
 
@@ -351,8 +351,8 @@ A receiver runs a pool's tasks on the plugin profiles of its
 [Placement](concepts.md#placement) says how a task reaches one.
 Give a host-local receiver, such as a systemd one, a pool of its own, as
 [systemd](plugins.md#systemd) explains.
-[Quickstart: Receiver](quickstart-production.md#receiver) walks through adding and
-starting receiver `nomad-1`, with every file it writes.
+The [Quickstart](quickstart-production.md#_5-add-the-receiver) adds receiver `nomad-1`, and its
+[Part 2](quickstart-production.md#part-2-start-the-receiver-on-nomad) starts it on Nomad.
 
 Prerequisites: the working directory
 ([Set up `wherry operator`](#set-up-wherry-operator)), the pool, and a receiver
@@ -366,7 +366,7 @@ host that meets [Run a receiver](operations-receivers.md#run-a-receiver).
    verified `checksums.txt` ([Install plugins](operations-receivers.md#install-plugins)); a
    `broker:` line would give the receiver a broker address other than
    `operator.yaml`'s. A single file at `receivers/nomad-1.yaml` in the
-   working directory, as the [Quickstart](quickstart-production.md#receiver) writes,
+   working directory, as the [Quickstart](quickstart-production.md#_5-add-the-receiver) writes,
    needs no `-f`:
 
    ```

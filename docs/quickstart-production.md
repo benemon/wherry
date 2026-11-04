@@ -1,38 +1,77 @@
 # Quickstart: production
 
-Run a first task on a Nomad cluster.
-This guide uses pool `build`, tenant `acme`, host `laptop` and receiver `nomad-1`.
+Set up wherry on a Nomad cluster and run a first task from your laptop.
+
+## What you'll build
+
+You'll work in three places.
+Each part of this guide happens in one of them.
+
+| Place | What runs there | Where its files live |
+| --- | --- | --- |
+| Operator machine | `wherry operator`, `docker` and the `nomad` CLI | the working directory `wherry-prod/` |
+| Nomad cluster | the receiver `nomad-1`, and the agent jobs it starts | the Nomad Variable `nomad/jobs/wherry-receiver` and a host volume |
+| Your laptop | `wherry host` and your coding agent | `~/.config/wherry/` |
+
+The names used throughout are pool `build`, tenant `acme`, receiver `nomad-1` and host `laptop`.
+
+### The files you'll make
+
+| File | Made by | Lives in | What it is |
+| --- | --- | --- | --- |
+| `operator.yaml`, `operator.password` | `operator init` | `wherry-prod/` | how `wherry operator` connects to Kafka |
+| `kafka-ca.pem` | you, from your Kafka cluster | `wherry-prod/` | the CA your broker's certificate chains to |
+| `pools/build.yaml` | you | `wherry-prod/` | the pool's terms: its agents and limits |
+| `receivers/nomad-1.yaml` | you | `wherry-prod/` | the receiver's configuration: its pool, plugin pin and profiles |
+| `receivers/nomad-1.config.yaml` | you, from the plugin example | `wherry-prod/` | the receiver's local configuration: where it finds its files on Nomad |
+| `bundles/receivers/nomad-1.bundle` | `receiver apply` | `wherry-prod/` | the receiver's Kafka identity: broker, principal and password |
+| `bundles/hosts/acme/laptop.bundle` | `tenant host add` | `wherry-prod/` | your laptop's Kafka identity |
+| `nomad/wherry-receiver.nomad.hcl`, `nomad/wherry-receiver.volume.hcl` | you, from the plugin example | `wherry-prod/` | the receiver's Nomad job and its state volume |
+| `config.yaml`, `bundle.yaml`, `host.key`, `ca.pem` | `host init` and you | `~/.config/wherry/` on your laptop | your laptop's configuration |
+
+The bundles hold passwords.
+`operator init` keeps `bundles/` and `operator.password` out of git through `wherry-prod/.gitignore`.
 
 ## Before you start
 
-You need a Kafka cluster, a Nomad cluster and an agent image.
-Review the [Kafka prerequisites](operations-operator.md#prepare-kafka) and the Nomad prerequisites below.
+On the operator machine:
+
+- `git`, and Docker with push access to a registry your Nomad clients pull from. This guide uses
+  `registry.example.com`.
+- The `nomad` CLI, set up to reach your cluster: `NOMAD_ADDR`, and whatever
+  [TLS settings](https://developer.hashicorp.com/nomad/docs/commands#environment-variables) your cluster needs. With
+  ACLs enabled, `NOMAD_TOKEN` must be a management token, because step 3 of Part 2 applies an ACL policy.
+- A Kafka cluster that meets the [Kafka prerequisites](operations-operator.md#prepare-kafka), with a super user's
+  SCRAM credential. This guide calls it `kafka-admin`. On Strimzi, set the
+  [ignored-users pattern](operations-operator.md#strimzi) first.
+
+On the Nomad cluster:
+
+- Nomad 1.10 or later.
+- A namespace for agent jobs, `agents`.
+- Clients that run the `docker` driver as root, with the CNI reference plugins.
+- An agent image your clients can pull, here `registry.example.com/claude-agent:1.0`, with Claude Code installed as
+  `claude`. It must meet the [agent contract](configuration-receiver.md#agent-contract).
+
+On your laptop:
+
+- A Claude Code OAuth token, which `claude setup-token` prints.
 
 ## Install wherry
 
-Install wherry with [Homebrew](https://brew.sh/), on macOS or Linux:
+Install wherry on the operator machine and on your laptop:
 
 ```sh
 brew install benemon/tap/wherry
 ```
 
-The `benemon/tap` formula installs the release archive for the machine's OS
-and architecture, and Homebrew checks the archive against the SHA-256 the
-formula names. Every release updates the formula.
-
-### Install a release archive
-
-Each [release](https://github.com/benemon/wherry/releases) carries
-`wherry_<version>_<os>_<arch>.tar.gz` for `linux` and `darwin` on `amd64` and
-`arm64`, `checksums.txt` with each archive's SHA-256,
-`checksums.txt.sigstore.json`, the keyless signature over it, and
-`<archive>.sbom.json`, an SPDX SBOM for each archive. `<version>` is a
-release tag. Download the archive and the checksums, verify the checksums'
-signature with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/),
-check the archive against them, and extract the binary:
+::: details Install from a release archive instead
+Each [release](https://github.com/benemon/wherry/releases) has an archive per OS and architecture, `checksums.txt`, and
+a signature over the checksums. Verify the signature with
+[cosign](https://docs.sigstore.dev/cosign/system_config/installation/), then the archive against the checksums:
 
 ```sh
-version=<version> os=linux arch=amd64
+version=v0.1.0-rc.28 os=linux arch=amd64
 base=https://github.com/benemon/wherry/releases/download/$version
 archive=wherry_${version}_${os}_${arch}.tar.gz
 curl -fsSL --remote-name-all "$base/$archive" "$base/checksums.txt" "$base/checksums.txt.sigstore.json"
@@ -44,108 +83,47 @@ tar -xzf "$archive" --strip-components=1 "${archive%.tar.gz}/wherry"
 install -m 0755 wherry /usr/local/bin/wherry
 ```
 
-On macOS, `shasum -a 256 -c -` takes the place of `sha256sum -c -`. Each
-archive also carries a provenance attestation, which
-[GitHub's CLI](https://cli.github.com/) verifies in place of the signature and
-checksum steps:
+On macOS, use `shasum -a 256 -c -` in place of `sha256sum -c -`.
+:::
+
+## Part 1: on the operator machine
+
+### 1. Create the working directory
+
+Create the working directory and its folders, and copy in your Kafka cluster's CA certificate:
 
 ```sh
-gh attestation verify "$archive" -R benemon/wherry
+mkdir -p wherry-prod/pools wherry-prod/receivers wherry-prod/nomad
+cd wherry-prod
+cp /path/to/your/kafka-ca.pem kafka-ca.pem
 ```
 
-Install wherry on the operator's machine before the operator's steps.
-
-## Operator
-
-Each step names the machine it runs on:
-
-- the operator's machine, which holds the installation's working directory,
-  where `wherry operator` keeps its connection, the pool and receiver files
-  and every bundle;
-- the Nomad cluster, which runs receiver `nomad-1` as a Nomad job, driven
-  with the `nomad` CLI from the operator's machine;
-- `laptop`, the host the tenant submits from.
-
-Two pairs of files name the same credentials:
-
-- The pool terms give agent `claude` the credential `claude-oauth-token`.
-  The host's configuration maps that name to a source on `laptop`.
-- The receiver configuration names the platform credential `nomad-token`,
-  the Nomad token the receiver authenticates with. The receiver's local
-  configuration maps that name to a source in the receiver's job.
-
-The configuration on `wherry.operator` holds the names. Each value is read from
-its source on the machine that resolves it.
-
-### Prerequisites
-
-- A Nomad cluster with:
-  - a namespace for agent jobs, `agents`;
-  - nodes in the default node pool with the `docker` driver, able to pull
-    `registry.example.com/claude-agent:1.0`, an image with Claude Code
-    installed as `claude`;
-  - a node pool `agents-host` whose nodes run the `exec` driver and have
-    Claude Code installed as `claude`;
-  - clients that can run the receiver job of the
-    [Nomad example](https://github.com/benemon/wherry-plugins/tree/main/nomad#run-the-receiver-in-nomad):
-    the docker driver, the CNI reference plugins for its bridge network, a
-    client running as root, and Nomad 1.10 or later for its dynamic host
-    volume;
-  - with ACLs enabled, a token that can create host volumes, put
-    variables, apply policies and run jobs.
-- A checkout of [wherry-plugins](https://github.com/benemon/wherry-plugins)
-  on the operator's machine, for `examples/nomad`, and the receiver image
-  its `examples/nomad/Containerfile` builds, as
-  [Run the receiver in a container](https://github.com/benemon/wherry-plugins/tree/main/nomad#run-the-receiver-in-a-container)
-  describes, pushed where the Nomad clients pull from, here
-  `registry.example.com/wherry-receiver:<version>`.
-- A Claude Code OAuth token, which `claude setup-token` prints, on `laptop`.
-- An agent that meets the [agent contract](configuration-receiver.md#agent-contract),
-  here Claude Code in the image and on the `agents-host` nodes.
-
-### 1. Prepare Kafka
-
-On the Kafka cluster, enable share groups, a TLS listener with
-SCRAM-SHA-512, an authoriser, and the settings
-[Prepare Kafka](operations-operator.md#prepare-kafka) lists, and create the Kafka
-super user's SCRAM credential, here `kafka-admin`. This step happens once per
-cluster. On a Strimzi cluster, set the User Operator's ignored-users pattern
-before `operator init`, as [Strimzi](operations-operator.md#strimzi) shows, so that it
-keeps the principals wherry creates.
-
-On the operator's machine, put the super user's password in
-`/etc/wherry/admin-password`, mode 0600. The listener's certificate here
-chains to a private CA, so put that CA's certificate in
-`/etc/wherry/kafka-ca.pem` too. A listener whose certificate chains to a
-system root needs no CA file.
-
-### 2. Initialise the working directory
-
-On the operator's machine, make the installation's working directory and
-run `wherry operator init` in it:
+Put the super user's password in a private temporary file.
+`read -rs` keeps it off the screen, and `printf %s` writes it without a trailing newline:
 
 ```sh
-mkdir wherry-prod && cd wherry-prod
-wherry operator init --broker kafka.example.com:9093 --ca-file /etc/wherry/kafka-ca.pem \
-  --super-user kafka-admin --super-user-password-file /etc/wherry/admin-password
+password_file=$(mktemp) && trap 'rm -f "$password_file"' EXIT
+printf "Kafka super user's password: " && read -rs password && printf %s "$password" > "$password_file" && unset password
 ```
 
-On a terminal, `init` asks for whatever the flags leave out. Connected as
-the Kafka super user, it creates the principal `wherry.operator` with a new
-password, grants it the ACLs provisioning needs, and creates the
-installation-wide topics. It writes `operator.yaml` (the broker, the CA file
-and `password_file: operator.password`) and `operator.password`, mode 0600,
-and adds `operator.password` and `bundles/` to `.gitignore`. The super user is
-written nowhere: every later `wherry operator` command, run in this
-directory or given `--dir`, connects as `wherry.operator`.
+The `trap` deletes the file when this shell exits, even if a step fails.
+Initialise the directory, then delete the password file:
 
-The broker address goes into every host bundle, so it is the one `laptop`
-reaches. A receiver can name another in its file.
+```sh
+wherry operator init --broker kafka.example.com:9093 --ca-file kafka-ca.pem \
+  --super-user kafka-admin --super-user-password-file "$password_file"
+rm "$password_file"
+```
 
-### 3. Write the pool terms
+`operator init` creates the principal `wherry.operator` and grants it what wherry needs.
+It doesn't keep the super user's password.
+Every later `wherry operator` command in this directory connects as `wherry.operator`.
 
-In the working directory, write the [pool terms](configuration-operator.md#pool-terms)
-to `pools/build.yaml`:
+The broker address goes into every bundle, so use one your laptop and the receiver can reach.
+
+### 2. Create the pool
+
+Write the pool's terms to `pools/build.yaml`:
 
 ```yaml
 agents:
@@ -159,85 +137,78 @@ producer_byte_rate: 1048576
 request_percentage: 10
 ```
 
-The pool runs one agent, `claude`, the default for a task that names none.
-Every run of it takes the credential `claude-oauth-token`, which the agent
-finds in the environment variable `CLAUDE_CODE_OAUTH_TOKEN`, where Claude
-Code reads its token. The name is the link to the host: `laptop`'s
-configuration gives `claude-oauth-token` a source in
-[Host step 3](#_3-initialise-the-host), and a host without one has
-`wherry submit` refuse the task.
+The pool runs one agent, `claude`.
+Each run gets the credential `claude-oauth-token` in the variable Claude Code reads.
+Your laptop supplies its value in Part 3.
 
-[Create a pool](operations-operator.md#create-a-pool) explains `delivery_limit`,
-`lock_duration` and the other fields.
-
-### 4. Create the pool
-
-In the working directory:
+Apply the terms:
 
 ```sh
 wherry operator pool apply build
 ```
 
-`pool apply` reads `pools/build.yaml` and creates the pool: it records the
-terms on `wherry.operator`, creates the pool's topics, and sets the
-configuration of its share group.
-Without that file, on a terminal, it asks for the agents, their models and
-credentials, the quotas and the start-by limit, writes `pools/build.yaml`,
-then applies it.
+[Pool terms](configuration-operator.md#pool-terms) explains every field.
 
-### 5. Entitle the tenant
-
-In the working directory:
+### 3. Add the tenant and give it the pool
 
 ```sh
 wherry operator tenant add acme
 wherry operator tenant pool add acme build
 ```
 
-Tenant `acme` may now submit to `build` from any host the operator adds for
-it, as in [Host step 1](#_1-add-the-host).
+### 4. Build and push the receiver image
 
-## Receiver
-
-Receiver `nomad-1` runs as a Nomad job, the receiver container of the
-[Nomad example](https://github.com/benemon/wherry-plugins/tree/main/nomad#run-the-receiver-in-nomad).
-The steps below give what wherry needs of it, and the example's README
-gives the rest. On Kubernetes or under systemd, the
-[Kubernetes](https://github.com/benemon/wherry-plugins/tree/main/kubernetes#run-the-receiver-in-the-cluster)
-and
-[systemd](https://github.com/benemon/wherry-plugins/tree/main/systemd#run-the-receiver-as-a-systemd-service)
-examples take the place of the pin's source in step 1 and of steps 4 to 8.
-
-### 1. Write the receiver configuration
-
-The receiver starts the Nomad plugin only from a binary whose SHA-256 its
-record pins. The receiver image builds the plugin, so the pin is the SHA-256
-of the binary inside the image, as
-[The plugin pin](https://github.com/benemon/wherry-plugins/tree/main/nomad#the-plugin-pin)
-describes. On the operator's machine, print it:
+The receiver runs from an image that holds wherry and the Nomad plugin.
+Each [wherry release](https://github.com/benemon/wherry/releases)'s notes name the plugin releases that pair with it.
+Set both versions, and the image name, once. These values are the current pair:
 
 ```sh
-docker run --rm --entrypoint sha256sum registry.example.com/wherry-receiver:<version> \
-  /usr/local/libexec/wherry/plugins/wherry-plugin-nomad
+wherry_version=v0.1.0-rc.28
+plugin_version=v0.1.0-rc.18
+image=registry.example.com/wherry-receiver:$wherry_version
 ```
 
-In the working directory, write the
-[receiver configuration](configuration-receiver.md#receiver-configuration) to
-`receivers/nomad-1.yaml`, with that SHA-256 as the pin (shown here as
-`0123…`):
+Build and push the image from a checkout of that release, beside `wherry-prod/`:
+
+```sh
+git clone --branch "nomad/$plugin_version" https://github.com/benemon/wherry-plugins ../wherry-plugins
+cd ../wherry-plugins
+docker build -f examples/nomad/Containerfile -t "$image" \
+  --build-arg VERSION="$plugin_version" --build-arg WHERRY_VERSION="$wherry_version" .
+docker push "$image"
+```
+
+Print the plugin binary's SHA-256 from the image:
+
+```sh
+docker run --rm --entrypoint sha256sum "$image" /usr/local/libexec/wherry/plugins/wherry-plugin-nomad
+```
+
+The receiver runs only a plugin binary with this SHA-256, so you'll record it in the next step.
+[The plugin pin](https://github.com/benemon/wherry-plugins/tree/main/nomad#the-plugin-pin) explains why.
+
+Copy the example's job file, volume file and local configuration into your working directory, then return there:
+
+```sh
+cp examples/nomad/wherry-receiver.nomad.hcl examples/nomad/wherry-receiver.volume.hcl ../wherry-prod/nomad/
+cp examples/nomad/config.yaml ../wherry-prod/receivers/nomad-1.config.yaml
+cd ../wherry-prod
+```
+
+### 5. Add the receiver
+
+Write the receiver's configuration to `receivers/nomad-1.yaml`, with the SHA-256 from step 4 as the pin:
 
 ```yaml
 pool: build
 plugin_sha256:
-  # The SHA-256 of the plugin binary in the receiver image, the one binary the receiver may run.
+  # The SHA-256 of the plugin binary in the receiver image: the one binary the receiver may run.
   nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 capacity: 2
 plugins:
   nomad:
-    # Both plugin profiles inherit this config; each states only how it differs.
     config:
       namespace: agents
-      credential: nomad-token
       runtime:
         driver: docker
         config:
@@ -254,195 +225,76 @@ plugins:
         agent: claude
         labels:
           isolation: container
-      - name: host
-        agent: claude
-        labels:
-          isolation: host
-        config:
-          node_pool: agents-host
-          runtime:
-            driver: exec
-            # The exec driver takes no image, so the plugin profile removes the inherited one.
-            config:
-              image: null
 ```
 
-The receiver connects to the broker `operator.yaml` names, unless a
-`broker:` key names another. The plugin's `config` holds what both plugin
-profiles share. It names no `address`, so the plugin reaches Nomad through
-the task API socket the receiver's job sets as `NOMAD_ADDR`. The
-[Nomad plugin's settings](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
-list every key. `image: null` removes the inherited `image` from profile
-`host`, as [Plugin profile merge](configuration-receiver.md#plugin-profile-merge)
-describes. Both profiles launch `claude`, which takes `claude-oauth-token`
-at the target the pool terms give it. A task with no selector runs on
-`container`, the first in routing order, and `--selector isolation=host`
-runs on `host`.
+The receiver takes two tasks at a time and starts each as a Docker job in the `agents` namespace.
+[Receiver configuration](configuration-receiver.md#receiver-configuration) explains every field.
 
-`credential: nomad-token` names a [platform
-credential](configuration-receiver.md#platform-credentials). The name is the link to
-the receiver's job: its local configuration gives `nomad-token` a source in
-[Receiver step 5](#_5-write-the-receiver-s-local-configuration). A receiver
-without one fails to configure the plugin profile, and exits with:
-
-```
-profile container: credential "nomad-token" has no source in the receiver's configuration
-```
-
-The same configuration also works as a
-[directory](configuration-receiver.md#receiver-configuration-directory) with one file
-for the receiver, one for the plugin and one for each plugin profile, given
-with `-f` naming the directory. Without a file, on a terminal,
-`receiver apply` asks for the pool, the plugin, its pin and config, the
-agents with their labels, the capacity and the broker address, writes
-`receivers/nomad-1.yaml`, then applies it.
-
-### 2. Check the receiver configuration
-
-In the working directory, check the file against the pool's terms:
-
-```sh
-wherry operator receiver apply nomad-1 --dry-run
-```
-
-`--dry-run` writes nothing and prints the pin and each plugin profile as the
-record will hold them, with the plugin's `config` merged in and its keys
-sorted:
-
-```yaml
-capacity: 2
-plugin_sha256:
-    nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-profiles:
-    - name: container
-      plugin: nomad
-      agent: claude
-      labels:
-        isolation: container
-      config:
-        credential: nomad-token
-        namespace: agents
-        runtime:
-            config:
-                args:
-                    - -c
-                    - cd "$NOMAD_TASK_DIR" && exec claude -p --output-format stream-json --verbose < prompt.txt
-                command: /bin/sh
-                image: registry.example.com/claude-agent:1.0
-            driver: docker
-            resources:
-                cpu: 1000
-                memory_mb: 2048
-    - name: host
-      plugin: nomad
-      agent: claude
-      labels:
-        isolation: host
-      config:
-        credential: nomad-token
-        namespace: agents
-        node_pool: agents-host
-        runtime:
-            config:
-                args:
-                    - -c
-                    - cd "$NOMAD_TASK_DIR" && exec claude -p --output-format stream-json --verbose < prompt.txt
-                command: /bin/sh
-            driver: exec
-            resources:
-                cpu: 1000
-                memory_mb: 2048
-```
-
-Plugin profile `host` has the `exec` driver and no `image`. A plugin
-profile whose agent is outside the pool's terms fails with
-`receiver agent is outside pool terms`.
-
-### 3. Add the receiver
-
-In the working directory:
-
-```sh
-wherry operator receiver apply nomad-1
-```
-
-`receiver apply` adds the receiver: it records the configuration and the pin
-on `wherry.operator`, creates the receiver's Kafka principal, and writes its
-bundle, `bundles/receivers/nomad-1.bundle`, mode 0600 in a directory of mode
-0700. The bundle holds the broker address, the principal and its Kafka
-password, and no CA. Step 6 hands it to the receiver's job through a Nomad
-Variable.
-
-### 4. Create the state volume
-
-The receiver's state directory keeps its signing key, and the pool keys while
-the receiver is or was its pool's key custodian. It must survive restarts,
-reschedules and job updates. A receiver that loses it cannot start under
-the same name again. The example keeps it on a dynamic host volume. From the
-wherry-plugins checkout:
-
-```sh
-nomad volume create examples/nomad/wherry-receiver.volume.hcl
-```
-
-### 5. Write the receiver's local configuration
-
-In the wherry-plugins checkout, write the [receiver local
-configuration](configuration-receiver.md#receiver-local-configuration) to
-`config.yaml`, from `examples/nomad/config.yaml`. The job renders it at
-`/local/config.yaml` and runs `wherry receiver run --config-file
-/local/config.yaml`:
+Edit `receivers/nomad-1.config.yaml`, the receiver's local configuration you copied in step 4.
+It says where the receiver finds its files inside the Nomad job.
+Your broker's certificate chains to a private CA, so turn on its `ca_file` line:
 
 ```yaml
 bundle: /secrets/receiver.bundle
 ca_file: /secrets/kafka-ca.pem
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
+metrics_addr: ":9464"
 drain_timeout: 20s
-credentials:
-  nomad-token:
-    env: NOMAD_TOKEN
 ```
 
-- `bundle` is where the job renders the bundle, readable by the image's
-  user alone.
-- `ca_file` is where the job renders the broker's CA. The broker's
-  certificate here chains to a private CA. Without `ca_file` the receiver
-  trusts the system roots.
-- `state_dir` is on the state volume of step 4.
-- `plugin_dir` is where the image installs the plugin.
-- `drain_timeout` stays at least 10 seconds below the job's `kill_timeout`,
-  30 seconds, since a stop takes up to `drain_timeout` plus 5 seconds
-  ([Drain timeout and the stop window](configuration-receiver.md#drain-timeout-and-the-stop-window)).
-- `credentials` gives the platform credential `nomad-token`, which the
-  receiver configuration names in
-  [Receiver step 1](#_1-write-the-receiver-configuration), its source:
-  `NOMAD_TOKEN`, the token of the job's
-  [workload identity](https://developer.hashicorp.com/nomad/docs/concepts/workload-identity).
-  Neither `wherry.operator` nor the bundle holds it.
+Without this file, `receiver apply` asks for each value instead.
+[Receiver local configuration](configuration-receiver.md#receiver-local-configuration) lists the questions and each
+plugin example's answers.
 
-### 6. Put the bundle, configuration and CA in a Nomad Variable
+Add the receiver:
 
-The job reads the items `bundle`, `config` and `ca` of the Nomad Variable
-`nomad/jobs/wherry-receiver` through its workload identity. From the
-wherry-plugins checkout:
+```sh
+wherry operator receiver apply nomad-1
+```
+
+This records the receiver and writes its bundle to `bundles/receivers/nomad-1.bundle`.
+
+### 6. Add your laptop
+
+```sh
+wherry operator tenant host add acme laptop
+```
+
+This writes your laptop's bundle to `bundles/hosts/acme/laptop.bundle`.
+
+> [!IMPORTANT]
+> Hand-off: copy `bundles/hosts/acme/laptop.bundle` and `kafka-ca.pem` to your laptop's home directory, over a channel
+> you trust. The bundle holds the laptop's Kafka password.
+
+## Part 2: start the receiver on Nomad
+
+You still work on the operator machine, in `wherry-prod/`.
+The `nomad` CLI sends each command to your cluster.
+
+### 1. Create the state volume
+
+The receiver keeps its signing key in a volume that outlives restarts and job updates:
+
+```sh
+nomad volume create nomad/wherry-receiver.volume.hcl
+```
+
+### 2. Hand the receiver its files
+
+The job reads the bundle, the local configuration and the CA from one Nomad Variable:
 
 ```sh
 nomad var put nomad/jobs/wherry-receiver \
-  bundle=@<working directory>/bundles/receivers/nomad-1.bundle \
-  config=@config.yaml ca=@/etc/wherry/kafka-ca.pem
+  bundle=@bundles/receivers/nomad-1.bundle config=@receivers/nomad-1.config.yaml ca=@kafka-ca.pem
 ```
 
-The example job's templates restart the receiver's task when an item
-changes
-([template `change_mode`](https://developer.hashicorp.com/nomad/docs/job-specification/template#change_mode)).
-
-### 7. Attach the receiver policy
+### 3. Attach the receiver's ACL policy
 
 Skip this step if your cluster runs without ACLs.
 
-1. Write the plugin's [ACL policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy)
-   to `policy.hcl`, with a `node_pool` block for each node pool the profiles use:
+1. Write the plugin's [ACL policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy) to
+   `nomad/policy.hcl`:
 
    ```hcl
    namespace "agents" {
@@ -462,100 +314,61 @@ Skip this step if your cluster runs without ACLs.
    node_pool "default" {
      policy = "read"
    }
-
-   node_pool "agents-host" {
-     policy = "read"
-   }
    ```
 
-2. Attach it to the receiver job before the job runs:
+2. Attach it to the receiver's job:
 
    ```sh
-   nomad acl policy apply -namespace default -job wherry-receiver wherry-receiver policy.hcl
+   nomad acl policy apply -namespace default -job wherry-receiver wherry-receiver nomad/policy.hcl
    ```
 
-The job's workload identity then reaches the `agents` namespace and both node pools.
-
-### 8. Run the receiver
-
-From the wherry-plugins checkout:
+### 4. Run the receiver
 
 ```sh
-nomad job run -var image=registry.example.com/wherry-receiver:<version> examples/nomad/wherry-receiver.nomad.hcl
+nomad job run -var image="$image" nomad/wherry-receiver.nomad.hcl
 ```
 
-The receiver creates its signing key, `signing.key`, in
-`/var/lib/wherry/state`, registers it, configures both plugin profiles in
-one plugin process, and logs, as `nomad alloc logs` shows:
+The receiver registers its signing key and starts taking work.
+`nomad alloc logs` shows lines like these:
 
 ```
 receiver: <time> registered key: signing=<key id>
-receiver: <time> configured: pool=build profiles=2 capacity=2
+receiver: <time> configured: pool=build profiles=1 capacity=2
 ```
 
-A configuration change ends the process, and Nomad restarts it.
-[Run a receiver](operations-receivers.md#run-a-receiver) lists what every receiver
-needs. To upgrade the receiver image later, record the new image's pin
-with `receiver apply`, then run the job with the new image, as
-[Install plugins](operations-receivers.md#install-plugins) describes.
+## Part 3: on your laptop
 
-### 9. Check the receiver
+### 1. Put the CA and your token in place
 
-In the working directory, print the configuration the receiver runs:
+The files from the hand-off are in your home directory.
+Move the CA to where wherry looks for it:
 
 ```sh
-wherry operator receiver show nomad-1
+cd ~
+mkdir -p -m 0700 ~/.config/wherry
+mv kafka-ca.pem ~/.config/wherry/ca.pem
 ```
 
-It prints the record, the same YAML `--dry-run` printed in
-[Receiver step 2](#_2-check-the-receiver-configuration). Once `laptop` is
-set up, `wherry host receivers` shows the receiver `live`, as
-[Host step 3](#_3-initialise-the-host) shows.
-
-## Host
-
-### 1. Add the host
-
-In the working directory:
+Save your Claude Code token in a new file only you can read, without a trailing newline.
+The first command removes any old copy, so the new file gets the private mode:
 
 ```sh
-wherry operator tenant host add acme laptop
+rm -f ~/claude-oauth-token
+(umask 077 && printf "Claude Code token: " && read -rs token && printf %s "$token" > ~/claude-oauth-token)
 ```
 
-`tenant host add` records host `laptop` of tenant `acme`, creates its Kafka
-principal and key topic, and writes its bundle,
-`bundles/hosts/acme/laptop.bundle`, mode 0600. Hand the bundle to `laptop`'s user
-over a channel you trust. It holds the host's Kafka password. The bundle
-carries nothing about the broker's CA: `laptop` trusts the broker through the
-system's trusted roots, or, for a private CA, through the CA file whoever
-distributes the Kafka CA puts on it.
-
-### 2. Install wherry
-
-On `laptop`, install wherry as in [Install wherry](#install-wherry).
-
-### 3. Initialise the host
-
-On `laptop`, put the broker's CA certificate, `/etc/wherry/kafka-ca.pem` on
-the operator's machine, at `~/kafka-ca.pem`. `host init` asks for it only on
-a terminal. Without one, place it at `~/.config/wherry/ca.pem` before
-`host init` runs.
-
-Keep the Claude Code OAuth token in a file readable by its owner
-alone. The command reads the token from standard input:
-
-```sh
-(umask 077 && cat > ~/claude-oauth-token)
-```
-
-Then give `host init` the bundle:
+### 2. Initialise the host
 
 ```sh
 wherry host init laptop.bundle
+rm laptop.bundle
 ```
 
+`host init` copies the bundle into `~/.config/wherry/`, so you can delete the hand-off copy.
+It creates your laptop's signing key and prints its key ID.
+Then it asks for a source for each credential the pool needs:
+
 ```
-CA file for the broker's certificate (blank for the system roots): ~/kafka-ca.pem
 wrote /home/me/.config/wherry/config.yaml
 <key ID>
 pool build delivers credential claude-oauth-token to its agents as CLAUDE_CODE_OAUTH_TOKEN.
@@ -563,51 +376,18 @@ Source for credential claude-oauth-token (file:PATH, env:VAR or command:ARGV; bl
 wrote /home/me/.config/wherry/config.yaml
 ```
 
-`host init` copies the bundle to `bundle.yaml` in the host's
-[configuration directory](configuration-host.md#client-configuration),
-`~/.config/wherry/` here, mode 0600 in a directory of mode 0700. It creates
-`host.key` there, registers it on the host's key topic, and prints its key
-ID, its RFC 7638 thumbprint in base64url. On a terminal, it asks for a CA file when its configuration names
-none and the directory holds no `ca.pem`. Leave it blank for a broker
-whose certificate the system's roots trust. It then reads the terms of every pool
-`acme` is entitled to and asks for a source for each credential their agents
-take that the configuration lacks: here `claude-oauth-token`, which the pool
-terms name in [Operator step 3](#_3-write-the-pool-terms). It writes
-`config.yaml` there, the [client
-configuration](configuration-host.md#client-configuration) every host command
-reads, with the source's reference, never the token:
+It writes `~/.config/wherry/config.yaml`, which names the source and never the token:
 
 ```yaml
 bundle: /home/me/.config/wherry/bundle.yaml
-ca_file: /home/me/kafka-ca.pem
 credentials:
   claude-oauth-token:
     file: /home/me/claude-oauth-token
 ```
 
-`wherry submit` encrypts the file's contents byte for byte in the task's
-envelope under the pool's key, and the receiver that claims the task opens
-it through the pool's key custodian. A credential can also come from an
-environment variable of the submitting process,
-`env:CLAUDE_CODE_OAUTH_TOKEN`, or from a command's output,
-`command:op read op://wherry/claude/credential`
-([credential sources](security.md#credential-sources)). When the agent's
-variable is already set where `host init` runs, it offers that variable as
-the source, defaulting to No ([suggested sources](security.md#suggested-sources)).
+[Credential sources](security.md#credential-sources) shows the other kinds of source.
 
-A credential left blank stays unconfigured, and `wherry submit` refuses a
-task that needs it:
-
-```
-invalid input: auth required: credential claude-oauth-token is not in this host's configuration
-```
-
-Run `wherry host init` again, without the bundle, to give it a source. A
-re-run keeps every entry and asks only for what is missing, such as the
-credentials of a pool `acme` is entitled to later.
-
-On `laptop`, `wherry host receivers` lists the receiver as the tenant sees
-it:
+### 3. See the receiver
 
 ```sh
 wherry host receivers
@@ -616,87 +396,42 @@ wherry host receivers
 ```
 receiver=nomad-1 pool=build capacity=2 in_flight=0 advertisement_age=4s status=live
   profile=container plugin=nomad agent=claude ready=true labels=isolation=container inline_limit=45056 credentials=claude-oauth-token:env=CLAUDE_CODE_OAUTH_TOKEN
-  profile=host plugin=nomad agent=claude ready=true labels=isolation=host inline_limit=45056 credentials=claude-oauth-token:env=CLAUDE_CODE_OAUTH_TOKEN
 ```
 
-`advertisement_age` is the age of the receiver's latest advertisement, and
-`status=live` holds while it is within 120 seconds. `ready=true` means the
-receiver offers the plugin profile. `inline_limit` is the most inline input
-bytes the Nomad plugin delivers. `credentials` lists the agent's credentials
-from the pool terms, each with its target. A credential `laptop` has no source for
-shows as `claude-oauth-token:env=CLAUDE_CODE_OAUTH_TOKEN(missing)`.
+### 4. Submit a task and walk away
 
-### 4. Connect a harness
-
-
-On `laptop`, install the wherry plugin in the harness, so that its agent
-submits tasks through `wherry host mcp`. In Claude Code:
+Submit a task and keep its run ID:
 
 ```sh
-claude plugin marketplace add benemon/wherry
-claude plugin install wherry@wherry
+run=$(wherry submit --prompt "Reply with exactly: wherry is working" | sed -n 's/^run_id=\([^ ]*\).*/\1/p')
+echo "$run"
 ```
 
-Run `/reload-plugins` in the session, then ask for the `receivers` tool,
-which lists `nomad-1`. The plugin's server reads
-`~/.config/wherry/config.yaml`.
-[Harness integration](operations-hosts.md#harness-integration) covers other
-harnesses and a configuration at another path.
+The run needs nothing more from your laptop.
+Close the lid if you like.
 
-### 5. Submit a task
-
-On `laptop`, from the command line:
+### 5. Collect the result
 
 ```sh
-wherry submit --prompt "Summarise the release notes in three sentences."
+wherry wait "$run"
 ```
 
-The task takes the pool's default agent, `claude`, and an empty selector, so
-it runs on plugin profile `container`. The host prints the run ID and the
-pool:
-
-```
-run_id=run-<id> pool=build
-```
-
-`--selector isolation=host` runs it on plugin profile `host`.
-
-### 6. Wait for the run
-
-On `laptop`:
-
-```sh
-wherry wait run-<id>
-```
-
-`wait` prints the agent's message and a line for each output it wrote,
-once the run ends. It exits 0 for `TASK_STATE_COMPLETED` and with a code
-per state otherwise, as [exit codes](commands.md#exit-codes) lists. It
-waits 2 hours 10 minutes by default (`--timeout` changes that). The run
-needs nothing more from the host once `submit` returns.
-
-In another terminal, `wherry logs -f run-<id>` prints the agent's
-transcript lines as the agent runs and exits when the run ends.
-`wherry logs run-<id> > run.log` keeps the transcript.
-
-`wherry events run-<id>` prints the run's status history.
-
-### If the run needs a credential
-
-`wherry submit` refuses a task whose credential source does not resolve,
-with `resolve credential <name>: <cause>`. A run that ends in
-`TASK_STATE_FAILED` with a message naming a credential found it missing or
-refused while it ran. The run does not resume.
-
-1. Fix the credential's source in `credentials` in the host configuration.
-2. Submit the task again with `wherry submit`, which starts a new run.
+`wait` prints the agent's reply once the run ends.
+It exits 0 when the run completed.
+To follow the transcript while the run is going, use `wherry logs -f "$run"` in another terminal.
 
 ## Check that it worked
 
-Confirm that `wherry host receivers` shows `nomad-1` as `live`.
-Confirm that your first run ends in `TASK_STATE_COMPLETED`.
+- `wherry host receivers` shows `nomad-1` as `live`.
+- `wherry wait` prints `wherry is working` and exits 0.
+
+If `submit` refuses with `auth required`, your laptop has no source for the credential: run `wherry host init` again.
 
 ## Next steps
 
-Read [Key concepts](concepts.md) to understand placement and recovery.
-See [Host operations](operations-hosts.md) for the next tasks.
+- Connect your coding agent, so it can delegate tasks itself. In Claude Code, run
+  `claude plugin marketplace add benemon/wherry` and `claude plugin install wherry@wherry`.
+  [Harness integration](operations-hosts.md#harness-integration) covers other harnesses.
+- [Key concepts](concepts.md) explains pools, tenants, placement and recovery.
+- [Receiver operations](operations-receivers.md) covers upgrades and the plugin pin.
+- [Host operations](operations-hosts.md) covers git repositories, files and harnesses.
