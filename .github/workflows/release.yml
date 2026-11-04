@@ -44,11 +44,6 @@ jobs:
   publish:
     needs: validate
     runs-on: ubuntu-latest
-    # Formula pushes run one at a time in start order, so a prerelease run cannot overwrite a stable formula pushed
-    # after it.
-    concurrency:
-      group: release-publish
-      cancel-in-progress: false
     outputs:
       formula: ${{ steps.formula.outputs.formula }}
     permissions:
@@ -91,7 +86,8 @@ jobs:
           case "$RELEASE_TAG" in (*[!A-Za-z0-9._-]*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
           gh release edit "$RELEASE_TAG" --draft=false
       # The formula follows prereleases until a stable tag exists, then stable releases only. A stable tag whose release
-      # failed still counts; re-run its release or delete the tag.
+      # failed still counts; re-run its release or delete the tag. A prerelease tagged before the first stable one but
+      # published after it can leave the formula on the prerelease; re-run the stable release's publish job.
       - name: Decide whether to push the Homebrew formula
         id: formula
         env:
