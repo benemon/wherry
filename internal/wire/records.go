@@ -707,6 +707,14 @@ func (value *RunStatus) validate() error {
 	switch binding.Kind {
 	case "claimed", "started", "rejected", "terminal", "released", "adopting", "reconciling":
 		return nil
+	case "placing":
+		// The text travels raw, as any status text does, when escaping would make it longer than base64.
+		message := update.Status.Message
+		if update.Status.State != TaskStateWorking || binding.LogOffset != nil || message == nil || len(message.Parts) != 1 ||
+			message.Parts[0].Text == "" && (message.Parts[0].Raw == nil || message.Parts[0].MediaType != "text/plain") {
+			return errors.New("a placing status is working, with one text part and no log offset")
+		}
+		return nil
 	default:
 		return errors.New("invalid status kind")
 	}

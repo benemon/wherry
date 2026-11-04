@@ -679,6 +679,57 @@ func TestEventsPrintsStatusesAndChunkCounts(t *testing.T) {
 	}
 }
 
+const (
+	placingFiltered  = "waiting for placement (1 nodes evaluated, 1 filtered, 0 exhausted)"
+	placingExhausted = "waiting for placement (2 nodes evaluated, 0 filtered, 2 exhausted)"
+)
+
+// placingStatus is a placing status as receiver-a writes it: WORKING, one text part, no log offset.
+func (b *bus) placingStatus(t *testing.T, admitted task, eventID, timestamp, text string) []byte {
+	status := wire.TaskStatus{State: wire.TaskStateWorking, Timestamp: timestamp,
+		Message: &wire.Message{MessageID: "msg-" + eventID, Role: wire.RoleAgent, Parts: []wire.Part{{Text: text}}, Extensions: []string{wire.ExtensionURI}}}
+	return b.status(t, admitted, eventID, "placing", status)
+}
+
+// placingRun admits a run whose job waits for placement twice, for a different reason each time, and returns the two
+// placing statuses' timestamps.
+func placingRun(t *testing.T) (*bus, string, [2]string) {
+	t.Helper()
+	b := newBus(t)
+	admitted := b.admitted(t)
+	runID := admitted.submission.Wherry.Run
+	times := [2]string{now(wire.TaskStateWorking).Timestamp, now(wire.TaskStateWorking).Timestamp}
+	b.feed(t, runID, b.placingStatus(t, admitted, "placing-1", times[0], placingFiltered),
+		b.placingStatus(t, admitted, "placing-2", times[1], placingExhausted))
+	return b, runID, times
+}
+
+func TestStatusShowsPlacing(t *testing.T) {
+	b, runID, _ := placingRun(t)
+	var stdout, stderr bytes.Buffer
+	if err := runStatus(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if want := "TASK_STATE_WORKING\n" + placingExhausted + "\n"; stdout.String() != want || stderr.Len() != 0 {
+		t.Fatalf("stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
+	}
+}
+
+func TestEventsListPlacing(t *testing.T) {
+	b, runID, times := placingRun(t)
+	var stdout, stderr bytes.Buffer
+	if err := runEvents(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 3 || !strings.HasPrefix(lines[0], "attempt=1 kind=claimed state=TASK_STATE_WORKING ") ||
+		lines[1] != "attempt=1 kind=placing state=TASK_STATE_WORKING receiver=receiver-a time="+times[0]+" message=\""+placingFiltered+"\"" ||
+		lines[2] != "attempt=1 kind=placing state=TASK_STATE_WORKING receiver=receiver-a time="+times[1]+" message=\""+placingExhausted+"\"" ||
+		stderr.Len() != 0 {
+		t.Fatalf("stdout %q stderr %q, want claimed then both placing statuses", stdout.String(), stderr.String())
+	}
+}
+
 func TestLogsPrintsTheLatestAttemptsLines(t *testing.T) {
 	b, runID := transcriptRun(t)
 	var stdout, stderr bytes.Buffer
