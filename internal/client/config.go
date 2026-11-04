@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -169,62 +168,8 @@ func LoadConfig(path string) (Config, error) {
 		if info, err := os.Stat(config.InputRoots[i]); err != nil || !info.IsDir() {
 			return Config{}, fmt.Errorf("config input root %s does not exist or is not a directory", root)
 		}
-		if held := HeldHostPath(config.InputRoots[i], config); held != "" {
-			return Config{}, fmt.Errorf("config input root %s holds %s, a directory of the host's own files", root, held)
-		}
 	}
 	return config, nil
-}
-
-// HeldHostPath names the first directory of the host's own files beneath root or root itself: state_dir, or the
-// directory of the host key, the bundle or a file credential source; it is "" when root holds none. An input opened
-// through root can follow a link anywhere beneath root, so a root holding any of them is refused rather than checked
-// at each open. Each directory's ancestors are compared with root by identity, so a link, a case-varied spelling or a
-// bind mount hides none, and a directory that does not exist yet is placed by its nearest existing ancestor.
-func HeldHostPath(root string, config Config) string {
-	rootInfo, err := os.Stat(root)
-	if err != nil {
-		return ""
-	}
-	paths := []string{config.StateDir, filepath.Dir(config.HostKey), filepath.Dir(config.Bundle)}
-	for _, name := range slices.Sorted(maps.Keys(config.Credentials)) {
-		if file := config.Credentials[name].File; file != "" {
-			paths = append(paths, filepath.Dir(file))
-		}
-	}
-	for _, path := range paths {
-		if path == "" {
-			continue
-		}
-		for dir := resolveExisting(path); ; dir = filepath.Dir(dir) {
-			if info, err := os.Stat(dir); err == nil && os.SameFile(info, rootInfo) {
-				return path
-			}
-			if dir == filepath.Dir(dir) {
-				break
-			}
-		}
-	}
-	return ""
-}
-
-// resolveExisting is path made absolute with the links of its nearest existing ancestor resolved, and the rest of it
-// unchanged.
-func resolveExisting(path string) string {
-	path, err := filepath.Abs(path)
-	if err != nil {
-		return path
-	}
-	rest := ""
-	for dir := path; ; dir = filepath.Dir(dir) {
-		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-			return filepath.Join(resolved, rest)
-		}
-		if dir == filepath.Dir(dir) {
-			return path
-		}
-		rest = filepath.Join(filepath.Base(dir), rest)
-	}
 }
 
 // Init creates the host key if it is missing and registers it on the host's key topic, returning its key ID and the

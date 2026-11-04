@@ -404,9 +404,6 @@ The server sends an input or `prompt_file` only from beneath its input
 roots: the client configuration's `input_roots`, or its working directory
 when that is unset. Every input root is a directory whose files the harness
 can send to remote agents; list only directories meant for that.
-An input root must not hold `state_dir` or the directory of `host_key`, `bundle`
-or a `file` credential source. The configuration with such a root fails to load.
-Without `input_roots`, the server does not start in such a working directory.
 
 `plugins/wherry` packages the server with the `wherry` Agent Skill:
 

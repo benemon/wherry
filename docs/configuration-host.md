@@ -34,7 +34,7 @@ The host's paths are the same on every OS, macOS included:
 | `credentials` | mapping | none | Map credential names to [sources](security.md#credential-sources). |
 | `git` | list | none | Map URL prefixes to credential names and SSH known-hosts files. |
 | `storage` | mapping | none | Map pool names to S3 `access_key` and `secret_key` credential names. |
-| `input_roots` | list of paths | MCP server working directory | Allow the MCP server to send inputs from these directories. None may hold `state_dir` or the directory of `host_key`, `bundle` or a `file` credential source. |
+| `input_roots` | list of paths | MCP server working directory | Allow the MCP server to send inputs from these directories. |
 
 Without a CA file, the host trusts system roots.
 Each credential source uses exactly one of `file`, `env` and `command`.
