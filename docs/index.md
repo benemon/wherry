@@ -45,11 +45,3 @@ A run can outlast the session that submits it.
 Use `wherry host wait RUN_ID` to collect its result later.
 [Runs and attempts](concepts.md#runs-and-attempts) explains recovery and its limits.
 [Run history](governance.md#run-history) explains retention.
-
-## What you need
-
-Run a Kafka cluster with wherry's required share-group and security settings.
-Create a pool, tenant and receiver with `wherry operator`.
-Enrol a host and submit your first task with the CLI or MCP tools.
-Follow the [production quickstart](quickstart-production.md) for a Nomad deployment.
-Use the [development quickstart](quickstart-development.md) for a local trial.
