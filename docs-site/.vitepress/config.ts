@@ -14,16 +14,54 @@ const sidebar = [
         "link": "/use-cases"
       },
       {
-        "text": "Quickstart: development",
+        "text": "Install the wherry CLI",
+        "link": "/install-cli"
+      },
+      {
+        "text": "Quickstart (development)",
         "link": "/quickstart-development"
+      }
+    ]
+  },
+  {
+    "text": "Deploy",
+    "items": [
+      {
+        "text": "Install",
+        "items": [
+          {
+            "text": "Overview",
+            "link": "/install"
+          },
+          {
+            "text": "Set up the operator",
+            "link": "/install-operator"
+          },
+          {
+            "text": "Receiver on Nomad",
+            "link": "/install-receiver-nomad"
+          },
+          {
+            "text": "Receiver on Kubernetes and OpenShift",
+            "link": "/install-receiver-kubernetes"
+          },
+          {
+            "text": "Receiver on systemd",
+            "link": "/install-receiver-systemd"
+          },
+          {
+            "text": "Set up a host",
+            "link": "/install-host"
+          },
+          {
+            "text": "Run a first task",
+            "link": "/install-first-task"
+          }
+        ]
       },
       {
-        "text": "Quickstart: production",
-        "link": "/quickstart-production"
-      },
-      {
-        "text": "Upgrading",
-        "link": "/upgrading"
+        "text": "Upgrade and uninstall",
+        "link": "/upgrade"
       }
     ]
   },
@@ -164,7 +202,7 @@ export default defineConfig({
     // The lockup carries the wordmark.
     siteTitle: false,
     nav: [
-      { text: 'Quickstart', link: '/quickstart-production' },
+      { text: 'Install', link: '/install' },
       { text: 'Configuration', link: '/configuration-host' },
       { text: 'Commands', link: '/commands' },
       { text: 'GitHub', link: 'https://github.com/benemon/wherry' },

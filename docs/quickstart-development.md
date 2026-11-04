@@ -3,7 +3,7 @@
 Run a complete instance on one machine.
 Use this instance to try wherry or develop integrations.
 
-For a deployment across machines, follow [Quickstart: production](quickstart-production.md).
+For a deployment across machines, follow [Install](install.md).
 
 ## Before you start
 
@@ -12,14 +12,7 @@ Without a harness, you can run the built-in mock agent instead.
 
 ## Install wherry
 
-Install wherry with [Homebrew](https://brew.sh/), on macOS or Linux:
-
-```sh
-brew install benemon/tap/wherry
-```
-
-Homebrew installs the archive for your operating system and architecture.
-It checks the archive against the formula's SHA-256.
+Install wherry on this machine, as [Install the wherry CLI](install-cli.md) shows.
 
 ## Start your instance
 

@@ -21,7 +21,9 @@ func quickstart(name string) string {
 
 // TestQuickstartFiles reads each file the quickstart writes with the reader that reads it in use, checks the receiver
 // configuration against the pool terms, and checks that each credential the pool terms and the receiver configuration
-// name has a source in the host's and the receiver's configuration. docs/quickstart-production.md holds each file whole.
+// name has a source in the host's and the receiver's configuration. docs/install-operator.md holds the pool terms whole,
+// and docs/install-host.md the host configuration; the Nomad record and local configuration come from the Nomad
+// plugin's install region in wherry-plugins, which this repository does not hold.
 func TestQuickstartFiles(t *testing.T) {
 	terms, err := readPoolConfig(quickstart("build-terms.yaml"), false)
 	if err != nil {
@@ -57,7 +59,8 @@ func TestQuickstartFiles(t *testing.T) {
 	if local.Bundle == "" || local.CAFile == "" || local.DrainTimeout <= 0 {
 		t.Fatalf("local configuration %+v; want the example's bundle, CA and drain timeout", local)
 	}
-	documented(t, "quickstart-production.md", "quickstart/build-terms.yaml", "quickstart/nomad-1.yaml", "quickstart/receiver-config.yaml", "quickstart/host-config.yaml")
+	documented(t, "install-operator.md", "quickstart/build-terms.yaml")
+	documented(t, "install-host.md", "quickstart/host-config.yaml")
 }
 
 // TestQuickstartMissingSourceError finds in the configuration reference and operations, as a code block of its own or of

@@ -13,8 +13,8 @@ model and [how it works](https://benemon.github.io/wherry/introduction#how-does-
 
 The [development quickstart](https://benemon.github.io/wherry/quickstart-development)
 runs a whole deployment on one machine with `wherry dev`.
-The [production quickstart](https://benemon.github.io/wherry/quickstart-production)
-provisions a pool, tenant and receiver on Nomad and runs a first task.
+[Install](https://benemon.github.io/wherry/install)
+provisions a pool, tenant and receiver on Nomad, Kubernetes or systemd and runs a first task.
 
 ## Configuration
 
@@ -32,7 +32,7 @@ covers Kafka, pools, tenants, receiver provisioning, revocation and reset.
 covers platforms, plugins, metrics and custody.
 [Host operations](https://benemon.github.io/wherry/operations-hosts)
 covers enrolment, harnesses, files and key rotation.
-[Upgrading](https://benemon.github.io/wherry/upgrading) gives the rolling procedure.
+[Upgrade and uninstall](https://benemon.github.io/wherry/upgrade) gives the rolling procedure.
 
 ## Harness integration
 

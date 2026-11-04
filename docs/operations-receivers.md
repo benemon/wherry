@@ -270,7 +270,7 @@ and another live receiver in the pool.
    `custodian: lost the custodian group's assignment for pool <pool>` since.
 
 2. Stop the pool's receivers one at a time, as for an
-   [upgrade](upgrading.md#upgrade-wherry), and wait for each to be `live` again in
+   [upgrade](upgrade.md#upgrade-wherry), and wait for each to be `live` again in
    `wherry host receivers` before stopping the next.
 
 3. When the custodian stops, check its log for

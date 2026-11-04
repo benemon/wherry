@@ -1,11 +1,13 @@
-# Upgrading
+# Upgrade and uninstall
+
+Upgrade wherry and its plugins in place, and uninstall a receiver or a host.
 
 ## Before you start
 
 Read the [release notes](https://github.com/benemon/wherry/releases) for compatibility requirements.
 Check record formats, key file formats and the plugin protocol version.
 Keep each receiver's local configuration, bundle and state directory.
-Verify the new binary as described in [Install wherry](quickstart-production.md#install-wherry).
+Verify the new binary as described in [Install the wherry CLI](install-cli.md).
 
 ## Upgrade wherry
 
@@ -50,3 +52,34 @@ Upgrade a reader that reports this error.
 Host and receiver signing keys must be private JWKs.
 Follow the release's migration instructions when formats change.
 For a [deployment reset](operations-operator.md#reset-a-deployment), move incompatible keys aside before provisioning new identities.
+
+## Upgrade and uninstall a receiver
+
+Each receiver page gives its platform's upgrade and uninstall steps.
+
+| Platform | Upgrade | Uninstall |
+| --- | --- | --- |
+| Nomad | [Upgrade](install-receiver-nomad.md#upgrade) | [Uninstall](install-receiver-nomad.md#uninstall) |
+| Kubernetes and OpenShift | [Upgrade](install-receiver-kubernetes.md#upgrade) | [Uninstall](install-receiver-kubernetes.md#uninstall) |
+| systemd | [Upgrade](install-receiver-systemd.md#upgrade) | [Uninstall](install-receiver-systemd.md#uninstall) |
+
+## Uninstall a host
+
+1. On the operator machine, in the working directory, remove the host:
+
+   ```sh
+   wherry operator tenant host remove TENANT HOST
+   ```
+
+   For this guide's host, that is `wherry operator tenant host remove acme laptop`.
+   [`tenant host remove`](commands.md#wherry-operator-tenant-host-remove-tenant-host) runs the host's revocation steps.
+
+2. After it succeeds, delete `~/.config/wherry/` on the laptop.
+   It holds `config.yaml`, `bundle.yaml`, `host.key` and `ca.pem`.
+3. Delete `~/claude-oauth-token` on the laptop when nothing else uses it.
+4. On the operator machine, delete `bundles/hosts/<tenant>/<host>.bundle`.
+   Host removal does not delete it.
+
+Removing the host does not revoke the Claude token.
+
+Check that it worked: `wherry operator tenant list` no longer lists the host under its tenant.

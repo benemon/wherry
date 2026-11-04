@@ -8,8 +8,8 @@ hero:
   tagline: An execution fabric for delegated agent work.
   actions:
     - theme: brand
-      text: Quickstart
-      link: /quickstart-production
+      text: Install
+      link: /install
     - theme: alt
       text: How it works
       link: /introduction
