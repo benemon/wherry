@@ -1331,15 +1331,75 @@ func TestConfigInputRoots(t *testing.T) {
 			t.Errorf("config with an input root that is %s: %v, want %q", name, err, test.want)
 		}
 	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("XDG_STATE_HOME", "")
+	if err := os.Mkdir(filepath.Join(home, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("bundle: bundle.yaml\ninput_roots: ['~/src']\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if config, err := LoadConfig(path); err != nil || !slices.Equal(config.InputRoots, []string{filepath.Join(home, "src")}) {
+		t.Fatalf("input roots %v, %v", config.InputRoots, err)
+	}
+	// The home directory holds the default state_dir and host key.
 	if err := os.WriteFile(path, []byte("bundle: bundle.yaml\ninput_roots: ['~']\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "a directory of the host's own files") {
+		t.Fatalf("config with the home directory as an input root: %v, want it refused", err)
+	}
+}
+
+// An input root holding state_dir, or the directory of the host key, the bundle or a credential file, is refused: an
+// input opened through the root could follow a link swapped in beneath it to any of them.
+func TestConfigInputRootHoldingTheHostsFilesIsRefused(t *testing.T) {
+	dirs := make([]string, 3)
+	for i := range dirs {
+		dir, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		dirs[i] = dir
+	}
+	root, outside, links := dirs[0], dirs[1], dirs[2]
+	if err := os.Mkdir(filepath.Join(root, "sub"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if config, err := LoadConfig(path); err != nil || !slices.Equal(config.InputRoots, []string{home}) {
-		t.Fatalf("input roots %v, %v", config.InputRoots, err)
+	if err := os.Symlink(filepath.Join(root, "sub"), filepath.Join(links, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	fields := func(changed map[string]string) string {
+		values := map[string]string{"bundle": filepath.Join(outside, "bundle.yaml"), "host_key": filepath.Join(outside, "host.key"),
+			"state_dir": filepath.Join(outside, "state"), "credential": filepath.Join(outside, "model")}
+		maps.Copy(values, changed)
+		return "bundle: " + values["bundle"] + "\nhost_key: " + values["host_key"] + "\nstate_dir: " + values["state_dir"] +
+			"\ncredentials:\n  model: {file: " + values["credential"] + "}\ninput_roots: ['" + root + "']\n"
+	}
+	path := filepath.Join(outside, "config.yaml")
+	for name, changed := range map[string]map[string]string{
+		"state_dir":                       {"state_dir": filepath.Join(root, "wherry", "state")},
+		"state_dir as the root":           {"state_dir": root},
+		"state_dir through a link":        {"state_dir": filepath.Join(links, "linked", "state")},
+		"the host key's directory":        {"host_key": filepath.Join(root, "keys", "host.key")},
+		"the bundle's directory":          {"bundle": filepath.Join(root, "bundle.yaml")},
+		"a credential file's directory":   {"credential": filepath.Join(root, "secrets", "model")},
+		"a credential file through links": {"credential": filepath.Join(links, "linked", "model")},
+	} {
+		if err := os.WriteFile(path, []byte(fields(changed)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "a directory of the host's own files") {
+			t.Errorf("config with an input root holding %s: %v, want it refused", name, err)
+		}
+	}
+	if err := os.WriteFile(path, []byte(fields(nil)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if config, err := LoadConfig(path); err != nil || !slices.Equal(config.InputRoots, []string{root}) {
+		t.Fatalf("config with the host's files outside its input root: %v, %v", config.InputRoots, err)
 	}
 }
 
