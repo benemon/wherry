@@ -2297,8 +2297,20 @@ func TestReceiversOfAHostWithoutEntitlementsIsEmpty(t *testing.T) {
 	if _, err := host.Register(f.ctx); err != nil {
 		t.Fatal(err)
 	}
+	// kadm lists every topic when it is given none, which it asks for as a metadata request naming no topics.
+	var all atomic.Int32
+	f.cluster.ControlKey(int16(kmsg.Metadata), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		f.cluster.KeepControl()
+		if request.(*kmsg.MetadataRequest).Topics == nil {
+			all.Add(1)
+		}
+		return nil, nil, false
+	})
 	receivers, err := host.Receivers(f.ctx)
 	if err != nil || len(receivers) != 0 {
 		t.Fatalf("receivers %v, %v; want none and no error", receivers, err)
+	}
+	if n := all.Load(); n != 0 {
+		t.Fatalf("listing receivers asked for every topic's metadata %d times", n)
 	}
 }
