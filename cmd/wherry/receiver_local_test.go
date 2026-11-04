@@ -324,3 +324,18 @@ func TestReceiverLocalCA(t *testing.T) {
 		})
 	}
 }
+
+func TestReceiverLocalInterruptedAndInvalidAnswers(t *testing.T) {
+	for _, answers := range []string{"", "\n\n", "\n\n\n\ninvalid\n", "\n\n\n\n\n\nenv\n9INVALID\n", "\n\n\n\n\n\nfile\n\n"} {
+		t.Run(fmt.Sprintf("%q", answers), func(t *testing.T) {
+			dir := t.TempDir()
+			onTerminal(t, answers)
+			if err := receiverLocalFile(dir, "r", "outside.yaml", false, false, io.Discard, localReceiver(), operatorConfig{}); err == nil {
+				t.Fatal("accepted incomplete or invalid answers")
+			}
+			if _, err := os.Stat(filepath.Join(dir, "receivers")); !os.IsNotExist(err) {
+				t.Fatalf("partial file written: %v", err)
+			}
+		})
+	}
+}
