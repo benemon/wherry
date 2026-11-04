@@ -713,7 +713,7 @@ No `wherry` command reads state while this holds, so the reset works on the
 platform and on Kafka directly.
 
 1. Stop every receiver and every `wherry host mcp` and host command.
-2. Stop and remove every run's platform job (the Nomad job, Kubernetes Job
+2. Stop and remove every run's platform job (the Nomad job, Kubernetes pod
    or systemd unit each [plugin](plugins.md) creates for a run). Once the
    tasks topics are gone no receiver can adopt these jobs or end them at
    their deadlines.
