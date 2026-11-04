@@ -144,8 +144,9 @@ func (r *Receiver) keepCustody(ctx, running context.Context) {
 	defer ticker.Stop()
 	for {
 		if group != nil && r.revoked() {
-			closeGroup()
-			r.assign(false)
+			leaving, cancelLeave := context.WithTimeout(context.WithoutCancel(running), stepDownMargin)
+			r.leaveGroup(leaving, closeGroup)
+			cancelLeave()
 		}
 		if err := r.tend(pass, time.Now()); err != nil && pass.Err() == nil {
 			r.logger.Printf("custody: %v", err)
@@ -187,16 +188,7 @@ func (r *Receiver) stepDown(ctx context.Context, stopped time.Time, closeGroup f
 	r.custody.mu.Lock()
 	acting := r.custody.producer != nil
 	r.custody.mu.Unlock()
-	// A closed static member keeps its assignment until the session timeout; removing it hands the partition on at once.
-	closeGroup()
-	r.assign(false)
-	left, err := kadm.NewClient(r.base).LeaveGroup(bounded, kadm.LeaveGroup(operator.CustodianGroup(r.config.Pool)).InstanceIDs(r.id))
-	if err == nil {
-		err = left.Error()
-	}
-	if err != nil {
-		r.logger.Printf("custodian: leave the custodian group: %v", err)
-	}
+	r.leaveGroup(bounded, closeGroup)
 	switch {
 	case !acting:
 		return
@@ -218,6 +210,20 @@ func (r *Receiver) stepDown(ctx context.Context, stopped time.Time, closeGroup f
 		sleep(waitCtx, custodyInterval)
 	}
 	r.logger.Printf("custodian: no successor in pool %s; keeping the pool keys to their deadlines", r.config.Pool)
+}
+
+// leaveGroup closes the group client with closeGroup and removes its static membership within ctx. A closed static
+// member keeps its assignment until the session timeout; removing it hands the partition on at once.
+func (r *Receiver) leaveGroup(ctx context.Context, closeGroup func()) {
+	closeGroup()
+	r.assign(false)
+	left, err := kadm.NewClient(r.base).LeaveGroup(ctx, kadm.LeaveGroup(operator.CustodianGroup(r.config.Pool)).InstanceIDs(r.id))
+	if err == nil {
+		err = left.Error()
+	}
+	if err != nil {
+		r.logger.Printf("custodian: leave the custodian group: %v", err)
+	}
 }
 
 // handOver writes, in one transaction, a re-key wrap to the successor's current key for every task hash the receiver's
