@@ -80,6 +80,8 @@ type fakePlugin struct {
 	dispatchErr error
 	// outcome is what Dispatch reports, OutcomeCreated when zero, or beside dispatchErr OutcomeUnknown when zero.
 	outcome pluginsdk.Outcome
+	// dispatchBlocks makes Dispatch wait until its context ends before it reports, as one returning at the bound.
+	dispatchBlocks bool
 	// handleSize is the length of the handle data Dispatch and Lookup return.
 	handleSize int
 	// jobName is the handle name Dispatch and Lookup return, or else agent- and the run ID.
@@ -209,6 +211,11 @@ func (f *fakePlugin) lookupHandle(handle pluginsdk.Handle) bool {
 func (f *fakePlugin) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk.Outcome, pluginsdk.Handle, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.dispatchBlocks {
+		f.mu.Unlock()
+		<-ctx.Done()
+		f.mu.Lock()
+	}
 	f.dispatches++
 	f.lastRun = run
 	if f.dispatchErr != nil {

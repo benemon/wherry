@@ -543,6 +543,54 @@ func TestPendingPastBothBoundsNamesTheEndBound(t *testing.T) {
 	}
 }
 
+// A running result completed before the bound that is buffered only once the phase has woken on the bound is taken by
+// the drain, not lost to the expiry: the receiver's lock holds the phase at its cancel check while the result arrives.
+func TestResultBufferedAfterTheBoundWakesThePhase(t *testing.T) {
+	f := newFixture(t, resultStream)
+	startBy := time.Now().Add(2 * time.Second).Unix()
+	bound := wire.PastBound(startBy)
+	record := f.submit(t, f.host, func(task *wire.Submission) {
+		task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = startBy, time.Now().Add(time.Minute).Unix()
+	})
+	set := controlClock(t, time.Now())
+	var once sync.Once
+	f.plugin.lookupHook = func(state pluginsdk.JobState) {
+		once.Do(func() {
+			// The phase wakes with nothing buffered and waits on the lock; the result completes before the bound by the
+			// receiver's clock and is buffered before the lock is given back.
+			f.receiver.mu.Lock()
+			time.Sleep(time.Until(bound) + 200*time.Millisecond)
+			set(bound.Add(-time.Second))
+			go func() {
+				time.Sleep(200 * time.Millisecond)
+				f.receiver.mu.Unlock()
+			}()
+		})
+	}
+	if status, kinds := f.execute(t, record, 1), f.kinds(t); status != kgo.AckAccept || !slices.Contains(kinds, "started") {
+		t.Fatalf("status %v statuses %v, want the buffered result started; logs:\n%s", status, kinds, f.logs.String())
+	}
+}
+
+// A Dispatch that returns created exactly at the bound issues no Lookup under the ended context: the run expires.
+func TestDispatchReturningAtTheBoundIssuesNoLookup(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.plugin.dispatchBlocks = true
+	startBy := time.Now().Add(time.Second).Unix()
+	record := f.submit(t, f.host, func(task *wire.Submission) {
+		task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = startBy, time.Now().Add(time.Minute).Unix()
+	})
+	status := f.execute(t, record, 1)
+	// A Lookup issued as the phase began has counted by now.
+	time.Sleep(300 * time.Millisecond)
+	if dispatches, lookups, _, _ := f.plugin.counts(); status != kgo.AckReject || dispatches != 1 || lookups != 0 {
+		t.Fatalf("status %v dispatches=%d lookups=%d, want one Dispatch, no Lookup and the run expired; logs:\n%s", status, dispatches, lookups, f.logs.String())
+	}
+	if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != wire.NotStartedBy(startBy) || f.plugin.stops != 1 {
+		t.Fatalf("terminal %s %q stops=%d, want stopped and FAILED %q", state, reason, f.plugin.stops, wire.NotStartedBy(startBy))
+	}
+}
+
 // A shutdown or a halt during the expiry's Stop writes nothing more: a shutdown releases the claim, a halt leaves it.
 func TestContextEndingDuringTheExpiryStop(t *testing.T) {
 	for name, halt := range map[string]bool{"shutdown": false, "halt": true} {
@@ -718,6 +766,21 @@ func TestAnAdopterOfAPendingJob(t *testing.T) {
 			t.Fatalf("releases=%d open requests %d, want released without an open", f.plugin.releases, len(f.openRequests(t)))
 		}
 	})
+	t.Run("past both bounds before the open", func(t *testing.T) {
+		f := newFixture(t, resultStream)
+		f.plugin.job = pluginsdk.JobPending
+		bound := time.Now().Add(time.Second).Unix()
+		record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = bound, bound })
+		f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
+		admitted := f.admitted(t, record)
+		passed(bound)
+		if status := f.receiver.execute(f.ctx, f.service.Operator, record, admitted, 2); status != kgo.AckReject {
+			t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+		}
+		if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != wire.NotEndedBy(bound) || f.plugin.stops != 1 || f.plugin.purges != 0 {
+			t.Fatalf("terminal %s %q stops=%d purges=%d, want stopped and FAILED %q", state, reason, f.plugin.stops, f.plugin.purges, wire.NotEndedBy(bound))
+		}
+	})
 }
 
 // An adopter's refusals with a pending job: past the bound it expires without a purge; a key no holder has takes the
@@ -805,6 +868,60 @@ func TestPendingSetIsKeyedByExecution(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Two executions of one run on one receiver: the newer holder adopts the pending job and enters the pending set; the
+// older one's Lookup, held until then, finds the job pending, and its placing write is fenced. Its exit leaves the gate
+// closed, so no poll opens until the newer holder's job starts, and then a fetch follows.
+func TestFencedHolderLeavesTheNewerHoldersGate(t *testing.T) {
+	f := pendingGateFixture(t)
+	hold := make(chan struct{})
+	f.plugin.lookupHold = hold
+	record := f.submit(t, f.host, nil)
+	older := f.executing(t, f.ctx, record, 1)
+	for f.lookupsHeld() == 0 {
+		if f.ctx.Err() != nil {
+			t.Fatalf("the older holder never looked up; logs:\n%s", f.logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	f.setPlugin(func(p *fakePlugin) { p.lookupHold = nil })
+	newer := f.executing(t, f.ctx, record, 2)
+	f.awaitKind(t, "placing")
+	if n := f.pendingRuns(); n != 1 {
+		t.Fatalf("%d entries in the pending set, want the newer holder's", n)
+	}
+	joins := f.shareJoins(t)
+	f.run(t, f.ctx)
+	close(hold)
+	select {
+	case status := <-older:
+		if status != 0 || !strings.Contains(f.logs.String(), "run "+testRun("run-a")+": fenced by a newer holder") {
+			t.Fatalf("older holder ended %v, want fenced with 0; logs:\n%s", status, f.logs.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the older holder did not exit; logs:\n%s", f.logs.String())
+	}
+	if texts := placingTexts(f.eventStatuses(t)); len(texts) != 1 {
+		t.Fatalf("placing %q, want the newer holder's alone", texts)
+	}
+	if most := f.mostSessions(2 * time.Second); most != 0 || joins() != 0 {
+		t.Fatalf("%d share sessions and %d joins after the fenced holder left, the newer one pending; want none", most, joins())
+	}
+	f.setPlugin(func(p *fakePlugin) { p.placedRuns[testRun("run-a")] = true })
+	if status := <-newer; status != kgo.AckAccept {
+		t.Fatalf("newer holder ended %v; logs:\n%s", status, f.logs.String())
+	}
+	if !f.awaitSessions(time.Second+500*time.Millisecond, func(n int) bool { return n > 0 }) {
+		t.Fatalf("no share session once the newer holder started; logs:\n%s", f.logs.String())
+	}
+}
+
+// lookupsHeld counts the Lookups lookupHold has held.
+func (f fixture) lookupsHeld() int {
+	f.plugin.mu.Lock()
+	defer f.plugin.mu.Unlock()
+	return len(f.plugin.lookupCtxs)
 }
 
 // A suspended pool serves an adopter's open for a pending job, as for a running one, and the job starts.

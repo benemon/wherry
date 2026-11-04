@@ -682,8 +682,12 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if run.profile.Plugin == nil {
 		return run.expired(ctx, nil, nil)
 	}
-	// A job no started event reported by task_started_by is located only to be stopped.
+	// A job no started event reported by task_started_by is located only to be stopped; a pending one past both bounds
+	// names the end bound.
 	if !started && adopted && !admitted.cancelled && startCtx.Err() != nil && ctx.Err() == nil {
+		if job.State == pluginsdk.JobPending {
+			return run.expired(ctx, &handle, nil)
+		}
 		return run.stopAndFail(ctx, handle, wire.NotStartedBy(task.Wherry.TaskStartedBy), nil)
 	}
 	if !started && neverStarted && startCtx.Err() != nil && ctx.Err() == nil {
@@ -1131,9 +1135,10 @@ func (run *activeRun) awaitStart(ctx, startCtx context.Context, handle pluginsdk
 			results <- lookupResult{job: job, err: err, completedAt: clock()}
 		}()
 	}
+	// No Lookup is issued under a startCtx already ended; the bound is acted on below.
 	if first != nil {
 		results <- *first
-	} else {
+	} else if startCtx.Err() == nil {
 		lookup()
 	}
 	checks := time.NewTicker(stateCheckInterval)
