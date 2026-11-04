@@ -15,8 +15,8 @@ import (
 
 const maxHandle = 4 << 10
 
-// PollDeadline bounds the Lookups the suite repeats until a dispatched job starts or ends; a variable so tests can
-// shorten it.
+// PollDeadline bounds each poll of a dispatched job until it starts or ends: one deadline covers every Lookup, which
+// runs under it, and every delay between them. A variable so tests can shorten it.
 var PollDeadline = 2 * time.Minute
 
 // pollInterval separates those Lookups.

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -48,9 +49,12 @@ func TestConformanceThroughThePlugin(t *testing.T) {
 	}
 }
 
+// pollDeadline is the PollDeadline conform runs the suite with.
+const pollDeadline = 5 * time.Second
+
 func conform(t *testing.T, wrap func(pluginsdk.Plugin) pluginsdk.Plugin) {
 	previous := pluginsdktest.PollDeadline
-	pluginsdktest.PollDeadline = 5 * time.Second
+	pluginsdktest.PollDeadline = pollDeadline
 	t.Cleanup(func() { pluginsdktest.PollDeadline = previous })
 	plugin := filepath.Join(t.TempDir(), "wherry-plugin-fake")
 	if output, err := exec.Command("go", "build", "-o", plugin, "../internal/testplugin").CombinedOutput(); err != nil {
@@ -130,17 +134,37 @@ func (p pendingForever) Lookup(ctx context.Context, runID string) (pluginsdk.Job
 	return job, err
 }
 
-var broken = map[string]struct {
-	wrap func(pluginsdk.Plugin) pluginsdk.Plugin
-	want string
-}{
-	"redispatches":   {func(p pluginsdk.Plugin) pluginsdk.Plugin { return redispatches{p} }, "lookup after dispatching the ended run"},
-	"forgets":        {func(p pluginsdk.Plugin) pluginsdk.Plugin { return forgets{p} }, "after the end = {Started:false"},
-	"drifts":         {func(p pluginsdk.Plugin) pluginsdk.Plugin { return drifts{p, new(int)} }, "second lookup while running"},
-	"pendingForever": {func(p pluginsdk.Plugin) pluginsdk.Plugin { return pendingForever{p} }, "lookup while running = {State:4"},
+// startsNever waits in Lookup, once the job is placed, until its context ends, as a plugin whose task never starts.
+type startsNever struct{ pluginsdk.Plugin }
+
+func (p startsNever) Lookup(ctx context.Context, runID string) (pluginsdk.Job, error) {
+	job, err := p.Plugin.Lookup(ctx, runID)
+	if err == nil && job.State == pluginsdk.JobRunning {
+		<-ctx.Done()
+		return pluginsdk.Job{}, ctx.Err()
+	}
+	return job, err
 }
 
-// Each broken plugin fails the suite at the case that guards against it.
+// broken plugins, each with the failure it causes and, when within is set, the bound on the Completes subtest's
+// duration.
+var broken = map[string]struct {
+	wrap   func(pluginsdk.Plugin) pluginsdk.Plugin
+	want   string
+	within time.Duration
+}{
+	"redispatches":   {func(p pluginsdk.Plugin) pluginsdk.Plugin { return redispatches{p} }, "lookup after dispatching the ended run", 0},
+	"forgets":        {func(p pluginsdk.Plugin) pluginsdk.Plugin { return forgets{p} }, "after the end = {Started:false", 0},
+	"drifts":         {func(p pluginsdk.Plugin) pluginsdk.Plugin { return drifts{p, new(int)} }, "second lookup while running", 0},
+	"pendingForever": {func(p pluginsdk.Plugin) pluginsdk.Plugin { return pendingForever{p} }, "lookup while running = {State:4", 0},
+	"startsNever":    {func(p pluginsdk.Plugin) pluginsdk.Plugin { return startsNever{p} }, "context deadline exceeded; want running within " + pollDeadline.String(), 2 * pollDeadline},
+}
+
+// completesTook is the duration the verbose output reports for the Completes subtest.
+var completesTook = regexp.MustCompile(`--- FAIL: TestBrokenPlugin/Completes \(([0-9.]+)s\)`)
+
+// Each broken plugin fails the suite at the case that guards against it. A Lookup that blocks fails the suite at
+// PollDeadline: one deadline covers every Lookup and every delay of the poll.
 func TestConformanceFailsBrokenPlugins(t *testing.T) {
 	for name, b := range broken {
 		t.Run(name, func(t *testing.T) {
@@ -149,6 +173,17 @@ func TestConformanceFailsBrokenPlugins(t *testing.T) {
 			output, err := cmd.CombinedOutput()
 			if err == nil || !strings.Contains(string(output), b.want) {
 				t.Fatalf("suite against %s = %v; want a failure naming %q\n%s", name, err, b.want, output)
+			}
+			if b.within == 0 {
+				return
+			}
+			took := completesTook.FindSubmatch(output)
+			if took == nil {
+				t.Fatalf("no Completes failure in the output\n%s", output)
+			}
+			seconds, err := strconv.ParseFloat(string(took[1]), 64)
+			if d := time.Duration(seconds * float64(time.Second)); err != nil || d < pollDeadline || d >= b.within {
+				t.Fatalf("Completes failed after %ss, want at PollDeadline %s, before %s", took[1], pollDeadline, b.within)
 			}
 		})
 	}
