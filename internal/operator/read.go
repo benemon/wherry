@@ -5,8 +5,10 @@ import (
 	"context"
 	json "encoding/json/v2"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -488,7 +490,7 @@ func (r *Reader) ReadAdvertisements(ctx context.Context, state State, keys signe
 	}
 	reads, err := r.readFrom(ctx, offsets, false)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read %s: %w", strings.Join(slices.Sorted(maps.Keys(offsets)), ", "), err)
 	}
 	// A record verifies only if its payload is the one read here unverified, so its receiver and time decide which
 	// records could win before any is verified.
@@ -501,7 +503,7 @@ func (r *Reader) ReadAdvertisements(ctx context.Context, state State, keys signe
 	for _, pool := range pools {
 		read := reads[PoolReceiversTopic(pool)]
 		if read.err != nil {
-			return nil, read.err
+			return nil, fmt.Errorf("read %s: %w", PoolReceiversTopic(pool), read.err)
 		}
 		for _, record := range slices.Backward(read.records) {
 			jws, err := jose.ParseSignedCompact(string(record.Value), []jose.SignatureAlgorithm{jose.EdDSA})

@@ -2251,3 +2251,54 @@ func TestPlacementSkipsRemovedEntitlement(t *testing.T) {
 		t.Fatalf("removed pool received %d tasks", n)
 	}
 }
+
+// A missing receivers topic of one entitled pool, deleted by hand, fails the host's reads of every pool's receivers
+// with an error naming the topic.
+func TestMissingEntitledPoolsReceiversTopicFailsTheRead(t *testing.T) {
+	f := newFixture(t)
+	f.pool(t, "pool-b")
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	topic := operator.PoolReceiversTopic("pool-b")
+	responses, err := kadm.NewClient(f.service.Operator).DeleteTopics(f.ctx, topic)
+	if err == nil {
+		err = responses.Error()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receivers, err := f.host.Receivers(f.ctx); err == nil || !strings.Contains(err.Error(), topic) {
+		t.Fatalf("receivers %v, %v; want an error naming %s", receivers, err, topic)
+	}
+	if err := f.submitErr(t); err == nil || !strings.Contains(err.Error(), topic) {
+		t.Fatalf("submit: %v; want an error naming %s", err, topic)
+	}
+}
+
+// A host of a tenant entitled to no pool lists no receivers.
+func TestReceiversOfAHostWithoutEntitlementsIsEmpty(t *testing.T) {
+	f := newFixtureNoHost(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	if err := f.service.TenantAdd(f.ctx, "tenant-b"); err != nil {
+		t.Fatal(err)
+	}
+	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
+	if err := f.service.HostAdd(f.ctx, "tenant-b", "host-b", bundle, false); err != nil {
+		t.Fatal(err)
+	}
+	kafka, principal := f.connect(t, bundle)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := NewHost(kafka, key, principal, t.TempDir(), nil, nil, log.New(f.logs, "host-b: ", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.Register(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	receivers, err := host.Receivers(f.ctx)
+	if err != nil || len(receivers) != 0 {
+		t.Fatalf("receivers %v, %v; want none and no error", receivers, err)
+	}
+}
