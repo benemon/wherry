@@ -92,6 +92,15 @@ keep them forever, and so does a pool's snapshot topic.
 A deployment has 1 + 2R + 4P + 2T + H topics for R receivers, P pools, T
 tenants and H hosts. The count depends on configuration alone.
 
+`pool apply` creates a pool's receivers topic before it records the pool, so
+a recorded pool always has one. Pools do not end, and no topic is deleted.
+A host reads the receivers topics of all its tenant's entitled pools in one
+pass. If one of them was deleted by hand, the read waits 10 seconds for it
+and then fails, so the host's submissions and receiver listings fail for
+every pool until `pool apply` creates the topic again; `operator check`
+reports it missing. A host of a tenant entitled to no pool reads no topic
+and lists no receivers.
+
 Every principal reads all of `wherry.operator`, so tenants see each other's
 names, hosts, entitlements and pools.
 
