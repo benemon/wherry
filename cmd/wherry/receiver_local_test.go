@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -151,6 +152,42 @@ func TestReceiverLocalFile(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), provided) || !strings.Contains(out.String(), "warning:") {
 		t.Fatal(out.String())
+	}
+	given := filepath.Join(provided, "config.yaml")
+	before, _ = os.Stat(given)
+	contents, _ = os.ReadFile(given)
+	if err := receiverLocalFile(dir, "r", provided, true, false, io.Discard, config, op.Broker, op.CAFile != ""); err != nil {
+		t.Fatal(err)
+	}
+	after, _ = os.Stat(given)
+	kept, _ = os.ReadFile(given)
+	if !bytes.Equal(contents, kept) || after.Mode().Perm() != 0o640 || !before.ModTime().Equal(after.ModTime()) {
+		t.Fatal("provided file changed")
+	}
+}
+
+func TestReceiverLocalRefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "escaped.yaml")
+	if err := os.MkdirAll(filepath.Join(dir, "receivers"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "receivers", "r.config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	onTerminal(t, strings.Repeat("\n", 8))
+	if err := receiverLocalFile(dir, "r", "outside.yaml", false, false, io.Discard, localReceiver(), "", false); err == nil {
+		t.Fatal("wrote through a dangling symlink")
+	}
+	if _, err := os.Stat(outside); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("symlink target written: %v", err)
+	}
+}
+
+func TestReceiverLocalHugeNegativeWindow(t *testing.T) {
+	onTerminal(t, "\n\n\n\n-2562047h47m16.854775808s\n")
+	if _, err := promptReceiverLocal(newPrompter(io.Discard), localReceiver(), false); err == nil || !strings.Contains(err.Error(), "less than 5s") {
+		t.Fatalf("got %v", err)
 	}
 }
 

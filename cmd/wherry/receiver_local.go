@@ -13,6 +13,7 @@ import (
 
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/operator"
+	"gopkg.in/yaml.v3"
 )
 
 func receiverCredentials(config operator.ReceiverConfig) []string {
@@ -70,7 +71,12 @@ func receiverLocalFile(dir, name, receiverPath string, directory, dryRun bool, o
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
 		}
-		if err := writeYAML(path, local); err != nil {
+		encoded, err := yaml.Marshal(local)
+		if err != nil {
+			return err
+		}
+		// Exclusive creation refuses a symlink, dangling or not, planted at the path while the questions were asked.
+		if _, err := createFile(path, encoded); err != nil {
 			return err
 		}
 		fmt.Fprintf(out, "wrote %s\n", path)
@@ -127,10 +133,10 @@ func promptReceiverLocal(p *prompter, config operator.ReceiverConfig, needsCA bo
 		kinds[profile.Plugin] = true
 	}
 	margin := max(10*time.Second, 6*time.Second+2*time.Second*time.Duration(len(kinds)))
-	local.DrainTimeout = window - margin
-	if local.DrainTimeout < 5*time.Second {
+	if window < margin+5*time.Second {
 		return local, errors.New("stop window leaves less than 5s to drain; raise kill_timeout, terminationGracePeriodSeconds or TimeoutStopSec")
 	}
+	local.DrainTimeout = window - margin
 	if local.MetricsAddr, err = p.ask("Where should it serve metrics? none for no listener.", ":9464"); err != nil {
 		return local, err
 	}

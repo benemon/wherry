@@ -99,7 +99,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		current, exists := state.Receivers[pos[2]]
-		bundle, err := bundlePath(dir, "receivers", force, pos[2])
+		bundle, err := bundlePath(dir, "receivers", false, pos[2])
 		if err != nil {
 			return err
 		}
@@ -113,6 +113,9 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			}
 			if kept, err := readReceiverConfig(filepath.Join(dir, "receivers", pos[2]+".yaml"), false); err == nil && kept.Broker != "" {
 				broker = kept.Broker
+			}
+			if _, err := bundlePath(dir, "receivers", true, pos[2]); err != nil {
+				return err
 			}
 			return service.ReceiverReissue(ctx, pos[2], broker, bundle)
 		}
@@ -146,6 +149,10 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		if dryRun {
 			return showReceiver(stdout, recorded)
 		}
+		// The bundle directories are made, or hardened to 0700, only once both configurations have passed their checks.
+		if _, err := bundlePath(dir, "receivers", true, pos[2]); err != nil {
+			return err
+		}
 		if exists {
 			// Only the bundle's password can carry a new broker, so a missing bundle is refused before recording.
 			kept, err := operator.ReadBundle(bundle)
@@ -158,9 +165,6 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 				return err
 			}
 			return rebroker(bundle, kept, config.Broker)
-		}
-		if _, err := bundlePath(dir, "receivers", true, pos[2]); err != nil {
-			return err
 		}
 		return service.ReceiverAdd(ctx, config, config.Broker, bundle)
 
