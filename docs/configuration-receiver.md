@@ -4,6 +4,71 @@
 
 A receiver reads local YAML configuration when it starts.
 
+### Generate or provide the local configuration
+
+1. Run `wherry operator receiver apply NAME` in your operator working directory.
+   Wherry checks the receiver configuration against the pool's terms first.
+2. Provide `DIR/config.yaml` when you use `-f DIR`, or keep
+   `receivers/NAME.config.yaml` in your working directory.
+   The directory's file takes precedence.
+   With `-f FILE`, the local configuration still lives under `receivers/`.
+   Wherry validates a provided file and preserves its bytes, permissions and modification time.
+3. If neither file exists, answer the questions below in a terminal.
+   Wherry writes `receivers/NAME.config.yaml` with mode `0600`.
+   Without a terminal, you must provide the file yourself.
+4. Supply the receiver with its bundle and local configuration at the paths your platform uses.
+   The local configuration stays in your working directory.
+   It is not recorded on `wherry.operator`.
+   A provisioning failure keeps the generated file for your next apply.
+
+| Question | Default | Field |
+| --- | --- | --- |
+| Where will the receiver read its bundle? | `/etc/wherry/receiver.bundle` | `bundle` |
+| Where will it read its broker's CA? | `/etc/wherry/kafka-ca.pem` when it uses the operator's broker and `operator.yaml` names a CA; otherwise `none` | `ca_file` |
+| Where does it keep its state? | `/var/lib/wherry/state` | `state_dir` |
+| Where are its plugins? | `/usr/local/libexec/wherry/plugins` | `plugin_dir` |
+| How long does its platform wait for it to stop before killing it? | `30s` | `drain_timeout`, calculated below |
+| Where should it serve metrics? | `:9464` | `metrics_addr` |
+| Read each platform credential from `env` or `file`? | `env` | `credentials` |
+| Which environment variable or file path? | Upper-case credential name with characters outside `[A-Z0-9_]` replaced by `_`, prefixed with `_` if it starts with a digit; no default file path | Credential source |
+
+Answer `none` for the system's trusted roots or for no metrics listener.
+Keep the state directory across restarts.
+Wherry subtracts `max(10s, 6s + 2s × plugin types)` from the stop window.
+The margin covers the receiver's 5-second step-down, up to 2 seconds per plugin process and 1 second spare.
+Your answer must leave at least 5 seconds to drain.
+Raise Nomad's `kill_timeout`, Kubernetes' `terminationGracePeriodSeconds` or systemd's `TimeoutStopSec` if it does not.
+Wherry asks once per credential named by the merged profiles, in sorted order.
+A profile can remove an inherited credential with `credential: null`.
+Edit the file to set `drain_timeout: 0s` or a `command` credential source.
+Every credential named by a profile must have a source.
+A missing `ca_file` produces a warning when the receiver uses the operator's broker and the operator names a CA.
+You may still trust that broker through the system roots.
+With `--dry-run`, standard error names the provided file or says apply will ask.
+Standard output keeps the receiver record format.
+
+### Answers for the plugin examples
+
+These answers follow the `config.yaml` files on
+[wherry-plugins main](https://github.com/benemon/wherry-plugins/tree/main/examples).
+For Nomad exec, use `examples/nomad/config-host.yaml`.
+You can provide those files to skip the questions.
+Replace `<version>` with the version you installed.
+
+| Answer | Nomad docker | Nomad exec | Kubernetes | systemd |
+| --- | --- | --- | --- | --- |
+| Bundle | `/secrets/receiver.bundle` | `/secrets/receiver.bundle` | `/etc/wherry/bundle/bundle.yaml` | `/run/credentials/wherry-receiver.service/bundle` |
+| Broker CA | `none` | `none` | `none` | `none` |
+| State | `/var/lib/wherry/state` | `/var/lib/wherry/state` | `/var/lib/wherry/state` | `/var/lib/wherry/state` |
+| Plugins | `/usr/local/libexec/wherry/plugins` | `/usr/local/libexec/wherry/<version>/plugins` | `/usr/local/libexec/wherry/plugins` | `/usr/local/libexec/wherry/plugins` |
+| Stop window | `30s` | `30s` | `30s` | `30s` |
+| Metrics | `:9464` | `:9464` | `:9464` | `:9464` |
+| Credentials | none; workload identity supplies `NOMAD_TOKEN` | none; workload identity supplies `NOMAD_TOKEN` | none; service account | none |
+
+Each example sets `drain_timeout: 20s`.
+For a private broker CA, answer `/secrets/kafka-ca.pem` on Nomad,
+`/etc/wherry/kafka-ca/ca.crt` on Kubernetes or `/etc/wherry/kafka-ca.pem` on systemd.
+
 ### Where wherry looks for the file
 
 1. Use the path passed with `wherry receiver run --config-file FILE`.
@@ -211,6 +276,7 @@ The directory holds:
 
 ```
 receiver.yaml
+config.yaml
 plugins/
   <type>/
     plugin.yaml
@@ -220,6 +286,7 @@ plugins/
 
 | File | Fields |
 | --- | --- |
+| `config.yaml` | optional: receiver local configuration, kept outside the receiver record |
 | `receiver.yaml` | `pool`, `plugin_sha256`, `broker` and `capacity` |
 | `plugins/<type>/plugin.yaml` | optional: the plugin's `labels` and `config` |
 | `plugins/<type>/profiles/*.yaml` | one plugin profile entry; routing order within the plugin is the lexical order of the file names |

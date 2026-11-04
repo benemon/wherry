@@ -1,0 +1,4 @@
+bundle: /etc/wherry/receiver.bundle
+credentials:
+  nomad-token:
+    env: NOMAD_TOKEN

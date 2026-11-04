@@ -474,6 +474,12 @@ func ValidateConfig(config ReceiverConfig, terms Terms) error {
 		if validateNames(profile.Name) != nil || names[profile.Name] || !wire.ValidName(profile.Plugin) {
 			return errors.New("profiles need unique valid names and a valid plugin")
 		}
+		if name, ok := profile.Config["credential"]; ok {
+			value, valid := name.(string)
+			if !valid || !wire.ValidName(value) {
+				return fmt.Errorf("credential %q is not a valid name", name)
+			}
+		}
 		names[profile.Name] = true
 		if _, ok := config.PluginSHA256[profile.Plugin]; !ok {
 			return fmt.Errorf("plugin type %s has no pinned SHA-256; set plugin_sha256.%s in the receiver's file and run receiver apply", profile.Plugin, profile.Plugin)

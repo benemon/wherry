@@ -499,6 +499,17 @@ a YAML flow mapping, the agents (one plugin profile each, named after its
 agent) with their labels, the capacity (default 1) and the broker address
 (default the operator's).
 
+Before recording, you provide the receiver's [local configuration](configuration-receiver.md#generate-or-provide-the-local-configuration).
+Wherry uses `PATH/config.yaml` with `-f DIR` when present.
+Otherwise it uses `receivers/<receiver>.config.yaml` in your working directory.
+If absent, it asks in a terminal and writes that file with mode `0600`.
+Without a terminal, it fails naming the file and its fields.
+It checks each merged profile's credential source before provisioning.
+A provided local configuration is never rewritten.
+With `--dry-run`, standard error names the local file or says apply will ask.
+An absent local file does not prevent a dry run.
+With `--force`, it reissues the identity without reading local configuration.
+
 With no receiver of that name, it records the configuration, creates the
 receiver's principal, key topic and progress topic,
 `wherry.receiver.<receiver>.progress`, grants its ACLs, and writes its

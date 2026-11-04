@@ -214,6 +214,7 @@ func TestReceiverShowPrintsWholeNumbersAsIntegers(t *testing.T) {
 
 func TestReceiverShowAndDryRun(t *testing.T) {
 	service := operatorEnv(t)
+	localFixture(t, ".", "receiver-a")
 	ctx := context.Background()
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
@@ -457,6 +458,7 @@ func bundleWorks(t *testing.T, service *operator.Service, path string, resalted 
 // without a record, and the old bundle stops working.
 func TestReceiverApplyForceReissuesTheIdentity(t *testing.T) {
 	service := operatorEnv(t)
+	localFixture(t, ".", "receiver-a")
 	ctx := context.Background()
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {

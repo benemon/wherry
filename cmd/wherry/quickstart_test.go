@@ -128,6 +128,7 @@ func TestQuickstartOperatorOutput(t *testing.T) {
 	if err := os.Symlink(receiverFile, filepath.Join("receivers", "nomad-1.yaml")); err != nil {
 		t.Fatal(err)
 	}
+	localFixture(t, ".", "nomad-1")
 	dryRun := wherry("receiver", "apply", "nomad-1", "--dry-run")
 	wherry("receiver", "apply", "nomad-1")
 	shown := wherry("receiver", "show", "nomad-1")
