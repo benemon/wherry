@@ -118,7 +118,7 @@ algorithm `EdDSA` (Ed25519). The protected header holds:
 | output chunk | `application/vnd.wherry.output.v1+jws` | receiver | `wherry.tenant.<tenant>.transcript` | run ID |
 | result | `application/vnd.wherry.result.v1+jws` | receiver | `wherry.tenant.<tenant>` | run ID |
 | echo | `application/vnd.wherry.echo.v1+jws` | receiver | `wherry.tenant.<tenant>` | run ID |
-| advertisement | `application/vnd.wherry.advertisement.v1+jws` | receiver | `wherry.receivers` | receiver ID |
+| advertisement | `application/vnd.wherry.advertisement.v1+jws` | receiver | `wherry.pool.<pool>.receivers` | receiver ID |
 | start failure | `application/vnd.wherry.start-failure.v1+jws` | receiver | `wherry.pool.<pool>.events` | run ID |
 | open request | `application/vnd.wherry.open-request.v1+jws` | receiver | `wherry.pool.<pool>.events` | run ID |
 | attempt wrap | `application/vnd.wherry.attempt-wrap.v1+jws` | receiver, the custodian | `wherry.pool.<pool>.events` | run ID |
@@ -153,7 +153,8 @@ A reader accepts a signed record only when all of these hold:
      ([Open request](#open-request)).
    - An echo on `wherry.tenant.<tenant>` names that tenant, and comes from a
      live member of the pool it names, to which the tenant is entitled.
-   - An advertisement comes from a live member of the pool it names.
+   - An advertisement on `wherry.pool.<pool>.receivers` names that pool, and
+     comes from a live member of it.
    - A [custodian snapshot](#custodian-snapshot) comes from the live member
      of the pool of its topic that it names as custodian.
 
@@ -1176,7 +1177,8 @@ the [claim check](#the-claim-check).
   decided as if that holder never claimed, `unchanged` or `released`; it is
   `lease` only when the membership ended after the custodian read the events.
 - `advertisement` names the previous holder's advertisement the decision took,
-  by its offset on `wherry.receivers` and its append time, and is absent when
+  by its offset on the pool's receivers topic, `wherry.pool.<pool>.receivers`,
+  and its append time, and is absent when
   it took none.
 - A custodian counts the claims it serves to a new claimant in
   `wherry_claimant_changes_total` by `reason`.

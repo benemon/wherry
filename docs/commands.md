@@ -120,10 +120,9 @@ operator init`. [Working directory](configuration-operator.md#operator-working-d
 lists what the directory holds.
 
 `wherry operator` writes every `wherry.operator` record as
-`wherry.operator`, creating `wherry.operator` and `wherry.receivers` first if
-they are missing and setting the [configuration](design.md#topics-1) of an
-existing `wherry.receivers`. `pool apply --dry-run` creates neither, and reads
-a missing `wherry.operator` as holding no records. Options parse as Go flags,
+`wherry.operator`, creating `wherry.operator` first if it is missing.
+`pool apply --dry-run` creates nothing, and reads a missing
+`wherry.operator` as holding no records. Options parse as Go flags,
 in the forms `--name value`, `--name=value` and `-name value`, and the last of
 a repeated option wins. Options other than `--dry-run` and `--force` take a
 value, and options can appear anywhere after `operator`. An option without a
@@ -203,7 +202,7 @@ Connected as the super user, once, it:
 1. writes a new random password for `wherry.operator` to a temporary file,
    mode 0600, in the working directory;
 2. grants `wherry.operator` the [operator ACLs](security.md#the-operator-principal);
-3. creates `wherry.operator` and `wherry.receivers` if they are missing;
+3. creates `wherry.operator` if it is missing;
 4. sets the new password on `wherry.operator`, creating the principal or
    replacing its password;
 5. renames the temporary file over `operator.password`.
@@ -237,8 +236,8 @@ agents, each one's models and credentials (`NAME=ENV_VAR` or
 `72h0m0s`).
 
 With no pool of that name, it records the terms, creates the pool's tasks,
-events and snapshot topics, and sets the configuration of its share group
-and topics:
+events, snapshot and receivers topics, and sets the configuration of its
+share group and topics:
 
 | Resource | Settings |
 | --- | --- |
@@ -246,6 +245,7 @@ and topics:
 | tasks topic `wherry.pool.<pool>.tasks` | `retention.ms` of `start_by_limit` plus six hours plus one day, unless it is already longer; `message.timestamp.type=LogAppendTime`, `cleanup.policy=delete`, `retention.bytes=-1`, `segment.ms=3600000` |
 | events topic `wherry.pool.<pool>.events` | the tasks topic's `retention.ms`, unless it is already longer; the tasks topic's other settings |
 | snapshot topic `wherry.pool.<pool>.custodian` | `cleanup.policy=compact`, `message.timestamp.type=LogAppendTime`, `retention.ms=-1` |
+| receivers topic `wherry.pool.<pool>.receivers` | `cleanup.policy=compact,delete`, `message.timestamp.type=LogAppendTime`, `retention.ms=604800000`, `segment.ms=3600000`, `max.compaction.lag.ms=3600000`, created when missing |
 | progress topic of each live receiver in the pool | the tasks topic's `retention.ms`, unless it is already longer, created when missing |
 | feed and transcript topic of every tenant with a host or an entitlement | `max.message.bytes=2097152` (2 MiB), set before it measures the records |
 
@@ -644,7 +644,12 @@ Loads `wherry.operator` and checks, in order:
 - that each pool's snapshot topic, `wherry.pool.<pool>.custodian`, has
   `cleanup.policy=compact`, `message.timestamp.type=LogAppendTime` and
   `retention.ms=-1`;
-- that each pool's tasks, events and snapshot topics have one partition;
+- that each pool's receivers topic, `wherry.pool.<pool>.receivers`, has
+  `cleanup.policy=compact,delete`, `message.timestamp.type=LogAppendTime`,
+  `retention.ms=604800000`, `segment.ms=3600000` and
+  `max.compaction.lag.ms=3600000`;
+- that each pool's tasks, events, snapshot and receivers topics have one
+  partition;
 - that each pool's tasks topic keeps records at least `start_by_limit` plus
   six hours plus one day, its events topic and each live receiver's progress
   topic at least as long as the tasks topic, and each entitled tenant's feed

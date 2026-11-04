@@ -31,12 +31,12 @@ differently live on different topics.
 | Topic | Writers | Readers | Holds |
 | --- | --- | --- | --- |
 | `wherry.operator` | the operator | every principal | pool terms, receiver configurations, tenants, hosts, entitlements, revocations in progress, membership ends, pool suspensions and resumes, rotate-key requests |
-| `wherry.receivers` | receivers | receivers, hosts | advertisements |
 | `wherry.receiver.<receiver>` | that receiver | its pool's members, entitled tenants' hosts | its keys |
 | `wherry.receiver.<receiver>.progress` | that receiver | its pool's live members | each run's latest committed transcript offset |
 | `wherry.pool.<pool>.tasks` | entitled tenants' hosts | the pool's receivers, through its share group | submissions |
 | `wherry.pool.<pool>.events` | the pool's receivers, entitled tenants' hosts | the pool's receivers | statuses, start failures, cancels, open requests, attempt wraps, re-key wraps, open refusals, claim decisions |
 | `wherry.pool.<pool>.custodian` | the pool's receivers | the pool's receivers, entitled tenants' hosts | custodian snapshots |
+| `wherry.pool.<pool>.receivers` | the pool's receivers | the pool's receivers, entitled tenants' hosts | the pool's advertisements |
 | `wherry.tenant.<tenant>` | receivers of the tenant's pools | the tenant's hosts | statuses, results, echoes |
 | `wherry.tenant.<tenant>.transcript` | receivers of the tenant's pools | the tenant's hosts | transcript chunks, output chunks |
 | `wherry.host.<tenant>.<host>` | that host | that host, receivers of the tenant's pools | its key |
@@ -69,11 +69,14 @@ pool the run was placed in, on behalf of a tenant entitled to it.
 [The wherry A2A extension](a2a-extension-v1.md) specifies every record.
 
 Every topic has one partition and `LogAppendTime` timestamps, and no topic
-is deleted. `wherry.receivers` and the progress topics have
+is deleted. A pool's receivers topic and the progress topics have
 `cleanup.policy=compact,delete`: their readers need only the latest record
-per key. No other host or receiver writes a progress topic. Every receiver can write
-`wherry.receivers`, so a reader keeps each key's latest record that
-verifies as its owner's. A pool's snapshot
+per key. No other host or receiver writes a progress topic. Only the pool's
+receivers can write its receivers topic, so a receiver can affect the
+discovery of its own pool alone: Kafka ACLs cannot restrict a record's key,
+so a pool member can write under another member's key, and a reader keeps
+each receiver's latest record that verifies as its owner's and names the
+topic's pool. A pool's snapshot
 topic has `cleanup.policy=compact`: its readers need only the latest
 committed snapshot, under its one key, and only the pool's receivers and
 `wherry.operator` can write it. Every other topic has `cleanup.policy=delete`.
@@ -83,10 +86,10 @@ records for its `start_by_limit` plus six hours plus a day, 4 days 6 hours
 by default. An update to a shorter `start_by_limit` lowers none of them: they
 keep the longer terms' retention, with the events and progress topics at
 least at the tasks topic's. The tenant feed and transcript topic keep them for 30
-days and `wherry.receivers` for 7. The identity and configuration topics
+days and a pool's receivers topic for 7. The identity and configuration topics
 keep them forever, and so does a pool's snapshot topic.
 
-A deployment has 2 + 2R + 3P + 2T + H topics for R receivers, P pools, T
+A deployment has 1 + 2R + 4P + 2T + H topics for R receivers, P pools, T
 tenants and H hosts. The count depends on configuration alone.
 
 Every principal reads all of `wherry.operator`, so tenants see each other's
@@ -211,9 +214,9 @@ directory.
 
 `wherry operator` creates each topic with one partition, the broker's default
 replication factor, `cleanup.policy=delete` and
-`message.timestamp.type=LogAppendTime`, except `wherry.receivers` and the
-progress topics, which it creates with `cleanup.policy=compact,delete`,
-`segment.ms=3600000` and `max.compaction.lag.ms=3600000`, so a segment
+`message.timestamp.type=LogAppendTime`, except a pool's receivers topic
+`wherry.pool.<pool>.receivers` and the progress topics, which it creates
+with `cleanup.policy=compact,delete`, `segment.ms=3600000` and `max.compaction.lag.ms=3600000`, so a segment
 closes and compacts within an hour, and a pool's snapshot topic
 `wherry.pool.<pool>.custodian`, which it creates with
 `cleanup.policy=compact`. A pool's tasks and events topics have
@@ -229,10 +232,10 @@ naming 256 outputs fits.
 | Topic | Created by | `retention.ms` |
 | --- | --- | --- |
 | `wherry.operator` | `operator init`, then any recording command when missing | `-1` |
-| `wherry.receivers` | `operator init`, then any recording command when missing | `604800000` (7 days) |
 | `wherry.pool.<pool>.tasks` | `pool apply` | at least `start_by_limit` plus 30 hours, in milliseconds; default `367200000`; `pool apply` never lowers it |
 | `wherry.pool.<pool>.events` | `pool apply` | at least tasks; `pool apply` raises it to tasks and never lowers it |
 | `wherry.pool.<pool>.custodian` | `pool apply` | `-1`, outside the pool retention bound |
+| `wherry.pool.<pool>.receivers` | `pool apply` | `604800000` (7 days), outside the pool retention bound |
 | `wherry.tenant.<tenant>` | `tenant add` | `2592000000` (30 days) |
 | `wherry.tenant.<tenant>.transcript` | `tenant add` | as the tenant feed, `2592000000` (30 days) |
 | `wherry.receiver.<receiver>` | `receiver apply` | `-1` |
@@ -244,13 +247,12 @@ and a one-day margin. Events and the pool's progress topics stay at least as
 long as tasks. A tenant feed and its transcript topic must stay for at least
 `start_by_limit` plus six hours; their 30-day default exceeds the
 default requirement of `280800000`. Identity and configuration topics stay
-at `-1`, and `wherry.receivers` remains a seven-day liveness topic.
+at `-1`, and a pool's receivers topic remains a seven-day liveness topic.
 
 `wherry operator` leaves an existing topic's configuration as it is, except
-that every recording command sets the configuration above on
-`wherry.receivers`, `pool apply` sets the retention, never
+that `pool apply` sets the retention, never
 lowering it, timestamp type, `cleanup.policy`, `retention.bytes` and `segment.ms` of the pool's tasks and events topics and
-the configuration of its snapshot topic, and `receiver apply` and `pool apply` set every
+the configuration of its snapshot and receivers topics, and `receiver apply` and `pool apply` set every
 configuration above on the progress topics of the pool's live receivers, never lowering their retention.
 `tenant add` and `pool apply` set `max.message.bytes` on
 existing tenant feeds and transcript topics. A
@@ -260,8 +262,8 @@ an entitled tenant's feed or transcript topic keeps, and `wherry operator
 check` reports a topic below its bound, a progress topic that keeps less
 than its pool's tasks topic, and a pool topic whose timestamp type is not
 `LogAppendTime`, a tasks or events topic without the hourly `segment.ms`,
-and a snapshot topic whose configuration differs from the above or that has
-more than one partition.
+and a snapshot or receivers topic whose configuration differs from the above
+or that has more than one partition.
 
 ### ACLs
 
@@ -275,23 +277,23 @@ which `operator init` gives ([The operator principal](security.md#the-operator-p
 | `wherry.operator` | topic prefix `wherry.` | Create, AlterConfigs, Read, Write |
 | `wherry.operator` | group prefix `p-` | AlterConfigs |
 | host | topic `wherry.operator` | Read, Describe |
-| host | topic `wherry.receivers` | Read, Describe |
 | host | topic `wherry.tenant.<own tenant>` | Read, Describe |
 | host | topic `wherry.tenant.<own tenant>.transcript` | Read, Describe |
 | host | topic `wherry.host.<own tenant>.<own host>` | Read, Write, Describe |
 | host | topics `wherry.pool.<p>.tasks` and `.events`, each entitled pool | Write, Describe |
 | host | topic `wherry.pool.<p>.custodian`, each entitled pool | Read, Describe |
+| host | topic `wherry.pool.<p>.receivers`, each entitled pool | Read, Describe |
 | host | topic `wherry.receiver.<r>`, each receiver of an entitled pool | Read, Describe |
 | receiver | topic `wherry.operator` | Read, Describe |
 | receiver | topic `wherry.receiver.<own>` | Read, Write, Describe |
 | receiver | topic `wherry.receiver.<own>.progress` | Read, Write, Describe |
 | receiver | topic `wherry.receiver.<peer>`, each other member of its pool, live or ended | Read, Describe |
 | receiver | topic `wherry.receiver.<peer>.progress`, each other live member of its pool | Read, Describe |
-| receiver | topic `wherry.receivers` | Read, Write, Describe |
 | receiver | topic `wherry.pool.<own pool>.tasks` | Read, Describe |
 | receiver | topic `wherry.pool.<own pool>.events` | Read, Write, Describe |
 | receiver | group `p-<own pool>` | Read, Describe, DescribeConfigs |
 | receiver | topic `wherry.pool.<own pool>.custodian` | Read, Write, Describe |
+| receiver | topic `wherry.pool.<own pool>.receivers` | Read, Write, Describe |
 | receiver | group `p-<own pool>.custodian` | Read, Describe |
 | receiver | transactional ID prefix `p.<own pool>.` | Write, Describe |
 | receiver | topic `wherry.tenant.<t>`, each tenant entitled to its pool now or before | Write, Describe |

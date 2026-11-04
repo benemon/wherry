@@ -176,7 +176,7 @@ reason, or withholding re-key wraps is out of scope.
 | Party | What it gets |
 | --- | --- |
 | Kafka operators and broker storage | ciphertext only, without a pool private key |
-| another tenant or pool | nothing: the platform's ACLs, TLS and SCRAM keep them apart, and only the pool's receivers and `wherry.operator` can write its snapshot |
+| another tenant or pool | nothing: the platform's ACLs, TLS and SCRAM keep them apart, and only the pool's receivers and `wherry.operator` can write its snapshot and its advertisements |
 | a compromised receiver that is not the key custodian | the credentials of the runs it claims; it can become custodian through the custodian group as any pool member can, which raises [WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover), as every custodian change does |
 | the key custodian, or anyone who copies its keys | every retained envelope under those keys, without claiming |
 

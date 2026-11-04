@@ -725,7 +725,7 @@ platform and on Kafka directly.
    and the client quotas set on the `wherry.tnt.` principals. Keep the super
    user, `wherry.operator` and its ACLs.
 4. Run [`wherry operator init`](#set-up-wherry-operator) again, which
-   creates `wherry.operator` and `wherry.receivers`, then set the deployment
+   creates `wherry.operator`, then set the deployment
    up again from [Create a pool](#create-a-pool), applying the kept files in
    `pools/` and `receivers/`, and give each host and receiver its new
    bundle.
