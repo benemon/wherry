@@ -657,7 +657,7 @@ func (c *claimCheck) claimDecision(ctx context.Context, digest string, statuses 
 	}
 	if !c.adsRead {
 		readCtx, cancel := context.WithTimeout(ctx, readTimeout)
-		ads, err := c.r.reader.ReadFrom(readCtx, operator.ReceiversTopic, 0)
+		ads, err := c.r.reader.ReadFrom(readCtx, operator.PoolReceiversTopic(c.r.config.Pool), 0)
 		cancel()
 		if err != nil {
 			// Without the advertisements the previous holder is taken as live.

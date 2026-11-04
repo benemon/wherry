@@ -69,7 +69,7 @@ wherry operator init --broker kafka.example.com:9093 --ca-file /etc/wherry/kafka
 Leave out `--ca-file` when the listener's certificate chains to a system
 root. `init` creates `wherry.operator` with a new password, grants it the
 [ACLs provisioning needs](security.md#the-operator-principal), creates the
-installation-wide topics, and writes `operator.yaml` and
+`wherry.operator` topic, and writes `operator.yaml` and
 `operator.password`. The broker address is what host bundles name, so use
 the address hosts reach; a receiver's file can name another. Every other
 `wherry operator` command runs in the working directory, or with `--dir`,
@@ -725,7 +725,7 @@ platform and on Kafka directly.
    and the client quotas set on the `wherry.tnt.` principals. Keep the super
    user, `wherry.operator` and its ACLs.
 4. Run [`wherry operator init`](#set-up-wherry-operator) again, which
-   creates `wherry.operator` and `wherry.receivers`, then set the deployment
+   creates `wherry.operator`, then set the deployment
    up again from [Create a pool](#create-a-pool), applying the kept files in
    `pools/` and `receivers/`, and give each host and receiver its new
    bundle.

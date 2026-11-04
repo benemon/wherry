@@ -88,7 +88,8 @@ of its configuration, and are neither labels nor selectable.
 
 **The client resolves placement before it signs.** It reads the receiver
 configurations on `wherry.operator` for their labels, and the advertisements on
-`wherry.receivers` for liveness, capacity and which profiles are ready. A
+the receivers topic of each pool the tenant is entitled to for liveness,
+capacity and which profiles are ready. A
 receiver whose latest advertisement is at most 120 seconds old is live. For each
 live receiver in a pool the tenant is entitled to, the client looks for a ready
 profile that launches the agent with labels the selector accepts. With no agent

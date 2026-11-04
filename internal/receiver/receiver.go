@@ -609,7 +609,7 @@ func (r *Receiver) advertise(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := r.base.ProduceSync(ctx, &kgo.Record{Topic: operator.ReceiversTopic, Key: []byte(r.id), Value: value}).FirstErr(); err != nil {
+	if err := r.base.ProduceSync(ctx, &kgo.Record{Topic: operator.PoolReceiversTopic(r.config.Pool), Key: []byte(r.id), Value: value}).FirstErr(); err != nil {
 		r.deny(err, capWrite)
 		return err
 	}

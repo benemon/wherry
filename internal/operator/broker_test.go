@@ -18,6 +18,7 @@ import (
 	"github.com/benemon/wherry/internal/kafkatest"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
+	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -157,6 +158,50 @@ func TestRealBrokerFixture(t *testing.T) {
 		// franz-go reports the failed producer-ID request without wrapping kerr.
 		if err == nil || !strings.Contains(err.Error(), kerr.TransactionalIDAuthorizationFailed.Message) {
 			t.Fatalf("another pool's transactional ID: got %v", err)
+		}
+	})
+
+	t.Run("a receiver advertises only on its own pool's receivers topic", func(t *testing.T) {
+		receiver := f.connect(t, ReceiverPrincipal(f.receiverA))
+		_, key, _ := ed25519.GenerateKey(rand.Reader)
+		registration, err := signed.RegisterKey(f.receiverA, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := receiver.ProduceSync(ctx, &kgo.Record{Topic: ReceiverTopic(f.receiverA), Key: []byte(f.receiverA), Value: registration}).FirstErr(); err != nil {
+			t.Fatalf("receiver registration: %v", err)
+		}
+		advertisement := sign(t, &wire.Advertisement{Receiver: f.receiverA, Pool: f.poolA, Offers: []wire.Offer{}, Capacity: 1, AtMS: time.Now().UnixMilli()}, key)
+		if err := receiver.ProduceSync(ctx, &kgo.Record{Topic: PoolReceiversTopic(f.poolA), Key: []byte(f.receiverA), Value: advertisement}).FirstErr(); err != nil {
+			t.Fatalf("own pool receivers topic: %v", err)
+		}
+		expectDenied(t, receiver.ProduceSync(ctx, &kgo.Record{Topic: PoolReceiversTopic(f.poolB), Key: []byte(f.receiverB), Value: advertisement}).FirstErr())
+		expectDenied(t, listEnd(f.connect(t, TenantPrincipal(f.tenantB, f.hostB1)), PoolReceiversTopic(f.poolA)))
+		state, err := f.service.LoadState(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		host := f.connect(t, TenantPrincipal(f.tenantA, f.hostA1))
+		keys, err := ReadKeys(ctx, host, map[string]string{f.receiverA: ReceiverTopic(f.receiverA)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader := NewReader(host)
+		defer reader.Close()
+		ads, err := reader.ReadAdvertisements(ctx, state, keys, []string{f.poolA}, time.Now(), time.Minute)
+		if err != nil || ads[f.receiverA].Pool != f.poolA {
+			t.Fatalf("host read advertisements %+v, %v; want %s's", ads, err, f.receiverA)
+		}
+		// The pool's custodian reads the topic as the claim check does.
+		records, err := readTopic(ctx, receiver, PoolReceiversTopic(f.poolA))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(records) == 0 {
+			t.Fatal("custodian read no advertisement")
+		}
+		if ad, err := AuthorizeAdvertisement(state, keys, records[len(records)-1].Value); err != nil || ad.Receiver != f.receiverA {
+			t.Fatalf("custodian read %+v, %v; want %s's advertisement", ad, err, f.receiverA)
 		}
 	})
 

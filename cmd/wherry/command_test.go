@@ -159,7 +159,7 @@ func newBus(t *testing.T) *bus {
 		t.Fatal(err)
 	}
 	b.produce(t, operator.ReceiverTopic("receiver-a"), "receiver-a", registration)
-	b.produce(t, operator.ReceiversTopic, "receiver-a", b.sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: "pool-a",
+	b.produce(t, operator.PoolReceiversTopic("pool-a"), "receiver-a", b.sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: "pool-a",
 		Offers: []wire.Offer{{Profile: "lab", Agent: "claude", InlineLimit: 49152}}, Capacity: 1, AtMS: time.Now().UnixMilli()}))
 	publishSnapshot(t, ctx, b.receiver, "pool-a", "receiver-a", b.receiverKey)
 	return b

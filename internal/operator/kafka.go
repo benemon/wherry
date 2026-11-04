@@ -176,6 +176,15 @@ func (service *Service) PoolApply(ctx context.Context, pool string, terms Terms,
 	} else if err := service.onePartition(ctx, true, PoolTasksTopic(pool), PoolEventsTopic(pool)); err != nil {
 		return err
 	}
+	// A recorded pool always has its receivers topic, which readers of the record expect. Pool names hold no dots, so the
+	// topic cannot collide with another derived name before CheckNames accepts the record.
+	if err := service.createTopicsWith(ctx, receiversConfigs, PoolReceiversTopic(pool)); err != nil {
+		return err
+	}
+	// A topic created with older configs converges on the next apply.
+	if err := service.configureTopics(ctx, receiversConfigs, PoolReceiversTopic(pool)); err != nil {
+		return err
+	}
 	state := current
 	if update || !exists {
 		record := Record{Kind: "pool", Pool: pool, Terms: &terms}
@@ -638,7 +647,7 @@ func tenantFeeds(state State) []string {
 // hold anything the agent printed.
 const tenantRetentionMS = 30 * 24 * 60 * 60 * 1000
 
-// receiversConfigs are wherry.receivers' topic configs: readers want only each receiver's latest advertisement, which
+// receiversConfigs are a pool's receivers topic configs: readers want only each receiver's latest advertisement, which
 // is its key's latest record. Compaction cleans closed segments alone, so a segment closes within the compaction lag.
 var receiversConfigs = map[string]string{
 	"cleanup.policy":         "compact,delete",
@@ -745,13 +754,6 @@ var appended = func(Record) {}
 // planRecord is the state once record is appended and record encoded, refusing a record the state refuses.
 func (service *Service) planRecord(ctx context.Context, record Record) (State, []byte, error) {
 	if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
-		return State{}, nil, err
-	}
-	if err := service.createTopicsWith(ctx, receiversConfigs, ReceiversTopic); err != nil {
-		return State{}, nil, err
-	}
-	// A topic created with older configs converges on the next operator write.
-	if err := service.configureTopics(ctx, receiversConfigs, ReceiversTopic); err != nil {
 		return State{}, nil, err
 	}
 	state, err := service.LoadState(ctx)
@@ -1023,22 +1025,28 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 			}
 		}
 	}
-	var custodianTopics []string
+	var custodianTopics, receiversTopics []string
 	for pool := range state.Pools {
 		custodianTopics = append(custodianTopics, CustodianTopic(pool))
+		receiversTopics = append(receiversTopics, PoolReceiversTopic(pool))
 	}
-	for _, name := range slices.Sorted(maps.Keys(custodianConfigs)) {
-		values, err := service.topicConfigs(ctx, name, custodianTopics...)
-		if err != nil {
-			return err
-		}
-		for _, topic := range custodianTopics {
-			if values[topic] != custodianConfigs[name] {
-				return fmt.Errorf("topic %s %s is %s, want %s", topic, name, values[topic], custodianConfigs[name])
+	for _, checked := range []struct {
+		topics  []string
+		configs map[string]string
+	}{{custodianTopics, custodianConfigs}, {receiversTopics, receiversConfigs}} {
+		for _, name := range slices.Sorted(maps.Keys(checked.configs)) {
+			values, err := service.topicConfigs(ctx, name, checked.topics...)
+			if err != nil {
+				return err
+			}
+			for _, topic := range checked.topics {
+				if values[topic] != checked.configs[name] {
+					return fmt.Errorf("topic %s %s is %s, want %s", topic, name, values[topic], checked.configs[name])
+				}
 			}
 		}
 	}
-	if err := service.onePartition(ctx, false, slices.Concat(poolTopics, custodianTopics)...); err != nil {
+	if err := service.onePartition(ctx, false, slices.Concat(poolTopics, custodianTopics, receiversTopics)...); err != nil {
 		return err
 	}
 	for pool, terms := range state.Pools {

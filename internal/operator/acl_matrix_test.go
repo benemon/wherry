@@ -12,7 +12,8 @@ import (
 )
 
 // ACLs and OperatorACLs grant exactly this matrix over two pools, pool-b suspended, two tenants, two live hosts, one
-// ended host and two receivers: a principal, a resource type, a resource (a prefix with *) and its operations.
+// ended host, two receivers of pool-a and one of pool-b: a principal, a resource type, a resource (a prefix with *) and
+// its operations.
 func TestACLMatrix(t *testing.T) {
 	terms := modelTerms()
 	records := []Record{{Version: 1, Kind: "tenant", Tenant: "tenant-a", AtMS: 1}, {Version: 1, Kind: "tenant", Tenant: "tenant-b", AtMS: 1},
@@ -22,7 +23,7 @@ func TestACLMatrix(t *testing.T) {
 		{Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-a", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-b", AtMS: 1},
 		{Version: 1, Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-a", AtMS: 1},
 	}
-	for _, config := range []ReceiverConfig{modelConfig("receiver-a", "pool-a"), modelConfig("receiver-b", "pool-a")} {
+	for _, config := range []ReceiverConfig{modelConfig("receiver-a", "pool-a"), modelConfig("receiver-b", "pool-a"), modelConfig("receiver-c", "pool-b")} {
 		copy := config
 		records = append(records, Record{Version: 1, Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &copy, AtMS: 1})
 	}
@@ -51,12 +52,12 @@ func TestACLMatrix(t *testing.T) {
 		"wherry.rcv.receiver-a topic wherry.operator READ,DESCRIBE",
 		"wherry.rcv.receiver-a topic wherry.pool.pool-a.custodian READ,WRITE,DESCRIBE",
 		"wherry.rcv.receiver-a topic wherry.pool.pool-a.events READ,WRITE,DESCRIBE",
+		"wherry.rcv.receiver-a topic wherry.pool.pool-a.receivers READ,WRITE,DESCRIBE",
 		"wherry.rcv.receiver-a topic wherry.pool.pool-a.tasks READ,DESCRIBE",
 		"wherry.rcv.receiver-a topic wherry.receiver.receiver-a READ,WRITE,DESCRIBE",
 		"wherry.rcv.receiver-a topic wherry.receiver.receiver-a.progress READ,WRITE,DESCRIBE",
 		"wherry.rcv.receiver-a topic wherry.receiver.receiver-b READ,DESCRIBE",
 		"wherry.rcv.receiver-a topic wherry.receiver.receiver-b.progress READ,DESCRIBE",
-		"wherry.rcv.receiver-a topic wherry.receivers READ,WRITE,DESCRIBE",
 		"wherry.rcv.receiver-a topic wherry.tenant.tenant-a WRITE,DESCRIBE",
 		"wherry.rcv.receiver-a topic wherry.tenant.tenant-a.transcript WRITE,DESCRIBE",
 		"wherry.rcv.receiver-a topic wherry.tenant.tenant-b WRITE,DESCRIBE",
@@ -70,38 +71,54 @@ func TestACLMatrix(t *testing.T) {
 		"wherry.rcv.receiver-b topic wherry.operator READ,DESCRIBE",
 		"wherry.rcv.receiver-b topic wherry.pool.pool-a.custodian READ,WRITE,DESCRIBE",
 		"wherry.rcv.receiver-b topic wherry.pool.pool-a.events READ,WRITE,DESCRIBE",
+		"wherry.rcv.receiver-b topic wherry.pool.pool-a.receivers READ,WRITE,DESCRIBE",
 		"wherry.rcv.receiver-b topic wherry.pool.pool-a.tasks READ,DESCRIBE",
 		"wherry.rcv.receiver-b topic wherry.receiver.receiver-a READ,DESCRIBE",
 		"wherry.rcv.receiver-b topic wherry.receiver.receiver-a.progress READ,DESCRIBE",
 		"wherry.rcv.receiver-b topic wherry.receiver.receiver-b READ,WRITE,DESCRIBE",
 		"wherry.rcv.receiver-b topic wherry.receiver.receiver-b.progress READ,WRITE,DESCRIBE",
-		"wherry.rcv.receiver-b topic wherry.receivers READ,WRITE,DESCRIBE",
 		"wherry.rcv.receiver-b topic wherry.tenant.tenant-a WRITE,DESCRIBE",
 		"wherry.rcv.receiver-b topic wherry.tenant.tenant-a.transcript WRITE,DESCRIBE",
 		"wherry.rcv.receiver-b topic wherry.tenant.tenant-b WRITE,DESCRIBE",
 		"wherry.rcv.receiver-b topic wherry.tenant.tenant-b.transcript WRITE,DESCRIBE",
 		"wherry.rcv.receiver-b transactional p.pool-a.* WRITE,DESCRIBE",
+		"wherry.rcv.receiver-c group p-pool-b READ,DESCRIBE,DESCRIBE_CONFIGS",
+		"wherry.rcv.receiver-c group p-pool-b.custodian READ,DESCRIBE",
+		"wherry.rcv.receiver-c topic wherry.host.tenant-a.host-a READ,DESCRIBE",
+		"wherry.rcv.receiver-c topic wherry.host.tenant-a.host-c READ,DESCRIBE",
+		"wherry.rcv.receiver-c topic wherry.operator READ,DESCRIBE",
+		"wherry.rcv.receiver-c topic wherry.pool.pool-b.custodian READ,WRITE,DESCRIBE",
+		"wherry.rcv.receiver-c topic wherry.pool.pool-b.events READ,WRITE,DESCRIBE",
+		"wherry.rcv.receiver-c topic wherry.pool.pool-b.receivers READ,WRITE,DESCRIBE",
+		"wherry.rcv.receiver-c topic wherry.pool.pool-b.tasks READ,DESCRIBE",
+		"wherry.rcv.receiver-c topic wherry.receiver.receiver-c READ,WRITE,DESCRIBE",
+		"wherry.rcv.receiver-c topic wherry.receiver.receiver-c.progress READ,WRITE,DESCRIBE",
+		"wherry.rcv.receiver-c topic wherry.tenant.tenant-a WRITE,DESCRIBE",
+		"wherry.rcv.receiver-c topic wherry.tenant.tenant-a.transcript WRITE,DESCRIBE",
+		"wherry.rcv.receiver-c transactional p.pool-b.* WRITE,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.host.tenant-a.host-a READ,WRITE,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.operator READ,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.pool.pool-a.custodian READ,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.pool.pool-a.events WRITE,DESCRIBE",
+		"wherry.tnt.tenant-a.host-a topic wherry.pool.pool-a.receivers READ,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.pool.pool-a.tasks WRITE,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.pool.pool-b.custodian READ,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.pool.pool-b.events WRITE,DESCRIBE",
+		"wherry.tnt.tenant-a.host-a topic wherry.pool.pool-b.receivers READ,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.pool.pool-b.tasks DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.receiver.receiver-a READ,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.receiver.receiver-b READ,DESCRIBE",
-		"wherry.tnt.tenant-a.host-a topic wherry.receivers READ,DESCRIBE",
+		"wherry.tnt.tenant-a.host-a topic wherry.receiver.receiver-c READ,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.tenant.tenant-a READ,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.tenant.tenant-a.transcript READ,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.host.tenant-b.host-b READ,WRITE,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.operator READ,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.pool.pool-a.custodian READ,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.pool.pool-a.events WRITE,DESCRIBE",
+		"wherry.tnt.tenant-b.host-b topic wherry.pool.pool-a.receivers READ,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.pool.pool-a.tasks WRITE,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.receiver.receiver-a READ,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.receiver.receiver-b READ,DESCRIBE",
-		"wherry.tnt.tenant-b.host-b topic wherry.receivers READ,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.tenant.tenant-b READ,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.tenant.tenant-b.transcript READ,DESCRIBE",
 	}

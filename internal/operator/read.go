@@ -5,8 +5,10 @@ import (
 	"context"
 	json "encoding/json/v2"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -478,43 +480,55 @@ func HostKeyTopics(state State, pool string) map[string]string {
 	return topics
 }
 
-// ReadAdvertisements returns each receiver's latest authorised advertisement
-// that is no older than liveness at now and no later than liveness ahead of it.
-func (r *Reader) ReadAdvertisements(ctx context.Context, state State, keys signed.Keys, now time.Time, liveness time.Duration) (map[string]wire.Advertisement, error) {
-	records, err := r.ReadFrom(ctx, ReceiversTopic, 0)
+// ReadAdvertisements returns each receiver's latest authorised advertisement on the receivers topics of pools, read
+// together, that is no older than liveness at now and no later than liveness ahead of it. A record naming another pool
+// than its topic's is refused.
+func (r *Reader) ReadAdvertisements(ctx context.Context, state State, keys signed.Keys, pools []string, now time.Time, liveness time.Duration) (map[string]wire.Advertisement, error) {
+	offsets := map[string]int64{}
+	for _, pool := range pools {
+		offsets[PoolReceiversTopic(pool)] = 0
+	}
+	reads, err := r.readFrom(ctx, offsets, false)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read %s: %w", strings.Join(slices.Sorted(maps.Keys(offsets)), ", "), err)
 	}
 	// A record verifies only if its payload is the one read here unverified, so its receiver and time decide which
 	// records could win before any is verified.
 	type candidate struct {
 		at    int64
+		pool  string
 		value []byte
 	}
 	candidates := map[string][]candidate{}
-	for _, record := range slices.Backward(records) {
-		jws, err := jose.ParseSignedCompact(string(record.Value), []jose.SignatureAlgorithm{jose.EdDSA})
-		if err != nil {
-			continue
+	for _, pool := range pools {
+		read := reads[PoolReceiversTopic(pool)]
+		if read.err != nil {
+			return nil, fmt.Errorf("read %s: %w", PoolReceiversTopic(pool), read.err)
 		}
-		var unverified struct {
-			Receiver string `json:"receiver"`
-			AtMS     int64  `json:"at_ms"`
+		for _, record := range slices.Backward(read.records) {
+			jws, err := jose.ParseSignedCompact(string(record.Value), []jose.SignatureAlgorithm{jose.EdDSA})
+			if err != nil {
+				continue
+			}
+			var unverified struct {
+				Receiver string `json:"receiver"`
+				AtMS     int64  `json:"at_ms"`
+			}
+			if json.Unmarshal(jws.UnsafePayloadWithoutVerification(), &unverified) != nil {
+				continue
+			}
+			if age := now.Sub(time.UnixMilli(unverified.AtMS)); age > liveness || age < -liveness {
+				continue
+			}
+			candidates[unverified.Receiver] = append(candidates[unverified.Receiver], candidate{unverified.AtMS, pool, record.Value})
 		}
-		if json.Unmarshal(jws.UnsafePayloadWithoutVerification(), &unverified) != nil {
-			continue
-		}
-		if age := now.Sub(time.UnixMilli(unverified.AtMS)); age > liveness || age < -liveness {
-			continue
-		}
-		candidates[unverified.Receiver] = append(candidates[unverified.Receiver], candidate{unverified.AtMS, record.Value})
 	}
 	latest := map[string]wire.Advertisement{}
 	for receiver, records := range candidates {
 		// Newest first; of equal times the later record, as they are read in reverse.
 		slices.SortStableFunc(records, func(a, b candidate) int { return cmp.Compare(b.at, a.at) })
 		for _, record := range records {
-			if advertisement, err := AuthorizeAdvertisement(state, keys, record.value); err == nil {
+			if advertisement, err := AuthorizeAdvertisement(state, keys, record.value); err == nil && advertisement.Pool == record.pool {
 				latest[receiver] = advertisement
 				break
 			}

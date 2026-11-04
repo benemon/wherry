@@ -323,7 +323,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	now := time.Now()
 	// A receiver keeps its plugin's declared limit through a restart, so an advertisement of any age counts for the
 	// profile limit; placement takes live ones alone.
-	declared, err := h.reader.ReadAdvertisements(ctx, v.state, v.keys, now, math.MaxInt64)
+	declared, err := h.reader.ReadAdvertisements(ctx, v.state, v.keys, slices.Sorted(maps.Keys(v.state.Entitlements[h.tenant])), now, math.MaxInt64)
 	if err != nil {
 		return SubmitResult{}, err
 	}
@@ -677,7 +677,7 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 		return nil, err
 	}
 	now := time.Now()
-	ads, err := h.reader.ReadAdvertisements(ctx, v.state, v.keys, now, math.MaxInt64)
+	ads, err := h.reader.ReadAdvertisements(ctx, v.state, v.keys, slices.Sorted(maps.Keys(v.state.Entitlements[h.tenant])), now, math.MaxInt64)
 	if err != nil {
 		return nil, err
 	}

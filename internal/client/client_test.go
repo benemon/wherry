@@ -31,6 +31,7 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -271,7 +272,7 @@ func (r *testReceiver) advertise(t *testing.T, ctx context.Context, mutate func(
 	if mutate != nil {
 		mutate(ad)
 	}
-	r.produce(t, ctx, operator.ReceiversTopic, r.id, r.sign(t, ad))
+	r.produce(t, ctx, operator.PoolReceiversTopic(r.pool), r.id, r.sign(t, ad))
 }
 
 func defaultSelector() []wire.Requirement {
@@ -1191,6 +1192,45 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	}
 	if d := got["receiver-d"]; d.Status != "ended" {
 		t.Fatalf("ended receiver %#v", d)
+	}
+}
+
+// A host reads the receivers topic of each pool its tenant is entitled to, and lists none of another pool's receivers.
+func TestReceiversReadsEachEntitledPoolsTopic(t *testing.T) {
+	f := newFixture(t)
+	f.pool(t, "pool-b")
+	if err := f.service.PoolApply(f.ctx, "pool-c", testTerms(), false); err != nil {
+		t.Fatal(err)
+	}
+	for receiver, pool := range map[string]string{"receiver-a": "pool-a", "receiver-b": "pool-b", "receiver-c": "pool-c"} {
+		f.addReceiver(t, receiver, pool).advertise(t, f.ctx, nil)
+	}
+	receivers, err := f.host.Receivers(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, receiver := range receivers {
+		got[receiver.ReceiverID] = receiver.Pool + " " + receiver.Status
+	}
+	if want := map[string]string{"receiver-a": "pool-a live", "receiver-b": "pool-b live"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("receivers %v, want %v", got, want)
+	}
+}
+
+// A receiver writes its own pool's receivers topic alone: another pool's is refused by the broker.
+func TestReceiverCannotAdvertiseOnAnotherPoolsTopic(t *testing.T) {
+	f := newFixtureNoHost(t)
+	f.pool(t, "pool-b")
+	f.addReceiver(t, "receiver-a", "pool-a")
+	other := f.addReceiver(t, "receiver-b", "pool-b")
+	value := other.sign(t, &wire.Advertisement{Receiver: "receiver-b", Pool: "pool-b", Offers: []wire.Offer{}, Capacity: 1, AtMS: time.Now().UnixMilli()})
+	if err := other.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: operator.PoolReceiversTopic("pool-b"), Key: []byte("receiver-b"), Value: value}).FirstErr(); err != nil {
+		t.Fatalf("own pool's receivers topic: %v", err)
+	}
+	err := other.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: operator.PoolReceiversTopic("pool-a"), Key: []byte("receiver-a"), Value: value}).FirstErr()
+	if !errors.Is(err, kerr.TopicAuthorizationFailed) {
+		t.Fatalf("another pool's receivers topic: %v, want TOPIC_AUTHORIZATION_FAILED", err)
 	}
 }
 
@@ -2209,5 +2249,68 @@ func TestPlacementSkipsRemovedEntitlement(t *testing.T) {
 	}
 	if n := f.tasksEnd(t, "pool-a"); n != 0 {
 		t.Fatalf("removed pool received %d tasks", n)
+	}
+}
+
+// A missing receivers topic of one entitled pool, deleted by hand, fails the host's reads of every pool's receivers
+// with an error naming the topic.
+func TestMissingEntitledPoolsReceiversTopicFailsTheRead(t *testing.T) {
+	f := newFixture(t)
+	f.pool(t, "pool-b")
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	topic := operator.PoolReceiversTopic("pool-b")
+	responses, err := kadm.NewClient(f.service.Operator).DeleteTopics(f.ctx, topic)
+	if err == nil {
+		err = responses.Error()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receivers, err := f.host.Receivers(f.ctx); err == nil || !strings.Contains(err.Error(), topic) {
+		t.Fatalf("receivers %v, %v; want an error naming %s", receivers, err, topic)
+	}
+	if err := f.submitErr(t); err == nil || !strings.Contains(err.Error(), topic) {
+		t.Fatalf("submit: %v; want an error naming %s", err, topic)
+	}
+}
+
+// A host of a tenant entitled to no pool lists no receivers.
+func TestReceiversOfAHostWithoutEntitlementsIsEmpty(t *testing.T) {
+	f := newFixtureNoHost(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	if err := f.service.TenantAdd(f.ctx, "tenant-b"); err != nil {
+		t.Fatal(err)
+	}
+	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
+	if err := f.service.HostAdd(f.ctx, "tenant-b", "host-b", bundle, false); err != nil {
+		t.Fatal(err)
+	}
+	kafka, principal := f.connect(t, bundle)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := NewHost(kafka, key, principal, t.TempDir(), nil, nil, log.New(f.logs, "host-b: ", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.Register(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	// kadm lists every topic when it is given none, which it asks for as a metadata request naming no topics.
+	var all atomic.Int32
+	f.cluster.ControlKey(int16(kmsg.Metadata), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		f.cluster.KeepControl()
+		if request.(*kmsg.MetadataRequest).Topics == nil {
+			all.Add(1)
+		}
+		return nil, nil, false
+	})
+	receivers, err := host.Receivers(f.ctx)
+	if err != nil || len(receivers) != 0 {
+		t.Fatalf("receivers %v, %v; want none and no error", receivers, err)
+	}
+	if n := all.Load(); n != 0 {
+		t.Fatalf("listing receivers asked for every topic's metadata %d times", n)
 	}
 }

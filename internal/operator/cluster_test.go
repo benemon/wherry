@@ -11,12 +11,11 @@ import (
 
 	"github.com/benemon/wherry/internal/kafkatest"
 	"github.com/twmb/franz-go/pkg/kadm"
-	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 // TestCompactionAcrossReplicasOnCluster runs on the multi-broker cluster test/kafka/up-cluster.sh starts. It writes
-// several values under each of a few keys to wherry.receivers and to a progress topic, both created with wherry's own
+// several values under each of a few keys to a pool receivers topic and to a progress topic, both created with wherry's own
 // configs, the progress values in transactions as a receiver writes them and with a terminal tombstone. With segments
 // closing quickly it then makes each replica the leader in turn and reads the topic from it: every replica must have
 // compacted its own copy to each key's latest record, and that record must survive each leader change.
@@ -36,52 +35,26 @@ func TestCompactionAcrossReplicasOnCluster(t *testing.T) {
 	brokers := kafkatest.Brokers(t, ctx, adm)
 	service := &Service{Operator: kafka}
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	progress := ReceiverProgressTopic("compaction-" + suffix)
-	if err := service.createTopicsWith(ctx, receiversConfigs, ReceiversTopic); err != nil {
+	receivers, progress := PoolReceiversTopic("compaction-"+suffix), ReceiverProgressTopic("compaction-"+suffix)
+	if err := service.createTopicsWith(ctx, receiversConfigs, receivers); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.createTopicsWith(ctx, progressConfigs(7*24*60*60*1000), progress); err != nil {
 		t.Fatal(err)
 	}
-	if err := kafkatest.Led(ctx, kafka, ReceiversTopic, progress); err != nil {
+	if err := kafkatest.Led(ctx, kafka, receivers, progress); err != nil {
 		t.Fatal(err)
 	}
-	// Segments close within seconds rather than the hour wherry sets, and the cleaner takes any dirty segment;
-	// wherry.receivers, which the other tests share, gets its configs back afterwards.
+	// Segments close within seconds rather than the hour wherry sets, and the cleaner takes any dirty segment.
 	fast := []kadm.AlterConfig{
 		{Op: kadm.SetConfig, Name: "segment.ms", Value: kadm.StringPtr("5000")},
 		{Op: kadm.SetConfig, Name: "max.compaction.lag.ms", Value: kadm.StringPtr("5000")},
 		{Op: kadm.SetConfig, Name: "min.cleanable.dirty.ratio", Value: kadm.StringPtr("0.01")},
 	}
-	// The cleanup restores wherry.receivers on a client of its own: the test's client is closed by then, its deferred
-	// Close running before any cleanup, and a closed client fails every request as a dead broker connection. Each
-	// restoring request is retried briefly on a retriable error or a lost connection, which a leader election the
-	// test made may still cause.
-	t.Cleanup(func() {
-		restoring, err := kgo.NewClient(kgo.SeedBrokers(address))
-		if err != nil {
-			t.Errorf("restore wherry.receivers: %v", err)
-			return
-		}
-		defer restoring.Close()
-		restoreCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		defer cancel()
-		restoreAdm, restoreService := kadm.NewClient(restoring), &Service{Operator: restoring}
-		if err := retried(restoreCtx, func() error {
-			return alterTopicConfigs(restoreCtx, restoreAdm, []kadm.AlterConfig{{Op: kadm.DeleteConfig, Name: "min.cleanable.dirty.ratio"}}, ReceiversTopic)
-		}); err != nil {
-			t.Errorf("restore wherry.receivers: %v", err)
-		}
-		if err := retried(restoreCtx, func() error {
-			return restoreService.configureTopics(restoreCtx, receiversConfigs, ReceiversTopic)
-		}); err != nil {
-			t.Errorf("restore wherry.receivers: %v", err)
-		}
-	})
-	if err := alterTopicConfigs(ctx, adm, fast, ReceiversTopic, progress); err != nil {
+	if err := alterTopicConfigs(ctx, adm, fast, receivers, progress); err != nil {
 		t.Fatal(err)
 	}
-	for _, topic := range []string{ReceiversTopic, progress} {
+	for _, topic := range []string{receivers, progress} {
 		if _, err := kafkatest.Partition(ctx, adm, topic, 0); err != nil {
 			t.Fatal(err)
 		}
@@ -91,14 +64,14 @@ func TestCompactionAcrossReplicasOnCluster(t *testing.T) {
 	const rounds = 5
 	value := func(key string, round int) []byte { return fmt.Appendf(nil, "%s-%d", key, round) }
 	// want is each key's latest value; nil is a tombstone.
-	want := map[string]map[string][]byte{ReceiversTopic: {}, progress: {}}
+	want := map[string]map[string][]byte{receivers: {}, progress: {}}
 	for round := range rounds {
 		for _, key := range keys {
-			record := &kgo.Record{Topic: ReceiversTopic, Key: []byte(key), Value: value(key, round)}
+			record := &kgo.Record{Topic: receivers, Key: []byte(key), Value: value(key, round)}
 			if err := kafka.ProduceSync(ctx, record).FirstErr(); err != nil {
 				t.Fatal(err)
 			}
-			want[ReceiversTopic][key] = record.Value
+			want[receivers][key] = record.Value
 		}
 	}
 	producer, err := kgo.NewClient(kgo.SeedBrokers(address), kgo.TransactionalID("p.compaction-"+suffix+".run"))
@@ -126,13 +99,13 @@ func TestCompactionAcrossReplicasOnCluster(t *testing.T) {
 	}
 	// A record past segment.ms closes the segment holding the test's records, which only then becomes cleanable.
 	time.Sleep(6 * time.Second)
-	for _, topic := range []string{ReceiversTopic, progress} {
+	for _, topic := range []string{receivers, progress} {
 		if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: topic, Key: []byte("compaction-" + suffix + "-roll"), Value: []byte("roll")}).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	for _, topic := range []string{ReceiversTopic, progress} {
+	for _, topic := range []string{receivers, progress} {
 		for _, broker := range brokers {
 			if err := kafkatest.MoveLeader(ctx, adm, topic, 0, broker); err != nil {
 				t.Fatal(err)
@@ -165,25 +138,6 @@ func alterTopicConfigs(ctx context.Context, adm *kadm.Client, configs []kadm.Alt
 		}
 	}
 	return nil
-}
-
-// retried calls fn until it succeeds, fails with an error that is neither a retriable Kafka error nor a lost or
-// failed broker connection, has failed five times, or ctx ends. It waits 250ms after the first failure, doubling
-// each time.
-func retried(ctx context.Context, fn func() error) error {
-	backoff := 250 * time.Millisecond
-	for attempt := 1; ; attempt++ {
-		err := fn()
-		if err == nil || attempt == 5 || !(kerr.IsRetriable(err) || kgo.IsRetryableBrokerErr(err)) {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("%w (%w)", err, ctx.Err())
-		case <-time.After(backoff):
-		}
-		backoff *= 2
-	}
 }
 
 // keyed reads topic to its last stable offset from its leader and returns the values of keys' records in order.
