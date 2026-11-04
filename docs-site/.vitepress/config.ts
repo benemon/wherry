@@ -142,13 +142,14 @@ check(sidebar)
 
 // The pages are the repository's docs/, copied to src/ by the build, so they also read as plain Markdown on GitHub;
 // rendered from outside this directory, their imports would not resolve against node_modules. The build also copies
-// wherry-plugins' examples/ to src/examples/ for the Plugins page's snippet imports; they are not pages.
+// wherry-plugins' examples/ to src/examples/ for the Plugins page's snippet imports, and each plugin's README.md to
+// src/plugins/<plugin>/README.md for the Install pages' includes of its install region; neither copy is pages.
 export default defineConfig({
   title: 'wherry',
   description: 'An execution fabric for delegated agent work.',
   base: '/wherry/',
   srcDir: 'src',
-  srcExclude: ['examples/**'],
+  srcExclude: ['examples/**', 'plugins/**'],
   ignoreDeadLinks: false,
   vite: { publicDir: '../../brand' },
   head: [

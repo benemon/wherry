@@ -19,8 +19,9 @@ permissions:
   contents: read
 
 env:
-  # The wherry-plugins commit whose examples the Plugins page embeds; a plugin release moves it to the commit it was cut from.
-  WHERRY_PLUGINS_REF: 106f4b1b2c7f62b68a7b73ac135085af7e20f90d
+  # The wherry-plugins commit whose examples the Plugins page embeds and whose README install regions the Install pages
+  # include; a plugin release moves it to the commit it was cut from.
+  WHERRY_PLUGINS_REF: 7c90af415d794263533868655f41ea8f83712802
 
 concurrency:
   group: pages-${{ github.event_name }}-${{ github.ref }}
@@ -32,7 +33,7 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      # The Plugins page embeds the receiver examples from wherry-plugins.
+      # The Plugins page embeds the receiver examples from wherry-plugins, and the Install pages include the plugin READMEs.
       - name: Check out wherry-plugins
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
