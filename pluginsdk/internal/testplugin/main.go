@@ -15,6 +15,7 @@ import (
 	"io/fs"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -53,9 +54,15 @@ type config struct {
 	// LogCredential makes Configure write Settings.Credential through its logger, on stdout and as a raw line on file
 	// descriptor 2, then fail with an error that holds it.
 	LogCredential bool `json:"log_credential"`
-	// Jobs makes the plugin keep each run's job as a platform does, for the conformance suite: Lookup finds it, Follow
-	// and Stop end it, Purge removes it, and Collect finds no outputs in it unless Outputs is set.
+	// Jobs makes the plugin keep each run's job as a platform does, for the conformance suite: Follow and Stop end it,
+	// Purge removes it, and Collect finds no outputs in it unless Outputs is set. Lookup's handle is not Dispatch's, and
+	// Follow and Collect refuse Dispatch's. Without it Lookup still finds a dispatched job running, under Dispatch's
+	// handle.
 	Jobs bool `json:"jobs"`
+	// Pending makes a kept job wait unplaced, Lookup reporting it pending with this reason, until the file Placed names
+	// exists; Lookup then finds it running, or ended when the file holds "ended". Stop ends a pending job never started.
+	Pending string `json:"pending"`
+	Placed  string `json:"placed"`
 	// Hang makes Ready stop the process without it exiting, so it answers nothing more, go-plugin's pings included.
 	Hang bool `json:"hang"`
 }
@@ -94,13 +101,28 @@ type fake struct {
 	jobs     map[string]*pluginsdk.Job
 }
 
-// end marks the job of a run ended, when the plugin keeps jobs.
+// dispatched prefixes the data of Dispatch's handle.
+const dispatched = "dispatch:"
+
+// end marks the job of a run ended, or never started when it was pending, when the plugin keeps jobs.
 func (f *fake) end(runID string) {
 	f.jobsMu.Lock()
 	defer f.jobsMu.Unlock()
-	if job := f.jobs[runID]; job != nil && job.State == pluginsdk.JobRunning {
+	switch job := f.jobs[runID]; {
+	case job == nil:
+	case job.State == pluginsdk.JobRunning:
 		job.State = pluginsdk.JobEnded
+	case job.State == pluginsdk.JobPending:
+		job.State, job.Class, job.Reason = pluginsdk.JobNeverStarted, "stopped", ""
 	}
+}
+
+// lookupHandle refuses Dispatch's handle where a kept job needs Lookup's.
+func (f *fake) lookupHandle(op string, handle pluginsdk.Handle) error {
+	if f.config.Jobs && strings.HasPrefix(string(handle.Data), dispatched) {
+		return &pluginsdk.Error{Op: op, Err: errors.New("the handle is Dispatch's, not Lookup's")}
+	}
+	return nil
 }
 
 func (f *fake) panics(method string) {
@@ -139,13 +161,21 @@ func (f *fake) Dispatch(_ context.Context, run pluginsdk.Run) (pluginsdk.Outcome
 		f.jobsMu.Lock()
 		defer f.jobsMu.Unlock()
 		if f.jobs[run.ID] == nil {
-			state := pluginsdk.JobRunning
-			if f.config.NeverStarted != "" {
-				state = pluginsdk.JobNeverStarted
+			job := &pluginsdk.Job{State: pluginsdk.JobRunning, Handle: handle, Attempt: run.Attempt, Profile: run.Profile, Agent: run.Agent}
+			switch {
+			case f.config.NeverStarted != "":
+				job.State, job.Class, job.Reason = pluginsdk.JobNeverStarted, "validation", f.config.NeverStarted
+			case f.config.Pending != "":
+				job.State, job.Reason = pluginsdk.JobPending, f.config.Pending
 			}
-			f.jobs[run.ID] = &pluginsdk.Job{State: state, Handle: handle, Attempt: run.Attempt, Profile: run.Profile, Agent: run.Agent}
+			f.jobs[run.ID] = job
 		}
-		return pluginsdk.OutcomeCreated, f.jobs[run.ID].Handle, nil
+		return pluginsdk.OutcomeCreated, pluginsdk.Handle{Data: []byte(dispatched + run.ID), Name: handle.Name}, nil
+	}
+	f.jobsMu.Lock()
+	defer f.jobsMu.Unlock()
+	if f.jobs[run.ID] == nil {
+		f.jobs[run.ID] = &pluginsdk.Job{State: pluginsdk.JobRunning, Handle: handle, Attempt: run.Attempt, Profile: run.Profile, Agent: run.Agent}
 	}
 	return pluginsdk.OutcomeCreated, handle, nil
 }
@@ -154,15 +184,27 @@ func (f *fake) Lookup(_ context.Context, runID string) (pluginsdk.Job, error) {
 	f.panics("Lookup")
 	f.jobsMu.Lock()
 	defer f.jobsMu.Unlock()
-	if job := f.jobs[runID]; job != nil {
-		return *job, nil
+	job := f.jobs[runID]
+	if job == nil {
+		return pluginsdk.Job{}, nil
 	}
-	return pluginsdk.Job{}, nil
+	if job.State == pluginsdk.JobPending && f.config.Placed != "" {
+		if placed, err := os.ReadFile(f.config.Placed); err == nil {
+			job.State, job.Reason = pluginsdk.JobRunning, ""
+			if string(placed) == "ended" {
+				job.State = pluginsdk.JobEnded
+			}
+		}
+	}
+	return *job, nil
 }
 
 // Follow emits the lines from offset from, then holds the stream open like a running job unless it finishes.
 func (f *fake) Follow(ctx context.Context, handle pluginsdk.Handle, from int64, out chan<- pluginsdk.Line) (pluginsdk.Terminal, error) {
 	f.panics("Follow")
+	if err := f.lookupHandle("read allocation", handle); err != nil {
+		return pluginsdk.Terminal{}, err
+	}
 	if f.config.NeverStarted != "" {
 		return pluginsdk.Terminal{Class: "validation", Node: "fake-node", Reason: f.config.NeverStarted}, nil
 	}
@@ -188,12 +230,15 @@ func (f *fake) Follow(ctx context.Context, handle pluginsdk.Handle, from int64, 
 
 func (f *fake) Stop(_ context.Context, handle pluginsdk.Handle) error {
 	f.panics("Stop")
-	f.end(string(handle.Data))
+	f.end(strings.TrimPrefix(string(handle.Data), dispatched))
 	return nil
 }
 
-func (f *fake) Collect(ctx context.Context, _ pluginsdk.Handle, limits pluginsdk.Limits, out chan<- pluginsdk.Output) error {
+func (f *fake) Collect(ctx context.Context, handle pluginsdk.Handle, limits pluginsdk.Limits, out chan<- pluginsdk.Output) error {
 	f.panics("Collect")
+	if err := f.lookupHandle("read allocation", handle); err != nil {
+		return err
+	}
 	if f.config.Jobs && !f.config.Outputs {
 		return nil
 	}

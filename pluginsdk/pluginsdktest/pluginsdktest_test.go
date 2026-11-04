@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/benemon/wherry/pluginsdk"
 	"github.com/benemon/wherry/pluginsdk/pluginsdktest"
@@ -47,6 +49,9 @@ func TestConformanceThroughThePlugin(t *testing.T) {
 }
 
 func conform(t *testing.T, wrap func(pluginsdk.Plugin) pluginsdk.Plugin) {
+	previous := pluginsdktest.PollDeadline
+	pluginsdktest.PollDeadline = 5 * time.Second
+	t.Cleanup(func() { pluginsdktest.PollDeadline = previous })
 	plugin := filepath.Join(t.TempDir(), "wherry-plugin-fake")
 	if output, err := exec.Command("go", "build", "-o", plugin, "../internal/testplugin").CombinedOutput(); err != nil {
 		t.Fatalf("build test plugin: %v\n%s", err, output)
@@ -68,9 +73,14 @@ func conform(t *testing.T, wrap func(pluginsdk.Plugin) pluginsdk.Plugin) {
 		}
 		return wrap(profile), nil
 	}
+	// The completing profile's jobs wait unplaced until the platform places them, a Lookup or two after Dispatch.
+	placed := filepath.Join(t.TempDir(), "placed")
+	timer := time.AfterFunc(1500*time.Millisecond, func() { _ = os.WriteFile(placed, nil, 0o600) })
+	t.Cleanup(func() { timer.Stop() })
 	pluginsdktest.Run(t, factory,
-		pluginsdk.Settings{Name: "completes", Agent: "claude", Config: []byte(`{"jobs":true,"finish":true,"inline_limit":4096}`)},
+		pluginsdk.Settings{Name: "completes", Agent: "claude", Config: fmt.Appendf(nil, `{"jobs":true,"finish":true,"pending":"queued","placed":%q,"inline_limit":4096}`, placed)},
 		pluginsdk.Settings{Name: "never-starts", Agent: "claude", Config: []byte(`{"jobs":true,"never_started":"image pull failed","inline_limit":4096}`)},
+		pluginsdk.Settings{Name: "pending", Agent: "claude", Config: []byte(`{"jobs":true,"pending":"0 nodes evaluated, 0 filtered, 0 exhausted","inline_limit":4096}`)},
 		4096)
 }
 
@@ -109,13 +119,25 @@ func (p drifts) Lookup(ctx context.Context, runID string) (pluginsdk.Job, error)
 	return job, err
 }
 
+// pendingForever never places a job that would run.
+type pendingForever struct{ pluginsdk.Plugin }
+
+func (p pendingForever) Lookup(ctx context.Context, runID string) (pluginsdk.Job, error) {
+	job, err := p.Plugin.Lookup(ctx, runID)
+	if job.State == pluginsdk.JobRunning {
+		job.State, job.Reason = pluginsdk.JobPending, "no nodes available"
+	}
+	return job, err
+}
+
 var broken = map[string]struct {
 	wrap func(pluginsdk.Plugin) pluginsdk.Plugin
 	want string
 }{
-	"redispatches": {func(p pluginsdk.Plugin) pluginsdk.Plugin { return redispatches{p} }, "lookup after dispatching the ended run"},
-	"forgets":      {func(p pluginsdk.Plugin) pluginsdk.Plugin { return forgets{p} }, "after the end = {Started:false"},
-	"drifts":       {func(p pluginsdk.Plugin) pluginsdk.Plugin { return drifts{p, new(int)} }, "second lookup while running"},
+	"redispatches":   {func(p pluginsdk.Plugin) pluginsdk.Plugin { return redispatches{p} }, "lookup after dispatching the ended run"},
+	"forgets":        {func(p pluginsdk.Plugin) pluginsdk.Plugin { return forgets{p} }, "after the end = {Started:false"},
+	"drifts":         {func(p pluginsdk.Plugin) pluginsdk.Plugin { return drifts{p, new(int)} }, "second lookup while running"},
+	"pendingForever": {func(p pluginsdk.Plugin) pluginsdk.Plugin { return pendingForever{p} }, "lookup while running = {State:4"},
 }
 
 // Each broken plugin fails the suite at the case that guards against it.

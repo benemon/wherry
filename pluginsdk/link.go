@@ -20,7 +20,7 @@ var handshake = plugin.HandshakeConfig{
 // versionedPlugins is every plugin protocol version Serve serves and Launch accepts, each with its plugin set. go-plugin
 // runs the newest version both sides list and refuses a plugin that lists none of Launch's.
 func versionedPlugins(p *grpcPlugin) map[int]plugin.PluginSet {
-	return map[int]plugin.PluginSet{10: {pluginName: p}}
+	return map[int]plugin.PluginSet{11: {pluginName: p}}
 }
 
 type grpcPlugin struct {

@@ -191,6 +191,7 @@ func (s *server) Lookup(ctx context.Context, req *pluginv1.LookupRequest) (*plug
 	}
 	return &pluginv1.LookupResponse{Job: &pluginv1.Job{
 		State: pluginv1.JobState(job.State), Handle: handleMessage(job.Handle), Attempt: job.Attempt, Profile: job.Profile, Agent: job.Agent,
+		Class: job.Class, Reason: job.Reason,
 	}}, nil
 }
 

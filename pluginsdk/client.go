@@ -314,7 +314,10 @@ func (r *remote) Lookup(ctx context.Context, runID string) (Job, error) {
 		return Job{}, callError(ctx, err)
 	}
 	job := resp.GetJob()
-	return Job{State: JobState(job.GetState()), Handle: handleOf(job.GetHandle()), Attempt: job.GetAttempt(), Profile: job.GetProfile(), Agent: job.GetAgent()}, nil
+	return Job{
+		State: JobState(job.GetState()), Handle: handleOf(job.GetHandle()), Attempt: job.GetAttempt(), Profile: job.GetProfile(), Agent: job.GetAgent(),
+		Class: job.GetClass(), Reason: job.GetReason(),
+	}, nil
 }
 
 func (r *remote) Follow(ctx context.Context, handle Handle, from int64, lines chan<- Line) (Terminal, error) {
