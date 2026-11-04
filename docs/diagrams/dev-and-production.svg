@@ -41,7 +41,7 @@
     <text x="284" y="446" font-size="11">in your coding agent</text>
 
     <text x="50" y="500" font-size="11.5" font-weight="600">For trying wherry and developing it.</text>
-    <text x="50" y="522" font-size="11">One command builds it, wherry dev down removes it.</text>
+    <text x="50" y="522" font-size="11">wherry dev init and wherry dev up build it; wherry dev down removes it.</text>
 
     <!-- production -->
     <text x="560" y="44" font-size="14" font-weight="600">Production</text>

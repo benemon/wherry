@@ -3,14 +3,12 @@
 Run a complete instance on one machine.
 Use this instance to try wherry or develop integrations.
 
-![A development instance on one machine beside a production deployment of the same parts](diagrams/dev-and-production.svg)
-
 For a deployment across machines, follow [Quickstart: production](quickstart-production.md).
 
 ## Before you start
 
 You need Linux or macOS, Docker or Podman, and an installed agent harness.
-Use `--agent mock` if you do not have a harness.
+Without a harness, you can run the built-in mock agent instead.
 
 ## Install wherry
 
@@ -39,7 +37,7 @@ production: Nomad's ACLs are off and every agent runs with your rights.
 - Docker or Podman that answers `docker version` or `podman version`. On
   macOS, Podman runs through `podman machine`.
 - An agent harness on `PATH`, `claude`, `codex` or `gemini`, logged in.
-  Without one, `--agent mock` runs the built-in mock agent alone.
+  Without one, use the mock agent, as step 1 shows.
 - Ports 4646, 4647, 4648 and 9093 free on 127.0.0.1, and 18080 with
   storage.
 - 1536 MB of memory for Kafka, which its Nomad job reserves, and the
@@ -49,6 +47,12 @@ production: Nomad's ACLs are off and every agent runs with your rights.
 
 ```sh
 wherry dev init
+```
+
+Without an agent harness, acquire the mock agent alone:
+
+```sh
+wherry dev init --agent mock
 ```
 
 `init` downloads Nomad 2.1.1, the newest nomad plugin release whose plugin

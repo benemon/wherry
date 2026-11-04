@@ -493,19 +493,24 @@ system roots trusts every CA they hold for the broker's address.
 
 ## Removal and retained data
 
-Tenant and entitlement removal revoke access and do not erase data. Receivers keep Write and
-Describe on ended entitlements' tenant feed and transcript and Read and Describe on every host key
-topic of that tenant, including ended hosts. Only the receiver's own revocation removes all its
-grants. These grants come from current pool membership: a receiver joining later receives them, and
-a host added later is readable by those receivers. This documented over-grant permits writes to a
-feed the tenant's hosts ignore for that pool and reads of public keys.
+Removing a tenant or an entitlement revokes access. It erases no data.
 
-After an entitlement ends, unclaimed tasks and claimed-task redeliveries fail admission without
-writes. Running jobs finish normally into the tenant feed, but hosts cannot read their pool's runs
-or cancel them. Pool-event readers drop their terminal statuses; the receiver still settles its
-claim. A run awaiting a pool key has its open refused and releases its task; its next admission
-rejects it. If an adopter's job already runs, or a receiver restarts mid-run, the job is left to the
-plugin's sweep. Receiver restarts reject redelivery rather than adopting the job.
+The pool's receivers keep some grants after an entitlement ends, so runs they already hold can finish:
+
+- Write and Describe on the tenant's feed and transcript topics.
+- Read and Describe on every host key topic of the tenant, including ended hosts.
+
+Only a receiver's own revocation removes these grants. They follow current pool membership, so a receiver that joins
+the pool later also gets them, and those receivers can read the key topic of a host added later. The over-grant
+allows writes to a feed the tenant's hosts ignore for that pool, and reads of public keys.
+
+What happens to work after an entitlement ends:
+
+- Unclaimed tasks, and redeliveries of claimed ones, fail admission. The receiver writes nothing for them.
+- Running jobs finish normally into the tenant's feed. The tenant's hosts can no longer read or cancel them.
+- A run waiting for its pool key is refused its open, and the receiver releases the task. Its next admission
+  rejects it.
+- A job whose run was released or whose receiver restarted mid-run is not adopted. The plugin's sweep cleans it up.
 
 Residue and manual cleanup after revocation:
 
@@ -516,4 +521,4 @@ Residue and manual cleanup after revocation:
 - Receivers' kept grants above remain until manually deleted with the Admin API; operator convergence restores grants derived from the log. Coordinate cleanup with stopping retained work and removing receivers.
 - Host removal leaves its client quota; delete its user quota with the Admin API. Tenant removal deletes live hosts' quotas before revoking them; previously ended hosts' quotas require manual cleanup.
 
-Only bundle files are erased by tenant removal. Comprehensive erasure and automated topic cleanup are future work.
+Tenant removal erases only the tenant's bundle files.

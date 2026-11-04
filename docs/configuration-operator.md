@@ -62,14 +62,16 @@ ignored. Any other entry and a directory with no agent files are errors.
 | `vcs` | list of strings | none | Allow git inputs from the listed remote hosts. |
 | `storage` | mapping | none | Set the S3-compatible store's `endpoint` and `bucket`. |
 
-An agent's `default_model`, when set, is one of its `models`; it defaults to
-the model of an agent listing one, and an agent without `models` has none. A task for an agent with `models` runs the model
-it names, or `default_model`; with no `default_model` it must name one, and
-`submit` refuses it otherwise. One naming a model outside `models` fails `submit`, and a
-receiver rejects one whose model has left the terms since with
-`model not in the pool's terms`. A task for an agent without `models` names
-no model, and its plugin profiles run the model their command sets. wherry does not
-interpret a model name.
+How a task's model is chosen:
+
+1. A task can name one of the agent's `models`.
+2. Otherwise it runs the agent's `default_model`.
+3. An agent with one model uses that model as its default.
+4. An agent with several models and no `default_model` needs every task to name one. `submit` refuses a task that does not.
+
+`submit` refuses a model outside `models`. A receiver rejects a task whose model has left the terms since, with
+`model not in the pool's terms`. An agent without `models` takes no model name; its plugin profiles run the model
+their command sets. wherry does not interpret model names.
 
 ### Agent credentials
 
@@ -90,11 +92,9 @@ its host has no source for, and its [prompt](configuration-receiver.md#agent-con
 supplied. Every plugin profile of the agent delivers the agent's credentials, each at
 its target.
 
-Each entry of `vcs` is a lowercase host name, optionally with a `:port` of
-1 to 65535, and appears once. A remote's host drops its scheme's default
-port, 443 for `https` and 22 for `ssh`, before it is matched, so an entry
-names a port only when it is not that default; an entry with the default
-port matches no remote. `git.example.com` matches
+Each entry of `vcs` is a lowercase host name, with an optional `:port` from 1 to 65535. Each entry appears once.
+wherry drops a remote's default port before matching: 443 for `https` and 22 for `ssh`. So name a port only when it is
+not the default. An entry that names the default port matches no remote. `git.example.com` matches
 `https://git.example.com/...` and `ssh://git@git.example.com/...`;
 `git.example.com:2222` matches `ssh://git@git.example.com:2222/...`. A pool
 without `vcs` accepts no git input.

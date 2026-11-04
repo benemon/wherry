@@ -41,8 +41,9 @@ Removal waits for host revocation and keeps retained data.
 
 ## Audit what delegated agents did
 
-Inspect who submitted a run and which receiver ran each attempt.
-Read its status history and transcript.
+Every record of a run is signed by the host or receiver that wrote it.
+See which receiver ran each attempt with `wherry host events`.
+Read the run's status history and transcript.
 Collect outputs with their digests checked before they are written.
 [Run history](governance.md#run-history) explains retention.
 [Host commands](commands.md#host-commands) lists the inspection commands.

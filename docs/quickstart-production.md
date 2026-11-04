@@ -91,9 +91,7 @@ its source on the machine that resolves it.
     the docker driver, the CNI reference plugins for its bridge network, a
     client running as root, and Nomad 1.10 or later for its dynamic host
     volume;
-  - with ACLs enabled, the
-    [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy)
-    in `policy.hcl`, and a token that can create host volumes, put
+  - with ACLs enabled, a token that can create host volumes, put
     variables, apply policies and run jobs.
 - A checkout of [wherry-plugins](https://github.com/benemon/wherry-plugins)
   on the operator's machine, for `examples/nomad`, and the receiver image
@@ -441,12 +439,42 @@ changes
 
 ### 7. Attach the receiver policy
 
-With ACLs enabled, attach the receiver policy to the job before it runs, so
-that the job's workload identity can reach the agents' namespace:
+Skip this step if your cluster runs without ACLs.
 
-```sh
-nomad acl policy apply -namespace default -job wherry-receiver wherry-receiver policy.hcl
-```
+1. Write the plugin's [ACL policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy)
+   to `policy.hcl`, with a `node_pool` block for each node pool the profiles use:
+
+   ```hcl
+   namespace "agents" {
+     capabilities = ["submit-job", "list-jobs", "read-job", "read-logs", "read-fs"]
+
+     variables {
+       path "nomad/jobs/agent-*" {
+         capabilities = ["write", "read", "destroy"]
+       }
+     }
+   }
+
+   node {
+     policy = "read"
+   }
+
+   node_pool "default" {
+     policy = "read"
+   }
+
+   node_pool "agents-host" {
+     policy = "read"
+   }
+   ```
+
+2. Attach it to the receiver job before the job runs:
+
+   ```sh
+   nomad acl policy apply -namespace default -job wherry-receiver wherry-receiver policy.hcl
+   ```
+
+The job's workload identity then reaches the `agents` namespace and both node pools.
 
 ### 8. Run the receiver
 
