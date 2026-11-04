@@ -524,3 +524,67 @@ func TestPoolRotateKeyConverges(t *testing.T) {
 	}
 	withdrawn(t, service, stray)
 }
+
+func TestTenantAddConverges(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	grant(t, service, stray)
+	if err := service.TenantAdd(context.Background(), "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	withdrawn(t, service, stray)
+}
+
+// ReceiverAdd's grants before its record only create; its pass after the record withdraws.
+func TestReceiverAddConvergesAfterItsRecord(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
+		t.Fatal(err)
+	}
+	grant(t, service, stray)
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), service.Broker, filepath.Join(t.TempDir(), "receiver.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	withdrawn(t, service, stray)
+}
+
+// A grant the records call for, bound to one client host rather than every host, is not the grant they call for: a
+// pass deletes it and keeps the binding for every host.
+func TestConvergeWithdrawsAHostSpecificBinding(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), service.Broker, filepath.Join(t.TempDir(), "receiver.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	wanted := ACL{ReceiverPrincipal("receiver-a"), "topic", ReceiverTopic("receiver-a"), false, []string{"READ"}}
+	bound := func() *kadm.ACLBuilder {
+		builder := kadm.NewACLs().Allow(wanted.Principal).AllowHosts("192.0.2.1").Topics(wanted.Resource).
+			ResourcePatternType(kadm.ACLPatternLiteral).Operations(kadm.OpRead)
+		builder.PrefixUser()
+		return builder
+	}
+	if _, err := kadm.NewClient(service.Operator).CreateACLs(ctx, bound()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.converge(ctx); err != nil {
+		t.Fatal(err)
+	}
+	described, err := kadm.NewClient(service.Operator).DescribeACLs(ctx, bound())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range described {
+		if result.Err != nil || len(result.Described) != 0 {
+			t.Fatalf("the host-specific binding survived: %+v, %v", result.Described, result.Err)
+		}
+	}
+	if ok, err := granted(ctx, service, wanted); err != nil || !ok {
+		t.Fatalf("the binding for every host was withdrawn: %v", err)
+	}
+}

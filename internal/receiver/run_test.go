@@ -1082,6 +1082,72 @@ func TestFollowFailureRetriesUntilTaskEndedBy(t *testing.T) {
 	}
 }
 
+// The Follows after a lost link are followRetryInterval, a second, apart.
+func TestFollowRetriesAreSpacedByTheRetryInterval(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.plugin.linkLost = 2
+	if task := runToTask(t, f); task.Status.State != wire.TaskStateCompleted {
+		t.Fatalf("task %#v after lost plugin links; want the run completed; logs:\n%s", task.Status, f.logs.String())
+	}
+	f.plugin.mu.Lock()
+	starts := slices.Clone(f.plugin.followStarts)
+	f.plugin.mu.Unlock()
+	if len(starts) != 3 {
+		t.Fatalf("followed %d times; want 3", len(starts))
+	}
+	for i := 1; i < len(starts); i++ {
+		if gap := starts[i].Sub(starts[i-1]); gap < time.Second {
+			t.Fatalf("follow %d began %s after the one before; want at least a second", i+1, gap)
+		}
+	}
+}
+
+// A Follow that fails for a job Lookup reports absent fails the run at once, with no Follow after it.
+func TestFollowErrorOnAnAbsentJobFailsTheRun(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.plugin.linkLost, f.plugin.lostErr, f.plugin.job = 1, errors.New("stream reset"), pluginsdk.JobAbsent
+	task := runToTask(t, f)
+	if task.Status.State != wire.TaskStateFailed || task.Artifacts[0].Parts[0].Text != "log stream failed" {
+		t.Fatalf("task %#v; want FAILED log stream failed; logs:\n%s", task.Status, f.logs.String())
+	}
+	if _, lookups, follows, _ := f.plugin.counts(); follows != 1 || lookups != 1 {
+		t.Fatalf("followed %d times after %d lookups; want no follow after the one lookup", follows, lookups)
+	}
+}
+
+// A retry that comes due after task_ended_by ends the run without another Follow.
+func TestFollowRetryChecksTheRunDeadline(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		lostErr error
+	}{
+		{"link lost", nil},
+		{"job running", errors.New("stream reset")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t, noResultStream)
+			f.plugin.linkLost, f.plugin.lostErr, f.plugin.job = 1<<20, test.lostErr, pluginsdk.JobRunning
+			shortLock(f, time.Second)
+			endBy := time.Now().Add(3 * time.Second).Unix()
+			f.submit(t, f.host, func(task *wire.Submission) {
+				task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = endBy, endBy
+			})
+			if err := f.receiver.claimOne(f.ctx, f.ctx, func() {}); err != nil {
+				t.Fatal(err)
+			}
+			if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != wire.NotEndedBy(endBy) {
+				t.Fatalf("terminal %s %q; want FAILED %q", state, reason, wire.NotEndedBy(endBy))
+			}
+			f.plugin.mu.Lock()
+			dead, follows := f.plugin.deadFollows, f.plugin.follows
+			f.plugin.mu.Unlock()
+			if dead != 0 {
+				t.Fatalf("%d of %d follows began after task_ended_by; want none", dead, follows)
+			}
+		})
+	}
+}
+
 func TestFollowErrorRetriesAFailedLookup(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.plugin.linkLost, f.plugin.lostErr, f.plugin.job, f.plugin.lookupFailures = 1, errors.New("stream reset"), pluginsdk.JobRunning, 2

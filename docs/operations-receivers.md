@@ -29,6 +29,23 @@ See [Lost pool keys](concepts.md#lost-pool-keys).
 A plugin exit leaves held runs available for adoption.
 [Plugin reference](commands.md#plugins) explains process and stream recovery.
 
+### Keep receiver identities stable
+
+Each receiver identity adds two topics: its key topic and its progress topic.
+Each host adds one key topic.
+wherry never deletes these topics.
+Run each receiver with a stable identity.
+Keep each receiver's bundle and its state directory.
+The bundle names the receiver.
+The state directory preserves the receiver's signing key.
+On Nomad, the host volume keeps the state directory across restarts.
+On Kubernetes, the PersistentVolumeClaim keeps it.
+Run one instance per receiver.
+Give each receiver its own bundle and state directory.
+To scale out again, restart the same stopped receivers.
+Do not apply new receiver names to scale out.
+Removing a receiver leaves its topics in Kafka.
+
 ### Install plugins
 
 The receiver ships with no plugins. Each plugin has its own

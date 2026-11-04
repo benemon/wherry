@@ -130,7 +130,9 @@ the published release as a user receives it: the assets against
 `.github/release-contents.txt`, the checksums' signature and the checksums,
 each archive's attestation, and, on macOS, `brew install benemon/tap/wherry`
 and `brew test wherry`. A tag with a hyphenated qualifier, such as
-`v0.1.0-rc.1`, publishes a prerelease. `pluginsdk/v*` tags version the
+`v0.1.0-rc.1`, publishes a prerelease. The Homebrew formula follows
+prereleases until the first stable tag (`vX.Y.Z`) exists, then stable releases
+only. `pluginsdk/v*` tags version the
 `pluginsdk` module and publish nothing. The same build, unsigned and
 unpublished, writes the archives into `dist` locally:
 

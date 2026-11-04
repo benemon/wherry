@@ -920,10 +920,10 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		case <-retry:
 			retry = nil
 			switch {
-			case !lookupRetry:
-				follow(position)
 			case runCtx.Err() != nil && ctx.Err() == nil:
 				return run.expired(ctx, &handle, pending)
+			case !lookupRetry:
+				follow(position)
 			default:
 				if status, done := recoverFollow(followErr); done {
 					return status

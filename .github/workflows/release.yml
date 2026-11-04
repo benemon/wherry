@@ -1,9 +1,11 @@
 name: release
 
 # A v* tag is the release act. Tags with a hyphenated qualifier (v0.1.0-rc.1)
-# publish a prerelease. The build lives in .goreleaser.yaml, and ci.yml's
-# release-build job runs it as a snapshot on every change. pluginsdk/v* tags
-# version the plugin protocol module and publish nothing.
+# publish a prerelease. The Homebrew formula follows prereleases until the first
+# stable tag (vX.Y.Z) exists, then stable releases only. The build lives in
+# .goreleaser.yaml, and ci.yml's release-build job runs it as a snapshot on
+# every change. pluginsdk/v* tags version the plugin protocol module and publish
+# nothing.
 on:
   push:
     tags: ['v*']
@@ -42,6 +44,8 @@ jobs:
   publish:
     needs: validate
     runs-on: ubuntu-latest
+    outputs:
+      formula: ${{ steps.formula.outputs.formula }}
     permissions:
       contents: write      # release creation and asset upload
       id-token: write      # provenance attestation and keyless signing
@@ -81,14 +85,30 @@ jobs:
         run: |
           case "$RELEASE_TAG" in (*[!A-Za-z0-9._-]*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
           gh release edit "$RELEASE_TAG" --draft=false
+      # The formula follows prereleases until a stable tag exists, then stable releases only. A stable tag whose release
+      # failed still counts; re-run its release or delete the tag. A prerelease tagged before the first stable one but
+      # published after it can leave the formula on the prerelease; re-run the stable release's publish job.
+      - name: Decide whether to push the Homebrew formula
+        id: formula
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          formula=true
+          case "$RELEASE_TAG" in
+            (*-*) if git tag -l 'v*' | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then formula=false; fi;;
+          esac
+          echo "formula=$formula for $RELEASE_TAG"
+          echo "formula=$formula" >> "$GITHUB_OUTPUT"
       # The formula is pushed over SSH, trusting only the host keys GitHub publishes, once the release its URLs name is
       # public.
       - name: Write GitHub's SSH host keys
+        if: ${{ steps.formula.outputs.formula == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$RUNNER_TEMP/known_hosts"
       # The deploy key has write access to benemon/homebrew-tap alone; without the secret the formula is left alone.
       - name: Push the Homebrew formula
+        if: ${{ steps.formula.outputs.formula == 'true' }}
         env:
           HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
           RELEASE_TAG: ${{ github.ref_name }}
@@ -162,9 +182,10 @@ jobs:
         run: for archive in wherry_*.tar.gz; do gh attestation verify "$archive" -R benemon/wherry; done
 
   # Installs the release from the tap as the README does, on Apple silicon, and runs the formula's test, which checks
-  # the installed binary's version.
+  # the installed binary's version. It runs only when publish pushed the formula.
   verify-brew:
     needs: publish
+    if: ${{ needs.publish.outputs.formula == 'true' }}
     runs-on: macos-latest
     steps:
       - name: Install wherry from benemon/tap and test it
