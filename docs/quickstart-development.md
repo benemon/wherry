@@ -3,6 +3,10 @@
 Run a complete instance on one machine.
 Use this instance to try wherry or develop integrations.
 
+![A development instance on one machine beside a production deployment of the same parts](diagrams/dev-and-production.svg)
+
+For a deployment across machines, follow [Quickstart: production](quickstart-production.md).
+
 ## Before you start
 
 You need Linux or macOS, Docker or Podman, and an installed agent harness.
