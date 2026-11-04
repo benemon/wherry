@@ -332,7 +332,6 @@ profiles:
 // ceiling is refused before anything is recorded (agb-345n).
 func TestPoolApply(t *testing.T) {
 	service := operatorEnv(t)
-	localFixture(t, ".", "receiver-a")
 	ctx := context.Background()
 	// runOperator reads the delivery and lock ceilings from the broker, and kfake reports neither until it is set.
 	ceiling, lockCeiling := "10", "60000"

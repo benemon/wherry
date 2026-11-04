@@ -570,7 +570,6 @@ func TestKafkaOptsTrustTheSystemRootsWithoutACA(t *testing.T) {
 // naming the fields a file gives. The guided path writes the file before applying it, so a refused apply leaves it.
 func TestPoolApplyGuidedPath(t *testing.T) {
 	service := operatorEnv(t)
-	localFixture(t, ".", "receiver-a")
 	shareCeilings(t, service.Operator)
 	if err := os.Mkdir("pools", 0o755); err != nil {
 		t.Fatal(err)
