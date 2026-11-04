@@ -31,6 +31,7 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -1214,6 +1215,22 @@ func TestReceiversReadsEachEntitledPoolsTopic(t *testing.T) {
 	}
 	if want := map[string]string{"receiver-a": "pool-a live", "receiver-b": "pool-b live"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("receivers %v, want %v", got, want)
+	}
+}
+
+// A receiver writes its own pool's receivers topic alone: another pool's is refused by the broker.
+func TestReceiverCannotAdvertiseOnAnotherPoolsTopic(t *testing.T) {
+	f := newFixtureNoHost(t)
+	f.pool(t, "pool-b")
+	f.addReceiver(t, "receiver-a", "pool-a")
+	other := f.addReceiver(t, "receiver-b", "pool-b")
+	value := other.sign(t, &wire.Advertisement{Receiver: "receiver-b", Pool: "pool-b", Offers: []wire.Offer{}, Capacity: 1, AtMS: time.Now().UnixMilli()})
+	if err := other.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: operator.PoolReceiversTopic("pool-b"), Key: []byte("receiver-b"), Value: value}).FirstErr(); err != nil {
+		t.Fatalf("own pool's receivers topic: %v", err)
+	}
+	err := other.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: operator.PoolReceiversTopic("pool-a"), Key: []byte("receiver-a"), Value: value}).FirstErr()
+	if !errors.Is(err, kerr.TopicAuthorizationFailed) {
+		t.Fatalf("another pool's receivers topic: %v, want TOPIC_AUTHORIZATION_FAILED", err)
 	}
 }
 
