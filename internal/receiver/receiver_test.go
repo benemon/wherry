@@ -1235,7 +1235,7 @@ func (f fixture) advertisedOffers(t *testing.T) wire.Advertisement {
 	}
 	reader := operator.NewReader(f.service.Operator)
 	defer reader.Close()
-	latest, err := reader.ReadAdvertisements(f.ctx, state, f.keys(), time.Now(), 2*time.Minute)
+	latest, err := reader.ReadAdvertisements(f.ctx, state, f.keys(), []string{testPool}, time.Now(), 2*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}

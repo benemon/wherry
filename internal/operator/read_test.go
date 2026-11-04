@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
+	json "encoding/json/v2"
 	"errors"
 	"maps"
 	"reflect"
@@ -129,7 +131,7 @@ func TestReadKeysFoldsEachOwnersTopic(t *testing.T) {
 }
 
 func TestReadAdvertisementsKeepsLatestLiveAuthorised(t *testing.T) {
-	client := readerCluster(t, ReceiversTopic)
+	client := readerCluster(t, PoolReceiversTopic("pool-a"), PoolReceiversTopic("pool-b"))
 	ctx := context.Background()
 	state := modelState(t)
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
@@ -138,7 +140,7 @@ func TestReadAdvertisementsKeepsLatestLiveAuthorised(t *testing.T) {
 	advertise := func(receiver, pool string, at time.Time, capacity int64) {
 		t.Helper()
 		encoded := sign(t, &wire.Advertisement{Receiver: receiver, Pool: pool, Offers: []wire.Offer{{Profile: "nomad", Agent: "agent-a"}}, Capacity: capacity, AtMS: at.UnixMilli()}, key)
-		if err := client.ProduceSync(ctx, &kgo.Record{Topic: ReceiversTopic, Value: encoded}).FirstErr(); err != nil {
+		if err := client.ProduceSync(ctx, &kgo.Record{Topic: PoolReceiversTopic(pool), Value: encoded}).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -149,7 +151,7 @@ func TestReadAdvertisementsKeepsLatestLiveAuthorised(t *testing.T) {
 	advertise("receiver-a", "pool-a", now.Add(time.Hour), 5)
 	reader := NewReader(client)
 	defer reader.Close()
-	latest, err := reader.ReadAdvertisements(ctx, state, keys, now, 2*time.Minute)
+	latest, err := reader.ReadAdvertisements(ctx, state, keys, []string{"pool-a", "pool-b"}, now, 2*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,12 +237,19 @@ func TestReadAdvertisementsVerifiesNewestFirst(t *testing.T) {
 		{"none verify", state, [][]byte{forged(advertisement("receiver-a", "pool-a", 10*time.Second, 1), advertisement("receiver-b", "pool-b", 5*time.Second, 2)), forged(advertisement("receiver-b", "pool-b", 5*time.Second, 3), advertisement("receiver-a", "pool-a", 10*time.Second, 4))}, map[string]int64{}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			client := readerCluster(t, ReceiversTopic)
+			client := readerCluster(t, PoolReceiversTopic("pool-a"), PoolReceiversTopic("pool-b"))
 			ctx := context.Background()
 			// verified is the latest authorised record of each receiver found by verifying every record.
 			verified := map[string]wire.Advertisement{}
 			for _, value := range c.records {
-				if err := client.ProduceSync(ctx, &kgo.Record{Topic: ReceiversTopic, Value: value}).FirstErr(); err != nil {
+				var named struct {
+					Pool string `json:"pool"`
+				}
+				payload, err := base64.RawURLEncoding.DecodeString(string(bytes.Split(value, []byte("."))[1]))
+				if err != nil || json.Unmarshal(payload, &named) != nil {
+					t.Fatalf("advertisement payload %q: %v", payload, err)
+				}
+				if err := client.ProduceSync(ctx, &kgo.Record{Topic: PoolReceiversTopic(named.Pool), Value: value}).FirstErr(); err != nil {
 					t.Fatal(err)
 				}
 				advertisement, err := AuthorizeAdvertisement(c.state, keys, value)
@@ -253,7 +262,7 @@ func TestReadAdvertisementsVerifiesNewestFirst(t *testing.T) {
 			}
 			reader := NewReader(client)
 			defer reader.Close()
-			latest, err := reader.ReadAdvertisements(ctx, c.state, keys, now, liveness)
+			latest, err := reader.ReadAdvertisements(ctx, c.state, keys, []string{"pool-a", "pool-b"}, now, liveness)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -372,7 +381,7 @@ func TestReadKeysListsAndFetchesTheTopicsTogether(t *testing.T) {
 // The reader groups advertisements by the receiver its signed payload names, never by the Kafka key, so a record
 // another receiver writes under a receiver's key is never that receiver's advertisement.
 func TestReadAdvertisementsIgnoresTheKafkaKey(t *testing.T) {
-	client := readerCluster(t, ReceiversTopic)
+	client := readerCluster(t, PoolReceiversTopic("pool-a"), PoolReceiversTopic("pool-b"))
 	ctx := context.Background()
 	state := modelState(t)
 	_, keyA, _ := ed25519.GenerateKey(rand.Reader)
@@ -382,7 +391,7 @@ func TestReadAdvertisementsIgnoresTheKafkaKey(t *testing.T) {
 	advertise := func(receiver, pool string, capacity int64, key ed25519.PrivateKey) {
 		t.Helper()
 		encoded := sign(t, &wire.Advertisement{Receiver: receiver, Pool: pool, Offers: []wire.Offer{{Profile: "nomad", Agent: "agent-a"}}, Capacity: capacity, AtMS: now.UnixMilli()}, key)
-		if err := client.ProduceSync(ctx, &kgo.Record{Topic: ReceiversTopic, Key: []byte("receiver-a"), Value: encoded}).FirstErr(); err != nil {
+		if err := client.ProduceSync(ctx, &kgo.Record{Topic: PoolReceiversTopic(pool), Key: []byte("receiver-a"), Value: encoded}).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -390,12 +399,37 @@ func TestReadAdvertisementsIgnoresTheKafkaKey(t *testing.T) {
 	advertise("receiver-a", "pool-a", 2, keyB)
 	reader := NewReader(client)
 	defer reader.Close()
-	latest, err := reader.ReadAdvertisements(ctx, state, keys, now, 2*time.Minute)
+	latest, err := reader.ReadAdvertisements(ctx, state, keys, []string{"pool-a", "pool-b"}, now, 2*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := latest["receiver-a"]; ok || len(latest) != 1 || latest["receiver-b"].Capacity != 1 {
 		t.Fatalf("advertisements %+v; want receiver-b's alone", latest)
+	}
+}
+
+// A receiver's authorised advertisement on another pool's receivers topic is refused, read with its own pool's or not.
+func TestReadAdvertisementsRefusesAnotherPoolsTopic(t *testing.T) {
+	client := readerCluster(t, PoolReceiversTopic("pool-a"), PoolReceiversTopic("pool-b"))
+	ctx := context.Background()
+	state := modelState(t)
+	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	keys := signed.Keys{"receiver-a": {Current: key.Public().(ed25519.PublicKey)}}
+	now := time.Now()
+	encoded := sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []wire.Offer{{Profile: "nomad", Agent: "agent-a"}}, Capacity: 1, AtMS: now.UnixMilli()}, key)
+	if err := client.ProduceSync(ctx, &kgo.Record{Topic: PoolReceiversTopic("pool-b"), Key: []byte("receiver-a"), Value: encoded}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	reader := NewReader(client)
+	defer reader.Close()
+	for _, pools := range [][]string{{"pool-b"}, {"pool-a", "pool-b"}} {
+		latest, err := reader.ReadAdvertisements(ctx, state, keys, pools, now, 2*time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(latest) != 0 {
+			t.Fatalf("advertisements of %v %+v; want none", pools, latest)
+		}
 	}
 }
 

@@ -875,7 +875,7 @@ func TestPlannedDrainHandsOverToALiveSuccessor(t *testing.T) {
 	if got := awaitScraped(t, successor, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"}`, 1); got != 1 {
 		t.Fatalf("takeovers = %v after a drain, want 1", got)
 	}
-	for _, record := range append(f.records(t, operator.ReceiversTopic), records...) {
+	for _, record := range append(f.records(t, operator.PoolReceiversTopic(testPool)), records...) {
 		parsed, err := jose.ParseSignedCompact(string(record.Value), []jose.SignatureAlgorithm{jose.EdDSA})
 		if err != nil {
 			t.Fatal(err)
@@ -913,7 +913,7 @@ func advertiseWith(t *testing.T, f fixture, r *Receiver, advertisement wire.Adve
 	t.Helper()
 	advertisement.Receiver, advertisement.Pool, advertisement.Offers, advertisement.Capacity = r.id, testPool, []wire.Offer{}, 1
 	value := must(t)(wire.SignRecord(&advertisement, r.signing))
-	if err := f.service.Operator.ProduceSync(f.ctx, &kgo.Record{Topic: operator.ReceiversTopic, Key: []byte(r.id), Value: value, Timestamp: time.UnixMilli(advertisement.AtMS)}).FirstErr(); err != nil {
+	if err := f.service.Operator.ProduceSync(f.ctx, &kgo.Record{Topic: operator.PoolReceiversTopic(testPool), Key: []byte(r.id), Value: value, Timestamp: time.UnixMilli(advertisement.AtMS)}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -101,6 +101,50 @@ func TestSnapshotTopicACLs(t *testing.T) {
 	}
 }
 
+// Each pool's live receivers read and write its receivers topic and the hosts of tenants entitled to the pool read it;
+// no receiver of another pool, ended receiver, host of an unentitled tenant or of an ended entitlement holds
+// it, and no one but wherry.operator holds a grant on another receivers topic.
+func TestPoolReceiversTopicACLs(t *testing.T) {
+	terms := modelTerms()
+	records := []Record{{Version: 1, Kind: "tenant", Tenant: "tenant-a", AtMS: 1}, {Version: 1, Kind: "tenant", Tenant: "tenant-b", AtMS: 1},
+		{Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}, {Version: 1, Kind: "pool", Pool: "pool-b", Terms: &terms, AtMS: 1},
+		{Version: 1, Kind: "host", Tenant: "tenant-a", Host: "host-a", AtMS: 1}, {Version: 1, Kind: "host", Tenant: "tenant-b", Host: "host-b", AtMS: 1},
+		{Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-a", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-b", AtMS: 1},
+		{Version: 1, Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-a", AtMS: 1},
+	}
+	for _, config := range []ReceiverConfig{modelConfig("receiver-a", "pool-a"), modelConfig("receiver-b", "pool-b"), modelConfig("receiver-c", "pool-a")} {
+		copy := config
+		records = append(records, Record{Version: 1, Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &copy, AtMS: 1})
+	}
+	records = append(records, Record{Version: 1, Kind: "end", Receiver: "receiver-c", AtMS: 1}, Record{Version: 1, Kind: "end", Tenant: "tenant-b", Pool: "pool-a", AtMS: 1})
+	state, err := Fold(records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for pool, want := range map[string]map[string][]string{
+		"pool-a": {
+			ReceiverPrincipal("receiver-a"):       {"READ", "WRITE", "DESCRIBE"},
+			TenantPrincipal("tenant-a", "host-a"): {"READ", "DESCRIBE"},
+			OperatorPrincipal:                     {"CREATE", "ALTER_CONFIGS", "READ", "WRITE"},
+		},
+		"pool-b": {
+			ReceiverPrincipal("receiver-b"):       {"READ", "WRITE", "DESCRIBE"},
+			TenantPrincipal("tenant-b", "host-b"): {"READ", "DESCRIBE"},
+			OperatorPrincipal:                     {"CREATE", "ALTER_CONFIGS", "READ", "WRITE"},
+		},
+	} {
+		got := map[string][]string{}
+		for _, acl := range append(ACLs(state), OperatorACLs...) {
+			if acl.ResourceType == "topic" && (acl.Resource == PoolReceiversTopic(pool) || acl.Prefix && strings.HasPrefix(PoolReceiversTopic(pool), acl.Resource)) {
+				got[acl.Principal] = acl.Operations
+			}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s receivers topic ACLs %v, want %v", pool, got, want)
+		}
+	}
+}
+
 // A pool peer keeps READ on an ended member's key topic, never on its progress topic.
 func TestEndedMembersKeyTopicStaysReadable(t *testing.T) {
 	terms := modelTerms()
@@ -131,8 +175,9 @@ func TestEndedMembersKeyTopicStaysReadable(t *testing.T) {
 	}
 }
 
-// Check reports a missing snapshot topic, a snapshot topic that is not compacted, and a task or events topic without
-// the hourly segment.ms, with more than one partition, not deleting by time or with a finite retention.bytes.
+// Check reports a missing, uncompacted or partitioned snapshot or receivers topic, a receivers topic without the hourly
+// segment.ms, and a task or events topic without the hourly segment.ms, with more than one partition, not deleting by
+// time or with a finite retention.bytes.
 func TestCheckReportsSnapshotTopicAndSegmentDrift(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -154,6 +199,24 @@ func TestCheckReportsSnapshotTopicAndSegmentDrift(t *testing.T) {
 		{"snapshot topic partitioned", func(t *testing.T, service *Service) {
 			addPartition(t, service, CustodianTopic("pool-a"))
 		}, CustodianTopic("pool-a") + " has 2 partitions"},
+		{"receivers topic missing", func(t *testing.T, service *Service) {
+			responses, err := kadm.NewClient(service.Operator).DeleteTopics(context.Background(), PoolReceiversTopic("pool-a"))
+			if err == nil {
+				err = responses.Error()
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		}, PoolReceiversTopic("pool-a")},
+		{"receivers topic not compacted", func(t *testing.T, service *Service) {
+			setTopicConfig(t, service, PoolReceiversTopic("pool-a"), "cleanup.policy", "delete")
+		}, PoolReceiversTopic("pool-a") + " cleanup.policy is delete, want compact,delete"},
+		{"receivers topic segment.ms drifted", func(t *testing.T, service *Service) {
+			setTopicConfig(t, service, PoolReceiversTopic("pool-a"), "segment.ms", "604800000")
+		}, PoolReceiversTopic("pool-a") + " segment.ms is 604800000, want 3600000"},
+		{"receivers topic partitioned", func(t *testing.T, service *Service) {
+			addPartition(t, service, PoolReceiversTopic("pool-a"))
+		}, PoolReceiversTopic("pool-a") + " has 2 partitions"},
 		{"tasks topic partitioned", func(t *testing.T, service *Service) {
 			addPartition(t, service, PoolTasksTopic("pool-a"))
 		}, PoolTasksTopic("pool-a") + " has 2 partitions"},

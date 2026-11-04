@@ -297,7 +297,7 @@ type Echo struct {
 	MessageID string    `json:"message_id"`
 }
 
-// Advertisement is a receiver's live offers on wherry.receivers.
+// Advertisement is a receiver's live offers on its pool's receivers topic.
 type Advertisement struct {
 	V        int     `json:"v"`
 	Receiver string  `json:"receiver"`

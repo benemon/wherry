@@ -39,8 +39,5 @@ func Delegate(ctx context.Context, superUser *kgo.Client, password string) error
 	if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
 		return err
 	}
-	if err := service.createTopicsWith(ctx, receiversConfigs, ReceiversTopic); err != nil {
-		return err
-	}
 	return setSCRAM(ctx, superUser, OperatorPrincipal, password)
 }

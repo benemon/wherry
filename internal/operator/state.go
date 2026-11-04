@@ -403,7 +403,7 @@ func (state State) LiveTenant(tenant string) error {
 }
 
 func (state State) CheckNames() error {
-	seen := map[string]string{OperatorTopic: "operator topic", ReceiversTopic: "receivers topic"}
+	seen := map[string]string{OperatorTopic: "operator topic"}
 	add := func(value, owner string) error {
 		if previous, ok := seen[value]; ok {
 			return fmt.Errorf("name collision between %s and %s", previous, owner)

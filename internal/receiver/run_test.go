@@ -1704,7 +1704,7 @@ func TestDenialStopsTheReceiver(t *testing.T) {
 		want   string
 	}{
 		"fetch":            {kadm.NewACLs().Topics(operator.PoolEventsTopic(testPool)).Operations(kadm.OpRead), "denied read: "},
-		"produce":          {kadm.NewACLs().Topics(operator.ReceiversTopic).Operations(kadm.OpWrite), "denied write: "},
+		"produce":          {kadm.NewACLs().Topics(operator.PoolReceiversTopic(testPool)).Operations(kadm.OpWrite), "denied write: "},
 		"transactional ID": {kadm.NewACLs().TransactionalIDs(operator.TransactionalPrefix(testPool)).Operations(kadm.OpAny), "denied transactional ID: "},
 		"share group":      {kadm.NewACLs().Groups(operator.PoolGroup(testPool)).Operations(kadm.OpAny), "denied share group: "},
 	} {
@@ -1745,7 +1745,7 @@ func TestPluginExitStopsTheReceiver(t *testing.T) {
 func TestRestartedReceiverAdoptsTheJobADeniedOneLeft(t *testing.T) {
 	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, endDelay: 40 * time.Second}})
 	done, _ := holdRun(t, f)
-	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(operator.ReceiversTopic).Operations(kadm.OpWrite))
+	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(operator.PoolReceiversTopic(testPool)).Operations(kadm.OpWrite))
 	if err := f.stopped(t, done, 10*time.Second); err == nil {
 		t.Fatal("Run returned no error after a denial")
 	}

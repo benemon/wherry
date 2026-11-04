@@ -593,11 +593,12 @@ func (f fixture) advertiseAs(t *testing.T, receiver string, key ed25519.PrivateK
 	f.advertiseIn(t, testPool, receiver, key, at)
 }
 
-// advertiseIn writes receiver's advertisement naming pool, signed by key, appended at at.
+// advertiseIn writes receiver's advertisement naming pool, signed by key, appended at at, on the custodian's own pool's
+// receivers topic.
 func (f fixture) advertiseIn(t *testing.T, pool, receiver string, key ed25519.PrivateKey, at time.Time) {
 	t.Helper()
 	value := must(t)(wire.SignRecord(&wire.Advertisement{Receiver: receiver, Pool: pool, Offers: []wire.Offer{}, Capacity: 1, AtMS: at.UnixMilli()}, key))
-	if err := f.service.Operator.ProduceSync(f.ctx, &kgo.Record{Topic: operator.ReceiversTopic, Key: []byte(receiver), Value: value, Timestamp: at}).FirstErr(); err != nil {
+	if err := f.service.Operator.ProduceSync(f.ctx, &kgo.Record{Topic: operator.PoolReceiversTopic(testPool), Key: []byte(receiver), Value: value, Timestamp: at}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -808,7 +809,7 @@ func servesAClaimAfterThePreviousHolderEnded(t *testing.T, unread bool) {
 	check := &claimCheck{r: f.receiver, events: events, keys: keys, now: time.Now()}
 	request := slices.IndexFunc(events.requests, func(request openRequest) bool { return request.digest == digest })
 	if unread {
-		f.failReadOnce(t, operator.ReceiversTopic)
+		f.failReadOnce(t, operator.PoolReceiversTopic(testPool))
 	}
 	answer := check.decide(f.ctx, events.requests[request])
 	var decision wire.ClaimDecision

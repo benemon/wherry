@@ -271,7 +271,7 @@ func (r *testReceiver) advertise(t *testing.T, ctx context.Context, mutate func(
 	if mutate != nil {
 		mutate(ad)
 	}
-	r.produce(t, ctx, operator.ReceiversTopic, r.id, r.sign(t, ad))
+	r.produce(t, ctx, operator.PoolReceiversTopic(r.pool), r.id, r.sign(t, ad))
 }
 
 func defaultSelector() []wire.Requirement {
@@ -1191,6 +1191,29 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	}
 	if d := got["receiver-d"]; d.Status != "ended" {
 		t.Fatalf("ended receiver %#v", d)
+	}
+}
+
+// A host reads the receivers topic of each pool its tenant is entitled to, and lists none of another pool's receivers.
+func TestReceiversReadsEachEntitledPoolsTopic(t *testing.T) {
+	f := newFixture(t)
+	f.pool(t, "pool-b")
+	if err := f.service.PoolApply(f.ctx, "pool-c", testTerms(), false); err != nil {
+		t.Fatal(err)
+	}
+	for receiver, pool := range map[string]string{"receiver-a": "pool-a", "receiver-b": "pool-b", "receiver-c": "pool-c"} {
+		f.addReceiver(t, receiver, pool).advertise(t, f.ctx, nil)
+	}
+	receivers, err := f.host.Receivers(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, receiver := range receivers {
+		got[receiver.ReceiverID] = receiver.Pool + " " + receiver.Status
+	}
+	if want := map[string]string{"receiver-a": "pool-a live", "receiver-b": "pool-b live"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("receivers %v, want %v", got, want)
 	}
 }
 
