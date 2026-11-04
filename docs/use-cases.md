@@ -18,9 +18,8 @@ Your agent needs a repository or a service that only one network can reach.
 Your laptop isn't on that network.
 Run a receiver inside it and send the task there.
 The agent runs next to the system it needs, so your laptop never needs the access.
-The credentials the run needs travel encrypted.
-The pool's key custodian checks them against the task.
-Then only the receiver that claims the task gets the key to them, for that one attempt.
+The credentials the run needs travel encrypted, and only receivers in the pool can open them.
+The receiver that claims the task gets them for that one attempt.
 
 [Placement](concepts.md#placement) explains how a task reaches a receiver.
 [Credential envelopes](security.md#credential-envelopes) explains how credentials travel.
@@ -40,7 +39,8 @@ isolation.
 
 Your work splits into pieces that don't depend on each other.
 Submit each piece as its own run.
-The pool's receivers take them as they have room, so they run side by side.
+The pool's receivers take them as they have room.
+They run side by side, as far as the pool's capacity allows.
 You, or your coding agent, split the work and combine the results.
 A coding agent uses the same tools for many runs as for one.
 
@@ -52,7 +52,7 @@ You run one set of receivers, and several teams want to use them.
 Make each team a tenant and give it the pools it may use.
 Each team's hosts see only that team's runs.
 When a team no longer needs access, remove its tenant.
-Its hosts lose access to every pool at once, and its queued tasks never start.
+Its hosts lose access to every pool, and its queued tasks never start.
 Jobs a receiver is already running finish, but the team can no longer collect their results.
 
 [Tenants](concepts.md#tenants) explains what a tenant is.
@@ -64,7 +64,7 @@ An agent acted on your behalf, and you need to know what it did.
 The host or receiver that wrote each task, status and result signs it.
 `wherry host events` shows which receiver ran each attempt, and when.
 `wherry host logs` shows the agent's transcript.
-The receiver redacts every credential of 8 bytes or more from it.
+The receiver redacts the run's credentials from it, by the rules [Credential envelopes](security.md#credential-envelopes) gives.
 Every file the run returns is checked against its digest, and a file that doesn't match is not kept.
 
 [Run history](governance.md#run-history) explains what is kept and for how long.
