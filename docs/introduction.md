@@ -37,5 +37,5 @@ wherry signs shared records and checks returned files against their digests.
 
 ![A development instance on one machine beside a production deployment of the same parts](diagrams/dev-and-production.svg)
 
-Follow the [production quickstart](quickstart-production.md) to run a first task on Nomad.
+Follow [Install](install.md) to deploy wherry and run a first task.
 For a local trial, follow the [development quickstart](quickstart-development.md).

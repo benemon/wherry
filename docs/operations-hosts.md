@@ -9,7 +9,7 @@
 5. Configure the credential sources it requests.
 6. Run `wherry host receivers` to check your access.
 
-The [production quickstart](quickstart-production.md#part-3-on-your-laptop) gives a complete example.
+[Set up a host](install-host.md) gives a complete example.
 
 ## Rotate a key
 
