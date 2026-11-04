@@ -93,8 +93,9 @@ supplied. Every plugin profile of the agent delivers the agent's credentials, ea
 its target.
 
 Each entry of `vcs` is a lowercase host name, with an optional `:port` from 1 to 65535. Each entry appears once.
-wherry drops a remote's default port before matching: 443 for `https` and 22 for `ssh`. So name a port only when it is
-not the default. An entry that names the default port matches no remote. `git.example.com` matches
+wherry drops a remote's port before matching when it is the default for the remote's scheme: 443 for `https` and 22
+for `ssh`. So an entry names a port only when the remote uses a non-default one. For example, `git.example.com:22`
+matches no `ssh` remote, while `git.example.com:443` matches an `ssh` remote on port 443. `git.example.com` matches
 `https://git.example.com/...` and `ssh://git@git.example.com/...`;
 `git.example.com:2222` matches `ssh://git@git.example.com:2222/...`. A pool
 without `vcs` accepts no git input.

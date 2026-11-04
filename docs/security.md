@@ -493,7 +493,8 @@ system roots trusts every CA they hold for the broker's address.
 
 ## Removal and retained data
 
-Removing a tenant or an entitlement revokes access. It erases no data.
+Removing a tenant or an entitlement revokes access. Run data stays where it is; tenant removal deletes only the
+tenant's bundle files.
 
 The pool's receivers keep some grants after an entitlement ends, so runs they already hold can finish:
 
