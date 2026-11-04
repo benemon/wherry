@@ -16,32 +16,36 @@ hero:
 features:
   - title: Hand off work and walk away
     link: /use-cases#hand-off-work-and-walk-away
-  - title: Reach systems only a particular network can reach
-    link: /use-cases#reach-systems-only-a-particular-network-can-reach
-  - title: Run where the hardware, OS or isolation is different
-    link: /use-cases#run-where-the-hardware-os-or-isolation-is-different
+  - title: Run agents where the network access exists
+    link: /use-cases#run-agents-where-the-network-access-exists
+  - title: Run tasks in the environment they need
+    link: /use-cases#run-tasks-in-the-environment-they-need
   - title: Fan out independent tasks
     link: /use-cases#fan-out-independent-tasks
   - title: Share agent compute across teams
     link: /use-cases#share-agent-compute-across-teams
-  - title: Audit what delegated agents did
-    link: /use-cases#audit-what-delegated-agents-did
+  - title: Trace delegated work from request to result
+    link: /use-cases#trace-delegated-work-from-request-to-result
 ---
 
 ## Why wherry
 
-You choose where delegated agent work runs.
-wherry sends tasks to your receivers through your Kafka cluster.
-Platform plugins run agents on Nomad, Kubernetes, OpenShift or hosts under systemd.
-[Placement](concepts.md#placement) selects profiles by agent and labels.
+Coding agents can delegate work, but where that work runs is often decided for you: on the machine running the agent,
+or in infrastructure its vendor provides. Neither is necessarily where the work belongs. A task might need a GPU, access
+to a private network, or stronger isolation than your laptop gives.
 
-Your operator creates tenants and grants each tenant access to pools.
-Hosts submit signed tasks.
-Receivers publish status, transcripts and results.
-The pool's key custodian releases each credential envelope to its claiming attempt.
-[Security](security.md) explains the trust boundaries.
+wherry separates the decision to delegate work from the infrastructure that runs it. Tasks travel through your Kafka
+cluster to receivers on infrastructure you control. Platform plugins start the agent, as its harness ships it, on
+Nomad, Kubernetes, OpenShift or hosts under systemd, and labels on each receiver's profiles let a task choose the
+capabilities it needs. [Placement](concepts.md#placement) explains how a task reaches a receiver.
 
-A run can outlast the session that submits it.
-Use `wherry host wait RUN_ID` to collect its result later.
-[Runs and attempts](concepts.md#runs-and-attempts) explains recovery and its limits.
-[Run history](governance.md#run-history) explains retention.
+Moving work between machines also means crossing trust boundaries, and wherry makes those boundaries explicit.
+Operators define pools and which tenants may use them. Hosts sign the work they submit, and receivers sign what they
+report. A task's credentials travel with it only in encrypted form, and the pool's key custodian releases the key to
+the one attempt that runs it. [Security](security.md) describes the trust model.
+
+Once submitted, a run has a lifecycle of its own. You can leave the session that started it, come back to its status
+and transcript, and collect its result later. When a receiver stops, Kafka offers the task again and another attempt
+takes over, and the run's records show what happened along the way.
+[Runs and attempts](concepts.md#runs-and-attempts) explains the recovery guarantees and their limits, and
+[Run history](governance.md#run-history) describes what is kept.

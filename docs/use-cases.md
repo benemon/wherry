@@ -12,7 +12,7 @@ If you asked for the agent's commits with `--git-changes`, they come back as a p
 [Runs and attempts](concepts.md#runs-and-attempts) explains what happens if a receiver stops mid-run.
 [Git repositories](operations-hosts.md#git-repositories) shows how to get changes back.
 
-## Reach systems only a particular network can reach
+## Run agents where the network access exists
 
 Your agent needs a repository or a service that only one network can reach.
 Your laptop isn't on that network.
@@ -24,7 +24,7 @@ The receiver that claims the task gets them for that one attempt.
 [Placement](concepts.md#placement) explains how a task reaches a receiver.
 [Credential envelopes](security.md#credential-envelopes) explains how credentials travel.
 
-## Run where the hardware, OS or isolation is different
+## Run tasks in the environment they need
 
 Some tasks need a GPU, another architecture, or stronger isolation than your machine gives.
 Your operator labels each receiver's profiles with what they offer.
@@ -48,24 +48,27 @@ A coding agent uses the same tools for many runs as for one.
 
 ## Share agent compute across teams
 
-You run one set of receivers, and several teams want to use them.
-Make each team a tenant and give it the pools it may use.
-Each team's hosts see only that team's runs.
-When a team no longer needs access, remove its tenant.
-Its hosts lose access to every pool, and its queued tasks never start.
-Jobs a receiver is already running finish, but the team can no longer collect their results.
+Several teams need somewhere to run delegated agent work, and each needs its own access and run history.
+Rather than build separate infrastructure for every team, an operator can offer one shared set of receivers through
+pools.
 
-[Tenants](concepts.md#tenants) explains what a tenant is.
-[Operator operations](operations-operator.md#tenant-onboarding-and-offboarding) gives the steps.
+Each team is a tenant, with access only to the pools it has been given.
+Its hosts submit work and follow their own runs, and never see another team's.
+The operator manages each tenant's access, and can remove it when the team no longer needs it.
 
-## Audit what delegated agents did
+[Tenants](concepts.md#tenants) explains the model, and
+[Operator operations](operations-operator.md#tenant-onboarding-and-offboarding) covers onboarding and offboarding.
 
-An agent acted on your behalf, and you need to know what it did.
+## Trace delegated work from request to result
+
+A delegated task has finished, and you need to establish where it ran, which receiver handled it, what the agent
+reported and which files it returned.
 The host or receiver that wrote each task, status and result signs it.
 `wherry host events` shows which receiver ran each attempt, and when.
 `wherry host logs` shows the agent's transcript.
 The receiver redacts the run's credentials from it, by the rules [Credential envelopes](security.md#credential-envelopes) gives.
 Every file the run returns is checked against its digest, and a file that doesn't match is not kept.
+What the agent did inside its job beyond its transcript is in your platform's own logs.
 
 [Run history](governance.md#run-history) explains what is kept and for how long.
 [Host commands](commands.md#host-commands) lists the commands.
