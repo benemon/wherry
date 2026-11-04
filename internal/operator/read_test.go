@@ -408,28 +408,30 @@ func TestReadAdvertisementsIgnoresTheKafkaKey(t *testing.T) {
 	}
 }
 
-// A receiver's authorised advertisement on another pool's receivers topic is refused, read with its own pool's or not.
+// A live pool-b receiver's genuinely signed advertisement of pool-b on pool-a's receivers topic is refused by a read of
+// pool-a's topic.
 func TestReadAdvertisementsRefusesAnotherPoolsTopic(t *testing.T) {
 	client := readerCluster(t, PoolReceiversTopic("pool-a"), PoolReceiversTopic("pool-b"))
 	ctx := context.Background()
 	state := modelState(t)
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
-	keys := signed.Keys{"receiver-a": {Current: key.Public().(ed25519.PublicKey)}}
+	keys := signed.Keys{"receiver-b": {Current: key.Public().(ed25519.PublicKey)}}
 	now := time.Now()
-	encoded := sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []wire.Offer{{Profile: "nomad", Agent: "agent-a"}}, Capacity: 1, AtMS: now.UnixMilli()}, key)
-	if err := client.ProduceSync(ctx, &kgo.Record{Topic: PoolReceiversTopic("pool-b"), Key: []byte("receiver-a"), Value: encoded}).FirstErr(); err != nil {
+	encoded := sign(t, &wire.Advertisement{Receiver: "receiver-b", Pool: "pool-b", Offers: []wire.Offer{{Profile: "nomad", Agent: "agent-a"}}, Capacity: 1, AtMS: now.UnixMilli()}, key)
+	if _, err := AuthorizeAdvertisement(state, keys, encoded); err != nil {
+		t.Fatalf("the advertisement does not authorise on its own: %v", err)
+	}
+	if err := client.ProduceSync(ctx, &kgo.Record{Topic: PoolReceiversTopic("pool-a"), Key: []byte("receiver-b"), Value: encoded}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	reader := NewReader(client)
 	defer reader.Close()
-	for _, pools := range [][]string{{"pool-b"}, {"pool-a", "pool-b"}} {
-		latest, err := reader.ReadAdvertisements(ctx, state, keys, pools, now, 2*time.Minute)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(latest) != 0 {
-			t.Fatalf("advertisements of %v %+v; want none", pools, latest)
-		}
+	latest, err := reader.ReadAdvertisements(ctx, state, keys, []string{"pool-a"}, now, 2*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if advertisement, ok := latest["receiver-b"]; ok {
+		t.Fatalf("pool-a's topic advertises receiver-b of pool-b: %+v", advertisement)
 	}
 }
 
