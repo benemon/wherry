@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1471,9 +1472,22 @@ func TestHostOfflineAndANonCustodianRunsTheTask(t *testing.T) {
 	f.quiet()
 	// The custodian keeps its place in the custodian group and serves opens, and claims nothing.
 	custody, stop := context.WithCancel(f.ctx)
-	t.Cleanup(stop)
-	go f.receiver.keepCustody(custody, custody)
-	go f.receiver.every(custody, openInterval, f.receiver.serveOpens)
+	var workers sync.WaitGroup
+	t.Cleanup(func() {
+		stop()
+		done := make(chan struct{})
+		go func() {
+			workers.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(20 * time.Second):
+			t.Fatal("custody workers did not return")
+		}
+	})
+	workers.Go(func() { f.receiver.keepCustody(custody, custody) })
+	workers.Go(func() { f.receiver.every(custody, openInterval, f.receiver.serveOpens) })
 	for {
 		f.receiver.custody.mu.Lock()
 		assigned := f.receiver.custody.assigned && f.receiver.custody.producer != nil
@@ -1487,7 +1501,7 @@ func TestHostOfflineAndANonCustodianRunsTheTask(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	other, otherLogs := f.newReceiver(t, testConfig("receiver-b"))
-	go other.Run(custody)
+	runUntilStopped(t, custody, other)
 	for !strings.Contains(otherLogs.String(), "configured:") {
 		time.Sleep(20 * time.Millisecond)
 	}
