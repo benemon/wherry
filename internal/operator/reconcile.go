@@ -207,6 +207,9 @@ func (service *Service) verifyACLs(ctx context.Context, acls []ACL) error {
 				break
 			}
 			if time.Now().After(deadline) {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				return missing
 			}
 			select {
