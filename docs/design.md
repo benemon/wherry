@@ -210,8 +210,8 @@ and reads the pool's events. It re-keys every task that meets all of these:
 It writes the re-key wraps to that key, one for each task hash, in one
 transaction, and then deletes its pool keys. A listing, read or write error
 keeps the keys to their deadlines. A task appended under its key after that
-read, or on a topic created within the listing's metadata age of up to 5
-seconds, is not re-keyed: it fails key-lost before it starts, and its host
+read, or on a topic the broker's metadata did not yet list when the scan
+listed the pool's task topics, is not re-keyed: it fails key-lost before it starts, and its host
 resubmits it before its `task_started_by` when a member acquires it in time.
 While its pool is suspended it does not scan the task topics and keeps its
 keys. A custodian with no other member to
