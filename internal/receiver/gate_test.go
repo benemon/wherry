@@ -388,7 +388,7 @@ func TestNoReadyOfferOpensNoPollOnRealBroker(t *testing.T) {
 	plugin := &fakePlugin{stream: resultStream, unready: true}
 	r := &Receiver{id: b.receiver, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
-			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
+			return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: plugin}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
@@ -505,7 +505,7 @@ func TestPendingRunOpensNoPollOnRealBroker(t *testing.T) {
 		logs := &syncBuffer{}
 		return &Receiver{id: id, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 			factory: func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
-				return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
+				return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: plugin}, nil
 			}}, logs
 	}
 	runMember := func(r *Receiver) {

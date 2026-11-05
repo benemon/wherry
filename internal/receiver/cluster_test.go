@@ -81,7 +81,7 @@ func (c *clusterRig) start(t *testing.T, ctx context.Context) {
 	c.plugin = &fakePlugin{stream: resultStream}
 	r := &Receiver{id: c.receiver, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(c.logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
-			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: c.plugin}, nil
+			return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: c.plugin}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)

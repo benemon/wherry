@@ -131,7 +131,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 			plugin := &fakePlugin{stream: noResultStream, endDelay: time.Minute}
 			r := &Receiver{id: receiverID, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 				factory: func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
-					return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
+					return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: plugin}, nil
 				}}
 			runCtx, stop := context.WithCancel(ctx)
 			done := make(chan error, 1)
@@ -620,7 +620,7 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	plugin := &fakePlugin{stream: resultStream}
 	r := &Receiver{id: b.receiver, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
-			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
+			return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: plugin}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
@@ -709,7 +709,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 	fake := &fakePlugin{stream: resultStream, outputs: outputs}
 	r := &Receiver{id: b.receiver, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
-			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: fake}, nil
+			return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: fake}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
@@ -796,7 +796,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	fake := &fakePlugin{stream: resultStream, outputs: []pluginsdk.Output{{Name: wire.GitPatch, Size: int64(len(patch)), Data: patch}}}
 	r := &Receiver{id: b.receiver, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
-			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: fake}, nil
+			return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: fake}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
@@ -916,7 +916,7 @@ func tenantEndReceiver(t *testing.T, ctx context.Context, b brokerPool) *Receive
 	t.Cleanup(r.reader.Close)
 	// configure requires a factory for the configured profile.
 	r.factory = func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
-		return Named{Name: settings.Name, Agent: settings.Agent, Plugin: &fakePlugin{stream: resultStream}}, nil
+		return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: &fakePlugin{stream: resultStream}}, nil
 	}
 	if err := r.register(ctx); err != nil {
 		t.Fatal(err)
