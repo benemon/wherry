@@ -231,7 +231,7 @@ func TestLeaderMovesDuringReadAndAdmissionOnCluster(t *testing.T) {
 	}
 	c.start(t, ctx)
 
-	tasks := operator.PoolTasksTopic(c.pool)
+	tasks := c.tasksTopic(t, ctx)
 	if err := c.move(ctx, tasks); err != nil {
 		t.Fatal(err)
 	}

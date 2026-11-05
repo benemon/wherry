@@ -92,10 +92,6 @@ type Receiver struct {
 	shutdownBy time.Time
 	// halt, set by Run once it claims, ends claiming and held runs at once with the error Run returns.
 	halt func(error)
-	// backoffUntil is when the receiver may fetch from its pool again after releasing a task it failed to start, and
-	// fetching counts the share sessions polling the pool for a task.
-	backoffUntil time.Time
-	fetching     int
 	// pending holds each execution whose latest observation of its job found it not placed, keyed by execution so an
 	// old attempt clears only its own entry.
 	pending map[*activeRun]struct{}
@@ -484,20 +480,6 @@ func (r *Receiver) suspended() bool {
 	return state.Suspended[r.config.Pool]
 }
 
-// backoff is how long the receiver waits before it fetches from its pool again.
-func (r *Receiver) backoff() time.Duration {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return time.Until(r.backoffUntil)
-}
-
-// sessions counts the share sessions polling the pool for a task.
-func (r *Receiver) sessions() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.fetching
-}
-
 func (r *Receiver) snapshot() (operator.State, signed.Keys, signed.Keys) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -622,14 +604,13 @@ func (r *Receiver) advertise(ctx context.Context) error {
 	return nil
 }
 
-// offer returns this receiver's first profile, in record order, that is in its current offers and launches the
-// placement's agent with configured labels satisfying its selector. The record lists each plugin's profiles in their
-// declared order, plugins sorted by type, so the host's placement and this routing compute the same match.
-func (r *Receiver) offer(placement wire.Placement) (Named, bool) {
+// offerFor returns this receiver's first profile, in record order, that is in its current offers and whose signature
+// topic under the pool's recorded terms is topic.
+func (r *Receiver) offerFor(topic string) (Named, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, named := range r.profiles {
-		if named.Agent == placement.Agent && wire.Satisfies(placement.Selector, named.Labels) &&
+		if operator.SignatureTopic(r.config.Pool, r.state.Pools[r.config.Pool], named.Agent, named.Labels) == topic &&
 			slices.ContainsFunc(r.offers, func(offer wire.Offer) bool { return offer.Profile == named.Name }) {
 			return named, true
 		}
@@ -643,8 +624,6 @@ type poolEvents struct {
 	// record of each.
 	statuses map[string][]wire.RunStatus
 	records  map[string][]*kgo.Record
-	// startFailures holds, per run, this receiver's start failures in log order.
-	startFailures map[string][]wire.StartFailure
 	// others holds, per run, every other record, such as cancels.
 	others map[string][][]byte
 	// requests holds the open requests in log order; answered holds the digest of each request an attempt wrap or a
@@ -660,14 +639,14 @@ type poolEvents struct {
 
 func newPoolEvents() poolEvents {
 	return poolEvents{
-		statuses: map[string][]wire.RunStatus{}, records: map[string][]*kgo.Record{}, startFailures: map[string][]wire.StartFailure{}, others: map[string][][]byte{},
+		statuses: map[string][]wire.RunStatus{}, records: map[string][]*kgo.Record{}, others: map[string][][]byte{},
 		answered: map[string]bool{}, rekeys: map[string][]wire.RekeyWrap{}, decisions: map[string]wire.ClaimDecision{}, seen: map[string]bool{},
 	}
 }
 
 // view is a copy of events a reader may keep while the fold goes on: the fold only appends past each slice's length.
 func (events poolEvents) view() poolEvents {
-	events.statuses, events.records, events.startFailures, events.others = maps.Clone(events.statuses), maps.Clone(events.records), maps.Clone(events.startFailures), maps.Clone(events.others)
+	events.statuses, events.records, events.others = maps.Clone(events.statuses), maps.Clone(events.records), maps.Clone(events.others)
 	events.answered, events.rekeys, events.decisions, events.seen = maps.Clone(events.answered), maps.Clone(events.rekeys), maps.Clone(events.decisions), nil
 	return events
 }
@@ -758,7 +737,6 @@ func (r *Receiver) foldEvents(ctx context.Context, records []*kgo.Record, state 
 		// The JWS type picks the one parse a record gets; the parse checks the type again under the signature. parseErr
 		// tells a record that does not verify, kept for the cancel check, from one that verifies and is refused.
 		var status wire.RunStatus
-		var failure wire.StartFailure
 		var request wire.OpenRequest
 		var attemptWrap wire.AttemptWrap
 		var refusal wire.OpenRefusal
@@ -792,7 +770,7 @@ func (r *Receiver) foldEvents(ctx context.Context, records []*kgo.Record, state 
 			case wire.StatusType:
 				status, err = operator.AuthorizePoolStatus(parse, state, peers, record.Value, r.config.Pool)
 			case wire.StartFailureType:
-				failure, err = operator.AuthorizePoolStartFailure(parse, state, peers, record.Value, r.config.Pool)
+				_, err = operator.AuthorizePoolStartFailure(parse, state, peers, record.Value, r.config.Pool)
 			case wire.OpenRequestType:
 				err = strict(&request)
 			case wire.AttemptWrapType:
@@ -831,10 +809,7 @@ func (r *Receiver) foldEvents(ctx context.Context, records []*kgo.Record, state 
 		case err != nil:
 			// A status or start failure that verifies but is not authorised counts for nothing.
 		case typ == wire.StartFailureType:
-			// A start failure binds its run's tenant through the task hash, which failedHere matches.
-			if failure.Wherry.Run == run && failure.Wherry.Receiver == r.id {
-				apply = func(events *poolEvents) { events.startFailures[run] = append(events.startFailures[run], failure) }
-			}
+			// A start failure is a pool event, not a cancel, and counts for nothing in the fold.
 		case typ == wire.AttemptWrapType:
 			apply = func(events *poolEvents) { events.answered[attemptWrap.Request] = true }
 		case typ == wire.OpenRefusalType:
@@ -891,11 +866,6 @@ func (events poolEvents) claim(run, hash string) *wire.RunStatus {
 		}
 	}
 	return nil
-}
-
-// failedHere reports a start failure for the task record hash, which binds the failure to its run's tenant.
-func failedHere(failures []wire.StartFailure, hash string) bool {
-	return slices.ContainsFunc(failures, func(failure wire.StartFailure) bool { return failure.TaskHash == hash })
 }
 
 type runKey struct{ tenant, run string }

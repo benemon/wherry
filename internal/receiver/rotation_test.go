@@ -129,7 +129,7 @@ func TestCancelOfHeldRunAfterSelfRotation(t *testing.T) {
 	}
 	// The adopter's first commit is its own claimed status, under the new key.
 	run := testActiveRun(t, f, "run-a", 2)
-	if err := run.commit(f.ctx, run.claimRecords(f.taskOffset(t, run.taskHash))...); err != nil {
+	if err := run.commit(f.ctx, run.claimRecords(f.tasksTopic(), f.taskOffset(t, run.taskHash))...); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.receiver.readCancels(f.ctx); err != nil {
@@ -156,7 +156,7 @@ func TestRunIDOfAnotherTenantAfterHolderRotation(t *testing.T) {
 			t.Cleanup(producer.Close)
 			task := testSubmission("run-x")
 			holder := &activeRun{receiver: f.receiver, producer: producer, task: task, taskHash: wire.TaskHash(must(t)(wire.SignRecord(task, f.host))), history: []wire.Message{task.Message}, attempt: 1, profile: f.receiver.profiles[0]}
-			if err := holder.commit(f.ctx, holder.claimRecords(0)...); err != nil {
+			if err := holder.commit(f.ctx, holder.claimRecords(f.tasksTopic(), 0)...); err != nil {
 				t.Fatal(err)
 			}
 			if rotate {

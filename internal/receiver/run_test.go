@@ -572,7 +572,7 @@ func (f fixture) holding(t *testing.T, task *wire.Submission, hash, receiver str
 	status := f.receiver.status(task, hash, 1, kind, taskStatus(wire.TaskStateWorking, ""), offset)
 	status.Wherry.Receiver = receiver
 	if kind == "claimed" {
-		status.Wherry.TaskOffset = new(int64)
+		status.Wherry.TaskTopic, status.Wherry.TaskOffset = f.tasksTopic(), new(int64)
 	}
 	f.produce(t, operator.PoolEventsTopic(testPool), task.Wherry.Run, must(t)(wire.SignRecord(status, key)))
 }
@@ -580,7 +580,7 @@ func (f fixture) holding(t *testing.T, task *wire.Submission, hash, receiver str
 // taskOffset is the offset of the task record hashing to hash on the pool's task topic.
 func (f fixture) taskOffset(t *testing.T, hash string) int64 {
 	t.Helper()
-	for _, record := range f.records(t, operator.PoolTasksTopic(testPool)) {
+	for _, record := range f.records(t, f.tasksTopic()) {
 		if wire.TaskHash(record.Value) == hash {
 			return record.Offset
 		}
@@ -880,14 +880,14 @@ func TestLastOffsetSkipsOnlyAnEndedHoldersTopicDenial(t *testing.T) {
 func TestFencedProducerStopsRunWrites(t *testing.T) {
 	f := newFixture(t, resultStream)
 	zombie := testActiveRun(t, f, "run-fence", 1)
-	if err := zombie.commit(f.ctx, zombie.claimRecords(f.taskOffset(t, zombie.taskHash))...); err != nil {
+	if err := zombie.commit(f.ctx, zombie.claimRecords(f.tasksTopic(), f.taskOffset(t, zombie.taskHash))...); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(operator.TransactionalPrefix(testPool)+testRun("run-fence"), "p."+testPool+".") {
 		t.Fatal("transactional ID is outside the pool's prefix")
 	}
 	adopter := testActiveRun(t, f, "run-fence", 2)
-	if err := adopter.commit(f.ctx, adopter.claimRecords(f.taskOffset(t, adopter.taskHash))...); err != nil {
+	if err := adopter.commit(f.ctx, adopter.claimRecords(f.tasksTopic(), f.taskOffset(t, adopter.taskHash))...); err != nil {
 		t.Fatal(err)
 	}
 	err := zombie.commit(f.ctx, zombie.progress(42))
@@ -906,11 +906,11 @@ func TestFencedProducerStopsRunWrites(t *testing.T) {
 func TestFencedStartFailureLeavesTheJob(t *testing.T) {
 	f := newFixture(t, resultStream)
 	zombie := testActiveRun(t, f, "run-fence", 1)
-	if err := zombie.commit(f.ctx, zombie.claimRecords(f.taskOffset(t, zombie.taskHash))...); err != nil {
+	if err := zombie.commit(f.ctx, zombie.claimRecords(f.tasksTopic(), f.taskOffset(t, zombie.taskHash))...); err != nil {
 		t.Fatal(err)
 	}
 	adopter := testActiveRun(t, f, "run-fence", 2)
-	if err := adopter.commit(f.ctx, adopter.claimRecords(f.taskOffset(t, adopter.taskHash))...); err != nil {
+	if err := adopter.commit(f.ctx, adopter.claimRecords(f.tasksTopic(), f.taskOffset(t, adopter.taskHash))...); err != nil {
 		t.Fatal(err)
 	}
 	if status := zombie.startFailure(f.ctx, "dispatch", "profile nomad created no job"); status != 0 {
@@ -1849,7 +1849,7 @@ func (f fixture) adoptedOnce(t *testing.T) {
 func TestAdmissionWritesDoNotFenceTheRunsHolder(t *testing.T) {
 	f := newFixture(t, resultStream)
 	holder := testActiveRun(t, f, "run-a", 1)
-	if err := holder.commit(f.ctx, holder.claimRecords(f.taskOffset(t, holder.taskHash))...); err != nil {
+	if err := holder.commit(f.ctx, holder.claimRecords(f.tasksTopic(), f.taskOffset(t, holder.taskHash))...); err != nil {
 		t.Fatal(err)
 	}
 	// A duplicate of the held turn is rejected while the holder runs.
@@ -1902,7 +1902,7 @@ func TestAmbiguousCommitAbandonsToRedelivery(t *testing.T) {
 				t.Fatalf("terminals on the pool's events %d, want %d", terminals, test.terminals)
 			}
 			commitTransaction = previous
-			tasks := f.records(t, operator.PoolTasksTopic(testPool))
+			tasks := f.records(t, f.tasksTopic())
 			admitted, ack := f.receiver.admit(f.ctx, tasks[len(tasks)-1])
 			if test.applied && (admitted != nil || ack != kgo.AckAccept) {
 				t.Fatalf("redelivered holder admitted=%v ack=%v, want accept without running", admitted != nil, ack)

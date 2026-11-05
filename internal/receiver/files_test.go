@@ -51,7 +51,7 @@ func (f fixture) submitPayload(t *testing.T, edit func(map[string]any)) *kgo.Rec
 	}
 	edit(named)
 	value := must(t)(signed.Sign("application/vnd.wherry.submission.v1+jws", signed.HostOwner(testTenant, testHost), named, f.host))
-	return f.produce(t, operator.PoolTasksTopic(testPool), testRun("run-a"), value)
+	return f.produce(t, f.tasksTopic(), testRun("run-a"), value)
 }
 
 func (f fixture) lastRun() pluginsdk.Run {

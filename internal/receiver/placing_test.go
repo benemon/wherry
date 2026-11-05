@@ -837,6 +837,12 @@ func (f fixture) lastEvent(t *testing.T) string {
 	return event
 }
 
+// gated reports the receiver's claim gate as a slot reads it.
+func gated(f fixture) bool {
+	gated, _ := f.receiver.claimable()
+	return gated
+}
+
 // Each execution holds its own entry in the pending set, so an old attempt clears only its own, in either order of
 // entry, and a late pending result of the old attempt does not reopen the gate the new one holds.
 func TestPendingSetIsKeyedByExecution(t *testing.T) {
@@ -844,7 +850,7 @@ func TestPendingSetIsKeyedByExecution(t *testing.T) {
 	f.receiver.mu.Lock()
 	f.receiver.offers = []wire.Offer{{Profile: "nomad"}}
 	f.receiver.mu.Unlock()
-	if f.receiver.gated() {
+	if gated(f) {
 		t.Fatal("gated before any pending run")
 	}
 	for name, order := range map[string][]int{"old first": {0, 1}, "new first": {1, 0}} {
@@ -854,16 +860,16 @@ func TestPendingSetIsKeyedByExecution(t *testing.T) {
 				attempts[i].pending()
 			}
 			attempts[0].placed()
-			if !f.receiver.gated() {
+			if !gated(f) {
 				t.Fatal("the old attempt's exit reopened the gate the new attempt holds")
 			}
 			attempts[0].pending()
 			attempts[0].placed()
-			if !f.receiver.gated() {
+			if !gated(f) {
 				t.Fatal("the old attempt's late pending result and exit reopened the gate")
 			}
 			attempts[1].placed()
-			if f.receiver.gated() {
+			if gated(f) {
 				t.Fatal("still gated once every entry is gone")
 			}
 		})
@@ -905,15 +911,15 @@ func TestFencedHolderLeavesTheNewerHoldersGate(t *testing.T) {
 	if texts := placingTexts(f.eventStatuses(t)); len(texts) != 1 {
 		t.Fatalf("placing %q, want the newer holder's alone", texts)
 	}
-	if most := f.mostSessions(2 * time.Second); most != 0 || joins() != 0 {
-		t.Fatalf("%d share sessions and %d joins after the fenced holder left, the newer one pending; want none", most, joins())
+	if most := f.mostMembers(2 * time.Second); most != 0 || joins() != 0 {
+		t.Fatalf("%d share group members and %d joins after the fenced holder left, the newer one pending; want none", most, joins())
 	}
 	f.setPlugin(func(p *fakePlugin) { p.placedRuns[testRun("run-a")] = true })
 	if status := <-newer; status != kgo.AckAccept {
 		t.Fatalf("newer holder ended %v; logs:\n%s", status, f.logs.String())
 	}
-	if !f.awaitSessions(time.Second+500*time.Millisecond, func(n int) bool { return n > 0 }) {
-		t.Fatalf("no share session once the newer holder started; logs:\n%s", f.logs.String())
+	if !f.awaitMembers(time.Second+500*time.Millisecond, func(n int) bool { return n > 0 }) {
+		t.Fatalf("no share group member once the newer holder started; logs:\n%s", f.logs.String())
 	}
 }
 
@@ -951,8 +957,8 @@ func pendingGateFixture(t *testing.T) fixture {
 }
 
 // A validated pending observation closes the claim gate: the idle polls end within the watcher's 100 ms plus their 1 s
-// FetchMaxWait, no share session joins while any held run is pending, records already fetched are admitted, and the gate
-// reopens only once no run is pending.
+// FetchMaxWait, no share group member joins while any held run is pending, records already fetched are admitted, and the
+// gate reopens only once no run is pending.
 func TestPendingRunClosesTheGate(t *testing.T) {
 	f := pendingGateFixture(t)
 	f.submit(t, f.host, nil)
@@ -968,23 +974,23 @@ func TestPendingRunClosesTheGate(t *testing.T) {
 	if n := f.pendingRuns(); n != 2 {
 		t.Fatalf("%d runs in the pending set, want 2", n)
 	}
-	if !f.awaitSessions(100*time.Millisecond+time.Second+500*time.Millisecond, func(n int) bool { return n == 0 }) {
-		t.Fatalf("%d share sessions still open 1.6 s after the gate closed, want none", f.receiver.sessions())
+	if !f.awaitMembers(100*time.Millisecond+time.Second+500*time.Millisecond, func(n int) bool { return n == 0 }) {
+		t.Fatalf("%d share group members still open 1.6 s after the gate closed, want none", f.polling())
 	}
 	joins := f.shareJoins(t)
-	if most := f.mostSessions(3 * time.Second); most != 0 || joins() != 0 {
-		t.Fatalf("%d share sessions and %d joins while runs are pending, want none", most, joins())
+	if most := f.mostMembers(3 * time.Second); most != 0 || joins() != 0 {
+		t.Fatalf("%d share group members and %d joins while runs are pending, want none", most, joins())
 	}
 	f.setPlugin(func(p *fakePlugin) { p.placedRuns[testRun("run-a")] = true })
 	f.await(t, testRun("run-a"), func(task wire.Task) bool { return task.Status.State == wire.TaskStateCompleted })
-	if most := f.mostSessions(2 * time.Second); most != 0 || joins() != 0 {
-		t.Fatalf("%d share sessions and %d joins with one run still pending, want none", most, joins())
+	if most := f.mostMembers(2 * time.Second); most != 0 || joins() != 0 {
+		t.Fatalf("%d share group members and %d joins with one run still pending, want none", most, joins())
 	}
 	f.setPlugin(func(p *fakePlugin) { p.placing = false })
 	f.await(t, testRun("run-b"), func(task wire.Task) bool { return task.Status.State == wire.TaskStateCompleted })
 	// A slot asleep on the gate checks again within its 1 s sleep.
-	if !f.awaitSessions(time.Second+500*time.Millisecond, func(n int) bool { return n > 0 }) {
-		t.Fatalf("no share session once no run is pending; logs:\n%s", f.logs.String())
+	if !f.awaitMembers(time.Second+500*time.Millisecond, func(n int) bool { return n > 0 }) {
+		t.Fatalf("no share group member once no run is pending; logs:\n%s", f.logs.String())
 	}
 }
 
@@ -995,12 +1001,12 @@ func TestPendingRunGatesTheSlotsEntry(t *testing.T) {
 	held.pending()
 	joins := f.shareJoins(t)
 	f.run(t, f.ctx)
-	if most := f.mostSessions(2 * time.Second); most != 0 || joins() != 0 {
-		t.Fatalf("%d share sessions and %d joins with a pending run held, want none", most, joins())
+	if most := f.mostMembers(2 * time.Second); most != 0 || joins() != 0 {
+		t.Fatalf("%d share group members and %d joins with a pending run held, want none", most, joins())
 	}
 	held.placed()
-	if !f.awaitSessions(time.Second+500*time.Millisecond, func(n int) bool { return n > 0 }) {
-		t.Fatalf("no share session once the run left the pending set; logs:\n%s", f.logs.String())
+	if !f.awaitMembers(time.Second+500*time.Millisecond, func(n int) bool { return n > 0 }) {
+		t.Fatalf("no share group member once the run left the pending set; logs:\n%s", f.logs.String())
 	}
 }
 
@@ -1009,16 +1015,16 @@ func TestPendingRunGatesTheSlotsEntry(t *testing.T) {
 func TestPendingRunEndsAnOpenPoll(t *testing.T) {
 	f := pendingGateFixture(t)
 	f.run(t, f.ctx)
-	if !f.awaitSessions(10*time.Second, func(n int) bool { return n == 6 }) {
+	if !f.awaitMembers(10*time.Second, func(n int) bool { return n == 6 }) {
 		t.Fatalf("the slots never polled; logs:\n%s", f.logs.String())
 	}
 	held := testActiveRun(t, f, "run-z", 1)
 	held.pending()
-	if !f.awaitSessions(100*time.Millisecond+time.Second+500*time.Millisecond, func(n int) bool { return n == 0 }) {
-		t.Fatalf("%d share sessions still open 1.6 s after a run turned pending, want none", f.receiver.sessions())
+	if !f.awaitMembers(100*time.Millisecond+time.Second+500*time.Millisecond, func(n int) bool { return n == 0 }) {
+		t.Fatalf("%d share group members still open 1.6 s after a run turned pending, want none", f.polling())
 	}
-	if most := f.mostSessions(2 * time.Second); most != 0 {
-		t.Fatalf("%d share sessions while a run is pending, want none", most)
+	if most := f.mostMembers(2 * time.Second); most != 0 {
+		t.Fatalf("%d share group members while a run is pending, want none", most)
 	}
 	held.placed()
 }
@@ -1028,12 +1034,6 @@ func TestPendingRunEndsAnOpenPoll(t *testing.T) {
 func TestPendingHoldsTheGateBesideTheOtherReasons(t *testing.T) {
 	f := gateFixture(t, resultStream)
 	held := testActiveRun(t, f, "run-z", 1)
-	setBackoff := func(d time.Duration) time.Time {
-		f.receiver.mu.Lock()
-		defer f.receiver.mu.Unlock()
-		f.receiver.backoffUntil = time.Now().Add(d)
-		return f.receiver.backoffUntil
-	}
 	suspend := func(suspended bool) {
 		if err := f.service.PoolSuspend(f.ctx, testPool, suspended); err != nil {
 			t.Fatal(err)
@@ -1044,16 +1044,13 @@ func TestPendingHoldsTheGateBesideTheOtherReasons(t *testing.T) {
 	}
 	closed := func(what string) {
 		t.Helper()
-		if most := f.mostSessions(1500 * time.Millisecond); most != 0 {
-			t.Fatalf("%s: %d share sessions, want none", what, most)
+		if most := f.mostMembers(1500 * time.Millisecond); most != 0 {
+			t.Fatalf("%s: %d share group members, want none", what, most)
 		}
 	}
 	held.pending()
 	f.run(t, f.ctx)
-	until := setBackoff(time.Second)
-	closed("back-off set while pending")
-	time.Sleep(time.Until(until))
-	closed("back-off expired, pending held")
+	closed("pending")
 	suspend(true)
 	held.placed()
 	closed("pending cleared while suspended")
@@ -1064,8 +1061,8 @@ func TestPendingHoldsTheGateBesideTheOtherReasons(t *testing.T) {
 	f.setReady(t, true)
 	closed("offers returned, pending held")
 	held.placed()
-	if !f.awaitSessions(time.Second+500*time.Millisecond, func(n int) bool { return n > 0 }) {
-		t.Fatalf("every reason cleared: no share session opened; logs:\n%s", f.logs.String())
+	if !f.awaitMembers(time.Second+500*time.Millisecond, func(n int) bool { return n > 0 }) {
+		t.Fatalf("every reason cleared: no share group member joined; logs:\n%s", f.logs.String())
 	}
 }
 

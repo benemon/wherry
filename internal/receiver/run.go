@@ -87,47 +87,41 @@ func (r *Receiver) claimLoop(claiming, running context.Context, idle func()) {
 	}
 }
 
-// claimGated reports that no new poll of the pool may open: a suspended pool, no ready offer, an active back-off or a
-// held run observed pending. r.mu must be held, and never across a poll, a client close, a sleep or a plugin call.
+// claimGated reports that no new poll of the pool may open: a suspended pool, no ready offer, which is an empty
+// subscription, or a held run observed pending. r.mu must be held, and never across a poll, a client close, a sleep or
+// a plugin call.
 func (r *Receiver) claimGated() bool {
-	return r.state.Suspended[r.config.Pool] || len(r.offers) == 0 || time.Now().Before(r.backoffUntil) || len(r.pending) > 0
+	return r.state.Suspended[r.config.Pool] || len(r.offers) == 0 || len(r.pending) > 0
 }
 
-// gated is claimGated taking r.mu.
-func (r *Receiver) gated() bool {
+// subscription is the sorted signature topics of the ready profiles under the pool's recorded terms, each once. A
+// profile joins only through its own signature. r.mu must be held.
+func (r *Receiver) subscription() []string {
+	var topics []string
+	for _, named := range r.profiles {
+		if slices.ContainsFunc(r.offers, func(offer wire.Offer) bool { return offer.Profile == named.Name }) {
+			topics = append(topics, operator.SignatureTopic(r.config.Pool, r.state.Pools[r.config.Pool], named.Agent, named.Labels))
+		}
+	}
+	slices.Sort(topics)
+	return slices.Compact(topics)
+}
+
+// claimable is claimGated and the subscription, read together under r.mu.
+func (r *Receiver) claimable() (bool, []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.claimGated()
+	return r.claimGated(), r.subscription()
 }
 
 func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
-	// The check and the count share the lock, so a slot releasing a task for another member knows every session that
-	// could fetch it again.
-	r.mu.Lock()
-	// claimGated reads the clock first, so a back-off with time left always gates: otherwise one expiring between the
-	// two reads would count a session that is never uncounted.
-	gated := r.claimGated()
-	wait := time.Until(r.backoffUntil)
-	if !gated {
-		r.fetching++
-	}
-	r.mu.Unlock()
-	if wait > 0 {
-		sleep(claiming, wait)
-		return nil
-	}
+	gated, topics := r.claimable()
 	if gated {
 		sleep(claiming, time.Second)
 		return nil
 	}
-	fetched := sync.OnceFunc(func() {
-		r.mu.Lock()
-		r.fetching--
-		r.mu.Unlock()
-	})
-	defer fetched()
 	share, err := r.newClient(
-		kgo.ConsumeTopics(operator.PoolTasksTopic(r.config.Pool)),
+		kgo.ConsumeTopics(topics...),
 		kgo.ShareGroup(operator.PoolGroup(r.config.Pool)),
 		kgo.ShareMaxRecords(1),
 		kgo.ShareMaxRecordsStrict(),
@@ -152,11 +146,16 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		defer cancel()
 		return share.FlushAcks(flushCtx)
 	}
+	// stale reports the gate holding or the subscription no longer the client's, so the slot reopens with the new set.
+	stale := func() bool {
+		gated, current := r.claimable()
+		return gated || !slices.Equal(current, topics)
+	}
 	var record *kgo.Record
 	for record == nil {
 		pollCtx, cancel := context.WithTimeout(claiming, 30*time.Second)
 		go func() {
-			for pollCtx.Err() == nil && !r.gated() {
+			for pollCtx.Err() == nil && !stale() {
 				sleep(pollCtx, 100*time.Millisecond)
 			}
 			cancel()
@@ -167,7 +166,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		if claiming.Err() != nil {
 			return claiming.Err()
 		}
-		if len(fetches.Records()) == 0 && r.gated() {
+		if len(fetches.Records()) == 0 && stale() {
 			return nil
 		}
 		if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
@@ -177,7 +176,6 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 			record = records[0]
 		}
 	}
-	fetched()
 	// A slot holding a task releases it only after running ends, so it does not hold up the idle slots' close.
 	defer context.AfterFunc(claiming, idle)()
 	if r.suspended() {
@@ -186,12 +184,6 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 	}
 	admitted, ack := r.admit(ctx, record)
 	if admitted == nil {
-		if ack == kgo.AckRelease && r.backoff() > 0 {
-			// Another slot's session open when the task goes back could be handed it at once.
-			for claiming.Err() == nil && r.sessions() > 0 {
-				sleep(claiming, 10*time.Millisecond)
-			}
-		}
 		record.Ack(ack)
 		return flush()
 	}
@@ -283,9 +275,9 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	if first := events.task(run); first != "" && first != hash {
 		return reject("duplicate submission")
 	}
-	// A copy of the claimed record, byte for byte at another offset, is acknowledged without a claim before anything is
-	// written under the run's key.
-	if claim := events.claim(run, hash); claim != nil && *claim.Wherry.TaskOffset != record.Offset {
+	// A copy of the claimed record, byte for byte at another topic or offset, is acknowledged without a claim before
+	// anything is written under the run's key.
+	if claim := events.claim(run, hash); claim != nil && (claim.Wherry.TaskTopic != record.Topic || *claim.Wherry.TaskOffset != record.Offset) {
 		return nil, kgo.AckAccept
 	}
 	state, _, _ := r.snapshot()
@@ -319,23 +311,19 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		return status.Wherry.TaskHash == hash && status.Wherry.Kind == "started" && status.Wherry.LogOffset != nil
 	})
 	ending := claimed && (now > task.Wherry.TaskStartedBy && !started || now > task.Wherry.TaskEndedBy)
-	// A member that failed to start the task does not try again, and fetches nothing for one lock duration so the
-	// broker can hand the task to another member.
-	if failedHere(events.startFailures[run], hash) && !ending {
-		admitted, ack := giveBack()
-		if ack == kgo.AckRelease {
-			r.logger.Printf("run %s: already failed here; releasing for another member", run)
-			r.mu.Lock()
-			r.backoffUntil = time.Now().Add(terms.LockDuration())
-			r.mu.Unlock()
-		}
-		return admitted, ack
+	// The record's topic routes the task: its agent is the placement's, and the profile it reached is ready and serves
+	// the selector, or the host computed the wrong topic.
+	if _, topicAgent, ok := wire.ParseTaskTopic(record.Topic); !ok || topicAgent != placement.Agent {
+		return reject("agent does not match the task topic")
 	}
-	profile, offered := r.offer(placement)
+	profile, offered := r.offerFor(record.Topic)
 	if !offered && !ending {
-		r.logger.Printf("run %s: no current offer for agent %s satisfying its selector", run, placement.Agent)
-		r.metrics.startFailures.WithLabelValues("none", "offer-unavailable").Inc()
+		// A profile that went unready since this slot subscribed: another member, or this one once ready, takes it.
+		r.logger.Printf("run %s: no ready profile for topic %s; releasing", run, record.Topic)
 		return giveBack()
+	}
+	if offered && !wire.Satisfies(placement.Selector, profile.Labels) {
+		return reject("selector does not match the task topic")
 	}
 	if !claimed && time.Since(record.Timestamp) > terms.StartByLimit() {
 		return reject("task_started_by is past the pool's start_by_limit")
@@ -493,8 +481,8 @@ type runSubmission struct {
 	submitted time.Time
 }
 
-// inadmissible is the rejection reason of a submission that carries no envelope or whose bounds fail at its append time
-// under terms, and empty for one that is admissible.
+// inadmissible is the rejection reason of a submission that carries no envelope, whose bounds fail at its append time
+// under terms or whose selector names a key outside terms' routable labels, and empty for one that is admissible.
 func inadmissible(submission runSubmission, terms operator.Terms) string {
 	binding, appended := submission.record.Wherry, submission.submitted
 	switch {
@@ -508,6 +496,8 @@ func inadmissible(submission runSubmission, terms operator.Terms) string {
 		return "task_ended_by is before task_started_by"
 	case binding.TaskEndedBy > binding.TaskStartedBy+operator.MaxRunDurationMS/1000:
 		return "task_ended_by is past task_started_by plus the 6h run cap"
+	case slices.ContainsFunc(binding.Placement.Selector, func(requirement wire.Requirement) bool { return !slices.Contains(terms.Routable, requirement.Key) }):
+		return "selector names a non-routable key"
 	}
 	return ""
 }
@@ -603,7 +593,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		}
 	}()
 
-	if err := run.commit(ctx, append([]*kgo.Record{run.feed(r.echo(task, admitted.taskHash))}, run.claimRecords(record.Offset)...)...); err != nil {
+	if err := run.commit(ctx, append([]*kgo.Record{run.feed(r.echo(task, admitted.taskHash))}, run.claimRecords(record.Topic, record.Offset)...)...); err != nil {
 		return run.abandon(err)
 	}
 	// A claim given back to the pool is released first, so the next claimant is served without waiting out this one.
@@ -2230,10 +2220,10 @@ func (run *activeRun) statusRecords(kind string, status wire.TaskStatus, offset 
 	return run.receiver.statusRecords(run.task, run.status(kind, status, offset, metadata))
 }
 
-// claimRecords are the run's claimed status records, naming the task record's offset.
-func (run *activeRun) claimRecords(offset int64) []*kgo.Record {
+// claimRecords are the run's claimed status records, naming the task record's topic and offset.
+func (run *activeRun) claimRecords(topic string, offset int64) []*kgo.Record {
 	value := run.status("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)
-	value.Wherry.TaskOffset = &offset
+	value.Wherry.TaskTopic, value.Wherry.TaskOffset = topic, &offset
 	return run.receiver.statusRecords(run.task, value)
 }
 

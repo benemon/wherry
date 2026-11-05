@@ -84,7 +84,7 @@ func TestRotateKeyRecordRotatesAtOnceAndHostsEncryptToTheNewKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, record := range f.records(t, operator.PoolTasksTopic(testPool)) {
+	for _, record := range f.records(t, f.tasksTopic()) {
 		if string(record.Key) != submitted.RunID {
 			continue
 		}

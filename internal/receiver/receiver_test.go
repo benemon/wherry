@@ -35,6 +35,7 @@ import (
 	"github.com/benemon/wherry/pluginsdk"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sasl/plain"
@@ -515,6 +516,8 @@ type fixture struct {
 	logs     *syncBuffer
 	// plugins are the fakes the receiver's factory builds, by profile name.
 	plugins map[string]*fakePlugin
+	// members records the share clients of the pool's share group from the fixture's start.
+	members *memberLog
 	// serving is set while the receiver, its pool's custodian, serves open requests.
 	serving *atomic.Bool
 	// envelope, when set, edits the values submit seals in a task's envelope.
@@ -660,7 +663,7 @@ func newBareFixtureWith(t *testing.T, terms operator.Terms, config operator.Rece
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := fixture{ctx: ctx, cluster: cluster, service: service, host: host, plugins: plugins, plugin: plugins["nomad"], serving: &atomic.Bool{}}
+	f := fixture{ctx: ctx, cluster: cluster, service: service, host: host, plugins: plugins, plugin: plugins["nomad"], members: watchMembers(cluster), serving: &atomic.Bool{}}
 	f.produce(t, operator.HostTopic(testTenant, testHost), "", must(t)(signed.RegisterKey(signed.HostOwner(testTenant, testHost), host)))
 	f.receiver, f.logs = f.newReceiver(t, config)
 	r := f.receiver
@@ -769,7 +772,7 @@ func testSubmission(name string) *wire.Submission {
 }
 
 // submit signs a submission with key, with an envelope of its values wrapped to the pool's current key as a host builds
-// it, and puts it on the pool's task topic, where every delivered record is.
+// it, and puts it on its signature's task topic, where every delivered record is.
 func (f fixture) submit(t *testing.T, key ed25519.PrivateKey, mutate func(*wire.Submission)) *kgo.Record {
 	t.Helper()
 	submission := testSubmission("run-a")
@@ -779,7 +782,44 @@ func (f fixture) submit(t *testing.T, key ed25519.PrivateKey, mutate func(*wire.
 	if submission.Wherry.Envelope == "" {
 		f.seal(t, submission)
 	}
-	return f.produce(t, operator.PoolTasksTopic(testPool), submission.Wherry.Run, must(t)(wire.SignRecord(submission, key)))
+	return f.produce(t, f.taskTopic(t, submission.Wherry.Placement), submission.Wherry.Run, must(t)(wire.SignRecord(submission, key)))
+}
+
+// taskTopic is the signature topic, under the pool's recorded terms, of the receiver's first profile that launches
+// placement's agent with labels satisfying its selector, as a host places a task. When none does, as for a signed task
+// that bypassed placement, it is the agent's signature with no labels, which this creates as another member's
+// receiver apply would.
+func (f fixture) taskTopic(t *testing.T, placement wire.Placement) string {
+	t.Helper()
+	topic, placed := f.signatureTopic(placement)
+	if !placed {
+		created, err := kadm.NewClient(f.service.Operator).CreateTopic(f.ctx, 1, -1, map[string]*string{"message.timestamp.type": kadm.StringPtr("LogAppendTime")}, topic)
+		if err == nil {
+			err = created.Err
+		}
+		if err != nil && !errors.Is(err, kerr.TopicAlreadyExists) {
+			t.Fatalf("create %s: %v", topic, err)
+		}
+	}
+	return topic
+}
+
+// signatureTopic is taskTopic without the topic's creation, and reports whether a profile places the task.
+func (f fixture) signatureTopic(placement wire.Placement) (string, bool) {
+	state, _, _ := f.receiver.snapshot()
+	terms := state.Pools[testPool]
+	for _, named := range f.receiver.profiles {
+		if named.Agent == placement.Agent && wire.Satisfies(placement.Selector, named.Labels) {
+			return operator.SignatureTopic(testPool, terms, named.Agent, named.Labels), true
+		}
+	}
+	return operator.SignatureTopic(testPool, terms, placement.Agent, nil), false
+}
+
+// tasksTopic is the signature topic of a claude task with no selector, where testSubmission's tasks go.
+func (f fixture) tasksTopic() string {
+	topic, _ := f.signatureTopic(wire.Placement{Agent: "claude"})
+	return topic
 }
 
 // seal puts in submission an envelope sealTask builds, edited by f.envelope, wrapped to the pool's current key.
@@ -859,7 +899,7 @@ func (f fixture) publishStatus(t *testing.T, record *kgo.Record, receiver string
 	status := f.receiver.status(f.parse(t, record), wire.TaskHash(record.Value), 1, kind, taskStatus(state, ""), nil)
 	status.Wherry.Receiver = receiver
 	if kind == "claimed" {
-		status.Wherry.TaskOffset = &record.Offset
+		status.Wherry.TaskTopic, status.Wherry.TaskOffset = record.Topic, &record.Offset
 	}
 	if mutate != nil {
 		mutate(status)
@@ -1493,8 +1533,8 @@ type multiFixture struct {
 }
 
 // newMultiFixture configures profiles lab, cloud and edge, in that order, for one agent with the labels
-// their operator declares: lab and cloud both carry class=cpu, only cloud an accelerator, edge class=arm. The agent's
-// credential is answered.
+// their operator declares, each routable, so each profile is a signature of its own: lab and cloud both carry
+// class=cpu, only cloud an accelerator, edge class=arm. The agent's credential is answered.
 func newMultiFixture(t *testing.T) multiFixture {
 	t.Helper()
 	m := multiFixture{lab: &fakePlugin{stream: resultStream}, cloud: &fakePlugin{stream: resultStream}, edge: &fakePlugin{stream: resultStream}}
@@ -1504,7 +1544,9 @@ func newMultiFixture(t *testing.T) multiFixture {
 		{Name: "cloud", Plugin: "fake", Agent: "claude", Labels: map[string]string{"site": "cloud", "class": "cpu", "example.com/accelerator": "gpu"}, Config: map[string]any{}},
 		{Name: "edge", Plugin: "fake", Agent: "claude", Labels: map[string]string{"site": "edge", "class": "arm"}, Config: map[string]any{}},
 	}
-	m.fixture = newFixtureWith(t, resultStream, testTerms(), config, map[string]*fakePlugin{"lab": m.lab, "cloud": m.cloud, "edge": m.edge})
+	terms := testTerms()
+	terms.Routable = []string{"site", "class", "example.com/accelerator"}
+	m.fixture = newFixtureWith(t, resultStream, terms, config, map[string]*fakePlugin{"lab": m.lab, "cloud": m.cloud, "edge": m.edge})
 	return m
 }
 
@@ -1568,29 +1610,6 @@ func TestEachSelectorOperatorRoutes(t *testing.T) {
 		if got := m.routed(t, test.selector...); got != test.want {
 			t.Errorf("%s: routed to %s, want %s", test.name, got, test.want)
 		}
-	}
-}
-
-func TestUnreadyProfileIsNeverChosen(t *testing.T) {
-	m := newMultiFixture(t)
-	m.lab.mu.Lock()
-	m.lab.unready = true
-	m.lab.mu.Unlock()
-	if err := m.receiver.advertise(m.ctx); err != nil {
-		t.Fatal(err)
-	}
-	for _, offer := range m.advertisedOffers(t).Offers {
-		if offer.Profile == "lab" {
-			t.Fatal("a profile that is not ready was advertised")
-		}
-	}
-	if got := m.routed(t, in("class", "cpu")); got != "cloud" {
-		t.Fatalf("routed to %s, want cloud: lab is not ready", got)
-	}
-	// Only the unready plugin satisfies this selector: a start failure, not a dispatch.
-	record := m.submit(t, m.host, func(task *wire.Submission) { task.Wherry.Placement.Selector = []wire.Requirement{in("site", "lab")} })
-	if admitted, ack := m.receiver.admit(m.ctx, record); admitted != nil || ack != kgo.AckRelease {
-		t.Fatalf("admitted=%v ack=%v, want a start failure and release", admitted != nil, ack)
 	}
 }
 
@@ -1887,20 +1906,15 @@ func TestRevocationLeavesAHeldRunToAnAdopter(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newBareFixtureWith(t, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: c.stream, endDelay: 40 * time.Second}})
-			// The adopter starts first, so it is the key custodian, and fetches nothing until the revoked receiver exits.
+			// The adopter starts first, so it is the key custodian, and fetches nothing until the revoked receiver exits: a
+			// run it holds pending gates its slots.
 			adopter := f.member(t, "receiver-b")
+			gate := &activeRun{receiver: adopter}
+			gate.pending()
 			revoked := make(chan struct{})
 			go func() {
-				for {
-					adopter.mu.Lock()
-					adopter.backoffUntil = time.Now().Add(time.Second)
-					adopter.mu.Unlock()
-					select {
-					case <-revoked:
-						return
-					case <-time.After(100 * time.Millisecond):
-					}
-				}
+				<-revoked
+				gate.placed()
 			}()
 			runUntilStopped(t, f.ctx, adopter)
 			f.awaitSnapshots(t, 1)

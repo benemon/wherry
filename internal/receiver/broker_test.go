@@ -147,7 +147,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.PoolTasksTopic(pool), Key: []byte(run), Value: value}).FirstErr(); err != nil {
+			if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: b.tasksTopic(t, ctx), Key: []byte(run), Value: value}).FirstErr(); err != nil {
 				t.Fatal(err)
 			}
 			for {
@@ -165,7 +165,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 			}
 			done <- nil
 			stopped := time.Now()
-			member, err := kgo.NewClient(append(append([]kgo.Opt(nil), opts...), kgo.ConsumeTopics(operator.PoolTasksTopic(pool)), kgo.ShareGroup(operator.PoolGroup(pool)), kgo.ShareMaxRecords(1))...)
+			member, err := kgo.NewClient(append(append([]kgo.Opt(nil), opts...), kgo.ConsumeTopics(b.tasksTopic(t, ctx)), kgo.ShareGroup(operator.PoolGroup(pool)), kgo.ShareMaxRecords(1))...)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -193,7 +193,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if offset, ok := offsets[operator.PoolGroup(pool)].Offsets.Lookup(operator.PoolTasksTopic(pool), redelivered.Partition); !ok || offset.Err != nil || offset.StartOffset > redelivered.Offset {
+			if offset, ok := offsets[operator.PoolGroup(pool)].Offsets.Lookup(b.tasksTopic(t, ctx), redelivered.Partition); !ok || offset.Err != nil || offset.StartOffset > redelivered.Offset {
 				t.Fatalf("share group start offset %+v past the task at %d: the task was archived", offset, redelivered.Offset)
 			}
 		})
@@ -221,6 +221,34 @@ func (b brokerPool) seal(t *testing.T, ctx context.Context, submission *wire.Sub
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// tasksTopic is the signature topic, under the pool's recorded terms, of a receiver's testConfig profile, where a claude
+// task with no selector goes.
+func (b brokerPool) tasksTopic(t *testing.T, ctx context.Context) string {
+	t.Helper()
+	state, err := b.service.LoadState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := testConfig(b.receiver).Profiles[0]
+	return operator.SignatureTopic(b.pool, state.Pools[b.pool], profile.Agent, profile.Labels)
+}
+
+// groupMembers counts the members of the pool's share group whose client ID is clientID.
+func (b brokerPool) groupMembers(t *testing.T, ctx context.Context, clientID string) int {
+	t.Helper()
+	groups, err := kadm.NewClient(b.kafka).DescribeShareGroups(ctx, operator.PoolGroup(b.pool))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, member := range groups[operator.PoolGroup(b.pool)].Members {
+		if member.ClientID == clientID {
+			n++
+		}
+	}
+	return n
 }
 
 // configure records the receiver's configuration with capacity.
@@ -251,9 +279,129 @@ func (b brokerPool) member(t *testing.T, ctx context.Context, id string) {
 	}
 }
 
-// TestDeliveryBudgetEndsATaskTwoMembersFailedOnRealBroker checks that a task each pool member fails to start once ends
-// FAILED in one terminal when the delivery budget is spent, with no member dispatching it twice.
-func TestDeliveryBudgetEndsATaskTwoMembersFailedOnRealBroker(t *testing.T) {
+// laneMember is a receiver of the broker pool under id, its plugins by profile name, built as the broker tests build one,
+// with its client ID its receiver ID so DescribeShareGroups names its members.
+func (b brokerPool) laneMember(t *testing.T, id string, keys signed.Keys, plugins map[string]*fakePlugin) (*Receiver, *syncBuffer) {
+	t.Helper()
+	base, err := kgo.NewClient(append(slices.Clone(b.opts), kgo.ClientID(id))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, signing, _ := ed25519.GenerateKey(rand.Reader)
+	keys[id] = signed.KeyState{Current: signing.Public().(ed25519.PublicKey)}
+	logs := &syncBuffer{}
+	return &Receiver{id: id, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+		factory: func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
+			return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: plugins[settings.Name]}, nil
+		}}, logs
+}
+
+// runLane runs r until the test ends.
+func runLane(t *testing.T, ctx context.Context, r *Receiver) {
+	t.Helper()
+	runCtx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- r.Run(runCtx) }()
+	t.Cleanup(func() { stop(); <-done })
+}
+
+// laneHost registers a host key for the pool's host and returns it.
+func (b brokerPool) laneHost(t *testing.T, ctx context.Context) ed25519.PrivateKey {
+	t.Helper()
+	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
+	registration, err := signed.RegisterKey(signed.HostOwner(b.tenant, b.host), hostKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.HostTopic(b.tenant, b.host), Value: registration}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	return hostKey
+}
+
+// laneTask seals and signs name's task with hostKey, edited by mutate, puts it on topic and returns its run.
+func (b brokerPool) laneTask(t *testing.T, ctx context.Context, hostKey ed25519.PrivateKey, name, topic string, mutate func(*wire.Submission)) string {
+	t.Helper()
+	submission := testSubmission(name)
+	submission.Wherry.Tenant, submission.Wherry.Host, submission.Wherry.Pool = b.tenant, b.host, b.pool
+	run := wire.RunID(b.tenant, b.host, submission.Wherry.RunNonce)
+	submission.Wherry.Run, submission.Message.TaskID, submission.Message.ContextID = run, run, run
+	if mutate != nil {
+		mutate(submission)
+	}
+	b.seal(t, ctx, submission)
+	value, err := wire.SignRecord(submission, hostKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: topic, Key: []byte(run), Value: value}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	return run
+}
+
+// laneEvents returns run's terminal statuses and the receivers of its start failures, in log order.
+func (b brokerPool) laneEvents(t *testing.T, ctx context.Context, keys signed.Keys, run string) ([]wire.RunStatus, []string) {
+	t.Helper()
+	records, err := readTopic(ctx, b.kafka, operator.PoolEventsTopic(b.pool))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var terminals []wire.RunStatus
+	var failed []string
+	for _, record := range records {
+		var status wire.RunStatus
+		var failure wire.StartFailure
+		switch {
+		case string(record.Key) != run:
+		case wire.ParseRecord(record.Value, keys, &status) == nil && status.Wherry.Kind == "terminal":
+			terminals = append(terminals, status)
+		case wire.ParseRecord(record.Value, keys, &failure) == nil:
+			failed = append(failed, failure.Wherry.Receiver)
+		}
+	}
+	return terminals, failed
+}
+
+// awaitTerminal waits for run's first terminal and returns its terminals and start failures then.
+func (b brokerPool) awaitTerminal(t *testing.T, ctx context.Context, keys signed.Keys, run string, logs ...*syncBuffer) ([]wire.RunStatus, []string) {
+	t.Helper()
+	for {
+		if terminals, failed := b.laneEvents(t, ctx, keys, run); len(terminals) > 0 {
+			return terminals, failed
+		}
+		if ctx.Err() != nil {
+			var all []string
+			for _, log := range logs {
+				all = append(all, log.String())
+			}
+			t.Fatalf("no terminal for %s; logs:\n%s", run, strings.Join(all, "\n---\n"))
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// noRedelivery polls topic as another member for 3 s and fails when run's task is delivered.
+func (b brokerPool) noRedelivery(t *testing.T, ctx context.Context, topic, run string) {
+	t.Helper()
+	pollCtx, cancelPoll := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelPoll()
+	poller, err := kgo.NewClient(append(slices.Clone(b.opts), kgo.ConsumeTopics(topic), kgo.ShareGroup(operator.PoolGroup(b.pool)), kgo.ShareMaxRecords(1))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer poller.Close()
+	for _, record := range poller.PollRecords(pollCtx, 1).Records() {
+		if string(record.Key) == run {
+			t.Fatal("the ended task was delivered again")
+		}
+	}
+}
+
+// TestAllAttemptsFailEndAtTheBudgetOnRealBroker runs two members of one signature whose plugins both fail to start,
+// whichever receives each delivery: the task ends in one budget terminal at the third attempt under a delivery limit of
+// 4, with one start failure and one dispatch per attempt, and is not delivered again.
+func TestAllAttemptsFailEndAtTheBudgetOnRealBroker(t *testing.T) {
 	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
 	if address == "" {
 		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
@@ -265,108 +413,182 @@ func TestDeliveryBudgetEndsATaskTwoMembersFailedOnRealBroker(t *testing.T) {
 	b.deliveryLimit(t, ctx, 4)
 	second := b.receiver + "-b"
 	b.member(t, ctx, second)
-	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
-	registration, err := signed.RegisterKey(signed.HostOwner(b.tenant, b.host), hostKey)
+	hostKey := b.laneHost(t, ctx)
+	keys := signed.Keys{}
+	firstPlugin, laterPlugin := &fakePlugin{outcome: pluginsdk.OutcomeNothingCreated}, &fakePlugin{outcome: pluginsdk.OutcomeNothingCreated}
+	first, firstLogs := b.laneMember(t, b.receiver, keys, map[string]*fakePlugin{"nomad": firstPlugin})
+	later, laterLogs := b.laneMember(t, second, keys, map[string]*fakePlugin{"nomad": laterPlugin})
+	runLane(t, ctx, first)
+	runLane(t, ctx, later)
+	b.joined(t, ctx, firstLogs)
+	topic := b.tasksTopic(t, ctx)
+	run := b.laneTask(t, ctx, hostKey, "run-budget", topic, nil)
+	terminals, failed := b.awaitTerminal(t, ctx, keys, run, firstLogs, laterLogs)
+	b.noRedelivery(t, ctx, topic, run)
+	terminals, failed = b.laneEvents(t, ctx, keys, run)
+	terminal := terminals[0]
+	reason := terminal.StatusUpdate.Status.Message.Parts[0].Text
+	if len(terminals) != 1 || terminal.StatusUpdate.Status.State != wire.TaskStateFailed || reason != "delivery budget exhausted after 3 attempts; last: profile nomad created no job" {
+		t.Fatalf("terminals %d, first by %s: %s %q", len(terminals), terminal.Wherry.Receiver, terminal.StatusUpdate.Status.State, reason)
+	}
+	firstDispatches, _, _, _ := firstPlugin.counts()
+	laterDispatches, _, _, _ := laterPlugin.counts()
+	if len(failed) != 3 || firstDispatches+laterDispatches != 3 {
+		t.Fatalf("start failures by %v and dispatches %d and %d, want one of each per attempt", failed, firstDispatches, laterDispatches)
+	}
+	t.Logf("attempts by %v", failed)
+}
+
+// TestOneBrokenOneWorkingMemberOnRealBroker runs two members of one signature, one whose plugin fails to start and one
+// whose plugin runs the task: the run completes when the working member receives an attempt, or ends at the budget when
+// the broken one receives every attempt. Either outcome is the accepted consequence; one terminal is not.
+func TestOneBrokenOneWorkingMemberOnRealBroker(t *testing.T) {
+	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
+	if address == "" {
+		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
+	}
+	shortIntervals(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	b := newBrokerPool(t, ctx, address)
+	b.deliveryLimit(t, ctx, 4)
+	second := b.receiver + "-b"
+	b.member(t, ctx, second)
+	hostKey := b.laneHost(t, ctx)
+	keys := signed.Keys{}
+	broken, brokenLogs := b.laneMember(t, b.receiver, keys, map[string]*fakePlugin{"nomad": {outcome: pluginsdk.OutcomeNothingCreated}})
+	working, workingLogs := b.laneMember(t, second, keys, map[string]*fakePlugin{"nomad": {stream: resultStream}})
+	runLane(t, ctx, broken)
+	runLane(t, ctx, working)
+	b.joined(t, ctx, brokenLogs)
+	topic := b.tasksTopic(t, ctx)
+	run := b.laneTask(t, ctx, hostKey, "run-mixed", topic, nil)
+	b.awaitTerminal(t, ctx, keys, run, brokenLogs, workingLogs)
+	b.noRedelivery(t, ctx, topic, run)
+	terminals, failed := b.laneEvents(t, ctx, keys, run)
+	terminal := terminals[0]
+	switch state := terminal.StatusUpdate.Status.State; {
+	case len(terminals) != 1:
+		t.Fatalf("%d terminals, want one", len(terminals))
+	case state == wire.TaskStateCompleted && terminal.Wherry.Receiver == second:
+		t.Logf("completed by the working member after start failures by %v", failed)
+	case state == wire.TaskStateFailed && strings.HasPrefix(terminal.StatusUpdate.Status.Message.Parts[0].Text, budgetReason) && len(failed) == 3:
+		t.Logf("ended at the budget: every attempt reached the broken member")
+	default:
+		t.Fatalf("terminal %s by %s after start failures by %v", state, terminal.Wherry.Receiver, failed)
+	}
+}
+
+// TestUnreadyReleaseSpendsAtMostTwoDeliveriesOnRealBroker runs a member of capacity 2 subscribed to profiles A and B and
+// makes A unready as a task on A's topic arrives: a slot that fetches it releases it and the other slot, still polling,
+// may re-acquire it once before its watcher acts, so the task has spent at most two deliveries when another member
+// subscribed to A's topic later receives it.
+func TestUnreadyReleaseSpendsAtMostTwoDeliveriesOnRealBroker(t *testing.T) {
+	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
+	if address == "" {
+		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
+	}
+	shortIntervals(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	b := newBrokerPool(t, ctx, address)
+	terms := testTerms()
+	terms.Routable = []string{"sig"}
+	b.applyTerms(t, ctx, terms)
+	config := testConfig(b.receiver)
+	config.Pool, config.Capacity = b.pool, 2
+	config.Profiles = []operator.ProfileSettings{
+		{Name: "a", Plugin: "fake", Agent: "claude", Labels: map[string]string{"sig": "a"}, Config: map[string]any{}},
+		{Name: "b", Plugin: "fake", Agent: "claude", Labels: map[string]string{"sig": "b"}, Config: map[string]any{}},
+	}
+	if _, err := b.service.ReceiverUpdate(ctx, config, false); err != nil {
+		t.Fatal(err)
+	}
+	state, err := b.service.LoadState(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.HostTopic(b.tenant, b.host), Value: registration}).FirstErr(); err != nil {
-		t.Fatal(err)
-	}
+	topicA := operator.SignatureTopic(b.pool, state.Pools[b.pool], "claude", map[string]string{"sig": "a"})
+	hostKey := b.laneHost(t, ctx)
 	keys := signed.Keys{}
-	member := func(id string) (*Receiver, *fakePlugin, *syncBuffer) {
-		base, err := kgo.NewClient(b.opts...)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, signing, _ := ed25519.GenerateKey(rand.Reader)
-		keys[id] = signed.KeyState{Current: signing.Public().(ed25519.PublicKey)}
-		logs, plugin := &syncBuffer{}, &fakePlugin{outcome: pluginsdk.OutcomeNothingCreated}
-		return &Receiver{id: id, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-			factory: func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
-				return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
-			}}, plugin, logs
-	}
-	first, firstPlugin, firstLogs := member(b.receiver)
-	later, laterPlugin, laterLogs := member(second)
-	runMember := func(r *Receiver) {
+	a := &fakePlugin{stream: resultStream}
+	r, logs := b.laneMember(t, b.receiver, keys, map[string]*fakePlugin{"a": a, "b": {stream: resultStream}})
+	stop := func() func() {
 		runCtx, stop := context.WithCancel(ctx)
 		done := make(chan error, 1)
 		go func() { done <- r.Run(runCtx) }()
-		t.Cleanup(func() { stop(); <-done })
+		return func() { stop(); <-done }
+	}()
+	for b.groupMembers(t, ctx, b.receiver) != 2 {
+		if ctx.Err() != nil {
+			t.Fatalf("the member's two slots never joined; logs:\n%s", logs.String())
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	runMember(first)
-	b.joined(t, ctx, firstLogs)
-	submission := testSubmission("run-budget")
-	submission.Wherry.Tenant, submission.Wherry.Host, submission.Wherry.Pool = b.tenant, b.host, b.pool
-	run := wire.RunID(b.tenant, b.host, submission.Wherry.RunNonce)
-	submission.Wherry.Run, submission.Message.TaskID, submission.Message.ContextID = run, run, run
-	b.seal(t, ctx, submission)
-	value, err := wire.SignRecord(submission, hostKey)
+	time.Sleep(time.Second)
+	a.mu.Lock()
+	a.unready = true
+	a.mu.Unlock()
+	run := b.laneTask(t, ctx, hostKey, "run-unready", topicA, nil)
+	// One 200 ms advertisement, the watcher's 100 ms and the close; then nothing more of the member polls A's topic.
+	time.Sleep(5 * time.Second)
+	stop()
+	t.Logf("releases: %d", strings.Count(logs.String(), "no ready profile for topic"))
+	member, err := kgo.NewClient(append(slices.Clone(b.opts), kgo.ConsumeTopics(topicA), kgo.ShareGroup(operator.PoolGroup(b.pool)), kgo.ShareMaxRecords(1))...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.PoolTasksTopic(b.pool), Key: []byte(run), Value: value}).FirstErr(); err != nil {
-		t.Fatal(err)
-	}
-	for !strings.Contains(firstLogs.String(), "run "+run+": already failed here; releasing for another member") {
-		if ctx.Err() != nil {
-			t.Fatalf("the first member never released its redelivery; logs:\n%s", firstLogs.String())
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	// The second member starts only once the first has failed the task and backed off.
-	runMember(later)
-	var terminals []wire.RunStatus
-	var failed []string
-	for len(terminals) == 0 {
-		if ctx.Err() != nil {
-			t.Fatalf("no terminal; first logs:\n%s\nsecond logs:\n%s", firstLogs.String(), laterLogs.String())
-		}
-		time.Sleep(200 * time.Millisecond)
-		records, err := readTopic(ctx, b.kafka, operator.PoolEventsTopic(b.pool))
-		if err != nil {
-			t.Fatal(err)
-		}
-		terminals, failed = nil, nil
-		for _, record := range records {
-			var status wire.RunStatus
-			var failure wire.StartFailure
-			switch {
-			case wire.ParseRecord(record.Value, keys, &status) == nil && status.Wherry.Kind == "terminal":
-				terminals = append(terminals, status)
-			case wire.ParseRecord(record.Value, keys, &failure) == nil:
-				failed = append(failed, failure.Wherry.Receiver)
+	defer member.Close()
+	for {
+		pollCtx, cancelPoll := context.WithTimeout(ctx, 2*time.Second)
+		records := member.PollRecords(pollCtx, 1).Records()
+		cancelPoll()
+		if len(records) > 0 && string(records[0].Key) == run {
+			if count := records[0].DeliveryCount(); count > 3 {
+				t.Fatalf("delivered here with count %d, want at most 2 earlier deliveries; logs:\n%s", count, logs.String())
 			}
+			return
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("the task never reached another member of A's topic; logs:\n%s", logs.String())
 		}
 	}
-	// A further terminal could only follow a redelivery, which the member poll below rules out.
-	pollCtx, cancelPoll := context.WithTimeout(ctx, 3*time.Second)
-	defer cancelPoll()
-	poller, err := kgo.NewClient(append(slices.Clone(b.opts), kgo.ConsumeTopics(operator.PoolTasksTopic(b.pool)), kgo.ShareGroup(operator.PoolGroup(b.pool)), kgo.ShareMaxRecords(1))...)
+}
+
+// TestUnknownSubscribedTopicOnRealBroker documents, without asserting it, the broker's answer to a share member whose
+// only subscribed topic does not exist: what its poll returns and how its heartbeat fares. The build report quotes the
+// log.
+func TestUnknownSubscribedTopicOnRealBroker(t *testing.T) {
+	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
+	if address == "" {
+		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	b := newBrokerPool(t, ctx, address)
+	missing := operator.PoolTasksPrefix(b.pool) + "claude." + strings.Repeat("0", 64)
+	member, err := kgo.NewClient(append(slices.Clone(b.opts), kgo.ClientID("unknown-topic"), kgo.ConsumeTopics(missing), kgo.ShareGroup(operator.PoolGroup(b.pool)), kgo.ShareMaxRecords(1), kgo.FetchMaxWait(time.Second))...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer poller.Close()
-	for _, record := range poller.PollRecords(pollCtx, 1).Records() {
-		if string(record.Key) == run {
-			t.Fatal("the ended task was redelivered")
+	defer member.Close()
+	for i := range 3 {
+		pollCtx, cancelPoll := context.WithTimeout(ctx, 5*time.Second)
+		fetches := member.PollRecords(pollCtx, 1)
+		cancelPoll()
+		t.Logf("poll %d: %d records, error %v", i, len(fetches.Records()), fetches.Err())
+	}
+	groups, err := kadm.NewClient(b.kafka).DescribeShareGroups(ctx, operator.PoolGroup(b.pool))
+	if err != nil {
+		t.Logf("describe the pool's share group: %v", err)
+		return
+	}
+	group := groups[operator.PoolGroup(b.pool)]
+	t.Logf("group state %q, error %v", group.GroupState, group.Err)
+	for _, described := range group.Members {
+		if described.ClientID == "unknown-topic" {
+			t.Logf("member %s epoch %d subscribed %v assigned %v", described.MemberID, described.MemberEpoch, described.SubscribedTopicNames, described.Assignment)
 		}
-	}
-	terminal := terminals[0]
-	reason := terminal.StatusUpdate.Status.Message.Parts[0].Text
-	if len(terminals) != 1 || terminal.StatusUpdate.Status.State != wire.TaskStateFailed || terminal.Wherry.Receiver != second ||
-		reason != "delivery budget exhausted after 3 attempts; last: profile nomad created no job" {
-		t.Fatalf("terminals %d, first by %s: %s %q", len(terminals), terminal.Wherry.Receiver, terminal.StatusUpdate.Status.State, reason)
-	}
-	if !slices.Equal(failed, []string{b.receiver, second}) {
-		t.Fatalf("start failures by %v, want the first member's then the second's", failed)
-	}
-	if firstDispatches, _, _, _ := firstPlugin.counts(); firstDispatches != 1 {
-		t.Fatalf("the first member dispatched %d times, want once", firstDispatches)
-	}
-	if laterDispatches, _, _, _ := laterPlugin.counts(); laterDispatches != 1 {
-		t.Fatalf("the second member dispatched %d times, want once", laterDispatches)
 	}
 }
 
@@ -606,7 +828,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("submit never placed: %v", err)
 	}
-	tasks, err := readTopic(ctx, b.kafka, operator.PoolTasksTopic(b.pool))
+	tasks, err := readTopic(ctx, b.kafka, b.tasksTopic(t, ctx))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -615,7 +837,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	if _, err := host.Submit(ctx, outside); !errors.Is(err, client.ErrInvalidInput) || !strings.Contains(err.Error(), "git remote host github.com is not in pool "+b.pool+"'s vcs hosts") {
 		t.Fatalf("submit outside the vcs hosts = %v; want a refusal naming the host and the pool", err)
 	}
-	if after, err := readTopic(ctx, b.kafka, operator.PoolTasksTopic(b.pool)); err != nil || len(after) != len(tasks) {
+	if after, err := readTopic(ctx, b.kafka, b.tasksTopic(t, ctx)); err != nil || len(after) != len(tasks) {
 		t.Fatalf("task topic holds %d records after the refusal, %v; want %d", len(after), err, len(tasks))
 	}
 	awaited, err := host.Await(ctx, submitted.RunID, 60*time.Second)
