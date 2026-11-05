@@ -751,7 +751,12 @@ func realService(t *testing.T) (*Service, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Delegate(context.Background(), realRoot(t), strings.TrimSpace(string(password))); err != nil {
+	root := realRoot(t)
+	if err := Delegate(context.Background(), root, strings.TrimSpace(string(password))); err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{Operator: root, Broker: os.Getenv("WHERRY_TRUST_BROKER"), CA: ca}
+	if err := service.WaitOperatorCredential(context.Background(), strings.TrimSpace(string(password))); err != nil {
 		t.Fatal(err)
 	}
 	operator := realClient(t, OperatorPrincipal, os.Getenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE"))
@@ -954,11 +959,6 @@ func TestReceiverUpdateKeepsThePrincipal(t *testing.T) {
 	var bundle Bundle
 	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
 		t.Fatal(err)
-	}
-	// kfake's SCRAM handshake always names 4096 iterations.
-	upsert := kadm.UpsertSCRAM{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}
-	if altered, err := kadm.NewClient(service.Operator).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
-		t.Fatalf("re-salt: %v %v", err, altered.Error())
 	}
 	login := func() error {
 		client, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()))

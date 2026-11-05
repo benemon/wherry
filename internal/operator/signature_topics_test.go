@@ -321,6 +321,10 @@ func TestCheckNamesSignatureTopicDrift(t *testing.T) {
 		}, "missing WRITE ACL on " + PoolTasksPrefix("pool-a") + " for " + TenantPrincipal("tenant-a", "host-a")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			// A missing grant fails Check only after topicWait.
+			if strings.HasPrefix(test.want, "missing ") {
+				t.Parallel()
+			}
 			_, service, closeFixture := kfakeService(t)
 			defer closeFixture()
 			ctx := context.Background()

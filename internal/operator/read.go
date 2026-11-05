@@ -286,8 +286,9 @@ func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64, once bo
 // listBackoff is the wait before listing offsets again after a retriable partition error.
 const listBackoff = 100 * time.Millisecond
 
-// topicWait bounds the wait for a created topic's metadata to reach every broker; one it has not reached answers
-// UNKNOWN_TOPIC_OR_PARTITION. A topic still missing after it is reported as missing.
+// topicWait bounds the wait for brokers to apply a created topic or ACL: a broker a topic has not reached answers
+// UNKNOWN_TOPIC_OR_PARTITION, and one an ACL has not reached describes nothing. One still missing after it is reported
+// as missing.
 const topicWait = 10 * time.Second
 
 // retriable reports whether a listed partition failed with a retriable error, or, before deadline, a listed topic was

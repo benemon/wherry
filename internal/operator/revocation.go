@@ -224,6 +224,61 @@ func (service *Service) Probe(topic string) func(context.Context, string, string
 	}
 }
 
+// WaitOperatorCredential waits, within topicWait, until every broker service.Operator lists accepts wherry.operator's
+// login with password. Brokers apply a SCRAM credential in turn, and a login refused before then succeeds after.
+func (service *Service) WaitOperatorCredential(ctx context.Context, password string) error {
+	waitCtx, cancel := context.WithTimeout(ctx, topicWait)
+	defer cancel()
+	brokers, err := kadm.NewClient(service.Operator).ListBrokers(waitCtx)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err != nil {
+		return fmt.Errorf("list brokers: %w", err)
+	}
+	ids := brokers.NodeIDs()
+	if len(ids) == 0 {
+		return errors.New("list brokers: none listed")
+	}
+	opts, err := KafkaOpts(service.Broker, service.CA, OperatorPrincipal, password)
+	if err != nil {
+		return err
+	}
+	client, err := kgo.NewClient(opts...)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	request := kmsg.NewPtrMetadataRequest()
+	request.Topics = []kmsg.MetadataRequestTopic{}
+	for _, id := range ids {
+		var refused error
+		for {
+			_, err := client.Broker(int(id)).Request(waitCtx, request)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if err == nil {
+				break
+			}
+			if errors.Is(err, kerr.SaslAuthenticationFailed) {
+				refused = err
+			} else if refused == nil || waitCtx.Err() == nil {
+				return fmt.Errorf("broker %d as %s: %w", id, OperatorPrincipal, err)
+			}
+			select {
+			case <-waitCtx.Done():
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				return fmt.Errorf("broker %d as %s: %w", id, OperatorPrincipal, refused)
+			case <-time.After(listBackoff):
+			}
+		}
+	}
+	return ctx.Err()
+}
+
 func (service *Service) TenantRemove(ctx context.Context, tenant string) error {
 	return service.removeTenant(ctx, tenant, service.Probe)
 }

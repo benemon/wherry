@@ -15,14 +15,11 @@ import (
 	"time"
 
 	busclient "github.com/benemon/wherry/internal/client"
-	"github.com/benemon/wherry/internal/operator"
-	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
 )
 
 // devProvision runs up's provisioning steps, operator to host, for instance on a TLS fake broker whose super user is
-// dev's, and returns the ready output and the host config's path. kfake's handshake names 4096 iterations, so each
-// password up sets at 8192 is re-salted before its principal logs in.
+// dev's, and returns the ready output and the host config's path.
 func devProvision(t *testing.T, instance devInstance) (string, string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -48,14 +45,9 @@ func devProvision(t *testing.T, instance devInstance) (string, string) {
 		t.Fatal(err)
 	}
 	defer service.Operator.Close()
-	upsert := kadm.UpsertSCRAM{User: operator.OperatorPrincipal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: operatorPassword(t, instance.env("operator"))}
-	if altered, err := kadm.NewClient(root).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
-		t.Fatal(err, altered.Error())
-	}
 	if err := devBootstrap(ctx, env, devAgents(manifest, nil), *service); err != nil {
 		t.Fatal(err)
 	}
-	resalt(t, service, filepath.Join(instance.env("operator"), "bundles", "hosts", devTenant, devHost+".bundle"))
 	_, config, err := placeHost(ctx, &env, nil, io.Discard)
 	if err != nil {
 		t.Fatal(err)

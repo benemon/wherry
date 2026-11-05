@@ -444,15 +444,12 @@ func TestPoolApply(t *testing.T) {
 	}
 }
 
-// bundleWorks reports whether the broker takes the bundle at path, once its credential is stored as kfake reads it.
-func bundleWorks(t *testing.T, service *operator.Service, path string, resalted bool) bool {
+// bundleWorks reports whether the broker takes the bundle at path.
+func bundleWorks(t *testing.T, service *operator.Service, path string) bool {
 	t.Helper()
 	bundle, err := operator.ReadBundle(path)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if resalted {
-		resalt(t, service, path)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -487,7 +484,7 @@ func TestReceiverApplyForceReissuesTheIdentity(t *testing.T) {
 	if err != nil || state.Receivers["receiver-a"].Pool != "pool-a" {
 		t.Fatalf("receivers %v, %v; want receiver-a recorded", state.Receivers, err)
 	}
-	if !bundleWorks(t, service, bundle, true) {
+	if !bundleWorks(t, service, bundle) {
 		t.Fatal("the broker refused the new receiver's bundle")
 	}
 	records := func() int64 {
@@ -507,7 +504,7 @@ func TestReceiverApplyForceReissuesTheIdentity(t *testing.T) {
 	if err := apply("-f", file); err != nil {
 		t.Fatal(err)
 	}
-	if again, err := os.ReadFile(bundle); err != nil || !bytes.Equal(again, old) || records() != before+1 || !bundleWorks(t, service, bundle, false) {
+	if again, err := os.ReadFile(bundle); err != nil || !bytes.Equal(again, old) || records() != before+1 || !bundleWorks(t, service, bundle) {
 		t.Fatalf("apply of an existing receiver left %d records and changed its bundle (%v) or password; want an update record alone", records(), err)
 	}
 	if err := apply("--force", "-f", file); err == nil || !strings.HasPrefix(err.Error(), "usage: wherry operator receiver apply NAME --force") {
@@ -523,10 +520,10 @@ func TestReceiverApplyForceReissuesTheIdentity(t *testing.T) {
 	if err := os.WriteFile(oldBundle, old, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if bundleWorks(t, service, oldBundle, false) {
+	if bundleWorks(t, service, oldBundle) {
 		t.Fatal("the broker took the old bundle after apply --force")
 	}
-	if !bundleWorks(t, service, bundle, true) {
+	if !bundleWorks(t, service, bundle) {
 		t.Fatal("the broker refused the bundle apply --force wrote")
 	}
 	if entries, err := os.ReadDir(filepath.Join("bundles", "receivers")); err != nil || len(entries) != 1 {
@@ -556,7 +553,7 @@ func TestHostAddForceReissuesTheIdentity(t *testing.T) {
 			t.Fatalf("%s: %v, %v; want mode %v", path, info, err, mode)
 		}
 	}
-	if !bundleWorks(t, service, bundle, true) {
+	if !bundleWorks(t, service, bundle) {
 		t.Fatal("the broker refused the new host's bundle")
 	}
 	// The bundle's file is reserved before the host is looked up.
@@ -576,7 +573,7 @@ func TestHostAddForceReissuesTheIdentity(t *testing.T) {
 	if err := os.Rename(aside, bundle); err != nil {
 		t.Fatal(err)
 	}
-	if !bundleWorks(t, service, bundle, false) {
+	if !bundleWorks(t, service, bundle) {
 		t.Fatal("a refused host add changed the password")
 	}
 	old, err := os.ReadFile(bundle)
@@ -610,10 +607,10 @@ func TestHostAddForceReissuesTheIdentity(t *testing.T) {
 	if err := os.WriteFile(oldBundle, old, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if bundleWorks(t, service, oldBundle, false) {
+	if bundleWorks(t, service, oldBundle) {
 		t.Fatal("the broker took the old bundle after host add --force")
 	}
-	if !bundleWorks(t, service, bundle, true) {
+	if !bundleWorks(t, service, bundle) {
 		t.Fatal("the broker refused the bundle host add --force wrote")
 	}
 	first, err := os.ReadFile(bundle)
@@ -625,14 +622,14 @@ func TestHostAddForceReissuesTheIdentity(t *testing.T) {
 		if err := add("tenant-b", options...); err != nil {
 			t.Fatalf("host add of host-a in another tenant %v = %v", options, err)
 		}
-		if !bundleWorks(t, service, other, true) {
+		if !bundleWorks(t, service, other) {
 			t.Fatalf("the broker refused the other tenant's bundle host add %v wrote", options)
 		}
 		if after, err := os.ReadFile(bundle); err != nil || !bytes.Equal(after, first) {
 			t.Fatalf("host add of host-a in another tenant %v changed %s: %v", options, bundle, err)
 		}
 	}
-	if !bundleWorks(t, service, bundle, false) {
+	if !bundleWorks(t, service, bundle) {
 		t.Fatal("the broker refused the first tenant's bundle after the other tenant's host add")
 	}
 }

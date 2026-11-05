@@ -110,6 +110,11 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 		err = operator.Delegate(ctx, superUser, password)
 	}
 	if err == nil {
+		if err = (&operator.Service{Operator: superUser, Broker: answers["broker"], CA: ca}).WaitOperatorCredential(ctx, password); err != nil {
+			err = fmt.Errorf("%w; run operator init again", err)
+		}
+	}
+	if err == nil {
 		err = os.Rename(temp.Name(), filepath.Join(dir, "operator.password"))
 	}
 	if err != nil {

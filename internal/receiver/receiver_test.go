@@ -708,11 +708,6 @@ func (f fixture) newReceiver(t *testing.T, config operator.ReceiverConfig) (*Rec
 	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
 		t.Fatal(err)
 	}
-	// kfake's server-first message always names 4096 iterations, whatever the credential was stored with.
-	upsert := kadm.UpsertSCRAM{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}
-	if altered, err := kadm.NewClient(f.service.Operator).AlterUserSCRAMs(f.ctx, nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
-		t.Fatalf("re-salt SCRAM credential: %v %v", err, altered.Error())
-	}
 	opts := []kgo.Opt{kgo.SeedBrokers(f.cluster.ListenAddrs()...), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()), kgo.FetchMaxWait(10 * time.Millisecond)}
 	base, err := kgo.NewClient(feedBatches(opts)...)
 	if err != nil {
