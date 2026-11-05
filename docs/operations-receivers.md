@@ -159,6 +159,22 @@ holding a run keeps its share session. A label or agent change comes through
 `receiver apply`, which restarts the receiver on the new record and moves the
 profile's signature to a new topic.
 
+`wherry_profile_ready` names each configured profile's signature topic and
+whether its latest local readiness evaluation included it in the ready
+offers; `receiver show` maps a topic to its labels. It describes the desired
+subscription when claiming is permitted, not live Kafka membership. It
+reflects the latest completed local offer evaluation: advertisements are
+scheduled every 30 seconds, but each profile's sweep and readiness check run
+in turn, each bounded by the advertise interval, so an evaluation can be
+later, and offers are set before the advertisement is published, so a failed
+publish can leave newer local offers than the last acknowledged
+advertisement. No fixed freshness bound applies. A ready profile reads 1 even
+while the claim gate is closed; `wherry_claim_gated` says, by reason, whether
+a restriction prevents a new poll, and its `no_ready_offer` reason is 1
+exactly when every `wherry_profile_ready` of the receiver is 0. Two profiles
+with the same agent and labels name the same topic, which the receiver
+subscribes once.
+
 A profile that goes unready between a claim's subscription and its fetch has
 its task released to the pool, logged as
 `run <run>: no ready profile for topic <topic>; releasing`, with no metric
@@ -171,8 +187,9 @@ acquisition spends a delivery.
 A receiver offers a profile only while the profile's plugin reports it ready.
 A receiver with no ready offer has an empty subscription and fetches no tasks from its pool.
 It closes its idle polls when it observes the empty subscription.
-After an advertisement makes a profile ready, it reopens with the new set, unless its pool is suspended or it holds a [pending run](#a-receiver-with-a-pending-run); closing waits for the in-flight fetch, and joining takes the broker's round trip.
+After an advertisement makes a profile ready, it reopens with the new set, unless its pool is suspended (`wherry_claim_gated{reason="suspended"}`) or it holds a [pending run](#a-receiver-with-a-pending-run) (`wherry_claim_gated{reason="pending_run"}`); closing waits for the in-flight fetch, and joining takes the broker's round trip.
 Its held runs keep running, renewing and reading cancels.
+`wherry_claim_gated{reason="no_ready_offer"}` is 1 while it has no ready offer; it reports a restriction on opening new polls, not observed polling.
 
 Each advertisement logs a line for every profile whose plugin reports it not ready:
 
@@ -205,6 +222,8 @@ A receiver that observes any held run pending stops claiming:
 - It ends an open idle poll and admits a task that poll returns.
 - It claims again only when no held run is pending.
 - Its held runs keep running, renewing and reading cancels.
+
+`wherry_claim_gated{reason="pending_run"}` is 1 while it holds a pending run; it reports a restriction on opening new polls, not observed polling.
 
 A receiver holds at most its capacity of runs, so at most that many of its runs are pending at once.
 A pending run past its `task_started_by` is stopped and fails with `not started by task_started_by (<RFC 3339 time>)`.
@@ -254,8 +273,8 @@ rules, `wherry-alerts.yaml`, built from these families. Each release archive
 carries them under `contrib/observability/`. The dashboard shows receivers
 and capacity in use, admissions, rejections and start failures, run
 durations and queue wait, open waits, platform errors and
-cleanup, and Kafka errors, for the pools and receivers its `pool` and
-`instance` variables select. [Runbooks](runbooks.md) has a section for each
+cleanup, Kafka errors, and signature topics and the claim gate, for the pools
+and receivers its `pool` and `instance` variables select. [Runbooks](runbooks.md) has a section for each
 rule, which its `runbook_url` links.
 
 Prerequisites: Prometheus scraping each receiver under the job name
