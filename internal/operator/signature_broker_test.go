@@ -13,7 +13,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// These tests pin the platform facts signature topics rely on (F30 to F34) and the prefixed task topic grants, against
+// These tests pin the platform facts signature topics rely on (F31 to F35) and the prefixed task topic grants, against
 // the real broker.
 
 // signatureTopics creates the share pool's signature topics for zones, as receiver apply would.
@@ -82,7 +82,7 @@ func nothing(t *testing.T, member *kgo.Client, wait time.Duration) {
 	}
 }
 
-// F30: one share group holds members subscribed to different topics, each assigned its own.
+// F31: one share group holds members subscribed to different topics, each assigned its own.
 func TestOneShareGroupTakesMembersWithDifferentSubscriptionsOnRealBroker(t *testing.T) {
 	if os.Getenv("WHERRY_TRUST_BROKER") == "" {
 		t.Skip("WHERRY_TRUST_BROKER is not set")
@@ -105,7 +105,7 @@ func TestOneShareGroupTakesMembersWithDifferentSubscriptionsOnRealBroker(t *test
 	s.members(t, []string{topics[0]}, []string{topics[1]})
 }
 
-// F31: a record reaches only its topic's subscribers.
+// F32: a record reaches only its topic's subscribers.
 func TestATaskReachesOnlyItsTopicsSubscribersOnRealBroker(t *testing.T) {
 	if os.Getenv("WHERRY_TRUST_BROKER") == "" {
 		t.Skip("WHERRY_TRUST_BROKER is not set")
@@ -133,7 +133,7 @@ func TestATaskReachesOnlyItsTopicsSubscribersOnRealBroker(t *testing.T) {
 	nothing(t, x, 5*time.Second)
 }
 
-// F32: a member that drops a topic, by closing its client for one without it, releases only the record it holds; a
+// F33: a member that drops a topic, by closing its client for one without it, releases only the record it holds; a
 // record it never acquired keeps its count.
 func TestDroppingATopicReleasesOnlyTheHeldRecordOnRealBroker(t *testing.T) {
 	if os.Getenv("WHERRY_TRUST_BROKER") == "" {
@@ -169,7 +169,7 @@ func TestDroppingATopicReleasesOnlyTheHeldRecordOnRealBroker(t *testing.T) {
 	}
 }
 
-// F33: a record on a topic no member subscribes to waits, with no delivery counted, until a subscriber joins.
+// F34: a record on a topic no member subscribes to waits, with no delivery counted, until a subscriber joins.
 func TestAnUnsubscribedTopicWaitsWithNoDeliveryCountOnRealBroker(t *testing.T) {
 	if os.Getenv("WHERRY_TRUST_BROKER") == "" {
 		t.Skip("WHERRY_TRUST_BROKER is not set")
@@ -186,7 +186,7 @@ func TestAnUnsubscribedTopicWaitsWithNoDeliveryCountOnRealBroker(t *testing.T) {
 	}
 }
 
-// F34: neither a receiver nor a host principal creates a topic, by CreateTopics or by producing to a missing one.
+// F35: neither a receiver nor a host principal creates a topic, by CreateTopics or by producing to a missing one.
 func TestReceiversAndHostsCannotCreateTopicsOnRealBroker(t *testing.T) {
 	if os.Getenv("WHERRY_TRUST_BROKER") == "" {
 		t.Skip("WHERRY_TRUST_BROKER is not set")
