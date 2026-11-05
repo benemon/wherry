@@ -24,6 +24,7 @@ import (
 
 	"github.com/benemon/wherry/pluginsdk/internal/pluginv1"
 	"github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/go-plugin"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -756,6 +757,29 @@ func TestOtherProtocolVersionsAreRefused(t *testing.T) {
 		if want := fmt.Sprintf("incompatible API version with plugin. Plugin version: %d, Client versions: [11]", version); !strings.Contains(err.Error(), want) {
 			t.Fatalf("launch error %v; want %q", err, want)
 		}
+	}
+}
+
+func TestProtocolsAreTheVersionedPluginsAscending(t *testing.T) {
+	if got := Protocols(); !reflect.DeepEqual(got, []int{11}) {
+		t.Fatalf("Protocols() = %v; want [11]", got)
+	}
+	previous := versionedPlugins
+	t.Cleanup(func() { versionedPlugins = previous })
+	versionedPlugins = func(p *grpcPlugin) map[int]plugin.PluginSet {
+		sets := map[int]plugin.PluginSet{}
+		for _, version := range []int{17, 3, 11, 29, 5, 23, 13, 2, 19, 7} {
+			sets[version] = plugin.PluginSet{pluginName: p}
+		}
+		return sets
+	}
+	want := []int{2, 3, 5, 7, 11, 13, 17, 19, 23, 29}
+	for range 5 {
+		got := Protocols()
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("Protocols() = %v; want %v", got, want)
+		}
+		got[0] = 0
 	}
 }
 
