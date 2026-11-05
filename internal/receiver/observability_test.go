@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -295,13 +296,16 @@ func TestRunsKeyLostAlertFiresOnAnyIncrease(t *testing.T) {
 var routingSubstitution = strings.NewReplacer(`$pool`, `pool-a`, `$instance`, `r1|r2`, `$__rate_interval`, `5m`)
 
 // Every dashboard query of the routing families is, after routingSubstitution, the expr of a promtool test in
-// routing.test.yml that states its expected samples, so changing one in the dashboard alone fails here.
+// routing.test.yml that expects samples, so changing one in the dashboard alone fails here; the Routing row's seven
+// panels must each keep their query.
 func TestDashboardRoutingQueriesAreTested(t *testing.T) {
 	var dashboard struct {
 		Panels []struct {
+			ID      int    `json:"id"`
 			Title   string `json:"title"`
 			Targets []struct {
-				Expr string `json:"expr"`
+				RefID string `json:"refId"`
+				Expr  string `json:"expr"`
 			} `json:"targets"`
 		} `json:"panels"`
 	}
@@ -334,18 +338,29 @@ func TestDashboardRoutingQueriesAreTested(t *testing.T) {
 	tested := map[string]bool{}
 	for _, test := range tests.Tests {
 		for _, query := range test.PromQL {
-			if query.ExpSamples != nil {
+			if query.ExpSamples != nil && len(*query.ExpSamples) > 0 {
 				tested[query.Expr] = true
 			}
 		}
 	}
-	count := 0
+	routing := map[[2]string]bool{}
+	exprs := map[string]int{}
 	for _, panel := range dashboard.Panels {
 		for _, target := range panel.Targets {
+			if panel.ID >= 37 && panel.ID <= 43 && target.Expr != "" {
+				key := [2]string{strconv.Itoa(panel.ID), target.RefID}
+				if routing[key] {
+					t.Errorf("panel %d has two targets %s", panel.ID, target.RefID)
+				}
+				routing[key] = true
+				if other, ok := exprs[target.Expr]; ok {
+					t.Errorf("panels %d and %d have the same query", other, panel.ID)
+				}
+				exprs[target.Expr] = panel.ID
+			}
 			if !strings.Contains(target.Expr, "wherry_profile_ready") && !strings.Contains(target.Expr, "wherry_claim_gated") {
 				continue
 			}
-			count++
 			expr := routingSubstitution.Replace(target.Expr)
 			if strings.Contains(expr, "$") {
 				t.Errorf("panel %q: %s leaves a variable after the substitution", panel.Title, expr)
@@ -356,7 +371,9 @@ func TestDashboardRoutingQueriesAreTested(t *testing.T) {
 			}
 		}
 	}
-	if count < 7 {
-		t.Fatalf("found %d routing queries in the dashboard; the parse found too few to check", count)
+	for id := 37; id <= 43; id++ {
+		if !routing[[2]string{strconv.Itoa(id), "A"}] {
+			t.Errorf("Routing panel %d has no query A", id)
+		}
 	}
 }
