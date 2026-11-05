@@ -734,9 +734,9 @@ func labelChange(t *testing.T, shared bool) {
 	f.plugin.endDelay = 4 * time.Second
 	topicA := f.profileTopic(t, "nomad")
 	topicB := operator.SignatureTopic(testPool, "claude", map[string]string{"zone": "b"})
-	done := f.run(t, f.ctx)
 	// The held run fills the receiver's one slot, so the task its host queues next waits on A's topic.
 	f.submit(t, f.host, nil)
+	done := f.run(t, f.ctx)
 	for {
 		if _, _, follows, _ := f.plugin.counts(); follows > 0 {
 			break
