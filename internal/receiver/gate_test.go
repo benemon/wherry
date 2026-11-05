@@ -425,7 +425,8 @@ func TestNoReadyOfferOpensNoPollOnRealBroker(t *testing.T) {
 			t.Fatalf("describe the pool's share group: no result for %s", operator.PoolGroup(b.pool))
 		case group.Err != nil && !errors.Is(group.Err, kerr.GroupIDNotFound):
 			t.Fatalf("describe the pool's share group: %v", group.Err)
-		// Membership, not assignment: a joining member is assigned nothing until its next heartbeat, 5 s later.
+		// Membership, not assignment: a member joining for a topic the group has not initialised is assigned nothing
+		// in its join response.
 		case group.Err == nil && len(group.Members) > 0:
 			t.Fatalf("the pool's share group has a member while no offer is ready; logs:\n%s", logs.String())
 		}
@@ -433,9 +434,10 @@ func TestNoReadyOfferOpensNoPollOnRealBroker(t *testing.T) {
 	plugin.mu.Lock()
 	plugin.unready = false
 	plugin.mu.Unlock()
-	// One 200 ms advertise interval to see the offer, then a slot's 1 s gate sleep, then the join. The join's response
-	// assigns nothing: the broker initialises the group's share-partition state after it and assigns on the next
-	// heartbeat, group.share.heartbeat.interval.ms (5 s by default, also its minimum) later; 2 s more for the scheduler.
+	// One 200 ms advertise interval to see the offer, then a slot's 1 s gate sleep, then the join. The group has not
+	// initialised the topic, so the join's response assigns nothing and a later heartbeat,
+	// group.share.heartbeat.interval.ms (5 s by default) apart, assigns once initialisation completes; 2 s more for the
+	// scheduler. An allowance for this fixture's defaults, not a bound.
 	ready := time.Now()
 	for {
 		groups, err := admin.DescribeShareGroups(ctx, operator.PoolGroup(b.pool))
