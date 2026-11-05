@@ -379,6 +379,7 @@ func TestOperatorInitRotatesThePassword(t *testing.T) {
 // init recovers from a failure to grant, to set the password, to wait for every broker to accept it or to rename the
 // password file: the failed run leaves operator.password holding the password the broker holds, or, when the wait or
 // the rename failed, the broker holding the new one, and a re-run gives both a new password. No run prints the super user's password or wherry.operator's.
+// TestOperatorInitKeepsItsFilesWhenTheCredentialWaitFails covers the failed wait.
 func TestOperatorInitRecoversFromAFailure(t *testing.T) {
 	noTerminal(t)
 	b, recorder := kfakeInitBroker(t)
@@ -1049,17 +1050,23 @@ func TestWaitOperatorCredential(t *testing.T) {
 		cluster, service := delegated(t, 0)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		var refusedAt atomic.Int64
+		cancelled := make(chan time.Time, 1)
 		answerOperatorLogins(cluster, func(node int32, n int) bool {
 			if node == 1 && n == 0 {
-				refusedAt.Store(time.Now().UnixNano())
-				time.AfterFunc(20*time.Millisecond, cancel)
+				time.AfterFunc(10*time.Millisecond, func() {
+					cancelled <- time.Now()
+					cancel()
+				})
 			}
 			return node == 1
 		})
 		err := service.WaitOperatorCredential(ctx, password)
-		if elapsed := time.Duration(time.Now().UnixNano() - refusedAt.Load()); !errors.Is(err, context.Canceled) || elapsed >= 100*time.Millisecond {
-			t.Fatalf("wait = %v %v after the refusal; want the cancellation before the 100ms backoff ends", err, elapsed)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("wait = %v; want the cancellation", err)
+		}
+		// A wait that ignored the cancellation would return about 90ms after it, at the end of the 100ms backoff.
+		if elapsed := time.Since(<-cancelled); elapsed >= 50*time.Millisecond {
+			t.Fatalf("wait returned %v after the cancellation; want under 50ms", elapsed)
 		}
 	})
 

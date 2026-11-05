@@ -47,7 +47,6 @@ func TestCheckRequiresTheOperatorsGrants(t *testing.T) {
 // verifyACLs retries, within topicWait, a describe that omits an expected operation, as brokers apply an ACL creation in
 // turn, and returns any other failure at once.
 func TestVerifyACLsWaitsForBrokers(t *testing.T) {
-	t.Parallel()
 	grant := ACL{TenantPrincipal("tenant-a", "host-a"), "topic", TenantTopic("tenant-a"), false, []string{"READ"}}
 	create := func(t *testing.T, service *Service, acl ACL) {
 		builder, err := aclBuilder(acl)
@@ -212,19 +211,23 @@ func TestVerifyACLsWaitsForBrokers(t *testing.T) {
 		defer closeFixture()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+		cancelled := make(chan time.Time, 1)
 		describes(cluster, func(n int64, request *kmsg.DescribeACLsRequest) (kmsg.Response, error, bool) {
 			if n == 1 {
-				time.AfterFunc(listBackoff/5, cancel)
+				time.AfterFunc(listBackoff/10, func() {
+					cancelled <- time.Now()
+					cancel()
+				})
 			}
 			return empty(request), nil, true
 		})
-		start := time.Now()
 		err := service.verifyACLs(ctx, []ACL{grant})
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("verify = %v; want the context's error", err)
 		}
-		if elapsed := time.Since(start); elapsed >= listBackoff {
-			t.Fatalf("verify returned %v after its start; want it before the %v backoff ends", elapsed, listBackoff)
+		// A wait that ignored the cancellation would return about 90ms after it, at the end of the backoff.
+		if elapsed := time.Since(<-cancelled); elapsed >= listBackoff/2 {
+			t.Fatalf("verify returned %v after the cancellation; want under %v", elapsed, listBackoff/2)
 		}
 	})
 }
