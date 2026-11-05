@@ -2,6 +2,7 @@ package receiver
 
 import (
 	"errors"
+	"maps"
 	"net/http/httptest"
 	"slices"
 	"strconv"
@@ -95,6 +96,44 @@ func TestScrapeCarriesNoRunMaterial(t *testing.T) {
 	for _, forbidden := range []string{testRun("run-a"), credentialName, testToken, host, s3Bucket, s3Signature, "X-Amz", "dataset.bin", "report.pdf", "agent reported no outcome", "node-secret-7", testHost} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("scrape holds %q:\n%s", forbidden, text)
+		}
+	}
+	// The routing families carry the profile's hashed topic and fixed reasons, and none of its label keys; its values
+	// dc1 and none are generic, so a scrape may hold them elsewhere.
+	topic := f.profileTopic(t, "nomad")
+	if got, want := gaugeLines(t, text, "wherry_profile_ready"), []string{`wherry_profile_ready{pool="pool-a",profile="nomad",topic="` + topic + `"} 1`}; !slices.Equal(got, want) {
+		t.Fatalf("wherry_profile_ready samples %q; want %q", got, want)
+	}
+	if got := gaugeLines(t, text, "wherry_claim_gated"); len(got) != 3 {
+		t.Fatalf("wherry_claim_gated samples %q; want 3", got)
+	}
+	gathered, err := f.receiver.metrics.registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := map[string][]string{"wherry_profile_ready": {"pool", "profile", "topic"}, "wherry_claim_gated": {"pool", "reason"}}
+	for _, family := range gathered {
+		want, ok := labels[family.GetName()]
+		if !ok {
+			continue
+		}
+		delete(labels, family.GetName())
+		for _, metric := range family.GetMetric() {
+			var names []string
+			for _, pair := range metric.GetLabel() {
+				names = append(names, pair.GetName())
+			}
+			if slices.Sort(names); !slices.Equal(names, want) {
+				t.Fatalf("%s labels %v; want %v", family.GetName(), names, want)
+			}
+		}
+	}
+	if len(labels) != 0 {
+		t.Fatalf("scrape lacks %v", slices.Collect(maps.Keys(labels)))
+	}
+	for _, forbidden := range []string{"gpu", "zone", "example.com"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("scrape holds the profile label key %q:\n%s", forbidden, text)
 		}
 	}
 }
@@ -364,5 +403,138 @@ func TestBudgetEndCountsOncePerTenantAndProfile(t *testing.T) {
 		if value := scrapedValue(t, f.receiver, series); value != 1 {
 			t.Fatalf("%s %v, want 1", series, value)
 		}
+	}
+}
+
+// gaugeLines is the sample lines of name in a scrape, sorted, after checking its TYPE line is gauge's.
+func gaugeLines(t *testing.T, text, name string) []string {
+	t.Helper()
+	if !strings.Contains(text, "\n# TYPE "+name+" gauge\n") {
+		t.Fatalf("scrape lacks # TYPE %s gauge:\n%s", name, text)
+	}
+	var lines []string
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, name+"{") || strings.HasPrefix(line, name+" ") {
+			lines = append(lines, line)
+		}
+	}
+	slices.Sort(lines)
+	return lines
+}
+
+// Each profile has one wherry_profile_ready sample naming its signature topic, 1 exactly while it is in the ready
+// offers, and the topics at 1 are the subscription.
+func TestProfileReadyNamesEachProfilesTopic(t *testing.T) {
+	f := signatureFixture(t, 1,
+		signatureProfile("a", "claude", map[string]string{"gpu": "1"}),
+		signatureProfile("b", "claude", map[string]string{"gpu": "2"}),
+		signatureProfile("c", "claude", map[string]string{"gpu": "1"}))
+	t1, t2 := f.profileTopic(t, "a"), f.profileTopic(t, "b")
+	if t1 == t2 || f.profileTopic(t, "c") != t1 {
+		t.Fatalf("topics a %s, b %s, c %s; want a and c to share one and b another", t1, t2, f.profileTopic(t, "c"))
+	}
+	check := func(a, b, c int) {
+		t.Helper()
+		text := scrape(t, f.receiver)
+		want := []string{
+			`wherry_profile_ready{pool="pool-a",profile="a",topic="` + t1 + `"} ` + strconv.Itoa(a),
+			`wherry_profile_ready{pool="pool-a",profile="b",topic="` + t2 + `"} ` + strconv.Itoa(b),
+			`wherry_profile_ready{pool="pool-a",profile="c",topic="` + t1 + `"} ` + strconv.Itoa(c),
+		}
+		got := gaugeLines(t, text, "wherry_profile_ready")
+		if !slices.Equal(got, want) {
+			t.Fatalf("wherry_profile_ready samples\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+		}
+		var ready []string
+		for _, line := range got {
+			if strings.HasSuffix(line, " 1") {
+				ready = append(ready, line[strings.Index(line, `topic="`)+len(`topic="`):strings.LastIndex(line, `"}`)])
+			}
+		}
+		slices.Sort(ready)
+		f.receiver.mu.Lock()
+		subscription := f.receiver.subscription()
+		f.receiver.mu.Unlock()
+		if !slices.Equal(slices.Compact(ready), subscription) {
+			t.Fatalf("topics at 1 %v; subscription %v", ready, subscription)
+		}
+	}
+	f.ready(t, "b", false)
+	check(1, 0, 1)
+	f.ready(t, "b", true)
+	f.ready(t, "a", false)
+	check(0, 1, 1)
+}
+
+// Each wherry_claim_gated reason is 1 exactly when its operand of claimGated holds, over every combination and through
+// the real pending and placed paths.
+func TestClaimGatedMatchesTheGate(t *testing.T) {
+	r := pluginReceiver(&fakePlugin{})
+	offers := []wire.Offer{{Profile: "nomad"}}
+	bit := func(set bool) string {
+		if set {
+			return "1"
+		}
+		return "0"
+	}
+	check := func(suspended, noOffer, pending bool) {
+		t.Helper()
+		text := scrape(t, r)
+		want := []string{
+			`wherry_claim_gated{pool="pool-a",reason="no_ready_offer"} ` + bit(noOffer),
+			`wherry_claim_gated{pool="pool-a",reason="pending_run"} ` + bit(pending),
+			`wherry_claim_gated{pool="pool-a",reason="suspended"} ` + bit(suspended),
+		}
+		if got := gaugeLines(t, text, "wherry_claim_gated"); !slices.Equal(got, want) {
+			t.Fatalf("suspended %t, no offer %t, pending %t: wherry_claim_gated samples\n%s\nwant\n%s",
+				suspended, noOffer, pending, strings.Join(got, "\n"), strings.Join(want, "\n"))
+		}
+		r.mu.Lock()
+		gated := r.claimGated()
+		r.mu.Unlock()
+		if want := suspended || noOffer || pending; gated != want {
+			t.Fatalf("suspended %t, no offer %t, pending %t: claimGated %t; want %t", suspended, noOffer, pending, gated, want)
+		}
+	}
+	for c := range 8 {
+		suspended, noOffer, pending := c&1 != 0, c&2 != 0, c&4 != 0
+		r.mu.Lock()
+		r.state.Suspended = map[string]bool{testPool: suspended}
+		r.offers = offers
+		if noOffer {
+			r.offers = nil
+		}
+		r.pending = nil
+		if pending {
+			r.pending = map[*activeRun]struct{}{{receiver: r}: {}}
+		}
+		r.mu.Unlock()
+		check(suspended, noOffer, pending)
+	}
+
+	// Transitions on the one receiver: no background loop runs, so only these steps change its state.
+	r.mu.Lock()
+	r.state.Suspended, r.offers, r.pending = nil, offers, nil
+	r.mu.Unlock()
+	check(false, false, false)
+	run := &activeRun{receiver: r}
+	run.pending()
+	check(false, false, true)
+	run.placed()
+	check(false, false, false)
+	for _, present := range []bool{false, true} {
+		r.mu.Lock()
+		r.offers = nil
+		if present {
+			r.offers = offers
+		}
+		r.mu.Unlock()
+		check(false, !present, false)
+	}
+	for _, suspended := range []bool{true, false} {
+		r.mu.Lock()
+		r.state.Suspended = map[string]bool{testPool: suspended}
+		r.mu.Unlock()
+		check(suspended, false, false)
 	}
 }

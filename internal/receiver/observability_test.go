@@ -31,7 +31,7 @@ func describedName(t *testing.T, desc *prometheus.Desc) string {
 	return match[1]
 }
 
-// shippedSeries is every wherry_ series a receiver process can export: the receiver's core and plugin families, a
+// shippedSeries is every wherry_ series a receiver process can export: the receiver's core, routing and plugin families, a
 // histogram's as its _bucket, _sum and _count series, and hostSeries.
 func shippedSeries(t *testing.T) map[string]bool {
 	t.Helper()
@@ -57,6 +57,9 @@ func shippedSeries(t *testing.T) map[string]bool {
 	}
 	for _, family := range pluginFamilies {
 		add(describedName(t, m.pluginDescs[family.name]), family.kind == pluginsdk.KindHistogram)
+	}
+	for _, desc := range []*prometheus.Desc{m.profileReady, m.claimGated} {
+		add(describedName(t, desc), false)
 	}
 	for _, name := range hostSeries {
 		names[name] = true
