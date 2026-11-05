@@ -16,7 +16,6 @@ import (
 
 // operator check fails without any grant operator init gives wherry.operator.
 func TestCheckRequiresTheOperatorsGrants(t *testing.T) {
-	t.Parallel()
 	for _, acl := range OperatorACLs {
 		for _, operation := range acl.Operations {
 			t.Run(acl.ResourceType+"/"+operation, func(t *testing.T) {
@@ -170,6 +169,42 @@ func TestVerifyACLsWaitsForBrokers(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("one allowance for every ACL", func(t *testing.T) {
+		t.Parallel()
+		cluster, service, closeFixture := kfakeService(t)
+		defer closeFixture()
+		create(t, service, grant)
+		absent := grant
+		absent.Resource = TenantTopic("tenant-b")
+		start := time.Now()
+		late := start.Add(topicWait * 7 / 10)
+		describes(cluster, func(_ int64, request *kmsg.DescribeACLsRequest) (kmsg.Response, error, bool) {
+			return empty(request), nil, request.ResourceName != nil && *request.ResourceName == grant.Resource && time.Now().Before(late)
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 3*topicWait)
+		defer cancel()
+		err := service.verifyACLs(ctx, []ACL{grant, absent})
+		elapsed := time.Since(start)
+		if want := "missing READ ACL on " + absent.Resource + " for " + absent.Principal; err == nil || err.Error() != want {
+			t.Fatalf("verify = %v; want %q", err, want)
+		}
+		if elapsed < topicWait || elapsed > topicWait*3/2 {
+			t.Fatalf("verify failed after %v; want about one %v allowance", elapsed, topicWait)
+		}
+	})
+
+	t.Run("no ACLs", func(t *testing.T) {
+		t.Parallel()
+		cluster, service, closeFixture := kfakeService(t)
+		defer closeFixture()
+		count := describes(cluster, func(_ int64, request *kmsg.DescribeACLsRequest) (kmsg.Response, error, bool) {
+			return empty(request), nil, true
+		})
+		if err := service.verifyACLs(context.Background(), nil); err != nil || count.Load() != 0 {
+			t.Fatalf("verify = %v after %d describes; want nil after none", err, count.Load())
+		}
+	})
 
 	t.Run("cancelled during the wait", func(t *testing.T) {
 		t.Parallel()

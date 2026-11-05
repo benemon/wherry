@@ -289,7 +289,6 @@ func deleteTopics(t *testing.T, service *Service, topics ...string) {
 // operator check names a live profile's missing signature topic, a signature topic's drifted config or second partition,
 // and a missing prefixed grant.
 func TestCheckNamesSignatureTopicDrift(t *testing.T) {
-	t.Parallel()
 	host := ACL{TenantPrincipal("tenant-a", "host-a"), "topic", PoolTasksPrefix("pool-a"), true, []string{"WRITE"}}
 	for _, test := range []struct {
 		name   string
@@ -322,7 +321,10 @@ func TestCheckNamesSignatureTopicDrift(t *testing.T) {
 		}, "missing WRITE ACL on " + PoolTasksPrefix("pool-a") + " for " + TenantPrincipal("tenant-a", "host-a")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
+			// A missing grant fails Check only after topicWait.
+			if strings.HasPrefix(test.want, "missing ") {
+				t.Parallel()
+			}
 			_, service, closeFixture := kfakeService(t)
 			defer closeFixture()
 			ctx := context.Background()
