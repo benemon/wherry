@@ -26,7 +26,8 @@ Choose a Nomad plugin release that pairs with your wherry release.
 ## Fit the steps to this guide
 
 - The record uses pool `build` from Set up the operator.
-  With one receiver, `build` is that receiver's pool.
+  A pool is one trust and tenancy boundary; the platform is a label.
+  `build` is that boundary here.
 - This guide's broker uses a private CA, `kafka-ca.pem` from Set up the operator.
   Take the steps' lines for a private broker CA.
 - The last step runs `wherry host receivers` from your laptop.

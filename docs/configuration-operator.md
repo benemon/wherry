@@ -61,7 +61,6 @@ ignored. Any other entry and a directory with no agent files are errors.
 | `reply_limit` | integer | the smaller of `1048576` and `output_limit` | Bound the redacted reply in bytes. |
 | `vcs` | list of strings | none | Allow git inputs from the listed remote hosts. |
 | `storage` | mapping | none | Set the S3-compatible store's `endpoint` and `bucket`. |
-| `routable_labels` | list of strings | none | List the label keys a selector may name. Each is a valid label key, listed once. |
 
 How a task's model is chosen:
 
@@ -137,22 +136,20 @@ the [extension](a2a-extension-v1.md#delivery-budget) lists.
 pool's terms. A lowered `delivery_limit` applies to a task in flight at its
 next release.
 
-**Routable labels.** A profile's signature is its agent plus the values of
-the `routable_labels` it carries; every other label is informational, shown
-but never routed on or selectable. Submit refuses a selector that names a key
-outside `routable_labels`, and a receiver rejects one. Each signature has its
-own task topic, which `receiver apply` and `pool apply` create.
+**Signatures.** A profile's signature is its agent plus all its labels;
+nothing in the pool terms takes part. Each signature has its own task topic,
+which `receiver apply` creates before the record that names it; `pool apply`
+recreates a recorded profile's topic that was deleted. No terms change creates
+or changes a signature.
 
-**Changing `routable_labels`** moves signatures: a removed key strands the
-live runs that select on it, whose adoption opens are refused and which the
-key custodian's re-key scan skips, and a widened key moves live runs'
-signatures, while queued tasks stay on their old topics. `pool apply` does not
-check this. Change `routable_labels`, narrowing or widening, by draining
-first:
-
-1. Stop the submissions that select on the affected keys.
-2. Let the runs that do end.
-3. Run `pool apply` with the new terms.
+**Changing a profile's labels or agent** moves its signature: `receiver
+apply` creates the new topic before the record, and the receiver restarts on
+the new record and subscribes to it. Tasks queued on the old topic wait there
+unless another member shares the old signature, and their hosts report them
+unclaimed at `task_started_by`; the receiver ends its held runs before it
+exits, and nothing waits for or checks the tasks queued on the old signature.
+To keep service uninterrupted, quiesce the submissions that target the
+affected signature first.
 
 ### Pool terms example
 
@@ -194,11 +191,6 @@ vcs:
 storage:
   endpoint: https://s3.example.com
   bucket: wherry
-# Label keys a selector may name; each signature, an agent and these labels, has its own task topic.
-routable_labels:
-  - platform
-  - isolation
-  - host
 ```
 
 The same terms as a directory for `pool apply build -f build`:
@@ -232,11 +224,6 @@ vcs:
 storage:
   endpoint: https://s3.example.com
   bucket: wherry
-# Label keys a selector may name; each signature, an agent and these labels, has its own task topic.
-routable_labels:
-  - platform
-  - isolation
-  - host
 ```
 
 `agents/claude.yaml`:

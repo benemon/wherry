@@ -102,10 +102,12 @@ or receiver reissue that a revocation overtakes refuses with `cannot return
 after its membership end` and writes no bundle. A command's pass deletes the
 grants a concurrent command adding a receiver makes before its record. That
 command's own pass restores them, and a peer denied meanwhile exits and is
-restarted by its supervisor. A `pool apply` and a `receiver apply` run at
-once can leave a live receiver's signature without its task topic: `operator
-check` names it, and `pool apply` of the pool with the same terms creates it.
-A receiver never creates a topic: its poll of a missing one logs an error
+restarted by its supervisor.
+
+A recorded profile's signature topic exists before its record. A topic
+missing afterwards was deleted outside wherry: `operator check` names it, and
+`pool apply` of the pool with the same terms recreates it before its
+no-update path. A receiver never creates a topic: its poll of a missing one logs an error
 and retries every 2 seconds.
 
 ## Create a pool
@@ -127,11 +129,9 @@ limit, writes `pools/build.yaml`, then applies it. `-f PATH` applies a file
 or directory elsewhere.
 
 The [pool terms example](configuration-operator.md#pool-terms-example) sets every field,
-as one file and as a directory. List in `routable_labels` the label keys
-tasks select on, such as `platform`, `isolation` and `host`; each profile
-signature, an agent and those labels, gets its own task topic, and a
-selector naming another key is refused. Change `routable_labels` only by
-[draining first](configuration-operator.md#pool-terms).
+as one file and as a directory. Each profile signature, an agent and all its
+labels, gets its own task topic; a label change moves a profile to a new one,
+as [Signatures](configuration-operator.md#pool-terms) describes.
 
 - `delivery_limit` bounds how often the broker delivers one task. A task
   reaches only members with a ready profile of its signature, so the limit
@@ -702,8 +702,8 @@ pool's current terms, checks that every pool's largest records still fit the
 broker's record limit, reports a tenant feed or transcript topic whose
 `max.message.bytes` is below 2 MiB, reports topic retention below the pool's required
 bounds, including an events or progress topic that keeps less than its
-pool's greatest task topic, reports a live receiver's profile whose
-signature topic is missing, checks each pool's task and events `segment.ms`,
+pool's greatest task topic, reports a profile of each receiver whose
+membership has not ended whose signature topic is missing, checks each pool's task and events `segment.ms`,
 `cleanup.policy`, `retention.bytes` and single partition and its
 snapshot topic's configuration and single partition, and confirms that every
 ACL the state calls for exists. It does not

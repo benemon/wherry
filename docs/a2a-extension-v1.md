@@ -1339,9 +1339,7 @@ release. Otherwise a receiver that claims a submission:
    `task_started_by` falls more than `start_by_limit_ms` after its append
    time; `task_ended_by is before task_started_by`; and
    `task_ended_by is past task_started_by plus the 6h run cap` when its
-   `task_ended_by` is more than six hours after its `task_started_by`; and
-   `selector names a non-routable key` when its selector names a key outside
-   the pool's `routable_labels`. Its
+   `task_ended_by` is more than six hours after its `task_started_by`. Its
    `rejected` status names no run's task (step 4), so a later submission of
    the run that passes is admitted. The custodian refuses the open of a
    claimed run that fails these checks, and the key custodian's re-key scan

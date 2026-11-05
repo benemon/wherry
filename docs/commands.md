@@ -98,9 +98,8 @@ A selector is a list of requirements, each naming one key once.
 | `DoesNotExist` | none | is absent |
 
 Values within a requirement are unique. An empty selector accepts every
-plugin profile. A selector names only keys in the pool's
-[`routable_labels`](configuration-operator.md#pool-terms); `submit` refuses
-another key, and a receiver rejects a task whose selector names one.
+plugin profile. Every label is part of a profile's
+[signature](concepts.md#placement), so a selector may name any key.
 
 On the command line a selector is comma-separated:
 
@@ -147,10 +146,10 @@ has written a record, it converges on every return, failed or not.
 [Concurrent operator commands](operations-operator.md#concurrent-operator-commands)
 states what this guarantees.
 
-Run operator commands one at a time: two applying at once is unsupported. A
-concurrent `pool apply` and `receiver apply` can leave a live receiver's
-signature without its task topic; `operator check` names it, and `pool apply`
-of the pool with the same terms creates it.
+A recorded profile's signature topic exists before its record. A topic
+missing afterwards was deleted outside wherry: `operator check` names it, and
+`pool apply` of the pool with the same terms recreates it before its no-update
+path. A receiver never creates a topic.
 
 `pool apply` and `receiver apply` read the object's file: `-f PATH`, else
 `pools/<pool>.yaml` or `receivers/<receiver>.yaml` in the working directory.
@@ -300,8 +299,9 @@ of `wherry.operator`, within 15 seconds, without a restart. A lowered
 `delivery_limit` applies to a task in flight at its next release.
 
 With a pool of that name and the terms recorded, it completes the pool,
-creating any missing topics, a live receiver's missing signature topic
-included, as after an `apply` that failed once it recorded them. When the
+creating any missing topics, the missing signature topic of each recorded
+profile of each receiver whose membership has not ended included, before its
+no-update path, as after an `apply` that failed once it recorded them. When the
 task topics'
 [record limit](configuration-operator.md#record-limit) has changed since, it records
 the terms again with the new limit.
@@ -588,9 +588,8 @@ Prints the receiver's recorded configuration as YAML: `capacity`, then
 `profiles`, each plugin profile resolved, in routing order, with its
 `name`, `plugin`, `agent`, `labels` and merged `config`
 ([Plugin profile merge](configuration-receiver.md#plugin-profile-merge)),
-its `signature` under the pool's terms, double-quoted with each line feed
-shown as `\n`, and the signature's task `topic`. This example's pool, `build`,
-has `routable_labels` `platform`, `isolation` and `host`:
+its `signature`, the agent and every label, double-quoted with each line
+feed shown as `\n`, and the signature's task `topic`:
 
 ```yaml
 capacity: 3
@@ -664,9 +663,9 @@ Loads `wherry.operator` and checks, in order:
 - that no two names collide;
 - every receiver configuration against its pool's terms;
 - that every pool's [records still fit the broker](configuration-operator.md#record-limit);
-- that every profile of a live receiver has its signature topic under its
-  pool's current terms, naming the receiver, the profile and the topic, and
-  that `pool apply` of the pool with the same terms creates it;
+- that every profile of each receiver whose membership has not ended has its
+  signature topic, naming the receiver, the profile and the topic, and that
+  `pool apply` of the pool with the same terms creates it;
 - topic retention and timestamp type against the [bounds](design.md#topics-1):
   `retention.ms=-1` on `wherry.operator` and every host and receiver key
   topic, and `message.timestamp.type=LogAppendTime` on every topic under each
@@ -1030,15 +1029,13 @@ Lists the receivers of every pool the tenant is entitled to, sorted by pool
 and receiver ID:
 
 ```
-receiver=<id> pool=<pool> routable=<k,...> capacity=<n> in_flight=<n> advertisement_age=<age> status=<status>
+receiver=<id> pool=<pool> capacity=<n> in_flight=<n> advertisement_age=<age> status=<status>
   profile=<name> plugin=<type> agent=<agent> ready=<bool> labels=<k=v,...> [inline_limit=<n>] [models=<m,...> default_model=<m>] [credentials=<name:env=VAR|name:file=FILE[(missing,optional)],...>]
 ```
 
 `status` is `live` when the latest advertisement is dated within 120
 seconds of now, either side, `stale` otherwise, `silent` when there is none,
-and `ended` after the receiver's membership end. `routable` lists, sorted, the
-pool's `routable_labels`, the keys a selector may name; it is empty when the
-pool has none. Plugin profiles, their plugins and their labels come from the
+and `ended` after the receiver's membership end. Plugin profiles, their plugins and their labels come from the
 receiver's configuration record, and an agent's `models` and
 `default_model` from the pool's [terms](configuration-operator.md#pool-terms) when it has them.
 `ready` is true when the receiver is live
@@ -1057,7 +1054,6 @@ goes without, as in
 | Member | Content |
 | --- | --- |
 | `receiver_id`, `pool` | strings |
-| `routable_labels` | the pool's routable label keys, sorted |
 | `profiles` | `{name, plugin, agent, inline_limit, models, default_model, credentials, labels, ready}`, `credentials` holding `{name, env, file, optional, configured}`, `env` or `file` the target; optional values are omitted when unset |
 | `capacity`, `in_flight` | integers from the latest advertisement |
 | `last_advertised` | RFC 3339 time of the latest advertisement; omitted when there is none |
@@ -1068,13 +1064,7 @@ goes without, as in
 Resolves a placement, a pool and a profile signature, signs the task and
 publishes it to the signature's task topic in the chosen pool. It prints
 `run_id=<id> pool=<pool>`, or fails with `no matching live receiver` when no
-live signature satisfies the agent, model and selector. A selector naming a
-key outside the `routable_labels` of every entitled pool is refused before
-any advertisement is read, naming the first such pool:
-
-```
-invalid input: selector keys gpu are not routable in pool build (routable: host, isolation, platform)
-```
+live signature satisfies the agent, model and selector.
 
 Before it publishes, it folds the host's key topic and refuses when the host
 key is not the topic's current key, since receivers admit a task only under
@@ -1084,9 +1074,9 @@ and needs `wherry host init` on a re-provisioned host.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--agent` | the pool's default, then the terms' order | agent to run |
+| `--agent` | the pool's default, then the signature with the most spare capacity | agent to run |
 | `--model` | the agent's `default_model` | model the agent runs, one of its `models` in the pool's terms |
-| `--selector` | empty | [selector](#selectors) over the pool's routable plugin profile labels |
+| `--selector` | empty | [selector](#selectors) over plugin profile labels |
 | `--prompt` | | prompt text |
 | `--prompt-file` | | file holding the prompt; `-` reads standard input |
 | `--git REMOTE@REF` | | repository the agent clones: an `https` or `ssh` URL, or `user@host:path`, at a branch, tag or commit |

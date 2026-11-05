@@ -27,8 +27,8 @@ already runs Kafka adds topics and principals to it.
 
 Kafka cannot filter records on the broker, so records consumed
 differently live on different topics. Kafka is the filter and the router:
-a pool has one task topic per profile signature, a profile's agent and the
-values of the pool's `routable_labels` it carries, and a member subscribes
+a pool has one task topic per profile signature, a profile's agent and all
+its labels, and a member subscribes
 to the signatures of its ready profiles, so a task reaches only members
 that can serve it.
 
@@ -95,18 +95,18 @@ keep them forever and are kept after revocation, and a pool's snapshot topic
 keeps them forever.
 
 A deployment has 1 + 2R + 3P + S + 2T + H topics for R receivers, P pools,
-S signature task topics, T tenants and H hosts. A pool has at most one task
-topic per distinct signature among its recorded profiles under each terms
-record, and at most agents × the product over routable keys of (distinct
-values + 1); a `routable_labels` change adds the new terms' signatures, and an
-apply that failed may have created some. The count depends on configuration
-alone.
+S signature task topics, T tenants and H hosts. S counts the distinct
+(agent, all labels) pairs ever recorded across the pools' profiles, plus the
+topics an apply created before it failed. No topic is deleted, so removing or
+relabelling a profile leaves its old topic: the count depends on the
+configuration and its history, with no fixed bound.
 
 `pool apply` creates a pool's receivers topic before it records the pool, so
 a recorded pool always has one. `receiver apply` creates the signature topics
-of the receiver's profiles under the recorded terms, and `pool apply` those of
-every live receiver's profiles under the new terms, before each appends its
-record, so a record never routes to a topic that does not exist. Pools do not end, and no topic is deleted.
+of the receiver's profiles before it appends its record, so a record never
+routes to a topic that does not exist. `pool apply` creates the missing
+signature topic of each recorded profile of each receiver whose membership has
+not ended, the recovery for a topic deleted outside wherry. Pools do not end, and no topic is deleted.
 A host reads the receivers topics of all its tenant's entitled pools in one
 pass. If one of them was deleted by hand, the read waits 10 seconds for it
 and then fails, so the host's submissions and receiver listings fail for
@@ -283,7 +283,8 @@ existing tenant feeds and transcript topics. A
 tenant feed's or transcript topic's retention can be changed with Kafka's
 own tools. `pool apply` and `tenant pool add` refuse terms that need more than
 an entitled tenant's feed or transcript topic keeps, and `wherry operator
-check` reports a live receiver's profile whose signature topic is missing, a
+check` reports a profile of a receiver whose membership has not ended whose
+signature topic is missing, a
 topic below its bound, an events or progress topic that keeps less than its
 pool's greatest task topic, a pool topic whose timestamp type is not
 `LogAppendTime`, a task or events topic without the hourly `segment.ms` or

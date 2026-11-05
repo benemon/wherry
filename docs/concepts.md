@@ -85,45 +85,58 @@ prefix, such as `example.com/gpu`; the prefix `wherry.io/` is reserved.
 Two profiles can launch the same agent with different labels, such as one
 in containers and one on the host.
 The runtime, node pool and datacenter a profile uses are part of its
-configuration, and are neither labels nor selectable unless the operator
-labels them, as the platform is labelled.
+configuration, not labels; the platform is a label the operator declares.
 
-**Routable and informational labels.** The pool's terms list its
-`routable_labels`, the label keys a task may select on. A selector names
-routable keys only: a host refuses one naming another key, and a receiver
-rejects a task whose selector does, `selector names a non-routable key`.
-Every other label is informational: recorded and shown, never routed on and
-never selectable. A profile's **signature** is its agent plus the routable
-labels it carries, and each signature in a pool has its own task topic,
-`wherry.pool.<pool>.tasks.<agent>.<hex>`.
+**Every label is routing information.** A profile's **signature** is its
+agent plus all its labels: the ones declared for it and merged into the
+profile, never its plugin configuration, so no runtime setting is selectable
+unless the operator declares it as a label. Each signature in a pool has its
+own task topic, `wherry.pool.<pool>.tasks.<agent>.<hex>`. Two profiles share a
+signature, and so a queue, only when their agent and every label are
+identical, byte for byte: members meant to share a queue carry identical
+labels. One differing label is a different signature, and a task placed on it
+waits for the members with that signature alone, even when the host spreads
+new tasks across both by spare capacity. Identical labels do not prove that
+the runtimes behind them have identical capabilities. Profiles that differ by
+an absent label have different queues even when a selector omits that key:
+`In` and `Exists` require the key, `NotIn` also matches an absent key, and
+`DoesNotExist` requires its absence. Placement selects one matching
+signature, and queued tasks do not overflow to another. No command checks
+that interchangeable members carry identical labels.
 
-**The client places a task on a signature before it signs.** It first drops
-each entitled pool whose `routable_labels` lack a key the selector names; when
-every entitled pool is dropped, submit refuses, naming the keys and the first
-such pool's routable labels. It then reads the receiver configurations on
-`wherry.operator` for their labels, and the advertisements on the receivers
-topic of each remaining pool for liveness, capacity and which profiles are
-ready. A receiver whose latest advertisement is at most 120 seconds old is
-live. For each live receiver, each agent the task may run and each ready
-profile that launches it with labels the selector accepts, the client counts
-the profile's signature, and adds the receiver's spare capacity once to each
-signature it offers: an estimate, since a receiver's capacity is shared
-across its signatures. With no agent named, a signature of the pool's default
-agent wins over any other. Among the signatures that remain, the one with the
-most spare capacity wins, and ties go to the lowest topic name. A selector no
-live signature satisfies is refused. The client signs the agent, the
-selector and the chosen pool into the task and writes it to the signature's
-task topic.
+**The client places a task on a signature before it signs.** It reads the
+receiver configurations on `wherry.operator` for their labels, and the
+advertisements on the receivers topic of each entitled pool for liveness,
+capacity and which profiles are ready. A receiver whose latest advertisement
+is at most 120 seconds old is live. For each live receiver, each agent the
+task may run and each ready profile that launches it with labels the selector
+accepts, the client counts the profile's signature, and adds the receiver's
+spare capacity once to each signature it offers: an estimate, since a
+receiver's capacity is shared across its signatures. With no agent named, a
+signature of the pool's default agent wins over any other; with no
+default-agent signature matching, the choice among the other agents'
+signatures is by spare capacity. Among the signatures that remain, the one
+with the most spare capacity wins, and ties go to the lowest topic name. A
+selector no live signature satisfies is refused. The client signs the agent,
+the selector and the chosen pool into the task and writes it to the
+signature's task topic.
 
-**The receiver subscribes** to the signature topics of its ready profiles
-and nothing else, so a task on another signature never reaches it. It runs a
-claimed task on its first ready profile, in order within its plugin, whose
-signature topic is the task's; it visits plugins in the order of their names,
-the same order the client uses. An agent outside the pool's terms, or other
-than the topic's, is rejected, and so is a selector that profile's labels do
-not satisfy, a host that computed the wrong topic. A profile that went unready
-between the claim's subscription and its fetch has its task released to the
-pool, logged, with no start-failure record.
+**The receiver subscribes** to the signature topics of its ready profiles.
+A claimed task goes to its first ready profile in recorded order with that
+topic's signature. All profiles sharing a signature have the same agent and
+labels. The selector is checked as a guard against a host publishing to the
+wrong topic; it does not route the task between profiles. If the signature
+has become unready, the receiver releases the task without recording an
+offer-unavailable start failure. An ending run can still clean up its job
+without a ready profile.
+
+**A label change moves a signature.** `receiver apply` creating a profile's
+new signature creates its topic before the record; the receiver restarts on
+the new record and subscribes to the new topic. Tasks queued on the old topic
+wait there unless another member shares the old signature, and their host
+reports them unclaimed at `task_started_by`; a label change does not carry
+them over. An operator who needs uninterrupted service quiesces the
+submissions that target the affected signature first.
 
 ## Files in and out
 
@@ -363,10 +376,9 @@ same host: the receiver restarted under the same receiver ID adopts its
 jobs, but a member on another host that claims a task starts a second job
 once the [claim check](a2a-extension-v1.md#the-claim-check) no longer counts
 the exited receiver a live claimant, as after a receiver crash. A systemd
-receiver therefore needs a signature of its own: list `host` in the pool's
-`routable_labels` and give each systemd profile a `host: <name>` label, so
-only the receiver restarted on that host serves its signature and adopts its
-runs.
+receiver therefore needs a signature of its own: give each systemd profile a
+`host: <name>` label, so only the receiver restarted on that host serves its
+signature and adopts its runs.
 The receiver leaves jobs running for adoption.
 
 A revoked principal does not return. A host or receiver that comes back is

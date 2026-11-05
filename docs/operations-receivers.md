@@ -151,12 +151,13 @@ Each plugin's README runs the receiver on its platform, with its steps:
 
 A receiver subscribes, through its pool's share group, to the signature task
 topics of its ready profiles: one topic per profile signature, a profile's
-agent and the pool's `routable_labels` it carries. A task on another
-signature never reaches it. After an advertisement, every 30 seconds, or a
-refresh of `wherry.operator`, every 15 seconds, that changes the set, it
-closes its idle polls and reopens them with the new set, a few seconds on a
-healthy broker, bounded by the fetch wait and the group join; that figure is
-not verified under load. A slot holding a run keeps its share session.
+agent and all its labels. A task on another signature never reaches it.
+After an advertisement, every 30 seconds, that changes the set, it closes its
+idle polls and reopens them with the new set; the close waits out an
+in-flight fetch, and the join takes the broker's group round trip. A slot
+holding a run keeps its share session. A label or agent change comes through
+`receiver apply`, which restarts the receiver on the new record and moves the
+profile's signature to a new topic.
 
 A profile that goes unready between a claim's subscription and its fetch has
 its task released to the pool, logged as

@@ -169,7 +169,7 @@ that none fetched by its `task_started_by` with
 
 1. Run `wherry host receivers` and check that a `live` receiver of the pool
    has a profile with `ready=true` for the run's agent whose labels satisfy
-   its selector over the `routable=` keys.
+   its selector.
 2. Run `wherry operator receiver show RECEIVER` for that receiver: the
    profile's `topic` is the signature topic it subscribes to.
 
@@ -177,12 +177,31 @@ Then start or reconfigure a receiver with a profile of that signature, or
 resubmit with a selector a live signature satisfies. A replacement of a
 key-lost run keeps its original signature's topic.
 
+## A task unclaimed while a peer sits idle
+
+A task its host reports `not started by task_started_by` while another live
+receiver with a ready profile for its agent sat idle was on a signature that
+peer does not serve. Two members share a queue only when the profile's agent
+and every label are identical; one differing label, or a label one has and the
+other lacks, is a different signature, and queued tasks never overflow to
+another signature. A receiver whose labels changed through `receiver apply`
+has moved to a new signature, leaving the tasks queued on its old one.
+
+1. Run `wherry operator receiver show RECEIVER` for the receiver the task was
+   placed on and for the idle peer, and compare each profile's `signature`
+   and `topic`.
+2. To make the peers interchangeable, give their profiles identical labels
+   and run `receiver apply` for the one that differs.
+
+Then resubmit the unclaimed run.
+
 ## `operator check` names a missing signature topic
 
 `wherry operator check` fails with
 `receiver <receiver> profile <profile>: signature topic <topic> is missing; pool apply <pool> with the same terms creates it`
-when a live receiver's profile has no task topic under the pool's current
-terms, as after two operator commands applied at once. Run
+when the profile of a receiver whose membership has not ended has no task
+topic: a recorded profile's topic exists before its record, so it was deleted
+outside wherry. Run
 `wherry operator pool apply <pool>` with the pool's recorded terms, then
 `wherry operator check` again.
 
