@@ -98,7 +98,9 @@ A selector is a list of requirements, each naming one key once.
 | `DoesNotExist` | none | is absent |
 
 Values within a requirement are unique. An empty selector accepts every
-plugin profile.
+plugin profile. A selector names only keys in the pool's
+[`routable_labels`](configuration-operator.md#pool-terms); `submit` refuses
+another key, and a receiver rejects a task whose selector names one.
 
 On the command line a selector is comma-separated:
 
@@ -137,13 +139,18 @@ and a `--dry-run` ends by converging Kafka on `wherry.operator`. A pass reads
 re-reads them and fails with `ACL plan incomplete` when one is missing. It
 deletes every other grant of a host or receiver principal on wherry's topics,
 groups and transactional IDs, which takes back a suspended pool's hosts'
-`WRITE` on its tasks topic. It deletes the SCRAM credential of each host and
+`WRITE` on its task-topic prefix. It deletes the SCRAM credential of each host and
 receiver whose membership ended. When `wherry.operator` grows during a pass,
 the command makes another, and after 5 such passes it fails with
 `wherry.operator moved during each of 5 convergence passes`. Once a command
 has written a record, it converges on every return, failed or not.
 [Concurrent operator commands](operations-operator.md#concurrent-operator-commands)
 states what this guarantees.
+
+Run operator commands one at a time: two applying at once is unsupported. A
+concurrent `pool apply` and `receiver apply` can leave a live receiver's
+signature without its task topic; `operator check` names it, and `pool apply`
+of the pool with the same terms creates it.
 
 `pool apply` and `receiver apply` read the object's file: `-f PATH`, else
 `pools/<pool>.yaml` or `receivers/<receiver>.yaml` in the working directory.
@@ -235,18 +242,19 @@ agents, each one's models and credentials (`NAME=ENV_VAR` or
 1048576), `request_percentage` (default 10) and `start_by_limit` (default
 `72h0m0s`).
 
-With no pool of that name, it records the terms, creates the pool's tasks,
-events, snapshot and receivers topics, and sets the configuration of its
-share group and topics:
+With no pool of that name, it records the terms, creates the pool's events,
+snapshot and receivers topics, and sets the configuration of its share group
+and topics. A new pool has no receivers, so it creates no task topic:
+`receiver apply` creates the signature topics of a receiver's profiles.
 
 | Resource | Settings |
 | --- | --- |
 | share group `p-<pool>` | `share.auto.offset.reset=earliest`, `share.isolation.level=read_committed`, `share.delivery.count.limit` from `delivery_limit` (default 5), `share.record.lock.duration.ms` from `lock_duration` (default `15s`) |
-| tasks topic `wherry.pool.<pool>.tasks` | `retention.ms` of `start_by_limit` plus six hours plus one day, unless it is already longer; `message.timestamp.type=LogAppendTime`, `cleanup.policy=delete`, `retention.bytes=-1`, `segment.ms=3600000` |
-| events topic `wherry.pool.<pool>.events` | the tasks topic's `retention.ms`, unless it is already longer; the tasks topic's other settings |
+| every task topic under `wherry.pool.<pool>.tasks.` | `retention.ms` of `start_by_limit` plus six hours plus one day, unless it is already longer; `message.timestamp.type=LogAppendTime`, `cleanup.policy=delete`, `retention.bytes=-1`, `segment.ms=3600000` |
+| events topic `wherry.pool.<pool>.events` | the greatest task topic's `retention.ms`, unless it is already longer; the task topics' other settings |
 | snapshot topic `wherry.pool.<pool>.custodian` | `cleanup.policy=compact`, `message.timestamp.type=LogAppendTime`, `retention.ms=-1` |
 | receivers topic `wherry.pool.<pool>.receivers` | `cleanup.policy=compact,delete`, `message.timestamp.type=LogAppendTime`, `retention.ms=604800000`, `segment.ms=3600000`, `max.compaction.lag.ms=3600000`, created when missing |
-| progress topic of each live receiver in the pool | the tasks topic's `retention.ms`, unless it is already longer, created when missing |
+| progress topic of each live receiver in the pool | the greatest task topic's `retention.ms`, or the terms' with none, unless it is already longer, created when missing |
 | feed and transcript topic of every tenant with a host or an entitlement | `max.message.bytes=2097152` (2 MiB), set before it measures the records |
 
 It sets these on new and existing topics. [Topics](design.md#topics-1) gives
@@ -266,13 +274,18 @@ records anything it refuses a `lock_duration` above the brokers'
 and a `start_by_limit` that with six hours added exceeds the `retention.ms`
 of the feed or transcript topic of a tenant entitled to the pool. Before it
 records the terms it refuses a pool name that is not valid and an existing
-tasks or events topic with more than one partition. It creates and
+task or events topic with more than one partition. It creates and
 configures the pool's receivers topic before it records the terms, so a
 recorded pool always has one. It creates the other topics after it records
 the terms, which is when it checks the pool's names against every other
 recorded name. It fails when a topic configuration it
 sets is not applied within 10 seconds, or when a describe of it still fails
 then, naming the describe's error.
+
+For a pool of that name, before it records the terms, it creates the
+signature topic, under the new terms, of every recorded profile of each
+receiver in the pool whose membership has not ended, with the task topics'
+settings above, so a record never routes to a missing topic.
 
 With a pool of that name and other terms, it records the new terms, makes
 the checks and settings above, and sets the share group's `share.delivery.count.limit` and
@@ -287,14 +300,15 @@ of `wherry.operator`, within 15 seconds, without a restart. A lowered
 `delivery_limit` applies to a task in flight at its next release.
 
 With a pool of that name and the terms recorded, it completes the pool,
-creating any missing topics, as after an `apply` that failed once it
-recorded them. When the tasks topic's
+creating any missing topics, a live receiver's missing signature topic
+included, as after an `apply` that failed once it recorded them. When the
+task topics'
 [record limit](configuration-operator.md#record-limit) has changed since, it records
 the terms again with the new limit.
 
 With `--dry-run`, it makes the same checks, among them the stranded
 receivers, the lock duration ceiling, the record limit and the partitions of
-an existing tasks or events topic, prints nothing, and creates and writes
+an existing task or events topic, prints nothing, and creates and writes
 nothing in Kafka; it measures a tenant topic below 2 MiB as `apply` would
 set it. Terms it refuses fail in the same way with or without
 `--dry-run`.
@@ -318,8 +332,8 @@ wherry operator pool suspend POOL
 ```
 
 Records a `suspend` record for the pool on `wherry.operator` and reconciles the
-ACLs. A suspended pool's tenants' hosts hold no `WRITE` on its tasks topic.
-The receivers keep `READ` on it, and every other ACL stays. A host refuses a
+ACLs. A suspended pool's tenants' hosts hold no `WRITE` on its task-topic
+prefix. The receivers keep `READ` on it, and every other ACL stays. A host refuses a
 submission to the pool with `pool POOL is suspended; submit again once it is
 resumed` before it resolves any
 credential or uploads any input. Receivers fetch nothing from the pool's
@@ -333,7 +347,7 @@ not stop a running job or take back the credentials it holds: rotating them
 at their issuers does, and
 [`wherry operator receiver remove`](#wherry-operator-receiver-remove-receiver)
 stops a receiver. A key custodian that drains while the pool is
-suspended does not scan the task topic or re-key any task. It keeps its
+suspended does not scan the task topics or re-key any task. It keeps its
 pool keys to their deadlines and logs
 `custodian: hand over to <receiver>: pool <pool> is suspended; its re-key scan waits for resume; keeping the pool keys to their deadlines`.
 The key custodian keeps rotating.
@@ -363,7 +377,7 @@ wherry operator pool resume POOL
 ```
 
 Records a `resume` record for the pool on `wherry.operator` and reconciles the
-ACLs, granting the hosts' `WRITE` on the tasks topic again. Receivers claim
+ACLs, granting the hosts' `WRITE` on the task-topic prefix again. Receivers claim
 from the pool again at their next refresh of `wherry.operator`. The key
 custodian serves first starts from the pass that acknowledges the record
 with `resumed_for` in its snapshot, and the command waits for that
@@ -393,9 +407,12 @@ or above its record's offset, writing
 to standard error every 10 seconds, `<time>` being the time left of the 5
 minutes. With none, it fails with
 `pool <pool>'s key custodian published no snapshot rotated for the rotate-key request at wherry.operator offset <offset> within 5m0s; the request stands`.
-It then captures the end offset of the pool's tasks topic, reads the topic
-as `wherry.operator` through that offset, and lists every retained task
-record whose submit wrap's `kid` is one of the suspect keys. Without
+It then lists the pool's task topics once, freezing that set as the report's
+topics, captures each one's end offset, reads each as `wherry.operator`
+through that offset, and lists every retained task record whose submit
+wrap's `kid` is one of the suspect keys. The listing is an inventory of the
+topics that existed when the scan started, not a proof that no other was
+created after it. Without
 `--suspect-key` the suspect key is the key the current snapshot names when
 the command starts; the command refuses when the pool has no snapshot or its
 current snapshot does not verify. A task record is listed whether or not its
@@ -405,20 +422,20 @@ holds no credential value:
 ```
 pool <pool>'s key custodian rotated for the rotate-key request; tasks appended through that rotation are listed
 suspect_keys=<kid>[,<kid>...]
-horizon partition=<n> oldest_retained_offset=<offset>
-horizon partition=<n>: retention deleted the tasks at offsets <offset> to <offset> during the scan; they may not be listed
+horizon topic=<topic> oldest_retained_offset=<offset>
+horizon topic=<topic>: retention deleted the tasks at offsets <offset> to <offset> during the scan; they may not be listed
 horizon: the oldest retained task was appended at <time>, <age> ago; tasks deleted by retention before it are not listed
-horizon: the task topic retains no task; tasks deleted by retention are not listed
+horizon: the task topics retain no task; tasks deleted by retention are not listed
 task run=<run> tenant=<tenant> key=<kid> credentials=<name>[,<name>...] appended=<time>
 tasks=<n>
 ```
 
-Each partition's horizon is its log start listed after the scan, since a
-fetch below the log start begins at the start then in effect. Where
-retention moved the start during the scan, the second `horizon` line names
-the offsets it deleted, from the start listed before the scan. The last
-`horizon` line is the first form when the topic retains a task and the
-second when it retains none.
+Each topic's horizon, one line per listed topic, is its log start listed
+after the scan, since a fetch below the log start begins at the start then in
+effect. Where retention moved a topic's start during the scan, a second
+`horizon` line for that topic names the offsets it deleted, from the start
+listed before the scan. The last `horizon` line is the first form when the
+topics retain a task and the second when they retain none.
 
 The credential names are the task's own credentials and every credential
 any terms record of the pool on `wherry.operator` gives the task's agent,
@@ -514,8 +531,11 @@ With `--force`, it reissues the identity without reading local configuration.
 
 With no receiver of that name, it records the configuration, creates the
 receiver's principal, key topic and progress topic,
-`wherry.receiver.<receiver>.progress`, grants its ACLs, and writes its
-bundle to `bundles/receivers/<receiver>.bundle`. The file must name a
+`wherry.receiver.<receiver>.progress`, and the signature topic of each of its
+profiles under the pool's recorded terms, with the task topics'
+[settings](#wherry-operator-pool-apply-pool), grants its ACLs, and writes its
+bundle to `bundles/receivers/<receiver>.bundle`. It creates every topic before
+it appends the record, so a create that fails leaves no record. The file must name a
 `pool`. It creates the progress topic of every other live receiver in the
 pool that lacks one, and sets the
 [progress topic configuration](design.md#topics-1) on each existing one, never lowering its `retention.ms`.
@@ -527,9 +547,11 @@ With `--dry-run`, it makes the same checks and prints each plugin profile as
 the record would hold it, with the pins, in the format of `receiver show`, and creates and
 writes nothing.
 
-With a receiver of that name, it records the new configuration in the
-receiver's pool. The file's `pool` may be empty and otherwise must name that
-pool. The record holds only the pins the file gives, so give one for every
+With a receiver of that name, it creates the signature topics of the new
+configuration's profiles under the pool's recorded terms, then records the
+new configuration in the receiver's pool. The file's `pool` may be empty and
+otherwise must name that pool. Tasks on a signature the new configuration no
+longer has wait unless another member shares it. The record holds only the pins the file gives, so give one for every
 plugin type. The principal and password stay as they are. When the file's
 broker address differs from the one in the receiver's bundle in
 `bundles/receivers/`, it rewrites the bundle with the new address and the
@@ -565,7 +587,10 @@ Prints the receiver's recorded configuration as YAML: `capacity`, then
 `plugin_sha256`, the SHA-256 pinned for each plugin type, then
 `profiles`, each plugin profile resolved, in routing order, with its
 `name`, `plugin`, `agent`, `labels` and merged `config`
-([Plugin profile merge](configuration-receiver.md#plugin-profile-merge)):
+([Plugin profile merge](configuration-receiver.md#plugin-profile-merge)),
+its `signature` under the pool's terms, double-quoted with each line feed
+shown as `\n`, and the signature's task `topic`. This example's pool, `build`,
+has `routable_labels` `platform`, `isolation` and `host`:
 
 ```yaml
 capacity: 3
@@ -584,6 +609,8 @@ profiles:
             config:
                 image: registry.example.com/claude-agent:1.0
             driver: docker
+      signature: "claude\nplatform=nomad\n"
+      topic: wherry.pool.build.tasks.claude.ef900330120d94dc0ea8292aaff80030aa744d924e6723016308bd36255e19a4
 ```
 
 A `credential` key shows the credential's name, which is all the record
@@ -637,12 +664,15 @@ Loads `wherry.operator` and checks, in order:
 - that no two names collide;
 - every receiver configuration against its pool's terms;
 - that every pool's [records still fit the broker](configuration-operator.md#record-limit);
+- that every profile of a live receiver has its signature topic under its
+  pool's current terms, naming the receiver, the profile and the topic, and
+  that `pool apply` of the pool with the same terms creates it;
 - topic retention and timestamp type against the [bounds](design.md#topics-1):
   `retention.ms=-1` on `wherry.operator` and every host and receiver key
-  topic, and `message.timestamp.type=LogAppendTime` on each pool's tasks and
-  events topics;
-- that each pool's tasks and events topics have `cleanup.policy=delete`,
-  `retention.bytes=-1` and `segment.ms=3600000`;
+  topic, and `message.timestamp.type=LogAppendTime` on every topic under each
+  pool's task-topic prefix and its events topic;
+- that every task topic under each pool's prefix and its events topic have
+  `cleanup.policy=delete`, `retention.bytes=-1` and `segment.ms=3600000`;
 - that each pool's snapshot topic, `wherry.pool.<pool>.custodian`, has
   `cleanup.policy=compact`, `message.timestamp.type=LogAppendTime` and
   `retention.ms=-1`;
@@ -650,15 +680,17 @@ Loads `wherry.operator` and checks, in order:
   `cleanup.policy=compact,delete`, `message.timestamp.type=LogAppendTime`,
   `retention.ms=604800000`, `segment.ms=3600000` and
   `max.compaction.lag.ms=3600000`;
-- that each pool's tasks, events, snapshot and receivers topics have one
+- that each pool's task, events, snapshot and receivers topics have one
   partition;
-- that each pool's tasks topic keeps records at least `start_by_limit` plus
+- that each pool's task topics keep records at least `start_by_limit` plus
   six hours plus one day, its events topic and each live receiver's progress
-  topic at least as long as the tasks topic, and each entitled tenant's feed
-  and transcript topic at least `start_by_limit` plus six hours;
+  topic at least as long as the greatest of them, `-1` when one is `-1`, and
+  each entitled tenant's feed and transcript topic at least `start_by_limit`
+  plus six hours;
 - that every tenant feed and transcript topic has a `max.message.bytes` of at
   least 2 MiB;
-- that every ACL the state calls for is present, with `wherry.operator`'s own
+- that every ACL the state calls for is present, the prefixed task-topic
+  grants of hosts and receivers included, with `wherry.operator`'s own
   [grants](security.md#the-operator-principal).
 
 It prints nothing when every check passes, and fails naming the first that
@@ -998,13 +1030,15 @@ Lists the receivers of every pool the tenant is entitled to, sorted by pool
 and receiver ID:
 
 ```
-receiver=<id> pool=<pool> capacity=<n> in_flight=<n> advertisement_age=<age> status=<status>
+receiver=<id> pool=<pool> routable=<k,...> capacity=<n> in_flight=<n> advertisement_age=<age> status=<status>
   profile=<name> plugin=<type> agent=<agent> ready=<bool> labels=<k=v,...> [inline_limit=<n>] [models=<m,...> default_model=<m>] [credentials=<name:env=VAR|name:file=FILE[(missing,optional)],...>]
 ```
 
 `status` is `live` when the latest advertisement is dated within 120
 seconds of now, either side, `stale` otherwise, `silent` when there is none,
-and `ended` after the receiver's membership end. Plugin profiles, their plugins and their labels come from the
+and `ended` after the receiver's membership end. `routable` lists, sorted, the
+pool's `routable_labels`, the keys a selector may name; it is empty when the
+pool has none. Plugin profiles, their plugins and their labels come from the
 receiver's configuration record, and an agent's `models` and
 `default_model` from the pool's [terms](configuration-operator.md#pool-terms) when it has them.
 `ready` is true when the receiver is live
@@ -1023,6 +1057,7 @@ goes without, as in
 | Member | Content |
 | --- | --- |
 | `receiver_id`, `pool` | strings |
+| `routable_labels` | the pool's routable label keys, sorted |
 | `profiles` | `{name, plugin, agent, inline_limit, models, default_model, credentials, labels, ready}`, `credentials` holding `{name, env, file, optional, configured}`, `env` or `file` the target; optional values are omitted when unset |
 | `capacity`, `in_flight` | integers from the latest advertisement |
 | `last_advertised` | RFC 3339 time of the latest advertisement; omitted when there is none |
@@ -1030,8 +1065,16 @@ goes without, as in
 
 ### `wherry host submit`
 
-Resolves a placement, signs the task and publishes it to the chosen pool. It
-prints `run_id=<id> pool=<pool>`, or fails with `no matching live receiver`.
+Resolves a placement, a pool and a profile signature, signs the task and
+publishes it to the signature's task topic in the chosen pool. It prints
+`run_id=<id> pool=<pool>`, or fails with `no matching live receiver` when no
+live signature satisfies the agent, model and selector. A selector naming a
+key outside the `routable_labels` of every entitled pool is refused before
+any advertisement is read, naming the first such pool:
+
+```
+invalid input: selector keys gpu are not routable in pool build (routable: host, isolation, platform)
+```
 
 Before it publishes, it folds the host's key topic and refuses when the host
 key is not the topic's current key, since receivers admit a task only under
@@ -1043,7 +1086,7 @@ and needs `wherry host init` on a re-provisioned host.
 | --- | --- | --- |
 | `--agent` | the pool's default, then the terms' order | agent to run |
 | `--model` | the agent's `default_model` | model the agent runs, one of its `models` in the pool's terms |
-| `--selector` | empty | [selector](#selectors) over plugin profile labels |
+| `--selector` | empty | [selector](#selectors) over the pool's routable plugin profile labels |
 | `--prompt` | | prompt text |
 | `--prompt-file` | | file holding the prompt; `-` reads standard input |
 | `--git REMOTE@REF` | | repository the agent clones: an `https` or `ssh` URL, or `user@host:path`, at a branch, tag or commit |

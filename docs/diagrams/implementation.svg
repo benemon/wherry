@@ -71,7 +71,7 @@
     <text x="472" y="374">.progress: runs' committed transcript offsets</text>
 
     <rect x="456" y="394" width="348" height="60" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
-    <text x="472" y="416" font-size="12" font-weight="600" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#00290b">wherry.pool.&lt;pool&gt;.tasks</text>
+    <text x="472" y="416" font-size="12" font-weight="600" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#00290b">wherry.pool.&lt;pool&gt;.tasks.*</text>
     <text x="472" y="434">submissions, claimed through share group p-&lt;pool&gt;</text>
 
     <rect x="456" y="466" width="348" height="60" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>

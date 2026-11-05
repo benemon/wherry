@@ -28,7 +28,9 @@ The defaults are `10m` and `2h`.
   names a file called `-`.
   `model` is as `--model` takes it, and a model outside the agent's `models`
   fails with `INVALID_ARGUMENT` naming the model, agent and pool.
-  `selector` is an array of `{key, operator, values}`. `git` is
+  `selector` is an array of `{key, operator, values}`, each key one of the
+  pool's `routable_labels`, which `receivers` lists; another key fails with
+  `INVALID_ARGUMENT` naming the keys and the pool. `git` is
   `{remote, ref, path, changes}`, as `--git`, `--git-path` and `--git-changes`
   take them, with `remote` and `ref` required; its credential and host key come
   from the client configuration's `git` entries, as for `submit`. `inputs` is

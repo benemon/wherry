@@ -61,6 +61,7 @@ ignored. Any other entry and a directory with no agent files are errors.
 | `reply_limit` | integer | the smaller of `1048576` and `output_limit` | Bound the redacted reply in bytes. |
 | `vcs` | list of strings | none | Allow git inputs from the listed remote hosts. |
 | `storage` | mapping | none | Set the S3-compatible store's `endpoint` and `bucket`. |
+| `routable_labels` | list of strings | none | List the label keys a selector may name. Each is a valid label key, listed once. |
 
 How a task's model is chosen:
 
@@ -119,8 +120,15 @@ receiver renews its lock every 10 seconds; wherry does not check this. The
 broker bounds it between
 `group.share.min.record.lock.duration.ms` and
 `group.share.max.record.lock.duration.ms`. Every delivery counts against
-`delivery_limit`, including a release after a start failure and a release
-by a member with no matching profile. From attempt
+`delivery_limit`, including a release after a start failure. A task reaches
+only members with a ready profile of its signature, so `delivery_limit` counts
+attempts, not hops between members, and is sized by the attempts one task may
+burn, never by the number of members. A member that failed to start a task
+may be handed it again, even when a peer with the same signature could have
+started it. A profile that goes unready between a claim's subscription and
+its fetch has its task released, and that member's other slots still polling
+may acquire it once each before they reopen without the topic: up to its
+capacity minus 1 more deliveries, which the sizing allows for. From attempt
 `delivery_limit` minus 1, a receiver ends a run `TASK_STATE_FAILED` with
 `delivery budget exhausted` where it would release it, except in the cases
 the [extension](a2a-extension-v1.md#delivery-budget) lists.
@@ -128,6 +136,23 @@ the [extension](a2a-extension-v1.md#delivery-budget) lists.
 [`pool apply`](commands.md#wherry-operator-pool-apply-pool) changes an existing
 pool's terms. A lowered `delivery_limit` applies to a task in flight at its
 next release.
+
+**Routable labels.** A profile's signature is its agent plus the values of
+the `routable_labels` it carries; every other label is informational, shown
+but never routed on or selectable. Submit refuses a selector that names a key
+outside `routable_labels`, and a receiver rejects one. Each signature has its
+own task topic, which `receiver apply` and `pool apply` create.
+
+**Changing `routable_labels`** moves signatures: a removed key strands the
+live runs that select on it, whose adoption opens are refused and which the
+key custodian's re-key scan skips, and a widened key moves live runs'
+signatures, while queued tasks stay on their old topics. `pool apply` does not
+check this. Change `routable_labels`, narrowing or widening, by draining
+first:
+
+1. Stop the submissions that select on the affected keys.
+2. Let the runs that do end.
+3. Run `pool apply` with the new terms.
 
 ### Pool terms example
 
@@ -154,7 +179,7 @@ agents:
       - {name: github-token, env: GH_TOKEN, required: false}
 default_agent: claude
 start_by_limit: 72h
-# Each receiver with no matching profile spends one delivery, so this covers the pool's receivers plus a margin.
+# The attempts one task may make, start failures included, plus a margin for the releases of a profile going unready.
 delivery_limit: 6
 # Above the receiver's 10s renewal interval.
 lock_duration: 30s
@@ -169,6 +194,11 @@ vcs:
 storage:
   endpoint: https://s3.example.com
   bucket: wherry
+# Label keys a selector may name; each signature, an agent and these labels, has its own task topic.
+routable_labels:
+  - platform
+  - isolation
+  - host
 ```
 
 The same terms as a directory for `pool apply build -f build`:
@@ -187,7 +217,7 @@ build/
 ```yaml
 default_agent: claude
 start_by_limit: 72h
-# Each receiver with no matching profile spends one delivery, so this covers the pool's receivers plus a margin.
+# The attempts one task may make, start failures included, plus a margin for the releases of a profile going unready.
 delivery_limit: 6
 # Above the receiver's 10s renewal interval.
 lock_duration: 30s
@@ -202,6 +232,11 @@ vcs:
 storage:
   endpoint: https://s3.example.com
   bucket: wherry
+# Label keys a selector may name; each signature, an agent and these labels, has its own task topic.
+routable_labels:
+  - platform
+  - isolation
+  - host
 ```
 
 `agents/claude.yaml`:
@@ -244,22 +279,23 @@ A record limit is the lower of what the record's producer batches and what
 the topic the record goes to takes, which Kafka's
 [`max.message.bytes`](https://kafka.apache.org/documentation/#topicconfigs_max.message.bytes)
 sets. wherry reads the topic's own setting, else the lowest
-`message.max.bytes` across the brokers. Submissions go to the pool's tasks
-topic from a host, which batches at most
+`message.max.bytes` across the brokers. Submissions go to the pool's task
+topics from a host, which batches at most
 [franz-go's default](https://pkg.go.dev/github.com/twmb/franz-go/pkg/kgo#ProducerBatchMaxBytes),
 1000012 bytes. Receiver records go to the feeds and transcript topics of
 the tenants entitled to the pool, from a receiver that batches at most
 2 MiB (2097152 bytes), the `max.message.bytes` wherry sets on every tenant
 feed and transcript topic. The Kafka cluster must allow a topic
 `max.message.bytes` of 2 MiB.
-`pool apply` records the tasks topic's record limit in the pool's terms,
+`pool apply` records the lowest record limit of the pool's task topics, or
+with none yet the brokers' and the host's batch limit, in the pool's terms,
 and [`submit`](commands.md#wherry-host-submit) measures each submission against it. A pool file
 does not set it.
 
 `pool apply`, `tenant pool add` and `check` compare five record-batch sizes
 against the record limits. wherry's tests build and sign each record to pin
 its size. The smallest task a host submits with a maximum envelope and its
-submit wrap, an 89326-byte batch, goes against the tasks topic's limit. Four
+submit wrap, an 89326-byte batch, goes against the task topics' limit. Four
 receiver records go against the tenant feeds' limit: the largest output
 chunk, of 256 KiB, two largest results, and the largest transcript chunk, a
 line of 512 KiB. Each result

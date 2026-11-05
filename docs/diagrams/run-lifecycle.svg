@@ -20,7 +20,7 @@
 
     <rect x="200" y="30" width="156" height="52" rx="6" fill="#fffdf7" stroke="#3f6b4a" stroke-width="1.5"/>
     <text x="278" y="52" text-anchor="middle" font-weight="600">Tasks</text>
-    <text x="278" y="70" text-anchor="middle" font-size="9" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#2e4a35">wherry.pool.&lt;pool&gt;.tasks</text>
+    <text x="278" y="70" text-anchor="middle" font-size="9" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#2e4a35">wherry.pool.&lt;pool&gt;.tasks.*</text>
 
     <rect x="368" y="30" width="156" height="52" rx="6" fill="#fffdf7" stroke="#3f6b4a" stroke-width="1.5"/>
     <text x="446" y="52" text-anchor="middle" font-weight="600">Events</text>

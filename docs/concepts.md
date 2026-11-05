@@ -16,7 +16,8 @@
   machines that run the `wherry` CLI or its MCP server. Each host is its
   own Kafka principal with its own Ed25519 signing key. A compromised host
   is a compromise of its tenant.
-- **A pool** is a set of receivers that share terms and trust each other fully.
+- **A pool** is a set of receivers that share terms and trust each other fully:
+  one pool per trust and tenancy boundary; the platform is a label.
   Its terms name the agents it runs, the credentials each agent takes and their targets, the
   share-group delivery limit and lock duration, and the quotas its tenants'
   hosts get. A tenant is entitled to one or more pools. A host entitled through
@@ -83,32 +84,46 @@ configuration record. Keys are arbitrary and may carry the operator's own
 prefix, such as `example.com/gpu`; the prefix `wherry.io/` is reserved.
 Two profiles can launch the same agent with different labels, such as one
 in containers and one on the host.
-The platform, runtime, node pool and datacenter a profile uses are part
-of its configuration, and are neither labels nor selectable.
+The runtime, node pool and datacenter a profile uses are part of its
+configuration, and are neither labels nor selectable unless the operator
+labels them, as the platform is labelled.
 
-**The client resolves placement before it signs.** It reads the receiver
-configurations on `wherry.operator` for their labels, and the advertisements on
-the receivers topic of each pool the tenant is entitled to for liveness,
-capacity and which profiles are ready. A
-receiver whose latest advertisement is at most 120 seconds old is live. For each
-live receiver in a pool the tenant is entitled to, the client looks for a ready
-profile that launches the agent with labels the selector accepts. With no agent
-named, each receiver takes the pool's default agent if a ready profile launches
-it, otherwise the first other agent in the terms' order that one does. A
-receiver that would run its pool's default agent wins over any receiver that
-would run another agent. Among the receivers that remain, the one with the most
-spare capacity wins, and ties go to the lowest receiver ID. The client
-signs the agent, the selector and the chosen pool into the task.
+**Routable and informational labels.** The pool's terms list its
+`routable_labels`, the label keys a task may select on. A selector names
+routable keys only: a host refuses one naming another key, and a receiver
+rejects a task whose selector does, `selector names a non-routable key`.
+Every other label is informational: recorded and shown, never routed on and
+never selectable. A profile's **signature** is its agent plus the routable
+labels it carries, and each signature in a pool has its own task topic,
+`wherry.pool.<pool>.tasks.<agent>.<hex>`.
 
-**The receiver routes** a task it claims to its first ready profile, in
-order within its plugin, whose agent and labels satisfy the task. It visits
-plugins in the order of their names, the same order the client uses, and
-labels choose between plugins. An agent outside
-the pool's terms is rejected. A task no ready profile satisfies is a start
-failure: the receiver records it on the pool's events and returns the task
-to the pool. The client places a task by one member's labels, but any
-member of the pool can claim it, so every member must honour the labels its
-profiles declare.
+**The client places a task on a signature before it signs.** It first drops
+each entitled pool whose `routable_labels` lack a key the selector names; when
+every entitled pool is dropped, submit refuses, naming the keys and the first
+such pool's routable labels. It then reads the receiver configurations on
+`wherry.operator` for their labels, and the advertisements on the receivers
+topic of each remaining pool for liveness, capacity and which profiles are
+ready. A receiver whose latest advertisement is at most 120 seconds old is
+live. For each live receiver, each agent the task may run and each ready
+profile that launches it with labels the selector accepts, the client counts
+the profile's signature, and adds the receiver's spare capacity once to each
+signature it offers: an estimate, since a receiver's capacity is shared
+across its signatures. With no agent named, a signature of the pool's default
+agent wins over any other. Among the signatures that remain, the one with the
+most spare capacity wins, and ties go to the lowest topic name. A selector no
+live signature satisfies is refused. The client signs the agent, the
+selector and the chosen pool into the task and writes it to the signature's
+task topic.
+
+**The receiver subscribes** to the signature topics of its ready profiles
+and nothing else, so a task on another signature never reaches it. It runs a
+claimed task on its first ready profile, in order within its plugin, whose
+signature topic is the task's; it visits plugins in the order of their names,
+the same order the client uses. An agent outside the pool's terms, or other
+than the topic's, is rejected, and so is a selector that profile's labels do
+not satisfy, a host that computed the wrong topic. A profile that went unready
+between the claim's subscription and its fetch has its task released to the
+pool, logged, with no start-failure record.
 
 ## Files in and out
 
@@ -282,7 +297,7 @@ Tasks submitted before a crash is detected can use the lost key and need resubmi
 ### Suspension
 
 Use `wherry operator pool suspend POOL` to stop new starts.
-The operator withdraws host Write access to the tasks topic.
+The operator withdraws host Write access to the pool's task topics.
 Receivers stop claiming new work.
 The custodian refuses first starts and continues serving adoptions.
 Running jobs can finish.
@@ -347,8 +362,11 @@ adopts each job. A host-local platform, such as systemd, adopts only on the
 same host: the receiver restarted under the same receiver ID adopts its
 jobs, but a member on another host that claims a task starts a second job
 once the [claim check](a2a-extension-v1.md#the-claim-check) no longer counts
-the exited receiver a live claimant, as after a receiver crash. The
-systemd plugin recommends a pool per receiver for this reason.
+the exited receiver a live claimant, as after a receiver crash. A systemd
+receiver therefore needs a signature of its own: list `host` in the pool's
+`routable_labels` and give each systemd profile a `host: <name>` label, so
+only the receiver restarted on that host serves its signature and adopts its
+runs.
 The receiver leaves jobs running for adoption.
 
 A revoked principal does not return. A host or receiver that comes back is

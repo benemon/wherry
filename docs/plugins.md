@@ -39,7 +39,7 @@ The examples below are imported from the plugin repository.
 describes these files and installs them.
 
 A systemd receiver adopts jobs only on its own host.
-Give each systemd receiver its own pool.
+Give each systemd receiver a signature of its own: list `host` in the pool's `routable_labels` and give each of its profiles a `host: <name>` label.
 With receivers on several hosts, redelivery can start another job while the first still runs.
 This can happen after the previous holder's lease expires or its membership ends.
 The lease expires 120 seconds after its last advertisement.
