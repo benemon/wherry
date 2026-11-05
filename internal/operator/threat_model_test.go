@@ -175,6 +175,24 @@ func TestConstructedNamesDoNotAlias(t *testing.T) {
 	if err := state.CheckNames(); err != nil {
 		t.Fatal(err)
 	}
+	// A signature topic parses back to its own pool and agent, which no other split of the same names gives, and lies
+	// under its pool's prefix alone: no other derived name of either pool is under it.
+	for _, names := range [][2]string{{"a", "b-c"}, {"a-b", "c"}, {"tasks", "events"}} {
+		topic := SignatureTopic(names[0], Terms{}, names[1], nil)
+		if pool, agent, ok := wire.ParseTaskTopic(topic); !ok || pool != names[0] || agent != names[1] {
+			t.Fatalf("%s parses to %q, %q, %t; want %v", topic, pool, agent, ok, names)
+		}
+		for _, pool := range []string{"a", "a-b", "tasks"} {
+			if strings.HasPrefix(topic, PoolTasksPrefix(pool)) != (pool == names[0]) {
+				t.Fatalf("%s under %s's prefix: %t", topic, pool, pool != names[0])
+			}
+			for _, derived := range []string{PoolEventsTopic(pool), CustodianTopic(pool), PoolReceiversTopic(pool), PoolGroup(pool), TransactionalPrefix(pool)} {
+				if derived == topic || strings.HasPrefix(derived, PoolTasksPrefix(names[0])) {
+					t.Fatalf("%s aliases the task topic prefix of %s", derived, names[0])
+				}
+			}
+		}
+	}
 }
 
 func TestStatusBindsPlacedPool(t *testing.T) {
@@ -583,13 +601,11 @@ func TestShareGroupStartsAtEarliest(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
+	poolWithReceiver(t, service)
+	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: modelTopic("pool-a"), Value: []byte("submitted-before-fetch")}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: PoolTasksTopic("pool-a"), Value: []byte("submitted-before-fetch")}).FirstErr(); err != nil {
-		t.Fatal(err)
-	}
-	member, err := kgo.NewClient(kgo.SeedBrokers(service.Broker), kgo.SASL(scram.Auth{User: "admin", Pass: "password"}.AsSha512Mechanism()), kgo.ConsumeTopics(PoolTasksTopic("pool-a")), kgo.ShareGroup(PoolGroup("pool-a")), kgo.ShareMaxRecords(1))
+	member, err := kgo.NewClient(kgo.SeedBrokers(service.Broker), kgo.SASL(scram.Auth{User: "admin", Pass: "password"}.AsSha512Mechanism()), kgo.ConsumeTopics(modelTopic("pool-a")), kgo.ShareGroup(PoolGroup("pool-a")), kgo.ShareMaxRecords(1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -651,6 +667,9 @@ func modelConfig(receiver, pool string) ReceiverConfig {
 	return ReceiverConfig{Receiver: receiver, Pool: pool, Capacity: 1, Profiles: []ProfileSettings{{Name: "profile-a", Plugin: "fake", Agent: "agent-a"}},
 		PluginSHA256: map[string]string{"fake": strings.Repeat("ab", 32)}}
 }
+
+// modelTopic is the signature topic, under modelTerms, of modelConfig's one profile in pool.
+func modelTopic(pool string) string { return SignatureTopic(pool, modelTerms(), "agent-a", nil) }
 
 func modelState(t *testing.T) State {
 	terms := modelTerms()

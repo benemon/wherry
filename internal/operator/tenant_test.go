@@ -154,7 +154,7 @@ func TestTenantKeptACLMatrix(t *testing.T) {
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("matrix:\n%v\nwant:\n%v", got, want)
 			}
-			if phase == "readded" && !hasACL(acls, TenantPrincipal("t", "live"), PoolTasksTopic("p"), "WRITE") {
+			if phase == "readded" && !hasACL(acls, TenantPrincipal("t", "live"), PoolTasksPrefix("p"), "WRITE") {
 				t.Fatal("re-add did not restore host grants")
 			}
 		})

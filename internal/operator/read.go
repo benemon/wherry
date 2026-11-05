@@ -66,6 +66,29 @@ func (r *Reader) Close() {
 	}
 }
 
+// PoolTaskTopics lists pool's signature task topics, sorted, from one metadata request for every topic the principal
+// may describe. A failed request or an error on a listed topic under the prefix is an error, never an empty pool. The
+// request goes to the broker: kadm's cached answer for every topic can omit topics a later request for named ones pruned
+// from its cache, and a broker's metadata can still lag a topic just created.
+func PoolTaskTopics(ctx context.Context, admin *kadm.Client, pool string) ([]string, error) {
+	// Asking for authorized operations is what makes kadm bypass its metadata cache.
+	listed, err := admin.ListTopics(kadm.WithAuthorizedOps(ctx))
+	if err != nil {
+		return nil, err
+	}
+	var topics []string
+	for _, detail := range listed.Sorted() {
+		if !strings.HasPrefix(detail.Topic, PoolTasksPrefix(pool)) {
+			continue
+		}
+		if detail.Err != nil {
+			return nil, fmt.Errorf("topic %s: %w", detail.Topic, detail.Err)
+		}
+		topics = append(topics, detail.Topic)
+	}
+	return topics, nil
+}
+
 // Admin returns an admin client over the reader's client.
 func (r *Reader) Admin() (*kadm.Client, error) {
 	r.mu.Lock()

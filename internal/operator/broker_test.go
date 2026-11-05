@@ -48,10 +48,10 @@ func TestRealBrokerFixture(t *testing.T) {
 
 	t.Run("a task submitted before the first fetch is delivered", func(t *testing.T) {
 		submitter := f.connect(t, TenantPrincipal(f.tenantA, f.hostA1))
-		if err := submitter.ProduceSync(ctx, &kgo.Record{Topic: PoolTasksTopic(f.poolA), Value: []byte("before-first-fetch")}).FirstErr(); err != nil {
+		if err := submitter.ProduceSync(ctx, &kgo.Record{Topic: modelTopic(f.poolA), Value: []byte("before-first-fetch")}).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
-		member := f.connect(t, ReceiverPrincipal(f.receiverA), kgo.ConsumeTopics(PoolTasksTopic(f.poolA)), kgo.ShareGroup(PoolGroup(f.poolA)), kgo.ShareMaxRecords(1))
+		member := f.connect(t, ReceiverPrincipal(f.receiverA), kgo.ConsumeTopics(modelTopic(f.poolA)), kgo.ShareGroup(PoolGroup(f.poolA)), kgo.ShareMaxRecords(1))
 		pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		for pollCtx.Err() == nil {
@@ -74,7 +74,7 @@ func TestRealBrokerFixture(t *testing.T) {
 
 	t.Run("a tenant cannot write a pool it is not entitled to", func(t *testing.T) {
 		host := f.connect(t, TenantPrincipal(f.tenantB, f.hostB1))
-		expectDenied(t, host.ProduceSync(ctx, &kgo.Record{Topic: PoolTasksTopic(f.poolA), Value: []byte("x")}).FirstErr())
+		expectDenied(t, host.ProduceSync(ctx, &kgo.Record{Topic: modelTopic(f.poolA), Value: []byte("x")}).FirstErr())
 	})
 
 	t.Run("a tenant reads only its own feed", func(t *testing.T) {
@@ -353,7 +353,7 @@ func provision(t *testing.T) *fixture {
 		must(hostFixture(t, service, ctx, host[0], host[1], path, false))
 		f.bundles[TenantPrincipal(host[0], host[1])] = readBundle(t, path)
 	}
-	must(kafkatest.Led(ctx, service.Operator, PoolTasksTopic(f.poolA), PoolEventsTopic(f.poolA), PoolTasksTopic(f.poolB), PoolEventsTopic(f.poolB),
+	must(kafkatest.Led(ctx, service.Operator, modelTopic(f.poolA), PoolEventsTopic(f.poolA), modelTopic(f.poolB), PoolEventsTopic(f.poolB),
 		TenantTopic(f.tenantA), TenantTranscriptTopic(f.tenantA), TenantTopic(f.tenantB), TenantTranscriptTopic(f.tenantB),
 		ReceiverTopic(f.receiverA), ReceiverProgressTopic(f.receiverA), ReceiverTopic(f.receiverB), ReceiverProgressTopic(f.receiverB),
 		HostTopic(f.tenantA, f.hostA1), HostTopic(f.tenantA, f.hostA2), HostTopic(f.tenantB, f.hostB1)))
@@ -504,7 +504,12 @@ func TestPoolApplyUpdateKeepsTheLongerRetentionOnRealBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := int64(terms.StartByLimitMS) + MaxRunDurationMS + retentionMarginMS
-	retentions, err := service.topicRetentions(ctx, PoolTasksTopic(pool), PoolEventsTopic(pool))
+	// A pool with no receiver has no task topic, only its events topic.
+	tasks, err := service.taskTopics(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retentions, err := service.topicRetentions(ctx, append(tasks, PoolEventsTopic(pool))...)
 	if err != nil {
 		t.Fatal(err)
 	}
