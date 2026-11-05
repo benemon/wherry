@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 	"testing"
 
@@ -43,39 +42,52 @@ func TestStrimziIgnoredUsersPattern(t *testing.T) {
 	}
 }
 
-// A signature names the agent and the routable labels a profile carries, whatever their order, and nothing else; its
-// topic is the one pattern every reader parses. The digests are sha256sum's of the literal encodings.
+// A signature names the agent and every label a profile carries, whatever their order, and nothing else; its topic is
+// the one pattern every reader parses. The digests are sha256sum's of the literal encodings.
 func TestSignatureTopic(t *testing.T) {
-	terms := Terms{Routable: []string{"platform", "isolation"}}
-	reordered := Terms{Routable: []string{"isolation", "platform"}}
-	labels := map[string]string{"platform": "nomad", "isolation": "container", "gpu": "a100"}
+	labels := map[string]string{"platform": "nomad", "isolation": "container"}
 	const both = "claude\nisolation=container\nplatform=nomad\n"
-	if got := Signature(terms, "claude", labels); got != both {
+	if got := Signature("claude", labels); got != both {
 		t.Fatalf("signature %q, want %q", got, both)
 	}
+	// The same labels inserted in the other order are the same signature.
+	reordered := map[string]string{}
+	reordered["isolation"] = "container"
+	reordered["platform"] = "nomad"
 	want := "wherry.pool.pool-a.tasks.claude.79c0eb55fa00d7e5903d9fa0f9f51ec162666978ff2938be19fd6e08b169833a"
-	for _, other := range []map[string]string{labels, {"isolation": "container", "platform": "nomad", "gpu": "h100"}, {"isolation": "container", "platform": "nomad"}} {
-		for _, routable := range []Terms{terms, reordered} {
-			if got := SignatureTopic("pool-a", routable, "claude", other); got != want {
-				t.Fatalf("routable %v, labels %v: topic %s, want %s", routable.Routable, other, got, want)
-			}
+	for _, same := range []map[string]string{labels, reordered} {
+		if got := SignatureTopic("pool-a", "claude", same); got != want {
+			t.Fatalf("labels %v: topic %s, want %s", same, got, want)
 		}
 	}
-	if !slices.Equal(terms.Routable, []string{"platform", "isolation"}) {
-		t.Fatalf("routable keys sorted in place: %v", terms.Routable)
+	// A label added, a value changed or another agent is another signature.
+	for _, other := range []struct {
+		agent  string
+		labels map[string]string
+	}{
+		{"claude", map[string]string{"platform": "nomad", "isolation": "container", "gpu": "a100"}},
+		{"claude", map[string]string{"platform": "nomad", "isolation": "host"}},
+		{"claude", map[string]string{"platform": "nomad"}},
+		{"codex", labels},
+	} {
+		if got := SignatureTopic("pool-a", other.agent, other.labels); got == want {
+			t.Errorf("agent %s, labels %v: topic %s, the same as agent claude, labels %v", other.agent, other.labels, got, labels)
+		}
+	}
+	if len(labels) != 2 || labels["platform"] != "nomad" || labels["isolation"] != "container" {
+		t.Fatalf("labels changed by the signature: %v", labels)
 	}
 	for _, fixture := range []struct {
-		terms  Terms
 		agent  string
 		labels map[string]string
 		topic  string
 	}{
-		{Terms{}, "codex", labels, "wherry.pool.pool-a.tasks.codex.243b0dc9b847e66c440dca985e10fe0ce9e29c379b018ddd5747ba8948f84cc8"},
-		{terms, "claude", map[string]string{"platform": "nomad", "gpu": "a100"}, "wherry.pool.pool-a.tasks.claude.ef900330120d94dc0ea8292aaff80030aa744d924e6723016308bd36255e19a4"},
-		{Terms{Routable: []string{"platform", "isolation", "gpu"}}, "claude", labels, "wherry.pool.pool-a.tasks.claude.e5bf4f20966c9016ba8c6d304637749604d2d1536b7a4c915e9109146cdd4618"},
+		{"codex", labels, "wherry.pool.pool-a.tasks.codex.b88843185bc94c1384b4cdf4b1a9968f785214fa8d3a347bbad461675acb503e"},
+		{"claude", map[string]string{"platform": "nomad", "isolation": "container", "gpu": "a100"}, "wherry.pool.pool-a.tasks.claude.e5bf4f20966c9016ba8c6d304637749604d2d1536b7a4c915e9109146cdd4618"},
+		{"claude", nil, "wherry.pool.pool-a.tasks.claude.98038b25280788a45a2f06c209513024c99adee81c6416b691b4b5872db7e027"},
 	} {
-		if got := SignatureTopic("pool-a", fixture.terms, fixture.agent, fixture.labels); got != fixture.topic {
-			t.Errorf("routable %v, agent %s: topic %s, want %s", fixture.terms.Routable, fixture.agent, got, fixture.topic)
+		if got := SignatureTopic("pool-a", fixture.agent, fixture.labels); got != fixture.topic {
+			t.Errorf("agent %s, labels %v: topic %s, want %s", fixture.agent, fixture.labels, got, fixture.topic)
 		}
 		if pool, agent, ok := wire.ParseTaskTopic(fixture.topic); !ok || pool != "pool-a" || agent != fixture.agent {
 			t.Errorf("%s parses to %q, %q, %v", fixture.topic, pool, agent, ok)
@@ -85,7 +97,7 @@ func TestSignatureTopic(t *testing.T) {
 		}
 	}
 	long := strings.Repeat("p", 32)
-	topic := SignatureTopic(long, terms, strings.Repeat("a", 32), labels)
+	topic := SignatureTopic(long, strings.Repeat("a", 32), labels)
 	if len(topic) != 148 {
 		t.Fatalf("topic at the longest names is %d characters, want 148", len(topic))
 	}
@@ -107,20 +119,6 @@ func TestSignatureTopic(t *testing.T) {
 	} {
 		if pool, agent, ok := wire.ParseTaskTopic(refused); ok {
 			t.Errorf("%q parses to %q, %q", refused, pool, agent)
-		}
-	}
-}
-
-func TestRoutableLabelsAreUniqueValidKeys(t *testing.T) {
-	terms := modelTerms()
-	terms.Routable = []string{"platform", "example.com/isolation"}
-	if err := validateTerms(terms); err != nil {
-		t.Fatalf("valid routable labels refused: %v", err)
-	}
-	for _, routable := range [][]string{{"platform", "platform"}, {"-platform"}, {""}, {"wherry.io/platform"}} {
-		terms.Routable = routable
-		if err := validateTerms(terms); err == nil || err.Error() != "routable labels must be unique valid label keys" {
-			t.Errorf("routable labels %q: %v", routable, err)
 		}
 	}
 }

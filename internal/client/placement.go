@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
 
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
@@ -14,23 +13,10 @@ import (
 
 // resolvePlacement chooses, among live advertisements in the tenant's entitled pools, a signature: a pool and the task
 // topic of a ready profile launching the agent with labels satisfying selector. Labels come from the operator's config
-// record, never the advertisement. A pool whose routable labels lack a selector key is excluded before any advertisement
-// is read. Each member adds its spare capacity once to every signature it offers, an estimate: capacity is shared across
-// a member's signatures. A default-agent signature wins, then the greatest spare, then the lowest topic. When nothing
-// places the task, every entitled pool excluded by a key is that refusal, else a pool's terms refusing its model is
-// that refusal.
+// record, never the advertisement. Each member adds its spare capacity once to every signature it offers, an estimate:
+// capacity is shared across a member's signatures. A default-agent signature wins, then the greatest spare, then the
+// lowest topic. When nothing places the task and a pool's terms refuse its model, the error is that refusal.
 func resolvePlacement(state operator.State, tenant, agent, model string, selector []wire.Requirement, ads map[string]wire.Advertisement) (string, wire.Placement, string, error) {
-	var pools []string
-	excluded := map[string]error{}
-	for _, pool := range slices.Sorted(maps.Keys(state.Entitlements[tenant])) {
-		if !state.Entitlements[tenant][pool] {
-			continue
-		}
-		pools = append(pools, pool)
-		if err := routable(state.Pools[pool], pool, selector); err != nil {
-			excluded[pool] = err
-		}
-	}
 	type signature struct {
 		pool, topic string
 		placement   wire.Placement
@@ -41,7 +27,7 @@ func resolvePlacement(state operator.State, tenant, agent, model string, selecto
 	var refused error
 	for _, receiver := range slices.Sorted(maps.Keys(ads)) {
 		ad := ads[receiver]
-		if !state.Entitlements[tenant][ad.Pool] || excluded[ad.Pool] != nil {
+		if !state.Entitlements[tenant][ad.Pool] {
 			continue
 		}
 		terms, config := state.Pools[ad.Pool], state.Receivers[receiver]
@@ -56,7 +42,7 @@ func resolvePlacement(state operator.State, tenant, agent, model string, selecto
 				if index < 0 || config.Profiles[index].Agent != candidate.Name || !wire.Satisfies(selector, config.Profiles[index].Labels) {
 					continue
 				}
-				topic := operator.SignatureTopic(ad.Pool, terms, candidate.Name, config.Profiles[index].Labels)
+				topic := operator.SignatureTopic(ad.Pool, candidate.Name, config.Profiles[index].Labels)
 				key := [2]string{ad.Pool, topic}
 				if offered[key] {
 					continue
@@ -78,31 +64,9 @@ func resolvePlacement(state operator.State, tenant, agent, model string, selecto
 		}
 	}
 	if chosen == nil {
-		if len(pools) > 0 && len(excluded) == len(pools) {
-			return "", wire.Placement{}, "", excluded[pools[0]]
-		}
 		return "", wire.Placement{}, "", cmp.Or(refused, ErrNoMatchingReceiver)
 	}
 	return chosen.pool, chosen.placement, chosen.topic, nil
-}
-
-// routable refuses a selector naming a key outside pool's routable labels.
-func routable(terms operator.Terms, pool string, selector []wire.Requirement) error {
-	var keys []string
-	for _, requirement := range selector {
-		if !slices.Contains(terms.Routable, requirement.Key) {
-			keys = append(keys, requirement.Key)
-		}
-	}
-	if len(keys) == 0 {
-		return nil
-	}
-	allowed := "none"
-	if len(terms.Routable) > 0 {
-		allowed = strings.Join(slices.Sorted(slices.Values(terms.Routable)), ", ")
-	}
-	slices.Sort(keys)
-	return fmt.Errorf("%w: selector keys %s are not routable in pool %s (routable: %s)", ErrInvalidInput, strings.Join(keys, ", "), pool, allowed)
 }
 
 // candidates returns the agents, by preference, whose terms in pool hold model: the default agent first. An empty model
@@ -161,7 +125,7 @@ func profileInlineLimit(state operator.State, pool, topic string, ads map[string
 		config := state.Receivers[receiver]
 		for _, offer := range ad.Offers {
 			index := slices.IndexFunc(config.Profiles, func(profile operator.ProfileSettings) bool { return profile.Name == offer.Profile })
-			if index < 0 || operator.SignatureTopic(pool, state.Pools[pool], config.Profiles[index].Agent, config.Profiles[index].Labels) != topic {
+			if index < 0 || operator.SignatureTopic(pool, config.Profiles[index].Agent, config.Profiles[index].Labels) != topic {
 				continue
 			}
 			if offer.InlineLimit > 0 && (limit == 0 || offer.InlineLimit < limit) {

@@ -2,6 +2,10 @@ package receiver
 
 import (
 	"crypto/ecdsa"
+	"errors"
+	"io"
+	"log"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -9,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
@@ -32,32 +38,24 @@ func signatureProfile(name, agent string, labels map[string]string) operator.Pro
 	return operator.ProfileSettings{Name: name, Plugin: "fake", Agent: agent, Labels: labels, Config: map[string]any{}}
 }
 
-// signatureFixture is a fixture of capacity whose profiles, in order, are ready fakes under terms with routable; f.plugin
-// is the first profile's.
-func signatureFixture(t *testing.T, capacity int64, routable []string, profiles ...operator.ProfileSettings) fixture {
+// signatureFixture is a fixture of capacity whose profiles, in order, are ready fakes; f.plugin is the first profile's.
+func signatureFixture(t *testing.T, capacity int64, profiles ...operator.ProfileSettings) fixture {
 	t.Helper()
-	terms := testTerms()
-	terms.Routable = routable
 	config := testConfig(testReceiver)
 	config.Capacity, config.Profiles = capacity, profiles
 	plugins := map[string]*fakePlugin{}
 	for _, profile := range profiles {
 		plugins[profile.Name] = &fakePlugin{stream: resultStream}
 	}
-	f := newFixtureWith(t, resultStream, terms, config, plugins)
+	f := newFixtureWith(t, resultStream, testTerms(), config, plugins)
 	f.plugin = plugins[profiles[0].Name]
 	return f
 }
 
-// twoSignatures is a signatureFixture of capacity with profiles a and b, launching claude with sig=a and sig=b, routable
-// on sig unless unrouted.
-func twoSignatures(t *testing.T, capacity int64, unrouted bool) fixture {
+// twoSignatures is a signatureFixture of capacity with profiles a and b, launching claude with sig=a and sig=b.
+func twoSignatures(t *testing.T, capacity int64) fixture {
 	t.Helper()
-	routable := []string{"sig"}
-	if unrouted {
-		routable = nil
-	}
-	return signatureFixture(t, capacity, routable,
+	return signatureFixture(t, capacity,
 		signatureProfile("a", "claude", map[string]string{"sig": "a"}), signatureProfile("b", "claude", map[string]string{"sig": "b"}))
 }
 
@@ -73,16 +71,15 @@ func (f fixture) ready(t *testing.T, profile string, ready bool) {
 	}
 }
 
-// profileTopic is the signature topic of the receiver's profile under the pool's terms as the receiver holds them.
+// profileTopic is the signature topic of the receiver's profile.
 func (f fixture) profileTopic(t *testing.T, profile string) string {
 	t.Helper()
-	state, _, _ := f.receiver.snapshot()
 	index := slices.IndexFunc(f.receiver.profiles, func(named Named) bool { return named.Name == profile })
 	if index < 0 {
 		t.Fatalf("no profile %s", profile)
 	}
 	named := f.receiver.profiles[index]
-	return operator.SignatureTopic(testPool, state.Pools[testPool], named.Agent, named.Labels)
+	return operator.SignatureTopic(testPool, named.Agent, named.Labels)
 }
 
 // topics sorts topics, as a subscription is.
@@ -150,7 +147,7 @@ func (f fixture) claimedRuns(t *testing.T) []string {
 // Idle refresh: an idle slot subscribed to {A} closes its poll and reopens with {A, B} when B becomes ready while A
 // stays ready, then with {B} when A goes unready; a task on A's topic then reaches no member until A is ready again.
 func TestIdleSlotReopensWithTheReadyProfilesTopics(t *testing.T) {
-	f := twoSignatures(t, 1, false)
+	f := twoSignatures(t, 1)
 	topicA, topicB := f.profileTopic(t, "a"), f.profileTopic(t, "b")
 	f.ready(t, "b", false)
 	f.run(t, f.ctx)
@@ -185,38 +182,10 @@ func TestIdleSlotReopensWithTheReadyProfilesTopics(t *testing.T) {
 	f.await(t, testRun("run-a"), func(task wire.Task) bool { return task.Status.State == wire.TaskStateCompleted })
 }
 
-// Idle refresh at a refresh: a pool apply that makes sig routable splits one signature into two; the idle slot reopens
-// with both new topics once the receiver's refresh reads the terms.
-func TestIdleSlotReopensWhenRoutableLabelsChange(t *testing.T) {
-	f := twoSignatures(t, 1, true)
-	unrouted := f.profileTopic(t, "a")
-	if b := f.profileTopic(t, "b"); b != unrouted {
-		t.Fatalf("profiles a and b on %s and %s with no routable labels, want one signature", unrouted, b)
-	}
-	f.run(t, f.ctx)
-	first := f.awaitMember(t, 10*time.Second, []string{unrouted})
-	terms := testTerms()
-	terms.Routable = []string{"sig"}
-	if err := f.service.PoolApply(f.ctx, testPool, terms, false); err != nil {
-		t.Fatal(err)
-	}
-	for {
-		state, _, _ := f.receiver.snapshot()
-		if slices.Equal(state.Pools[testPool].Routable, terms.Routable) {
-			break
-		}
-		if f.ctx.Err() != nil {
-			t.Fatal("the receiver never refreshed the terms")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	f.awaitReopen(t, first, time.Now(), topics(f.profileTopic(t, "a"), f.profileTopic(t, "b")))
-}
-
 // Idle refresh, a delayed close: the replacement joins only once the old client's close, held here at its leave, has
 // completed.
 func TestIdleSlotReopensOnlyAfterTheOldClientCloses(t *testing.T) {
-	f := twoSignatures(t, 1, false)
+	f := twoSignatures(t, 1)
 	topicA, topicB := f.profileTopic(t, "a"), f.profileTopic(t, "b")
 	f.ready(t, "b", false)
 	f.run(t, f.ctx)
@@ -251,8 +220,8 @@ func TestIdleSlotReopensOnlyAfterTheOldClientCloses(t *testing.T) {
 // Compaction: two ready profiles of one signature put its topic in the subscription once; one of them going unready
 // leaves the subscription, and the poll, as they are.
 func TestOneSignatureOfTwoProfilesIsSubscribedOnce(t *testing.T) {
-	f := signatureFixture(t, 1, []string{"sig"},
-		signatureProfile("a", "claude", map[string]string{"sig": "a", "gpu": "a100"}), signatureProfile("a2", "claude", map[string]string{"sig": "a", "gpu": "h100"}))
+	f := signatureFixture(t, 1,
+		signatureProfile("a", "claude", map[string]string{"sig": "a", "gpu": "a100"}), signatureProfile("a2", "claude", map[string]string{"sig": "a", "gpu": "a100"}))
 	topic := f.profileTopic(t, "a")
 	if other := f.profileTopic(t, "a2"); other != topic {
 		t.Fatalf("profiles a and a2 on %s and %s, want one signature", topic, other)
@@ -282,7 +251,7 @@ func TestOneSignatureOfTwoProfilesIsSubscribedOnce(t *testing.T) {
 // Renewal during refresh: a held run keeps its share client and renews through a readiness change while the idle slot's
 // client closes and a new one joins with the new subscription.
 func TestHeldRunRenewsWhileTheIdleSlotReopens(t *testing.T) {
-	f := twoSignatures(t, 2, false)
+	f := twoSignatures(t, 2)
 	topicA, topicB := f.profileTopic(t, "a"), f.profileTopic(t, "b")
 	f.plugin.endDelay = 6 * time.Second
 	f.ready(t, "b", false)
@@ -374,11 +343,10 @@ func TestSlotRejoinsPromptlyAfterAStartFailure(t *testing.T) {
 // reason on the pool's events.
 func TestTaskOnAnotherAgentsTopicIsRejected(t *testing.T) {
 	f := newFixture(t, resultStream)
-	state, _, _ := f.receiver.snapshot()
 	for name, topic := range map[string]string{
-		"another agent":     operator.SignatureTopic(testPool, state.Pools[testPool], "codex", nil),
+		"another agent":     operator.SignatureTopic(testPool, "codex", nil),
 		"no signature":      "wherry.pool." + testPool + ".tasks",
-		"another pool's":    operator.SignatureTopic("pool-b", state.Pools[testPool], "codex", nil),
+		"another pool's":    operator.SignatureTopic("pool-b", "codex", nil),
 		"uppercase digest":  strings.ToUpper(f.tasksTopic()),
 		"a dotted agent ok": operator.PoolTasksPrefix(testPool) + "claude.x." + strings.Repeat("a", 64),
 	} {
@@ -403,94 +371,50 @@ func TestTaskOnAnotherAgentsTopicIsRejected(t *testing.T) {
 	f.admitted(t, f.submit(t, f.host, func(task *wire.Submission) { named(task, "run-own") }))
 }
 
-// Admission, selector: two members alone in turn, whose profiles share a signature and differ on an informational
-// label, each reject a task whose selector names that label, whatever the operator, and a task naming a label no profile
-// carries, with the one fixed reason.
-func TestSelectorOnAnInformationalLabelIsRejectedByEveryMember(t *testing.T) {
-	selectors := map[string][]wire.Requirement{
-		"In":            {in("gpu", "a100")},
-		"NotIn":         {notIn("gpu", "a100")},
-		"Exists":        {exists("gpu")},
-		"DoesNotExist":  {doesNotExist("gpu")},
-		"missing label": {in("zone", "dc1")},
+// Admission, selector: a signed task on the signature's own topic whose selector the signature's labels do not satisfy,
+// as a host that computed the wrong topic would publish it, is rejected with the fixed reason on the pool's events and
+// never released, whatever the operator.
+func TestTaskWhoseSelectorItsTopicsSignatureFailsIsRejected(t *testing.T) {
+	f := signatureFixture(t, 1, signatureProfile("nomad", "claude", map[string]string{"platform": "nomad"}))
+	topic := f.profileTopic(t, "nomad")
+	// Positive control: a selector the signature satisfies is admitted on its topic.
+	matching := f.submit(t, f.host, func(task *wire.Submission) {
+		named(task, "run-matching")
+		task.Wherry.Placement.Selector = []wire.Requirement{in("platform", "nomad")}
+	})
+	if matching.Topic != topic {
+		t.Fatalf("the matching task on %s, want the signature's %s", matching.Topic, topic)
 	}
-	var signature string
-	for _, gpu := range []string{"a100", "h100"} {
-		t.Run("gpu="+gpu, func(t *testing.T) {
-			f := signatureFixture(t, 1, []string{"platform"}, signatureProfile("nomad", "claude", map[string]string{"platform": "nomad", "gpu": gpu}))
-			topic := f.profileTopic(t, "nomad")
-			if signature != "" && topic != signature {
-				t.Fatalf("the members' profiles are on %s and %s, want one signature", signature, topic)
-			}
-			signature = topic
-			// Positive control: a selector on the routable key is admitted.
-			f.admitted(t, f.submit(t, f.host, func(task *wire.Submission) {
-				named(task, "run-routable")
-				task.Wherry.Placement.Selector = []wire.Requirement{in("platform", "nomad")}
-			}))
-			for name, selector := range selectors {
-				record := f.submit(t, f.host, func(task *wire.Submission) {
-					named(task, "run-"+strings.ReplaceAll(strings.ToLower(name), " ", "-"))
-					task.Wherry.Placement.Selector = selector
-				})
-				onSignature := *record
-				onSignature.Topic = topic
-				f.rejected(t, &onSignature, "selector names a non-routable key")
+	f.admitted(t, matching)
+	for name, selector := range map[string][]wire.Requirement{
+		"In":           {in("platform", "kubernetes")},
+		"NotIn":        {notIn("platform", "nomad")},
+		"Exists":       {exists("gpu")},
+		"DoesNotExist": {doesNotExist("platform")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := "run-" + strings.ToLower(name)
+			record := f.submit(t, f.host, func(task *wire.Submission) {
+				named(task, run)
+				task.Wherry.Placement.Selector = selector
+			})
+			wrong := *record
+			wrong.Topic = topic
+			f.rejected(t, &wrong, "selector does not match the task topic")
+			if !slices.ContainsFunc(f.eventStatuses(t), func(status wire.RunStatus) bool {
+				return status.Wherry.Run == testRun(run) && status.Wherry.Kind == "rejected" &&
+					status.StatusUpdate.Status.Message.Parts[0].Text == "selector does not match the task topic"
+			}) {
+				t.Fatal("no rejection with the fixed reason on the pool's events")
 			}
 		})
-	}
-}
-
-// Custodian and re-key: once Routable narrows, a run claimed while its selector's key was routable is refused its open
-// RefusedNotClaimant and skipped by the re-key scan, while an unclaimed task with the same selector is rejected at
-// admission; a run with no selector, the control, is served and re-keyed.
-func TestNarrowedRoutableRefusesTheClaimedRunAndRejectsTheUnclaimed(t *testing.T) {
-	f := signatureFixture(t, 1, []string{"zone"}, signatureProfile("nomad", "claude", map[string]string{"zone": "dc1"}))
-	f.quiet()
-	zoned := func(task *wire.Submission) { task.Wherry.Placement.Selector = []wire.Requirement{in("zone", "dc1")} }
-	claimed := f.submit(t, f.host, func(task *wire.Submission) { named(task, "run-claimed"); zoned(task) })
-	control := f.submit(t, f.host, func(task *wire.Submission) { named(task, "run-control") })
-	unclaimed := f.submit(t, f.host, func(task *wire.Submission) { named(task, "run-unclaimed"); zoned(task) })
-	f.statusAs(t, claimed, testReceiver, f.receiver.signing, "claimed", 1)
-	f.statusAs(t, control, testReceiver, f.receiver.signing, "claimed", 1)
-	terms := testTerms()
-	if err := f.service.PoolApply(f.ctx, testPool, terms, false); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.receiver.refresh(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	if answer := f.answered(t, f.openAs(t, control, testReceiver, f.receiver.signing, 1)); answer != "wrap" {
-		t.Fatalf("the control's open answered %q, want served", answer)
-	}
-	if answer := f.answered(t, f.openAs(t, claimed, testReceiver, f.receiver.signing, 1)); answer != wire.RefusedNotClaimant {
-		t.Fatalf("the claimed run's open answered %q, want %s", answer, wire.RefusedNotClaimant)
-	}
-	successor, err := newAttemptKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	current := wire.PoolKey{KeyID: signed.KeyThumbprint(&successor.PublicKey), Key: jose.JSONWebKey{Key: &successor.PublicKey}}
-	if err := f.receiver.handOver(f.ctx, current); err != nil {
-		t.Fatal(err)
-	}
-	rekeys := f.rekeys(t)
-	if len(rekeys[testRun("run-control")]) != 1 || len(rekeys[testRun("run-claimed")]) != 0 {
-		t.Fatalf("re-key wraps %d for the control and %d for the claimed run, want 1 and 0", len(rekeys[testRun("run-control")]), len(rekeys[testRun("run-claimed")]))
-	}
-	f.rejected(t, unclaimed, "selector names a non-routable key")
-	// The two outcomes stay apart: the claimed run has a refusal and no rejection, the unclaimed one a rejection alone.
-	for _, status := range f.eventStatuses(t) {
-		if status.Wherry.Run == testRun("run-claimed") && status.Wherry.Kind == "rejected" {
-			t.Fatal("the claimed run was rejected, want its open refused")
-		}
 	}
 }
 
 // Unready release: a task on a profile's topic fetched after the profile went unready is released, logged, with no
 // record and no metric; the slot's replacement client subscribes to the ready profile's topic alone.
 func TestTaskForAnUnreadyProfileIsReleased(t *testing.T) {
-	f := twoSignatures(t, 1, false)
+	f := twoSignatures(t, 1)
 	topicA, topicB := f.profileTopic(t, "a"), f.profileTopic(t, "b")
 	record := f.submit(t, f.host, nil)
 	if record.Topic != topicA {
@@ -532,7 +456,7 @@ func TestClaimedRunPastItsBoundWithItsProfileUnreadyEnds(t *testing.T) {
 		"pending job": {pluginsdk.JobPending, false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := signatureFixture(t, 1, []string{"zone"}, signatureProfile("nomad", "claude", map[string]string{"zone": "dc1"}))
+			f := signatureFixture(t, 1, signatureProfile("nomad", "claude", map[string]string{"zone": "dc1"}))
 			f.plugin.job = c.job
 			startBy := time.Now().Add(time.Second).Unix()
 			record := f.submit(t, f.host, func(task *wire.Submission) {
@@ -574,7 +498,7 @@ func TestClaimedRunPastItsBoundWithItsProfileUnreadyEnds(t *testing.T) {
 // Copy check: a byte-for-byte copy of the claimed record at the same offset on another signature topic is acknowledged
 // without a claim.
 func TestCopyOnAnotherTopicAtTheSameOffsetIsAcknowledged(t *testing.T) {
-	f := twoSignatures(t, 1, false)
+	f := twoSignatures(t, 1)
 	topicB := f.profileTopic(t, "b")
 	record := f.submit(t, f.host, nil)
 	f.statusAs(t, record, testReceiver, f.receiver.signing, "claimed", 1)
@@ -593,33 +517,37 @@ func TestCopyOnAnotherTopicAtTheSameOffsetIsAcknowledged(t *testing.T) {
 	}
 }
 
-// Custodian read: the custodian reads the task at the claim's own topic, not one recomputed from terms that changed
-// since, and refuses a claim naming a topic outside the pool's prefix.
+// Custodian read: once receiver apply changes the claimant's labels, the custodian reads the task at the claim's own
+// topic, not one recomputed from the claimant's recorded profile, and refuses a claim naming a topic outside the pool's
+// prefix.
 func TestCustodianReadsTheClaimsTopic(t *testing.T) {
-	f := signatureFixture(t, 1, nil, signatureProfile("nomad", "claude", map[string]string{"zone": "dc1"}))
+	f := newFixture(t, resultStream)
 	f.quiet()
+	claimant := f.peer(t, "receiver-b")
 	record := f.submit(t, f.host, nil)
-	f.statusAs(t, record, testReceiver, f.receiver.signing, "claimed", 1)
-	terms := testTerms()
-	terms.Routable = []string{"zone"}
-	if err := f.service.PoolApply(f.ctx, testPool, terms, false); err != nil {
+	f.statusAs(t, record, "receiver-b", claimant.signing, "claimed", 1)
+	config := testConfig("receiver-b")
+	config.Profiles[0].Labels = map[string]string{"zone": "dc2"}
+	if _, err := f.service.ReceiverUpdate(f.ctx, config, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatal(err)
 	}
-	if recomputed := f.profileTopic(t, "nomad"); recomputed == record.Topic {
-		t.Fatalf("the profile's topic %s did not move with the terms", recomputed)
+	state, _, _ := f.receiver.snapshot()
+	recorded := state.Receivers["receiver-b"].Profiles[0]
+	if recomputed := operator.SignatureTopic(testPool, recorded.Agent, recorded.Labels); recomputed == record.Topic {
+		t.Fatalf("the claimant's recorded profile is still on %s after its labels changed", recomputed)
 	}
-	if answer := f.answered(t, f.openAs(t, record, testReceiver, f.receiver.signing, 1)); answer != "wrap" {
+	if answer := f.answered(t, f.openAs(t, record, "receiver-b", claimant.signing, 1)); answer != "wrap" {
 		t.Fatalf("open answered %q, want served from the claim's topic; logs:\n%s", answer, f.logs.String())
 	}
 	other := f.submit(t, f.host, func(task *wire.Submission) { named(task, "run-elsewhere") })
 	status := f.receiver.status(f.parse(t, other), wire.TaskHash(other.Value), 1, "claimed", taskStatus(wire.TaskStateWorking, ""), nil)
 	elsewhere := operator.PoolTasksPrefix("pool-b") + "claude." + strings.Repeat("a", 64)
-	status.Wherry.Receiver, status.Wherry.TaskTopic, status.Wherry.TaskOffset = testReceiver, elsewhere, &other.Offset
-	f.produce(t, operator.PoolEventsTopic(testPool), string(other.Key), must(t)(wire.SignRecord(status, f.receiver.signing)))
-	if answer := f.answered(t, f.openAs(t, other, testReceiver, f.receiver.signing, 1)); answer != wire.RefusedNotClaimant {
+	status.Wherry.Receiver, status.Wherry.TaskTopic, status.Wherry.TaskOffset = "receiver-b", elsewhere, &other.Offset
+	f.produce(t, operator.PoolEventsTopic(testPool), string(other.Key), must(t)(wire.SignRecord(status, claimant.signing)))
+	if answer := f.answered(t, f.openAs(t, other, "receiver-b", claimant.signing, 1)); answer != wire.RefusedNotClaimant {
 		t.Fatalf("open of a claim on %s answered %q, want %s", elsewhere, answer, wire.RefusedNotClaimant)
 	}
 }
@@ -702,7 +630,7 @@ func omitFromListings(f fixture, taskTopics ...string) func() {
 // re-keyed. A re-keyed task on the second topic opens under the successor's key.
 func TestRekeyScanReadsEveryTaskTopic(t *testing.T) {
 	three := func(t *testing.T) (fixture, []*kgo.Record, wire.PoolKey, *ecdsa.PrivateKey) {
-		f := signatureFixture(t, 1, []string{"sig"},
+		f := signatureFixture(t, 1,
 			signatureProfile("a", "claude", map[string]string{"sig": "a"}), signatureProfile("b", "claude", map[string]string{"sig": "b"}),
 			signatureProfile("c", "claude", map[string]string{"sig": "c"}))
 		f.quiet()
@@ -789,4 +717,123 @@ func TestRekeyScanReadsEveryTaskTopic(t *testing.T) {
 			t.Fatalf("logs:\n%s", f.logs.String())
 		}
 	})
+}
+
+// Label change: receiver apply changing a profile's label creates the new signature's topic before the record that
+// moves the profile; the receiver ends its held run, exits and, restarted, subscribes to the new topic alone. A task its
+// host queued on the old topic is never fetched there and its host reports it unclaimed at task_started_by, unless a
+// second member shares the old signature, which serves it.
+func TestLabelChangeMovesTheReceiversSignature(t *testing.T) {
+	for name, shared := range map[string]bool{"alone": false, "a peer shares the old signature": true} {
+		t.Run(name, func(t *testing.T) { labelChange(t, shared) })
+	}
+}
+
+func labelChange(t *testing.T, shared bool) {
+	f := signatureFixture(t, 1, signatureProfile("nomad", "claude", map[string]string{"zone": "a"}))
+	f.plugin.endDelay = 4 * time.Second
+	topicA := f.profileTopic(t, "nomad")
+	topicB := operator.SignatureTopic(testPool, "claude", map[string]string{"zone": "b"})
+	done := f.run(t, f.ctx)
+	// The held run fills the receiver's one slot, so the task its host queues next waits on A's topic.
+	f.submit(t, f.host, nil)
+	for {
+		if _, _, follows, _ := f.plugin.counts(); follows > 0 {
+			break
+		}
+		if f.ctx.Err() != nil {
+			t.Fatalf("the held run never started; logs:\n%s", f.logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Setenv("WHERRY_TEST_TOKEN", testToken)
+	kafka, err := kgo.NewClient(append(f.service.Operator.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kafka.Close()
+	host, err := client.NewHost(kafka, f.host, operator.TenantPrincipal(testTenant, testHost), filepath.Join(t.TempDir(), "host"),
+		map[string]credential.Source{credentialName: {Env: "WHERRY_TEST_TOKEN"}}, nil, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	startBy := time.Now().Add(15 * time.Second)
+	queued, err := host.Submit(f.ctx, client.SubmitInput{Agent: "claude", Prompt: "hello", StartBy: startBy, EndBy: startBy.Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(f.records(t, topicA), func(record *kgo.Record) bool { return string(record.Key) == queued.RunID }) {
+		t.Fatalf("the queued task is not on A's topic %s", topicA)
+	}
+	// At the creation of B's topic the record still holds the profile on A.
+	var created, recordFirst atomic.Bool
+	f.cluster.ControlKey(kmsg.CreateTopics.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		f.cluster.KeepControl()
+		if created.Load() || !slices.ContainsFunc(request.(*kmsg.CreateTopicsRequest).Topics, func(topic kmsg.CreateTopicsRequestTopic) bool { return topic.Topic == topicB }) {
+			return nil, nil, false
+		}
+		created.Store(true)
+		f.cluster.SleepControl(func() {
+			state, err := f.service.LoadState(f.ctx)
+			recordFirst.Store(err != nil || state.Receivers[testReceiver].Profiles[0].Labels["zone"] != "a")
+		})
+		return nil, nil, false
+	})
+	config := testConfig(testReceiver)
+	config.Profiles = []operator.ProfileSettings{signatureProfile("nomad", "claude", map[string]string{"zone": "b"})}
+	if _, err := f.service.ReceiverUpdate(f.ctx, config, false); err != nil {
+		t.Fatal(err)
+	}
+	if !created.Load() || recordFirst.Load() {
+		t.Fatalf("B's topic created %t, after the record %t; want it created while the record still held A", created.Load(), recordFirst.Load())
+	}
+	// The receiver ends its held run and exits on the new record; it keeps no poll on A's topic.
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrConfigChanged) {
+			t.Fatalf("Run returned %v, want ErrConfigChanged", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatalf("the receiver kept running on its old signature; members %+v; logs:\n%s", f.members.all(), f.logs.String())
+	}
+	restartedAt := time.Now()
+	runUntilStopped(t, f.ctx, restarted(t, f.receiver))
+	f.awaitMember(t, 10*time.Second, []string{topicB})
+	for _, member := range f.members.all() {
+		if member.joined.After(restartedAt) && !slices.Equal(member.topics, []string{topicB}) || member.left.IsZero() && slices.Contains(member.topics, topicA) {
+			t.Fatalf("a member subscribed to %v after the restart, want B's topic alone; members %+v", member.topics, f.members.all())
+		}
+	}
+	if shared {
+		peerPlugin := &fakePlugin{stream: resultStream}
+		f.plugins["peer"] = peerPlugin
+		peerConfig := testConfig("receiver-c")
+		peerConfig.Profiles = []operator.ProfileSettings{signatureProfile("peer", "claude", map[string]string{"zone": "a"})}
+		peer, _ := f.newReceiver(t, peerConfig)
+		peer.logger = f.receiver.logger
+		runUntilStopped(t, f.ctx, peer)
+		awaited, err := host.Await(f.ctx, queued.RunID, 30*time.Second)
+		if err != nil || awaited.Status.State != wire.TaskStateCompleted {
+			t.Fatalf("await %+v, %v; want the queued task served by the peer on the old signature; logs:\n%s", awaited, err, f.logs.String())
+		}
+		if dispatches, _, _, _ := peerPlugin.counts(); dispatches != 1 {
+			t.Fatalf("the peer dispatched %d times, want the queued task once", dispatches)
+		}
+		if dispatches, _, _, _ := f.plugin.counts(); dispatches != 1 {
+			t.Fatalf("the moved profile dispatched %d times, want the held run alone", dispatches)
+		}
+		return
+	}
+	passed(startBy.Unix())
+	awaited, err := host.Await(f.ctx, queued.RunID, 30*time.Second)
+	if err != nil || awaited.Unclaimed == "" || awaited.Status.State != wire.TaskStateSubmitted {
+		t.Fatalf("await %+v, %v; want the queued task reported unclaimed at task_started_by", awaited, err)
+	}
+	if slices.Contains(f.claimedRuns(t), queued.RunID) {
+		t.Fatalf("the task queued on the old signature was claimed; logs:\n%s", f.logs.String())
+	}
+	if dispatches, _, _, _ := f.plugin.counts(); dispatches != 1 {
+		t.Fatalf("the moved profile dispatched %d times, want the held run alone", dispatches)
+	}
 }

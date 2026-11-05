@@ -564,7 +564,7 @@ func TestLabelKeyGrammar(t *testing.T) {
 		strings.Repeat("a", 63), strings.Repeat("a", 253) + "/x",
 		"notwherry.io/x", "wherry.io.example/x", "wherry.iox/x",
 	} {
-		if !ValidLabelKey(key) {
+		if !validKey(key) {
 			t.Errorf("valid key %q rejected", key)
 		}
 	}
@@ -574,7 +574,7 @@ func TestLabelKeyGrammar(t *testing.T) {
 		"Lab/x", "lab_x/y", "-lab/x", "lab-/x", "lab..x/y", ".lab/x",
 		"wherry.io/x", "sub.wherry.io/x", "a.b.wherry.io/x",
 	} {
-		if ValidLabelKey(key) {
+		if validKey(key) {
 			t.Errorf("invalid key %q accepted", key)
 		}
 	}

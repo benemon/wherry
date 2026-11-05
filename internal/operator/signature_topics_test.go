@@ -46,16 +46,9 @@ func zoned(receiver string, zones ...string) ReceiverConfig {
 	return config
 }
 
-// zoneTerms are modelTerms routing on zone.
-func zoneTerms() Terms {
-	terms := modelTerms()
-	terms.Routable = []string{"zone"}
-	return terms
-}
-
-// zoneTopic is the signature topic, under zoneTerms, of a pool-a profile in zone.
+// zoneTopic is the signature topic of a pool-a profile in zone.
 func zoneTopic(zone string) string {
-	return SignatureTopic("pool-a", zoneTerms(), "agent-a", map[string]string{"zone": zone})
+	return SignatureTopic("pool-a", "agent-a", map[string]string{"zone": zone})
 }
 
 // listedTaskTopics lists pool's task topics, failing t on an error.
@@ -114,23 +107,23 @@ func onAppend(t *testing.T, kind string, check func(Record)) {
 	}
 }
 
-// receiver apply creates every signature topic of the receiver's profiles under the pool's recorded terms, configured,
-// before the record that names them; a failed create records nothing, an update creates a new profile's topic before
-// its record and a dry run creates none.
+// receiver apply creates every signature topic of the receiver's profiles, configured, before the record that names
+// them; a failed create records nothing, an update creates a new or changed profile's topic before its record and a dry
+// run creates none.
 func TestReceiverApplyCreatesSignatureTopicsBeforeTheRecord(t *testing.T) {
 	cluster, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolApply(ctx, "pool-a", zoneTerms(), false); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	bounds, err := poolRetention(withDefaults(zoneTerms()))
+	bounds, err := poolRetention(withDefaults(modelTerms()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var checked []string
 	onAppend(t, "receiver", func(record Record) {
-		topics := profileTopics(*record.Config, zoneTerms())
+		topics := profileTopics(*record.Config)
 		assertTaskTopics(t, service, bounds.tasks, topics...)
 		checked = append(checked, topics...)
 	})
@@ -181,12 +174,23 @@ func TestReceiverApplyCreatesSignatureTopicsBeforeTheRecord(t *testing.T) {
 	if !slices.Contains(checked, zoneTopic("d")) {
 		t.Fatalf("topics checked at the update's record %v; want %s", checked, zoneTopic("d"))
 	}
+	// A changed label is a new signature, whose topic exists before the record that moves the profile to it.
+	changed := zoned("receiver-a", "a", "b", "d")
+	changed.Profiles[1].Labels = map[string]string{"zone": "e"}
+	checked = nil
+	if _, err := service.ReceiverUpdate(ctx, changed, false); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(checked, zoneTopic("e")) {
+		t.Fatalf("topics checked at the changed profile's record %v; want %s", checked, zoneTopic("e"))
+	}
 }
 
-// pool apply changing the routable labels creates every live receiver's signature topic under the new terms before the
-// record, none for an ended receiver, and converges every topic under the prefix; its dry run creates nothing, a new pool
-// none, and a re-apply of the same terms creates a deleted topic.
-func TestPoolApplyCreatesSignatureTopicsBeforeTheRecord(t *testing.T) {
+// pool apply recreates, before its record, the deleted signature topic of a recorded profile of a receiver whose
+// membership has not ended, and none for an ended receiver; a retention change converges every topic under the prefix,
+// an old signature's included; its dry run creates nothing, a new pool none, and a re-apply of the same terms recreates
+// a deleted topic before its no-update path.
+func TestPoolApplyCreatesMissingSignatureTopicsBeforeTheRecord(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
@@ -204,63 +208,81 @@ func TestPoolApplyCreatesSignatureTopicsBeforeTheRecord(t *testing.T) {
 	if _, err := service.appendChecked(ctx, []byte("end.receiver-c"), Record{Kind: "end", Receiver: "receiver-c"}); err != nil {
 		t.Fatal(err)
 	}
-	// Under modelTerms zone is informational, so the three profiles share one signature.
-	unrouted := modelTopic("pool-a")
-	if topics := listedTaskTopics(t, service, "pool-a"); !slices.Equal(topics, []string{unrouted}) {
-		t.Fatalf("task topics %v, want %s alone", topics, unrouted)
-	}
-	setTopicConfig(t, service, unrouted, "cleanup.policy", "compact")
-	if err := service.PoolApply(ctx, "pool-a", zoneTerms(), true); err != nil {
+	// receiver-b's profile moves to zone b2, so zone b's topic is an old signature's that no recorded profile has.
+	moved := zoned("receiver-b", "b")
+	moved.Profiles[0].Labels = map[string]string{"zone": "b2"}
+	if _, err := service.ReceiverUpdate(ctx, moved, false); err != nil {
 		t.Fatal(err)
 	}
-	if topics := listedTaskTopics(t, service, "pool-a"); !slices.Equal(topics, []string{unrouted}) {
-		t.Fatalf("pool apply --dry-run left task topics %v, want %s alone", topics, unrouted)
+	want := slices.Sorted(slices.Values([]string{zoneTopic("a"), zoneTopic("b"), zoneTopic("b2"), zoneTopic("c")}))
+	if topics := listedTaskTopics(t, service, "pool-a"); !slices.Equal(topics, want) {
+		t.Fatalf("task topics %v, want %v", topics, want)
 	}
-	bounds, err := poolRetention(withDefaults(zoneTerms()))
+	deleteTopics(t, service, zoneTopic("a"), zoneTopic("c"))
+	setTopicConfig(t, service, zoneTopic("b"), "cleanup.policy", "compact")
+	longer := modelTerms()
+	longer.StartByLimitMS = Millis((10 * 24 * time.Hour).Milliseconds())
+	if err := service.PoolApply(ctx, "pool-a", longer, true); err != nil {
+		t.Fatal(err)
+	}
+	if topics := listedTaskTopics(t, service, "pool-a"); slices.Contains(topics, zoneTopic("a")) {
+		t.Fatalf("pool apply --dry-run left task topics %v, want %s still missing", topics, zoneTopic("a"))
+	}
+	bounds, err := poolRetention(withDefaults(longer))
 	if err != nil {
 		t.Fatal(err)
 	}
-	recorded := false
+	recorded := 0
 	onAppend(t, "pool", func(Record) {
-		recorded = true
-		assertTaskTopics(t, service, bounds.tasks, zoneTopic("a"), zoneTopic("b"))
+		recorded++
+		assertTaskTopics(t, service, bounds.tasks, zoneTopic("a"))
 		if slices.Contains(listedTaskTopics(t, service, "pool-a"), zoneTopic("c")) {
 			t.Errorf("pool apply created ended receiver-c's topic %s", zoneTopic("c"))
 		}
 	})
-	if err := service.PoolApply(ctx, "pool-a", zoneTerms(), false); err != nil {
+	if err := service.PoolApply(ctx, "pool-a", longer, false); err != nil {
 		t.Fatal(err)
 	}
-	if !recorded {
-		t.Fatal("pool apply recorded no terms")
+	if recorded != 1 {
+		t.Fatalf("pool apply recorded its terms %d times, want once", recorded)
 	}
-	want := slices.Sorted(slices.Values([]string{unrouted, zoneTopic("a"), zoneTopic("b")}))
+	want = slices.Sorted(slices.Values([]string{zoneTopic("a"), zoneTopic("b"), zoneTopic("b2")}))
 	if topics := listedTaskTopics(t, service, "pool-a"); !slices.Equal(topics, want) {
 		t.Fatalf("task topics %v, want %v", topics, want)
 	}
 	assertTaskTopics(t, service, bounds.tasks, want...)
-	responses, err := kadm.NewClient(service.Operator).DeleteTopics(ctx, zoneTopic("b"))
+	// The same terms again record nothing, yet recreate a topic deleted since.
+	deleteTopics(t, service, zoneTopic("b2"))
+	if err := service.Check(ctx); err == nil || !strings.Contains(err.Error(), zoneTopic("b2")+" is missing") {
+		t.Fatalf("check without %s = %v; want it named missing", zoneTopic("b2"), err)
+	}
+	if err := service.PoolApply(ctx, "pool-a", longer, false); err != nil {
+		t.Fatal(err)
+	}
+	if recorded != 1 {
+		t.Fatalf("pool apply of the same terms recorded them, %d records in all; want the no-update path", recorded)
+	}
+	assertTaskTopics(t, service, bounds.tasks, zoneTopic("b2"))
+	if err := service.Check(ctx); err != nil {
+		t.Fatalf("check after the re-apply: %v", err)
+	}
+	if err := service.PoolApply(ctx, "pool-b", modelTerms(), false); err != nil {
+		t.Fatal(err)
+	}
+	if topics := listedTaskTopics(t, service, "pool-b"); len(topics) != 0 {
+		t.Fatalf("a new pool has task topics %v, want none", topics)
+	}
+}
+
+// deleteTopics deletes topics, failing t on an error.
+func deleteTopics(t *testing.T, service *Service, topics ...string) {
+	t.Helper()
+	responses, err := kadm.NewClient(service.Operator).DeleteTopics(context.Background(), topics...)
 	if err == nil {
 		err = responses.Error()
 	}
 	if err != nil {
 		t.Fatal(err)
-	}
-	if err := service.Check(ctx); err == nil || !strings.Contains(err.Error(), zoneTopic("b")+" is missing") {
-		t.Fatalf("check without %s = %v; want it named missing", zoneTopic("b"), err)
-	}
-	if err := service.PoolApply(ctx, "pool-a", zoneTerms(), false); err != nil {
-		t.Fatal(err)
-	}
-	assertTaskTopics(t, service, bounds.tasks, zoneTopic("b"))
-	if err := service.Check(ctx); err != nil {
-		t.Fatalf("check after the re-apply: %v", err)
-	}
-	if err := service.PoolApply(ctx, "pool-b", zoneTerms(), false); err != nil {
-		t.Fatal(err)
-	}
-	if topics := listedTaskTopics(t, service, "pool-b"); len(topics) != 0 {
-		t.Fatalf("a new pool has task topics %v, want none", topics)
 	}
 }
 
@@ -376,7 +398,7 @@ func TestPoolTaskTopicsListsThePrefixAndFailsOnAnError(t *testing.T) {
 	cluster, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	topics := []string{zoneTopic("b"), zoneTopic("a"), SignatureTopic("pool-b", modelTerms(), "agent-a", nil), PoolEventsTopic("pool-a"), "wherry.pool.pool-a.tasks"}
+	topics := []string{zoneTopic("b"), zoneTopic("a"), SignatureTopic("pool-b", "agent-a", nil), PoolEventsTopic("pool-a"), "wherry.pool.pool-a.tasks"}
 	if err := service.createTopics(ctx, "-1", topics...); err != nil {
 		t.Fatal(err)
 	}

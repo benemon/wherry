@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 
@@ -39,23 +40,20 @@ func validateNames(values ...string) error {
 	return nil
 }
 
-// Signature is the canonical encoding of a profile's signature under terms: the agent, then key=value for each key of
-// terms' routable labels, sorted, that labels carries, each element followed by a line feed. Neither = nor a line feed
-// is in a label key or value.
-func Signature(terms Terms, agent string, labels map[string]string) string {
+// Signature is the canonical encoding of a profile's signature: the agent, then key=value for each of labels' keys in
+// sorted order, each element followed by a line feed. Neither = nor a line feed is in a label key or value.
+func Signature(agent string, labels map[string]string) string {
 	var encoding strings.Builder
 	encoding.WriteString(agent + "\n")
-	for _, key := range slices.Sorted(slices.Values(terms.Routable)) {
-		if value, ok := labels[key]; ok {
-			encoding.WriteString(key + "=" + value + "\n")
-		}
+	for _, key := range slices.Sorted(maps.Keys(labels)) {
+		encoding.WriteString(key + "=" + labels[key] + "\n")
 	}
 	return encoding.String()
 }
 
 // SignatureTopic is the task topic of a profile's signature in pool: the agent in clear and the SHA-256 of the
 // signature's encoding in lowercase hex.
-func SignatureTopic(pool string, terms Terms, agent string, labels map[string]string) string {
-	sum := sha256.Sum256([]byte(Signature(terms, agent, labels)))
+func SignatureTopic(pool, agent string, labels map[string]string) string {
+	sum := sha256.Sum256([]byte(Signature(agent, labels)))
 	return PoolTasksPrefix(pool) + agent + "." + hex.EncodeToString(sum[:])
 }

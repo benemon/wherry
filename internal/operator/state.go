@@ -62,9 +62,6 @@ type Terms struct {
 	VCS []string `json:"vcs,omitzero" yaml:"vcs"`
 	// Storage is the pool's S3 lane; nil allows no S3 input or output.
 	Storage *Storage `json:"storage,omitzero" yaml:"storage"`
-	// Routable holds the label keys a profile's signature carries and a selector may name; a profile's other labels are
-	// informational, never routed on and never selectable.
-	Routable []string `json:"routable_labels,omitzero" yaml:"routable_labels"`
 	// RecordLimit is the tasks topic's record limit as pool apply reads it from the broker; no pool file sets it.
 	RecordLimit int64 `json:"record_limit,omitzero" yaml:"-"`
 }
@@ -818,11 +815,6 @@ func validateTerms(terms Terms) error {
 	if terms.Storage != nil {
 		if err := terms.Storage.validate(); err != nil {
 			return err
-		}
-	}
-	for i, key := range terms.Routable {
-		if !wire.ValidLabelKey(key) || slices.Contains(terms.Routable[:i], key) {
-			return errors.New("routable labels must be unique valid label keys")
 		}
 	}
 	for _, agent := range terms.Agents {

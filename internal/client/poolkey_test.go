@@ -764,8 +764,8 @@ func TestResubmitHelperProcess(t *testing.T) {
 	fmt.Printf("replacement=%s\n", replacement)
 }
 
-// signaturesFixture adds receiver-a, whose two claude profiles differ in region, a routable label, so they have two
-// signature topics, both ready; it returns them, eu's first.
+// signaturesFixture adds receiver-a, whose two claude profiles differ in region, so they have two signature topics, both
+// ready; it returns them, eu's first.
 func (f *fixture) signaturesFixture(t *testing.T) (*testReceiver, string, string) {
 	t.Helper()
 	profiles := []operator.ProfileSettings{
@@ -776,7 +776,7 @@ func (f *fixture) signaturesFixture(t *testing.T) (*testReceiver, string, string
 	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) {
 		ad.Offers = []wire.Offer{{Profile: "eu", Agent: "claude"}, {Profile: "us", Agent: "claude"}}
 	})
-	eu, us := operator.SignatureTopic("pool-a", testTerms(), "claude", profiles[0].Labels), operator.SignatureTopic("pool-a", testTerms(), "claude", profiles[1].Labels)
+	eu, us := operator.SignatureTopic("pool-a", "claude", profiles[0].Labels), operator.SignatureTopic("pool-a", "claude", profiles[1].Labels)
 	if eu == us {
 		t.Fatal("the two profiles share a signature")
 	}

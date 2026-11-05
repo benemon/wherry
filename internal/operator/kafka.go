@@ -172,10 +172,10 @@ func (service *Service) PoolApply(ctx context.Context, pool string, terms Terms,
 	if dryRun {
 		return service.onePartition(ctx, true, append(tasks, PoolEventsTopic(pool))...)
 	}
-	// Every live receiver's signature topics under the new terms exist before the record that routes to them; a new pool
-	// has no receivers.
+	// Every recorded profile of a receiver whose membership has not ended has its signature topic, recreated here when it
+	// was deleted, before the record and before the no-update path; a new pool has no receivers.
 	if exists {
-		if err := service.createTaskTopics(ctx, retention.tasks, signatureTopics(current, pool, terms)...); err != nil {
+		if err := service.createTaskTopics(ctx, retention.tasks, signatureTopics(current, pool)...); err != nil {
 			return err
 		}
 	}
@@ -290,23 +290,24 @@ func (service *Service) taskTopics(ctx context.Context, pool string) ([]string, 
 	return PoolTaskTopics(ctx, kadm.NewClient(service.Operator), pool)
 }
 
-// signatureTopics are the signature topics under terms of every recorded profile of pool's live receivers, sorted.
-func signatureTopics(state State, pool string, terms Terms) []string {
+// signatureTopics are the signature topics of every recorded profile of pool's receivers whose membership has not ended,
+// sorted.
+func signatureTopics(state State, pool string) []string {
 	var topics []string
 	for receiver, config := range state.Receivers {
 		if config.Pool == pool && !state.Ended[ReceiverPrincipal(receiver)] {
-			topics = append(topics, profileTopics(config, terms)...)
+			topics = append(topics, profileTopics(config)...)
 		}
 	}
 	slices.Sort(topics)
 	return slices.Compact(topics)
 }
 
-// profileTopics are the signature topics under terms of config's profiles, sorted.
-func profileTopics(config ReceiverConfig, terms Terms) []string {
+// profileTopics are the signature topics of config's profiles, sorted.
+func profileTopics(config ReceiverConfig) []string {
 	var topics []string
 	for _, profile := range config.Profiles {
-		topics = append(topics, SignatureTopic(config.Pool, terms, profile.Agent, profile.Labels))
+		topics = append(topics, SignatureTopic(config.Pool, profile.Agent, profile.Labels))
 	}
 	slices.Sort(topics)
 	return slices.Compact(topics)
@@ -481,14 +482,13 @@ func (service *Service) ReceiverUpdate(ctx context.Context, config ReceiverConfi
 	return asRecorded(record)
 }
 
-// receiverTaskTopics creates the signature topics of config's profiles under its pool's recorded terms.
+// receiverTaskTopics creates the signature topics of config's profiles with its pool's recorded retention.
 func (service *Service) receiverTaskTopics(ctx context.Context, state State, config ReceiverConfig) error {
-	terms := state.Pools[config.Pool]
-	retention, err := poolRetention(withDefaults(terms))
+	retention, err := poolRetention(withDefaults(state.Pools[config.Pool]))
 	if err != nil {
 		return err
 	}
-	return service.createTaskTopics(ctx, retention.tasks, profileTopics(config, terms)...)
+	return service.createTaskTopics(ctx, retention.tasks, profileTopics(config)...)
 }
 
 // asRecorded is record's configuration as a reader of the encoded record would decode it.
@@ -690,7 +690,8 @@ func (service *Service) Check(ctx context.Context) error {
 	return service.verifyACLs(ctx, append(ACLs(state), OperatorACLs...))
 }
 
-// checkSignatureTopics refuses a live receiver's profile whose signature topic under its pool's current terms is missing.
+// checkSignatureTopics refuses a profile of a receiver whose membership has not ended when its signature topic is
+// missing.
 func (service *Service) checkSignatureTopics(ctx context.Context, state State) error {
 	for _, pool := range slices.Sorted(maps.Keys(state.Pools)) {
 		tasks, err := service.taskTopics(ctx, pool)
@@ -703,7 +704,7 @@ func (service *Service) checkSignatureTopics(ctx context.Context, state State) e
 				continue
 			}
 			for _, profile := range config.Profiles {
-				if topic := SignatureTopic(pool, state.Pools[pool], profile.Agent, profile.Labels); !slices.Contains(tasks, topic) {
+				if topic := SignatureTopic(pool, profile.Agent, profile.Labels); !slices.Contains(tasks, topic) {
 					return fmt.Errorf("receiver %s profile %s: signature topic %s is missing; pool apply %s with the same terms creates it", receiver, profile.Name, topic, pool)
 				}
 			}

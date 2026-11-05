@@ -94,13 +94,13 @@ func (r *Receiver) claimGated() bool {
 	return r.state.Suspended[r.config.Pool] || len(r.offers) == 0 || len(r.pending) > 0
 }
 
-// subscription is the sorted signature topics of the ready profiles under the pool's recorded terms, each once. A
+// subscription is the sorted signature topics of the ready profiles, each once. A
 // profile joins only through its own signature. r.mu must be held.
 func (r *Receiver) subscription() []string {
 	var topics []string
 	for _, named := range r.profiles {
 		if slices.ContainsFunc(r.offers, func(offer wire.Offer) bool { return offer.Profile == named.Name }) {
-			topics = append(topics, operator.SignatureTopic(r.config.Pool, r.state.Pools[r.config.Pool], named.Agent, named.Labels))
+			topics = append(topics, operator.SignatureTopic(r.config.Pool, named.Agent, named.Labels))
 		}
 	}
 	slices.Sort(topics)
@@ -481,8 +481,8 @@ type runSubmission struct {
 	submitted time.Time
 }
 
-// inadmissible is the rejection reason of a submission that carries no envelope, whose bounds fail at its append time
-// under terms or whose selector names a key outside terms' routable labels, and empty for one that is admissible.
+// inadmissible is the rejection reason of a submission that carries no envelope or whose bounds fail at its append time
+// under terms, and empty for one that is admissible.
 func inadmissible(submission runSubmission, terms operator.Terms) string {
 	binding, appended := submission.record.Wherry, submission.submitted
 	switch {
@@ -496,8 +496,6 @@ func inadmissible(submission runSubmission, terms operator.Terms) string {
 		return "task_ended_by is before task_started_by"
 	case binding.TaskEndedBy > binding.TaskStartedBy+operator.MaxRunDurationMS/1000:
 		return "task_ended_by is past task_started_by plus the 6h run cap"
-	case slices.ContainsFunc(binding.Placement.Selector, func(requirement wire.Requirement) bool { return !slices.Contains(terms.Routable, requirement.Key) }):
-		return "selector names a non-routable key"
 	}
 	return ""
 }

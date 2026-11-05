@@ -556,9 +556,7 @@ func TestStartedJobRunsPastItsStartBy(t *testing.T) {
 }
 
 func TestPlacementSelectorSelectsAnOffer(t *testing.T) {
-	terms := testTerms()
-	terms.Routable = []string{"zone", "example.com/gpu"}
-	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
+	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	admitted := f.admitted(t, f.submit(t, f.host, func(task *wire.Submission) {
 		task.Wherry.Placement.Selector = []wire.Requirement{in("zone", "dc1"), exists("example.com/gpu")}
 	}))

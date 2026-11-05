@@ -178,7 +178,7 @@ func TestConstructedNamesDoNotAlias(t *testing.T) {
 	// A signature topic parses back to its own pool and agent, which no other split of the same names gives, and lies
 	// under its pool's prefix alone: no other derived name of either pool is under it.
 	for _, names := range [][2]string{{"a", "b-c"}, {"a-b", "c"}, {"tasks", "events"}} {
-		topic := SignatureTopic(names[0], Terms{}, names[1], nil)
+		topic := SignatureTopic(names[0], names[1], nil)
 		if pool, agent, ok := wire.ParseTaskTopic(topic); !ok || pool != names[0] || agent != names[1] {
 			t.Fatalf("%s parses to %q, %q, %t; want %v", topic, pool, agent, ok, names)
 		}
@@ -668,8 +668,8 @@ func modelConfig(receiver, pool string) ReceiverConfig {
 		PluginSHA256: map[string]string{"fake": strings.Repeat("ab", 32)}}
 }
 
-// modelTopic is the signature topic, under modelTerms, of modelConfig's one profile in pool.
-func modelTopic(pool string) string { return SignatureTopic(pool, modelTerms(), "agent-a", nil) }
+// modelTopic is the signature topic of modelConfig's one profile in pool.
+func modelTopic(pool string) string { return SignatureTopic(pool, "agent-a", nil) }
 
 func modelState(t *testing.T) State {
 	terms := modelTerms()

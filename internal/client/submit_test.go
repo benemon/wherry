@@ -305,16 +305,3 @@ func TestSubmitNamesARecordTheBrokerRefuses(t *testing.T) {
 		t.Fatalf("submit = %v; want the record size and a remedy", err)
 	}
 }
-
-// Submit refuses a selector naming a key outside the pool's routable labels and publishes nothing.
-func TestSubmitRefusesANonRoutableSelectorKey(t *testing.T) {
-	f := newFixture(t)
-	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
-	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: []wire.Requirement{{Key: "gpu", Operator: wire.OpExists}}, Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
-	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "selector keys gpu are not routable in pool pool-a (routable: region, runtime)") {
-		t.Fatalf("submit = %v; want the key refused", err)
-	}
-	if n := f.tasksEnd(t, "pool-a"); n != 0 {
-		t.Fatalf("pool tasks hold %d records after a refused selector", n)
-	}
-}

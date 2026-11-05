@@ -605,7 +605,8 @@ func (r *Receiver) lookup(ctx context.Context, events poolEvents, request *wire.
 	if events.task(request.Run) != request.TaskHash {
 		return nil, nil, wire.RefusedNotClaimant, nil
 	}
-	// The claim's own topic is read, never one recomputed from the current terms, and only within the pool's prefix.
+	// The claim's own topic is read, never one recomputed from the claimant's recorded profiles, and only within the
+	// pool's prefix.
 	if !strings.HasPrefix(claim.Wherry.TaskTopic, operator.PoolTasksPrefix(r.config.Pool)) {
 		return nil, nil, wire.RefusedNotClaimant, nil
 	}

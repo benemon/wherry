@@ -20,10 +20,9 @@ import (
 func (s shareTest) signatureTopics(t *testing.T, zones ...string) []string {
 	t.Helper()
 	terms := modelTerms()
-	terms.Routable = []string{"zone"}
 	var topics []string
 	for _, zone := range zones {
-		topics = append(topics, SignatureTopic(s.pool, terms, "agent-a", map[string]string{"zone": zone}))
+		topics = append(topics, SignatureTopic(s.pool, "agent-a", map[string]string{"zone": zone}))
 	}
 	bounds, err := poolRetention(withDefaults(terms))
 	if err != nil {
@@ -198,7 +197,7 @@ func TestReceiversAndHostsCannotCreateTopicsOnRealBroker(t *testing.T) {
 	if err := host.ProduceSync(ctx, &kgo.Record{Topic: modelTopic(f.poolA), Value: []byte("existing")}).FirstErr(); err != nil {
 		t.Fatalf("host produce to %s: %v", modelTopic(f.poolA), err)
 	}
-	missing := SignatureTopic(f.poolA, Terms{Routable: []string{"zone"}}, "agent-a", map[string]string{"zone": "nowhere"})
+	missing := SignatureTopic(f.poolA, "agent-a", map[string]string{"zone": "nowhere"})
 	for _, principal := range []string{ReceiverPrincipal(f.receiverA), TenantPrincipal(f.tenantA, f.hostA1)} {
 		created, err := kadm.NewClient(f.connect(t, principal)).CreateTopics(ctx, 1, -1, nil, missing)
 		if err == nil {

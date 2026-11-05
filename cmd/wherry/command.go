@@ -236,8 +236,8 @@ func runReceivers(ctx context.Context, client *busclient.Host, args []string, st
 			if !receiver.LastAdvertised.IsZero() {
 				age = max(time.Since(receiver.LastAdvertised), 0).Round(time.Second).String()
 			}
-			fmt.Fprintf(stdout, "receiver=%s pool=%s routable=%s capacity=%d in_flight=%d advertisement_age=%s status=%s\n",
-				receiver.ReceiverID, receiver.Pool, strings.Join(receiver.Routable, ","), receiver.Capacity, receiver.InFlight, age, receiver.Status)
+			fmt.Fprintf(stdout, "receiver=%s pool=%s capacity=%d in_flight=%d advertisement_age=%s status=%s\n",
+				receiver.ReceiverID, receiver.Pool, receiver.Capacity, receiver.InFlight, age, receiver.Status)
 			for _, profile := range receiver.Profiles {
 				fmt.Fprintf(stdout, "  profile=%s plugin=%s agent=%s ready=%t labels=%s", profile.Name, profile.Plugin, profile.Agent, profile.Ready, wire.TermsText(profile.Labels))
 				if profile.InlineLimit > 0 {

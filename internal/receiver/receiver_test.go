@@ -788,7 +788,7 @@ func (f fixture) submit(t *testing.T, key ed25519.PrivateKey, mutate func(*wire.
 	return f.produce(t, f.taskTopic(t, submission.Wherry.Placement), submission.Wherry.Run, must(t)(wire.SignRecord(submission, key)))
 }
 
-// taskTopic is the signature topic, under the pool's recorded terms, of the receiver's first profile that launches
+// taskTopic is the signature topic of the receiver's first profile that launches
 // placement's agent with labels satisfying its selector, as a host places a task. When none does, as for a signed task
 // that bypassed placement, it is the agent's signature with no labels, which this creates as another member's
 // receiver apply would.
@@ -809,14 +809,12 @@ func (f fixture) taskTopic(t *testing.T, placement wire.Placement) string {
 
 // signatureTopic is taskTopic without the topic's creation, and reports whether a profile places the task.
 func (f fixture) signatureTopic(placement wire.Placement) (string, bool) {
-	state, _, _ := f.receiver.snapshot()
-	terms := state.Pools[testPool]
 	for _, named := range f.receiver.profiles {
 		if named.Agent == placement.Agent && wire.Satisfies(placement.Selector, named.Labels) {
-			return operator.SignatureTopic(testPool, terms, named.Agent, named.Labels), true
+			return operator.SignatureTopic(testPool, named.Agent, named.Labels), true
 		}
 	}
-	return operator.SignatureTopic(testPool, terms, placement.Agent, nil), false
+	return operator.SignatureTopic(testPool, placement.Agent, nil), false
 }
 
 // tasksTopic is the signature topic of a claude task with no selector, where testSubmission's tasks go.
@@ -1542,7 +1540,7 @@ type multiFixture struct {
 }
 
 // newMultiFixture configures profiles lab, cloud and edge, in that order, for one agent with the labels
-// their operator declares, each routable, so each profile is a signature of its own: lab and cloud both carry
+// their operator declares, so each profile is a signature of its own: lab and cloud both carry
 // class=cpu, only cloud an accelerator, edge class=arm. The agent's credential is answered.
 func newMultiFixture(t *testing.T) multiFixture {
 	t.Helper()
@@ -1553,9 +1551,7 @@ func newMultiFixture(t *testing.T) multiFixture {
 		{Name: "cloud", Plugin: "fake", Agent: "claude", Labels: map[string]string{"site": "cloud", "class": "cpu", "example.com/accelerator": "gpu"}, Config: map[string]any{}},
 		{Name: "edge", Plugin: "fake", Agent: "claude", Labels: map[string]string{"site": "edge", "class": "arm"}, Config: map[string]any{}},
 	}
-	terms := testTerms()
-	terms.Routable = []string{"site", "class", "example.com/accelerator"}
-	m.fixture = newFixtureWith(t, resultStream, terms, config, map[string]*fakePlugin{"lab": m.lab, "cloud": m.cloud, "edge": m.edge})
+	m.fixture = newFixtureWith(t, resultStream, testTerms(), config, map[string]*fakePlugin{"lab": m.lab, "cloud": m.cloud, "edge": m.edge})
 	return m
 }
 

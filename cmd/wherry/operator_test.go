@@ -204,7 +204,7 @@ func TestReceiverShowPrintsWholeNumbersAsIntegers(t *testing.T) {
 	var out bytes.Buffer
 	config := operator.ReceiverConfig{Capacity: 1, Profiles: []operator.ProfileSettings{{Name: "p", Plugin: "nomad", Agent: "claude",
 		Config: map[string]any{"memory_mb": float64(1 << 20), "ratio": 0.5, "sizes": []any{float64(2048000)}}}}}
-	if err := showReceiver(&out, config, operator.Terms{}); err != nil {
+	if err := showReceiver(&out, config); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"memory_mb: 1048576", "ratio: 0.5", "- 2048000"} {
@@ -218,8 +218,7 @@ func TestReceiverShowAndDryRun(t *testing.T) {
 	service := operatorEnv(t)
 	localFixture(t, ".", "receiver-a")
 	ctx := context.Background()
-	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
-		Routable: []string{"tier", "platform"}}
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}

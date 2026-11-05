@@ -605,12 +605,12 @@ func (r *Receiver) advertise(ctx context.Context) error {
 }
 
 // offerFor returns this receiver's first profile, in record order, that is in its current offers and whose signature
-// topic under the pool's recorded terms is topic.
+// topic is topic.
 func (r *Receiver) offerFor(topic string) (Named, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, named := range r.profiles {
-		if operator.SignatureTopic(r.config.Pool, r.state.Pools[r.config.Pool], named.Agent, named.Labels) == topic &&
+		if operator.SignatureTopic(r.config.Pool, named.Agent, named.Labels) == topic &&
 			slices.ContainsFunc(r.offers, func(offer wire.Offer) bool { return offer.Profile == named.Name }) {
 			return named, true
 		}

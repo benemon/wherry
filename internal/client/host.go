@@ -114,10 +114,8 @@ type CancelResult struct {
 // Receiver describes a receiver of a pool the tenant is entitled to, its profiles as wherry.operator records them and its
 // latest advertisement.
 type Receiver struct {
-	ReceiverID string `json:"receiver_id"`
-	Pool       string `json:"pool"`
-	// Routable is the label keys a selector may name in the pool, from its terms.
-	Routable       []string  `json:"routable_labels"`
+	ReceiverID     string    `json:"receiver_id"`
+	Pool           string    `json:"pool"`
 	Profiles       []Profile `json:"profiles"`
 	Capacity       int64     `json:"capacity"`
 	InFlight       int64     `json:"in_flight"`
@@ -690,7 +688,7 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 			continue
 		}
 		receiver := Receiver{
-			ReceiverID: id, Pool: config.Pool, Routable: slices.Sorted(slices.Values(v.state.Pools[config.Pool].Routable)), Profiles: []Profile{}, Status: "silent",
+			ReceiverID: id, Pool: config.Pool, Profiles: []Profile{}, Status: "silent",
 		}
 		ended := v.state.Ended[operator.ReceiverPrincipal(id)]
 		ad, advertised := ads[id]

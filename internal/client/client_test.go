@@ -91,7 +91,6 @@ func testTerms() operator.Terms {
 		},
 		DefaultAgent:  "claude",
 		DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
-		Routable: []string{"runtime", "region"},
 	}
 }
 
@@ -612,28 +611,32 @@ func TestSubmitIgnoresInlineLimitOfOfferOutsideSelector(t *testing.T) {
 	}
 }
 
-// The profile inline limit is the smallest among the advertised profiles, of any age, whose signature is the chosen
-// one: a profile of the same signature that differs in an informational label counts, one of another signature does not.
+// Inline limit by signature: the profile inline limit is the smallest among the advertised profiles, of any age, whose
+// signature is the chosen one; another matching signature's lower limit does not constrain it.
 func TestProfileInlineLimitIsTheChosenSignatures(t *testing.T) {
 	state := operator.NewState()
 	state.Pools["pool-a"] = testTerms()
 	eu := map[string]string{"runtime": "podman", "region": "eu"}
+	// one and two have the same agent and labels, one signature; us has another that the same selector matches.
 	profiles := []operator.ProfileSettings{
-		{Name: "a100", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu", "gpu": "a100"}},
-		{Name: "h100", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu", "gpu": "h100"}},
+		{Name: "one", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}},
+		{Name: "two", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}},
 		{Name: "us", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "us"}},
 	}
 	for _, id := range []string{"receiver-a", "receiver-b"} {
 		state.Receivers[id] = operator.ReceiverConfig{Receiver: id, Pool: "pool-a", Profiles: profiles}
 	}
-	topic := operator.SignatureTopic("pool-a", state.Pools["pool-a"], "claude", eu)
-	ads := map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", AtMS: time.Now().UnixMilli(),
-		Offers: []wire.Offer{{Profile: "a100", InlineLimit: 5000}, {Profile: "h100", InlineLimit: 100}, {Profile: "us", InlineLimit: 50}}}}
-	if limit, profile := profileInlineLimit(state, "pool-a", topic, ads); limit != 100 || profile != "h100" {
-		t.Fatalf("limit %d of %q, want h100's 100", limit, profile)
+	topic := operator.SignatureTopic("pool-a", "claude", eu)
+	if other := operator.SignatureTopic("pool-a", "claude", profiles[2].Labels); other == topic {
+		t.Fatal("us shares eu's signature")
 	}
-	ads["receiver-b"] = wire.Advertisement{Receiver: "receiver-b", Pool: "pool-a", AtMS: time.Now().Add(-time.Hour).UnixMilli(), Offers: []wire.Offer{{Profile: "a100", InlineLimit: 70}}}
-	if limit, profile := profileInlineLimit(state, "pool-a", topic, ads); limit != 70 || profile != "a100" {
+	ads := map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", AtMS: time.Now().UnixMilli(),
+		Offers: []wire.Offer{{Profile: "one", InlineLimit: 5000}, {Profile: "two", InlineLimit: 100}, {Profile: "us", InlineLimit: 50}}}}
+	if limit, profile := profileInlineLimit(state, "pool-a", topic, ads); limit != 100 || profile != "two" {
+		t.Fatalf("limit %d of %q, want two's 100, not the other signature's 50", limit, profile)
+	}
+	ads["receiver-b"] = wire.Advertisement{Receiver: "receiver-b", Pool: "pool-a", AtMS: time.Now().Add(-time.Hour).UnixMilli(), Offers: []wire.Offer{{Profile: "one", InlineLimit: 70}}}
+	if limit, profile := profileInlineLimit(state, "pool-a", topic, ads); limit != 70 || profile != "one" {
 		t.Fatalf("limit %d of %q, want the stale advertisement's 70", limit, profile)
 	}
 }
@@ -797,7 +800,6 @@ func TestResolvePlacement(t *testing.T) {
 	terms := testTerms()
 	terms.Agents = append(terms.Agents, operator.AgentTerms{Name: "gemini"})
 	terms.DefaultAgent = "codex"
-	terms.Routable = []string{"runtime", "region", "gpu"}
 	// The declared agent order is claude, codex, gemini; codex is the default. Equal spare capacity leaves the lowest
 	// topic, which sorts by agent first.
 	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{
@@ -877,7 +879,7 @@ func TestResolvePlacementSumsSpareBySignatureThenLowestTopic(t *testing.T) {
 	member("receiver-e", "pool-a", 4, 2, "lab")   // spare 2, the same signature as receiver-c: 5 together
 	member("receiver-b", "pool-a", 9, 0, "cloud") // most spare, but its ready profile launches codex
 	member("receiver-a", "pool-c", 9, 0, "lab")   // most spare, pool not entitled
-	poolA, poolB := operator.SignatureTopic("pool-a", testTerms(), "claude", nil), operator.SignatureTopic("pool-b", testTerms(), "claude", nil)
+	poolA, poolB := operator.SignatureTopic("pool-a", "claude", nil), operator.SignatureTopic("pool-b", "claude", nil)
 	pool, placement, topic, err := resolvePlacement(state, "tenant-a", "claude", "", nil, ads)
 	if err != nil || pool != "pool-a" || placement.Agent != "claude" || topic != poolA {
 		t.Fatalf("placed %q %#v on %s, %v; want pool-a's claude signature, spare 5 over pool-b's 4", pool, placement, topic, err)
@@ -898,10 +900,10 @@ func TestResolvePlacementAddsAMembersSpareOncePerSignature(t *testing.T) {
 	state := operator.NewState()
 	state.Pools["pool-a"], state.Pools["pool-b"] = terms, terms
 	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true, "pool-b": true}
-	// receiver-a's two profiles differ only in an informational label, so they share one signature.
+	// receiver-a's two profiles have the same agent and labels, so they share one signature.
 	state.Receivers["receiver-a"] = operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{
 		{Name: "one", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "gpu": "a100"}},
-		{Name: "two", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "gpu": "h100"}},
+		{Name: "two", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "gpu": "a100"}},
 	}}
 	state.Receivers["receiver-b"] = operator.ReceiverConfig{Receiver: "receiver-b", Pool: "pool-b", Profiles: []operator.ProfileSettings{
 		{Name: "one", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman"}},
@@ -915,59 +917,160 @@ func TestResolvePlacementAddsAMembersSpareOncePerSignature(t *testing.T) {
 	}
 }
 
-// A selector key outside a pool's routable labels excludes the pool before any advertisement counts: with every entitled
-// pool excluded the refusal names the first, sorted; with one left the task places there; a model refusal then outranks
-// no matching receiver.
-func TestResolvePlacementRefusesNonRoutableSelectorKeys(t *testing.T) {
-	routable := testTerms()
-	none := testTerms()
-	none.Routable = nil
+// Host signature placement: receiver-a offers S1 then S2 for claude, receiver-b S2 alone, receiver-d S1 alone, so S2's
+// aggregate spare is the greatest; no selector and a partial selector both choose S2, whatever the order of a member's
+// profiles and offers. A nonmatching signature with more spare, an unready one, and an unentitled pool's take no part;
+// equal aggregate spare chooses the lowest topic; two profiles of one signature on one member count its spare once.
+func TestResolvePlacementBySignature(t *testing.T) {
+	s1 := map[string]string{"runtime": "podman", "region": "eu"}
+	s2 := map[string]string{"runtime": "podman", "region": "us"}
+	topic1, topic2 := operator.SignatureTopic("pool-a", "claude", s1), operator.SignatureTopic("pool-a", "claude", s2)
+	type member struct {
+		id, pool string
+		spare    int64
+		profiles []operator.ProfileSettings
+		offers   []string
+	}
+	profile := func(name string, labels map[string]string) operator.ProfileSettings {
+		return operator.ProfileSettings{Name: name, Plugin: "nomad", Agent: "claude", Labels: labels}
+	}
+	place := func(t *testing.T, members []member, selector []wire.Requirement) string {
+		t.Helper()
+		state := operator.NewState()
+		state.Pools["pool-a"], state.Pools["pool-c"] = testTerms(), testTerms()
+		state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true}
+		ads := map[string]wire.Advertisement{}
+		for _, m := range members {
+			state.Receivers[m.id] = operator.ReceiverConfig{Receiver: m.id, Pool: m.pool, Profiles: m.profiles}
+			ad := wire.Advertisement{Receiver: m.id, Pool: m.pool, Capacity: m.spare}
+			for _, offer := range m.offers {
+				ad.Offers = append(ad.Offers, wire.Offer{Profile: offer, Agent: "claude"})
+			}
+			ads[m.id] = ad
+		}
+		pool, placement, topic, err := resolvePlacement(state, "tenant-a", "", "", selector, ads)
+		if err != nil || pool != "pool-a" || placement.Agent != "claude" {
+			t.Fatalf("placed %q %#v on %s, %v; want pool-a's claude", pool, placement, topic, err)
+		}
+		return topic
+	}
+	reversed := func(members []member) []member {
+		var out []member
+		for _, m := range members {
+			m.profiles, m.offers = slices.Clone(m.profiles), slices.Clone(m.offers)
+			slices.Reverse(m.profiles)
+			slices.Reverse(m.offers)
+			out = append(out, m)
+		}
+		return out
+	}
+	partial := []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"podman"}}}
+	// S1: 3 + 1 = 4; S2: 3 + 2 = 5. A member counting only its first matching profile would leave S1 4 and S2 2.
+	members := []member{
+		{"receiver-a", "pool-a", 3, []operator.ProfileSettings{profile("one", s1), profile("two", s2)}, []string{"one", "two"}},
+		{"receiver-b", "pool-a", 2, []operator.ProfileSettings{profile("two", s2)}, []string{"two"}},
+		{"receiver-d", "pool-a", 1, []operator.ProfileSettings{profile("one", s1)}, []string{"one"}},
+		// More spare, but its labels fail the partial selector.
+		{"receiver-e", "pool-a", 9, []operator.ProfileSettings{profile("exec", map[string]string{"runtime": "exec"})}, []string{"exec"}},
+		// Recorded with S1's labels and more spare, but unready: it offers nothing.
+		{"receiver-f", "pool-a", 9, []operator.ProfileSettings{profile("one", s1)}, nil},
+		// Most spare, in a pool the tenant is not entitled to.
+		{"receiver-g", "pool-c", 20, []operator.ProfileSettings{profile("one", s1)}, []string{"one"}},
+	}
+	for name, test := range map[string]struct {
+		members  []member
+		selector []wire.Requirement
+	}{
+		"no selector":                {members, nil},
+		"partial selector":           {members, partial},
+		"reversed, no selector":      {reversed(members), nil},
+		"reversed, partial selector": {reversed(members), partial},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// With no selector, receiver-e's exec signature matches and has the most spare; drop it to keep S1 and S2 apart.
+			members := test.members
+			if test.selector == nil {
+				members = slices.DeleteFunc(slices.Clone(members), func(m member) bool { return m.id == "receiver-e" })
+			}
+			if topic := place(t, members, test.selector); topic != topic2 {
+				t.Fatalf("placed on %s, want S2 %s with aggregate spare 5", topic, topic2)
+			}
+		})
+	}
+	t.Run("a nonmatching signature with more spare", func(t *testing.T) {
+		if topic := place(t, members, partial); topic == operator.SignatureTopic("pool-a", "claude", map[string]string{"runtime": "exec"}) {
+			t.Fatalf("placed on the exec signature %s, which the selector does not match", topic)
+		}
+	})
+	// Equal aggregate spare: the lowest topic, whichever signature a member offers first.
+	lowest := min(topic1, topic2)
+	tied := slices.Clone(members[:3])
+	tied[1].spare = 1
+	for name, members := range map[string][]member{"in order": tied, "reversed": reversed(tied)} {
+		t.Run("tie "+name, func(t *testing.T) {
+			if topic := place(t, members, partial); topic != lowest {
+				t.Fatalf("placed on %s with S1 and S2 at spare 4, want the lowest topic %s", topic, lowest)
+			}
+		})
+	}
+	// Two profiles of S1 on receiver-c count its spare 2 once: S1 2 against S2 3. Counted per offer, S1 would have 4.
+	t.Run("duplicate profiles", func(t *testing.T) {
+		duplicates := []member{
+			{"receiver-b", "pool-a", 3, []operator.ProfileSettings{profile("two", s2)}, []string{"two"}},
+			{"receiver-c", "pool-a", 2, []operator.ProfileSettings{profile("one", s1), profile("again", s1)}, []string{"one", "again"}},
+		}
+		if topic := place(t, duplicates, partial); topic != topic2 {
+			t.Fatalf("placed on %s, want S2 %s: receiver-c's spare counts once for S1", topic, topic2)
+		}
+	})
+}
+
+// Submit places on the signature with the most live spare: a stale advertisement's capacity, declared for the profile
+// limit, counts for no signature.
+func TestSubmitCountsOnlyLiveSpareForASignature(t *testing.T) {
+	f := newFixture(t)
+	us := operator.ProfileSettings{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "us"}}
+	config := operator.ReceiverConfig{Receiver: "receiver-b", Pool: "pool-a", Capacity: 2, Profiles: []operator.ProfileSettings{us}, PluginSHA256: map[string]string{"nomad": strings.Repeat("ab", 32)}}
+	receiver := f.addReceiverConfig(t, config)
+	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity = 2 })
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity = 1 })
+	// A stale advertisement for eu's signature, with spare enough to win were it live.
+	f.addReceiver(t, "receiver-c", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) {
+		ad.Capacity, ad.AtMS = 50, time.Now().Add(-10*liveness).UnixMilli()
+	})
+	want := operator.SignatureTopic("pool-a", "claude", us.Labels)
+	result := f.submit(t, defaultSelector())
+	if topic := receiver.claim(t, f.ctx, result.RunID)[0].topic; topic != want {
+		t.Fatalf("placed on %s, want the us signature %s with live spare 2 over eu's 1", topic, want)
+	}
+}
+
+// Precedence when nothing places: a pool's recorded model refusal outranks no matching live receiver.
+func TestResolvePlacementPrefersAModelRefusalToNoMatchingReceiver(t *testing.T) {
+	modelled := testTerms()
+	modelled.Agents = slices.Clone(modelled.Agents)
+	modelled.Agents[0].Models = []string{"haiku"}
+	// pool-a holds opus, but no ready profile there matches the selector.
+	opus := testTerms()
+	opus.Agents = slices.Clone(opus.Agents)
+	opus.Agents[0].Models = []string{"opus"}
 	state := operator.NewState()
-	state.Pools["pool-a"], state.Pools["pool-b"] = routable, none
-	state.Entitlements["tenant-a"] = map[string]bool{"pool-b": true, "pool-a": true}
+	state.Pools["pool-a"], state.Pools["pool-b"] = opus, modelled
+	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true, "pool-b": true}
+	ads := map[string]wire.Advertisement{}
 	for id, pool := range map[string]string{"receiver-a": "pool-a", "receiver-b": "pool-b"} {
 		state.Receivers[id] = operator.ReceiverConfig{Receiver: id, Pool: pool, Profiles: []operator.ProfileSettings{
-			{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu", "gpu": "a100"}},
+			{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman"}},
 		}}
+		ads[id] = wire.Advertisement{Receiver: id, Pool: pool, Capacity: 1, Offers: []wire.Offer{{Profile: "lab"}}}
 	}
-	selector := func(keys ...string) []wire.Requirement {
-		var requirements []wire.Requirement
-		for _, key := range keys {
-			requirements = append(requirements, wire.Requirement{Key: key, Operator: wire.OpExists})
-		}
-		return requirements
+	unmatched := []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}
+	if _, _, _, err := resolvePlacement(state, "tenant-a", "claude", "opus", unmatched, ads); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "model opus is not in agent claude's models in pool pool-b") {
+		t.Fatalf("one pool unmatched, the other refusing the model: %v", err)
 	}
-	// No advertisement at all: the key refusal does not depend on one.
-	_, _, _, err := resolvePlacement(state, "tenant-a", "", "", selector("zone", "gpu", "runtime"), nil)
-	if !errors.Is(err, ErrInvalidInput) || err.Error() != "invalid input: selector keys gpu, zone are not routable in pool pool-a (routable: region, runtime)" {
-		t.Fatalf("every pool excluded: %v", err)
-	}
-	ads := map[string]wire.Advertisement{
-		"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Offers: []wire.Offer{{Profile: "lab"}}},
-		"receiver-b": {Receiver: "receiver-b", Pool: "pool-b", Capacity: 9, Offers: []wire.Offer{{Profile: "lab"}}},
-	}
-	if _, _, _, err := resolvePlacement(state, "tenant-a", "", "", selector("gpu"), ads); !errors.Is(err, ErrInvalidInput) || !strings.HasSuffix(err.Error(), "selector keys gpu are not routable in pool pool-a (routable: region, runtime)") {
-		t.Fatalf("every pool excluded, with live members: %v", err)
-	}
-	// pool-b, routing on nothing, is excluded by runtime; pool-a takes the task despite pool-b's spare capacity.
-	if pool, _, _, err := resolvePlacement(state, "tenant-a", "", "", selector("runtime"), ads); err != nil || pool != "pool-a" {
-		t.Fatalf("placed %q, %v; want pool-a, the pool routing on runtime", pool, err)
-	}
-	delete(state.Entitlements["tenant-a"], "pool-a")
-	if _, _, _, err := resolvePlacement(state, "tenant-a", "", "", selector("runtime"), ads); !errors.Is(err, ErrInvalidInput) || !strings.HasSuffix(err.Error(), "selector keys runtime are not routable in pool pool-b (routable: none)") {
-		t.Fatalf("a pool routing on nothing: %v", err)
-	}
-	// One pool excluded by a key and the other refusing the model: the model refusal.
-	state.Entitlements["tenant-a"]["pool-a"] = true
-	modelled := routable
-	modelled.Agents = slices.Clone(routable.Agents)
-	modelled.Agents[0].Models = []string{"haiku"}
-	state.Pools["pool-a"] = modelled
-	if _, _, _, err := resolvePlacement(state, "tenant-a", "claude", "opus", selector("runtime"), ads); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "model opus is not in agent claude's models in pool pool-a") {
-		t.Fatalf("one pool excluded, the other refusing the model: %v", err)
-	}
-	if _, _, _, err := resolvePlacement(state, "tenant-a", "claude", "", selector("region"), map[string]wire.Advertisement{}); !errors.Is(err, ErrNoMatchingReceiver) || err.Error() != "no matching live receiver" {
-		t.Fatalf("one pool excluded, the other with no live member: %v", err)
+	delete(state.Entitlements["tenant-a"], "pool-b")
+	if _, _, _, err := resolvePlacement(state, "tenant-a", "claude", "opus", unmatched, ads); !errors.Is(err, ErrNoMatchingReceiver) || err.Error() != "no matching live receiver" {
+		t.Fatalf("no pool matching and none refusing the model: %v", err)
 	}
 }
 
@@ -1296,7 +1399,7 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	if want := []string{"receiver-a", "receiver-c", "receiver-d", "receiver-b"}; len(order) != len(want) || order[0] != want[0] || order[1] != want[1] || order[2] != want[2] || order[3] != want[3] {
 		t.Fatalf("receivers %v, want %v", order, want)
 	}
-	if a := got["receiver-a"]; a.Status != "live" || a.Capacity != 3 || a.InFlight != 1 || !slices.Equal(a.Routable, []string{"region", "runtime"}) ||
+	if a := got["receiver-a"]; a.Status != "live" || a.Capacity != 3 || a.InFlight != 1 ||
 		!reflect.DeepEqual(a.Profiles, []Profile{
 			{Name: "lab", Plugin: "nomad", Agent: "claude", InlineLimit: 49152, Credentials: []Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true},
 			{Name: "cloud", Plugin: "aws", Agent: "codex", Credentials: []Credential{{Name: "openai", Env: "OPENAI_API_KEY", Configured: true}, {Name: "github-token", Env: "GH_TOKEN", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},

@@ -68,9 +68,6 @@ func TestPoolConfigExampleParses(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("directory config = %+v, want %+v", got, want)
 	}
-	if !slices.Equal(want.Routable, []string{"platform", "isolation", "host"}) {
-		t.Fatalf("routable_labels parsed as %v, want [platform isolation host]", want.Routable)
-	}
 	for _, fields := range []reflect.Value{reflect.ValueOf(want), reflect.ValueOf(want.Agents[0])} {
 		for i := range fields.NumField() {
 			if fields.Field(i).IsZero() && fields.Type().Field(i).Tag.Get("yaml") != "-" {

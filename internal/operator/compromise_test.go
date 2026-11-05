@@ -145,8 +145,8 @@ func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
-	// A second signature topic of the pool, as a receiver whose profile carries a routable label would have.
-	second := SignatureTopic("pool-a", Terms{Routable: []string{"zone"}}, "agent-a", map[string]string{"zone": "b"})
+	// A second signature topic of the pool, as a receiver whose profile carries a zone label would have.
+	second := SignatureTopic("pool-a", "agent-a", map[string]string{"zone": "b"})
 	if err := service.createTaskTopics(ctx, 86400000, second); err != nil {
 		t.Fatal(err)
 	}

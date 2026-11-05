@@ -1440,7 +1440,6 @@ func TestTaskAppendedAfterTheDrainScanIsResubmittedOnce(t *testing.T) {
 
 func taskAppendedAfterTheDrainScan(t *testing.T, emptyListing bool) {
 	terms := testTerms()
-	terms.Routable = []string{"zone"}
 	config := func(receiver string) operator.ReceiverConfig {
 		config := testConfig(receiver)
 		config.Profiles = []operator.ProfileSettings{

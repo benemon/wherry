@@ -223,16 +223,11 @@ func (b brokerPool) seal(t *testing.T, ctx context.Context, submission *wire.Sub
 	}
 }
 
-// tasksTopic is the signature topic, under the pool's recorded terms, of a receiver's testConfig profile, where a claude
-// task with no selector goes.
+// tasksTopic is the signature topic of a receiver's testConfig profile, where a claude task with no selector goes.
 func (b brokerPool) tasksTopic(t *testing.T, ctx context.Context) string {
 	t.Helper()
-	state, err := b.service.LoadState(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
 	profile := testConfig(b.receiver).Profiles[0]
-	return operator.SignatureTopic(b.pool, state.Pools[b.pool], profile.Agent, profile.Labels)
+	return operator.SignatureTopic(b.pool, profile.Agent, profile.Labels)
 }
 
 // groupMembers counts the members of the pool's share group whose client ID is clientID.
@@ -492,9 +487,7 @@ func TestUnreadyReleaseSpendsAtMostTwoDeliveriesOnRealBroker(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	b := newBrokerPool(t, ctx, address)
-	terms := testTerms()
-	terms.Routable = []string{"sig"}
-	b.applyTerms(t, ctx, terms)
+	b.applyTerms(t, ctx, testTerms())
 	config := testConfig(b.receiver)
 	config.Pool, config.Capacity = b.pool, 2
 	config.Profiles = []operator.ProfileSettings{
@@ -504,11 +497,7 @@ func TestUnreadyReleaseSpendsAtMostTwoDeliveriesOnRealBroker(t *testing.T) {
 	if _, err := b.service.ReceiverUpdate(ctx, config, false); err != nil {
 		t.Fatal(err)
 	}
-	state, err := b.service.LoadState(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	topicA := operator.SignatureTopic(b.pool, state.Pools[b.pool], "claude", map[string]string{"sig": "a"})
+	topicA := operator.SignatureTopic(b.pool, "claude", map[string]string{"sig": "a"})
 	hostKey := b.laneHost(t, ctx)
 	keys := signed.Keys{}
 	a := &fakePlugin{stream: resultStream}

@@ -147,11 +147,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		if dryRun {
-			state, err := service.LoadState(ctx)
-			if err != nil {
-				return err
-			}
-			return showReceiver(stdout, recorded, state.Pools[recorded.Pool])
+			return showReceiver(stdout, recorded)
 		}
 		// The bundle directories are made, or hardened to 0700, only once both configurations have passed their checks.
 		if _, err := bundlePath(dir, "receivers", true, pos[2]); err != nil {
@@ -184,7 +180,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		if !ok {
 			return errors.New("no receiver by that name")
 		}
-		return showReceiver(stdout, config, state.Pools[config.Pool])
+		return showReceiver(stdout, config)
 	case "tenant add":
 		if len(pos) != 3 {
 			return errors.New(operatorUsage[command])
@@ -353,8 +349,8 @@ func writeRotateReport(out io.Writer, pool string, report operator.RotateReport,
 }
 
 // showReceiver writes config's capacity, plugin pins and resolved profiles, in routing order, to out as YAML, each profile
-// with its signature under terms, double-quoted so its line feeds show as \n, and its signature's task topic.
-func showReceiver(out io.Writer, config operator.ReceiverConfig, terms operator.Terms) error {
+// with its signature, double-quoted so its line feeds show as \n, and its signature's task topic.
+func showReceiver(out io.Writer, config operator.ReceiverConfig) error {
 	type shown struct {
 		operator.ProfileSettings `yaml:",inline"`
 		Signature                yaml.Node `yaml:"signature"`
@@ -364,8 +360,8 @@ func showReceiver(out io.Writer, config operator.ReceiverConfig, terms operator.
 	for _, profile := range config.Profiles {
 		// The record decodes numbers as float64, which YAML would print as 1e+06.
 		profile.Config = integral(profile.Config).(map[string]any)
-		signature := yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Style: yaml.DoubleQuotedStyle, Value: operator.Signature(terms, profile.Agent, profile.Labels)}
-		profiles = append(profiles, shown{profile, signature, operator.SignatureTopic(config.Pool, terms, profile.Agent, profile.Labels)})
+		signature := yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Style: yaml.DoubleQuotedStyle, Value: operator.Signature(profile.Agent, profile.Labels)}
+		profiles = append(profiles, shown{profile, signature, operator.SignatureTopic(config.Pool, profile.Agent, profile.Labels)})
 	}
 	encoded, err := yaml.Marshal(struct {
 		Capacity     int64             `yaml:"capacity"`

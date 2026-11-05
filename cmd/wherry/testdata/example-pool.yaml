@@ -32,8 +32,3 @@ vcs:
 storage:
   endpoint: https://s3.example.com
   bucket: wherry
-# Label keys a selector may name; each signature, an agent and these labels, has its own task topic.
-routable_labels:
-  - platform
-  - isolation
-  - host
