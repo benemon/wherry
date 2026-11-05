@@ -290,3 +290,73 @@ func TestRunsKeyLostAlertFiresOnAnyIncrease(t *testing.T) {
 		t.Fatalf("WherryRunsKeyLost expr %q, want any increase of wherry_runs_key_lost_total above 0", expr)
 	}
 }
+
+// routingSubstitution is the one fixed substitution routing.test.yml's exprs make of the dashboard's variables.
+var routingSubstitution = strings.NewReplacer(`$pool`, `pool-a`, `$instance`, `r1|r2`, `$__rate_interval`, `5m`)
+
+// Every dashboard query of the routing families is, after routingSubstitution, the expr of a promtool test in
+// routing.test.yml that states its expected samples, so changing one in the dashboard alone fails here.
+func TestDashboardRoutingQueriesAreTested(t *testing.T) {
+	var dashboard struct {
+		Panels []struct {
+			Title   string `json:"title"`
+			Targets []struct {
+				Expr string `json:"expr"`
+			} `json:"targets"`
+		} `json:"panels"`
+	}
+	data, err := os.ReadFile(filepath.Join(observability, "wherry-dashboard.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &dashboard); err != nil {
+		t.Fatal(err)
+	}
+	var tests struct {
+		RuleFiles []string `yaml:"rule_files"`
+		Tests     []struct {
+			PromQL []struct {
+				Expr       string `yaml:"expr"`
+				ExpSamples *[]any `yaml:"exp_samples"`
+			} `yaml:"promql_expr_test"`
+		} `yaml:"tests"`
+	}
+	data, err = os.ReadFile(filepath.Join(observability, "routing.test.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(data, &tests); err != nil {
+		t.Fatal(err)
+	}
+	if len(tests.RuleFiles) != 0 {
+		t.Errorf("routing.test.yml loads rule files %v; its tests evaluate the dashboard's queries alone", tests.RuleFiles)
+	}
+	tested := map[string]bool{}
+	for _, test := range tests.Tests {
+		for _, query := range test.PromQL {
+			if query.ExpSamples != nil {
+				tested[query.Expr] = true
+			}
+		}
+	}
+	count := 0
+	for _, panel := range dashboard.Panels {
+		for _, target := range panel.Targets {
+			if !strings.Contains(target.Expr, "wherry_profile_ready") && !strings.Contains(target.Expr, "wherry_claim_gated") {
+				continue
+			}
+			count++
+			expr := routingSubstitution.Replace(target.Expr)
+			if strings.Contains(expr, "$") {
+				t.Errorf("panel %q: %s leaves a variable after the substitution", panel.Title, expr)
+				continue
+			}
+			if !tested[expr] {
+				t.Errorf("panel %q: no routing.test.yml test with exp_samples evaluates %s", panel.Title, expr)
+			}
+		}
+	}
+	if count < 7 {
+		t.Fatalf("found %d routing queries in the dashboard; the parse found too few to check", count)
+	}
+}
