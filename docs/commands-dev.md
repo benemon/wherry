@@ -43,8 +43,9 @@ Acquires everything `up` runs into `cache/` and records it in
 - The newest `nomad/v*` release of the nomad plugin that passes three
   checks: its `checksums.txt` verifies against its sigstore bundle from the
   plugin's release workflow, its archive matches `checksums.txt`, and its
-  binary speaks this wherry's plugin protocol. A binary that speaks another
-  is dropped for the next older release.
+  binary speaks this wherry's plugin protocol. A binary that speaks a newer
+  protocol is dropped for the next older release; one that speaks an older
+  protocol ends the search, since no older release speaks a newer one.
 - Kafka 4.3.1, the `docker.io/apache/kafka` image the real-broker tests
   pin by digest, pulled and tagged
   `wherry-dev/kafka:<id12>` in the runtime's own store. With

@@ -976,6 +976,8 @@ func TestRefusedProtocol(t *testing.T) {
 		{"incompatible API version with plugin. Plugin version: 99999999999999999999, Client versions: [11]", 0, false},
 		{"plugin exited before handshake; last output said Plugin version: 10, Client versions: [11]", 0, false},
 		{"plugin type nomad: /p: incompatible core API version with plugin. Plugin version: 2, Core version: 1", 0, false},
+		{"incompatible API version with plugin. Plugin version: 10, Client versions: [11] and more", 0, false},
+		{"notincompatible API version with plugin. Plugin version: 10, Client versions: [11]", 0, false},
 	} {
 		if got, ok := refusedProtocol(tc.message); got != tc.want || ok != tc.ok {
 			t.Errorf("refusedProtocol(%q) = %d, %t; want %d, %t", tc.message, got, ok, tc.want, tc.ok)
