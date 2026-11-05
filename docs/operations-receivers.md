@@ -170,8 +170,8 @@ acquisition spends a delivery.
 
 A receiver offers a profile only while the profile's plugin reports it ready.
 A receiver with no ready offer has an empty subscription and fetches no tasks from its pool.
-It closes any poll it has open, usually within about a second.
-It fetches again within about a second of its next advertisement with a ready offer, unless its pool is suspended or it holds a [pending run](#a-receiver-with-a-pending-run).
+It closes its idle polls when it observes the empty subscription.
+After an advertisement makes a profile ready, it reopens with the new set, unless its pool is suspended or it holds a [pending run](#a-receiver-with-a-pending-run); closing waits for the in-flight fetch, and joining takes the broker's round trip.
 Its held runs keep running, renewing and reading cancels.
 
 Each advertisement logs a line for every profile whose plugin reports it not ready:
@@ -202,7 +202,7 @@ The receiver writes the run's `placing` status, `waiting for placement (<reason>
 A receiver that observes any held run pending stops claiming:
 
 - It opens no new poll of its pool while any held run is pending.
-- It ends an open idle poll within 100 ms plus `FetchMaxWait`, 1 second, and admits a task that poll returns.
+- It ends an open idle poll and admits a task that poll returns.
 - It claims again only when no held run is pending.
 - Its held runs keep running, renewing and reading cancels.
 
