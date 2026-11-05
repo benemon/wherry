@@ -520,6 +520,8 @@ type fixture struct {
 	members *memberLog
 	// serving is set while the receiver, its pool's custodian, serves open requests.
 	serving *atomic.Bool
+	// stopServing ends the fixture's serving of open requests, once a pass under way returns; nil for a bare fixture.
+	stopServing func()
 	// envelope, when set, edits the values submit seals in a task's envelope.
 	envelope func(*wire.Submission, *signed.EnvelopeValues)
 }
@@ -628,7 +630,8 @@ func newFixtureWith(t *testing.T, stream []string, terms operator.Terms, config 
 	f.serving.Store(true)
 	serveCtx, stop := context.WithCancel(f.ctx)
 	served := make(chan struct{})
-	t.Cleanup(func() { stop(); <-served })
+	f.stopServing = func() { stop(); <-served }
+	t.Cleanup(f.stopServing)
 	go func() {
 		defer close(served)
 		for serveCtx.Err() == nil {
@@ -1048,9 +1051,15 @@ func (f fixture) execute(t *testing.T, record *kgo.Record, attempt int64) kgo.Ac
 	return f.receiver.execute(f.ctx, f.service.Operator, record, f.admitted(t, record), attempt)
 }
 
-// run starts the receiver's Run, which the test's end stops, and returns the channel its error arrives on.
+// run starts the receiver's Run, which the test's end stops, and returns the channel its error arrives on. Run serves
+// open requests itself, so the fixture's serving ends first: a pass under way returns before Run configures the
+// receiver.
 func (f fixture) run(t *testing.T, ctx context.Context) <-chan error {
 	t.Helper()
+	if f.stopServing != nil {
+		f.serving.Store(false)
+		f.stopServing()
+	}
 	ctx, stop := context.WithCancel(ctx)
 	done, returned := make(chan error, 1), make(chan struct{})
 	go func() {
