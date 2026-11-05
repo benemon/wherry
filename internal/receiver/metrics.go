@@ -41,6 +41,8 @@ type metrics struct {
 	ignoredWraps, keyLost                                         prometheus.Counter
 
 	pluginDescs map[string]*prometheus.Desc
+	// profileReady and claimGated are the routing families, which routingCollector reads at scrape time.
+	profileReady, claimGated *prometheus.Desc
 	// lastGood holds, by profile, the samples of its latest Metrics call that answered.
 	mu       sync.Mutex
 	lastGood map[string][]prometheus.Metric
@@ -113,6 +115,8 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 		}
 		m.pluginDescs[family.name] = prometheus.NewDesc(family.name, family.help, labels, nil)
 	}
+	m.profileReady = prometheus.NewDesc("wherry_profile_ready", "Whether the profile is in the receiver's current ready offers.", []string{"profile", "topic"}, nil)
+	m.claimGated = prometheus.NewDesc("wherry_claim_gated", "Whether the claim gate prevents a new poll, by reason.", []string{"reason"}, nil)
 	return m
 }
 
@@ -136,8 +140,58 @@ var pluginFamilies = []pluginFamily{
 func (m *metrics) registerFor(r *Receiver) {
 	m.register.Do(func() {
 		registerer := prometheus.WrapRegistererWith(prometheus.Labels{"pool": r.config.Pool}, m.registry)
-		registerer.MustRegister(append(m.collectors, pluginCollector{r})...)
+		registerer.MustRegister(append(m.collectors, pluginCollector{r}, routingCollector{r})...)
 	})
+}
+
+// routingCollector collects each profile's signature topic and readiness, and the claim gate's operands, at scrape
+// time from the state claimGated and subscription read.
+type routingCollector struct{ receiver *Receiver }
+
+func (c routingCollector) Describe(descs chan<- *prometheus.Desc) {
+	descs <- c.receiver.metrics.profileReady
+	descs <- c.receiver.metrics.claimGated
+}
+
+// Collect copies the state under r.mu and sends after releasing it, so a slow scrape never holds the lock the claim
+// loop and runs take. It makes no plugin call, Kafka call or sleep.
+func (c routingCollector) Collect(out chan<- prometheus.Metric) {
+	r, m := c.receiver, c.receiver.metrics
+	type profileSample struct {
+		profile, topic string
+		ready          bool
+	}
+	r.mu.Lock()
+	// The three operands of claimGated, read as it reads them.
+	gated := map[string]bool{
+		"suspended":      r.state.Suspended[r.config.Pool],
+		"no_ready_offer": len(r.offers) == 0,
+		"pending_run":    len(r.pending) > 0,
+	}
+	profiles := make([]profileSample, 0, len(r.profiles))
+	for _, named := range r.profiles {
+		profiles = append(profiles, profileSample{
+			profile: named.Name,
+			topic:   operator.SignatureTopic(r.config.Pool, named.Agent, named.Labels),
+			// The test subscription uses.
+			ready: slices.ContainsFunc(r.offers, func(offer wire.Offer) bool { return offer.Profile == named.Name }),
+		})
+	}
+	r.mu.Unlock()
+	for _, sample := range profiles {
+		out <- prometheus.MustNewConstMetric(m.profileReady, prometheus.GaugeValue, gauge(sample.ready), sample.profile, sample.topic)
+	}
+	for _, reason := range []string{"suspended", "no_ready_offer", "pending_run"} {
+		out <- prometheus.MustNewConstMetric(m.claimGated, prometheus.GaugeValue, gauge(gated[reason]), reason)
+	}
+}
+
+// gauge is 1 for true and 0 for false.
+func gauge(value bool) float64 {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 // pluginCollector collects the profiles' samples at scrape time.
