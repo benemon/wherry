@@ -16,6 +16,64 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+const (
+	openOutcomeOpened     string = "opened"
+	openOutcomeRefused    string = "refused"
+	openOutcomeExpired    string = "expired"
+	openOutcomeUnanswered string = "unanswered"
+)
+
+const (
+	dispatchOutcomeCreated string = "created"
+	dispatchOutcomeNothing string = "nothing"
+	dispatchOutcomeUnknown string = "unknown"
+)
+
+const (
+	startClassInputTooLarge string = "input-too-large"
+	startClassDispatch      string = "dispatch"
+	startClassPlatform      string = "platform"
+)
+
+const (
+	collectionReasonFailed     string = "failed"
+	collectionReasonNotStopped string = "not_stopped"
+	collectionReasonOverLimits string = "over_limits"
+	collectionReasonTimeout    string = "timeout"
+)
+
+const (
+	droppedReasonTimeout       string = "timeout"
+	droppedReasonError         string = "error"
+	droppedReasonDuplicate     string = "duplicate"
+	droppedReasonUnknownFamily string = "unknown_family"
+	droppedReasonUnknownLabel  string = "unknown_label"
+	droppedReasonKind          string = "kind"
+	droppedReasonLabelValue    string = "label_value"
+	droppedReasonValue         string = "value"
+)
+
+const (
+	rejectionReasonRunID              string = "run ID does not match its signer"
+	rejectionReasonDuplicate          string = "duplicate submission"
+	rejectionReasonAgent              string = "agent is outside the pool terms"
+	rejectionReasonModel              string = "model not in the pool's terms"
+	rejectionReasonStartBound         string = "not started by task_started_by"
+	rejectionReasonEndBound           string = "not ended by task_ended_by"
+	rejectionReasonTopicAgent         string = "agent does not match the task topic"
+	rejectionReasonSelector           string = "selector does not match the task topic"
+	rejectionReasonStartLimit         string = "task_started_by is past the pool's start_by_limit"
+	rejectionReasonRequiredCredential string = "the host does not supply a required credential of the agent"
+	rejectionReasonCredentialTarget   string = "a task credential takes the target of one of the agent's credentials"
+	rejectionReasonVCS                string = "git remote host outside the pool's vcs hosts"
+	rejectionReasonStorage            string = "pool has no storage"
+	rejectionReasonPart               string = "unsupported message part"
+	rejectionReasonEnvelope           string = "the task carries no envelope"
+	rejectionReasonAppendTime         string = "task_started_by is before its append time"
+	rejectionReasonBoundOrder         string = "task_ended_by is before task_started_by"
+	rejectionReasonRunCap             string = "task_ended_by is past task_started_by plus the 6h run cap"
+)
+
 // durationBuckets bound the core's histograms, in seconds, from one second to six hours.
 var durationBuckets = []float64{1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200, 14400, 21600}
 
@@ -101,6 +159,15 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 		m.takeovers.WithLabelValues(reason)
 	}
 	m.claimantChanges = counters("claimant_changes_total", "Claims served to a new claimant, by reason.", "reason")
+	for _, op := range []capability{capRead, capWrite, capTransactional, capClaim} {
+		m.busErrors.WithLabelValues(string(op))
+	}
+	for _, op := range []capability{capRead, capWrite, capTransactional, capClaim, capMembership} {
+		m.denials.WithLabelValues(string(op))
+	}
+	for _, reason := range []string{wire.ClaimReleased, wire.ClaimLease} {
+		m.claimantChanges.WithLabelValues(reason)
+	}
 	m.keyLost = counter("runs_key_lost_total", "Runs ended with the wherry event key-lost.")
 	m.ignoredWraps = counter("ignored_wraps_total", "Wraps whose key does not decrypt the task's envelope.")
 	m.renewalFailures = counter("renewal_failures_total", "Failed claim renewals.")
@@ -118,6 +185,73 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m.profileReady = prometheus.NewDesc("wherry_profile_ready", "Whether the profile is in the receiver's current ready offers.", []string{"profile", "topic"}, nil)
 	m.claimGated = prometheus.NewDesc("wherry_claim_gated", "Whether the claim gate prevents a new poll, by reason.", []string{"reason"}, nil)
 	return m
+}
+
+// Children must exist before refresh publishes entitlements and remain across subsequent refreshes.
+func (m *metrics) initialize(state operator.State, pool string, profiles []Named) {
+	for _, profile := range profiles {
+		name := profile.Name
+		for _, value := range []string{startClassInputTooLarge, startClassDispatch, startClassPlatform} {
+			m.startFailures.WithLabelValues(name, value)
+		}
+		for _, value := range []string{dispatchOutcomeCreated, dispatchOutcomeNothing, dispatchOutcomeUnknown} {
+			m.dispatchOutcomes.WithLabelValues(name, value)
+		}
+		for _, value := range []string{collectionReasonFailed, collectionReasonNotStopped, collectionReasonOverLimits, collectionReasonTimeout} {
+			m.collectionFailures.WithLabelValues(name, value)
+		}
+		for _, value := range []string{droppedReasonTimeout, droppedReasonError, droppedReasonDuplicate, droppedReasonUnknownFamily, droppedReasonUnknownLabel, droppedReasonKind, droppedReasonLabelValue, droppedReasonValue} {
+			m.dropped.WithLabelValues(name, value)
+		}
+		m.stopFailures.WithLabelValues(name)
+		m.purgeFailures.WithLabelValues(name)
+		m.sweepFailures.WithLabelValues(name)
+		m.placement.WithLabelValues(name)
+	}
+	for tenant, pools := range state.Entitlements {
+		if !pools[pool] {
+			continue
+		}
+		m.claims.WithLabelValues(tenant)
+		m.openWait.WithLabelValues(tenant)
+		for _, value := range []string{openOutcomeOpened, openOutcomeRefused, openOutcomeExpired, openOutcomeUnanswered} {
+			m.openWaits.WithLabelValues(tenant, value)
+		}
+		for _, value := range []string{rejectionReasonRunID, rejectionReasonDuplicate, rejectionReasonAgent, rejectionReasonModel, rejectionReasonStartBound, rejectionReasonEndBound, rejectionReasonTopicAgent, rejectionReasonSelector, rejectionReasonStartLimit, rejectionReasonRequiredCredential, rejectionReasonCredentialTarget, rejectionReasonVCS, rejectionReasonStorage, rejectionReasonPart, rejectionReasonEnvelope, rejectionReasonAppendTime, rejectionReasonBoundOrder, rejectionReasonRunCap} {
+			m.rejections.WithLabelValues(tenant, value)
+		}
+		admissions, budget := map[string]bool{"": true}, map[string]bool{"none": true}
+		for _, profile := range profiles {
+			admissions[profile.Name], budget[profile.Name] = true, true
+			m.adoptions.WithLabelValues(tenant, profile.Name)
+			for _, terms := range state.Pools[pool].Agents {
+				if terms.Name != profile.Agent {
+					continue
+				}
+				models := terms.Models
+				if len(models) == 0 {
+					models = []string{""}
+				}
+				for _, model := range models {
+					agent, model := termsPlacementLabels(state.Pools[pool].Agents, wire.Placement{Agent: profile.Agent, Model: model})
+					for _, status := range []string{"completed", "failed", "canceled"} {
+						m.runs.WithLabelValues(tenant, profile.Name, agent, model, status)
+						m.runDuration.WithLabelValues(tenant, profile.Name, agent, model, status)
+					}
+				}
+				break
+			}
+		}
+		for profile := range admissions {
+			m.admissions.WithLabelValues(tenant, profile)
+			m.redeliveries.WithLabelValues(tenant, profile)
+			m.queueWait.WithLabelValues(tenant, profile)
+		}
+		for profile := range budget {
+			m.budgetExhausted.WithLabelValues(tenant, profile)
+			m.redactions.WithLabelValues(tenant, profile)
+		}
+	}
 }
 
 // pluginFamily is a metric family the core declares for plugins: its one label besides profile, if any, takes only
@@ -217,9 +351,9 @@ func (c pluginCollector) Collect(out chan<- prometheus.Metric) {
 			defer m.mu.Unlock()
 			switch {
 			case errors.Is(err, context.DeadlineExceeded):
-				m.dropped.WithLabelValues(named.Name, "timeout").Inc()
+				m.dropped.WithLabelValues(named.Name, droppedReasonTimeout).Inc()
 			case err != nil:
-				m.dropped.WithLabelValues(named.Name, "error").Inc()
+				m.dropped.WithLabelValues(named.Name, droppedReasonError).Inc()
 			default:
 				m.lastGood[named.Name] = m.pluginMetrics(named.Name, samples)
 			}
@@ -239,7 +373,7 @@ func (m *metrics) pluginMetrics(name string, samples []pluginsdk.Sample) []prome
 	for _, sample := range samples {
 		labels, reason := pluginLabels(name, sample)
 		if key := sample.Family + "\xff" + strings.Join(labels, "\xff"); reason == "" && seen[key] {
-			reason = "duplicate"
+			reason = droppedReasonDuplicate
 		} else {
 			seen[key] = true
 		}
@@ -261,23 +395,23 @@ func (m *metrics) pluginMetrics(name string, samples []pluginsdk.Sample) []prome
 func pluginLabels(name string, sample pluginsdk.Sample) ([]string, string) {
 	index := slices.IndexFunc(pluginFamilies, func(family pluginFamily) bool { return family.name == sample.Family })
 	if index < 0 {
-		return nil, "unknown_family"
+		return nil, droppedReasonUnknownFamily
 	}
 	family := pluginFamilies[index]
 	for key := range sample.Labels {
 		if key != "profile" && key != family.label {
-			return nil, "unknown_label"
+			return nil, droppedReasonUnknownLabel
 		}
 	}
 	if sample.Kind != family.kind {
-		return nil, "kind"
+		return nil, droppedReasonKind
 	}
 	if family.label == "" {
 		return []string{name}, ""
 	}
 	value := sample.Labels[family.label]
 	if !slices.Contains(family.values, value) {
-		return nil, "label_value"
+		return nil, droppedReasonLabelValue
 	}
 	return []string{name, value}, ""
 }
@@ -285,7 +419,7 @@ func pluginLabels(name string, sample pluginsdk.Sample) ([]string, string) {
 func (m *metrics) pluginMetric(sample pluginsdk.Sample, labels []string) (prometheus.Metric, string) {
 	desc := m.pluginDescs[sample.Family]
 	if math.IsNaN(sample.Value) || math.IsInf(sample.Value, 0) || sample.Kind == pluginsdk.KindCounter && sample.Value < 0 {
-		return nil, "value"
+		return nil, droppedReasonValue
 	}
 	kind := prometheus.GaugeValue
 	if sample.Kind == pluginsdk.KindCounter {
@@ -299,7 +433,10 @@ func (m *metrics) pluginMetric(sample pluginsdk.Sample, labels []string) (promet
 // hold it, or empty when the agent has none.
 func (r *Receiver) placementLabels(placement wire.Placement) (string, string) {
 	state, _, _ := r.snapshot()
-	agents := state.Pools[r.config.Pool].Agents
+	return termsPlacementLabels(state.Pools[r.config.Pool].Agents, placement)
+}
+
+func termsPlacementLabels(agents []operator.AgentTerms, placement wire.Placement) (string, string) {
 	index := slices.IndexFunc(agents, func(terms operator.AgentTerms) bool { return terms.Name == placement.Agent })
 	switch {
 	case index < 0:

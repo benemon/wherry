@@ -71,8 +71,8 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" --strip-components=1 "prometheus-$PROMETHEUS_VERSION.linux-amd64/promtool"
       - name: Check the alert rules
         run: '"$RUNNER_TEMP/promtool" check rules contrib/observability/wherry-alerts.yaml'
-      - name: Test the dashboard's Routing queries
-        run: '"$RUNNER_TEMP/promtool" test rules contrib/observability/routing.test.yml'
+      - name: Test the dashboard's Routing queries and counter increases
+        run: '"$RUNNER_TEMP/promtool" test rules contrib/observability/routing.test.yml contrib/observability/counter-zero.test.yml'
 
   # One job per package, each with its own broker: the packages share wherry.operator, so they never share a broker.
   broker:

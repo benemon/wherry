@@ -55,8 +55,8 @@ hash is not secret protection.
 | `wherry_transaction_aborts_total` | counter | none | transactions aborted after a failed produce |
 | `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome: a run gives its task back for redelivery, an open request is answered again only when its answer is absent, and the key custodian reads back its snapshot topic |
 | `wherry_fenced_total` | counter | none | runs given up to a newer holder |
-| `wherry_custodian_takeovers_total` | counter | `reason` | snapshots this receiver published taking over its pool's key custody: `takeover`, `contested`; both start at 0 |
-| `wherry_runs_key_lost_total` | counter | none | runs this receiver ended with the wherry event `key-lost`; starts at 0 |
+| `wherry_custodian_takeovers_total` | counter | `reason` | snapshots this receiver published taking over its pool's key custody: `takeover`, `contested` |
+| `wherry_runs_key_lost_total` | counter | none | runs this receiver ended with the wherry event `key-lost` |
 | `wherry_claimant_changes_total` | counter | `reason` | claims the key custodian served to a new claimant: `released`, `lease` |
 | `wherry_ignored_wraps_total` | counter | none | wraps whose key does not decrypt the task's envelope |
 | `wherry_metrics_dropped_total` | counter | `profile`, `reason` | plugin samples dropped and `Metrics` calls that failed |
@@ -94,3 +94,69 @@ minutes, and 1, 2, 4 and 6 hours. `wherry_plugin_placement_seconds` uses
 `pluginsdk.PlacementBuckets`: 1, 2, 5, 10 and 30 seconds, and 1, 2, 5, 10 and 30
 minutes.
 
+## Series created at zero
+
+At construction, the receiver creates `bus_errors_total` for `read`, `write`,
+`transactional ID` and `share group`; `denials_total` for those operations plus
+`membership`; and `claimant_changes_total` for `released` and `lease`.
+`custodian_takeovers_total` also starts at zero for `takeover` and `contested`,
+as do the unlabelled core counters.
+
+After successful startup and subsequent state refreshes, before publishing the
+new state, the receiver creates these core children (all names have the
+`wherry_` prefix). Histograms have zero buckets, count and sum, with no observation.
+
+| Families | Seeded labels besides pool |
+| --- | --- |
+| `claims_total` | entitled tenant |
+| `admissions_total`, `redeliveries_total`, `queue_wait_seconds` | tenant × (configured profiles union {empty profile}) |
+| `adoptions_total` | tenant × configured profiles |
+| `delivery_budget_exhausted_total`, `redactions_total` | tenant × (configured profiles union {`none`}) |
+| `runs_total`, `run_duration_seconds` | tenant × configured (profile, agent, model) × `completed`, `failed`, `canceled` |
+| `rejections_total` | tenant × the 18 rejection reasons below |
+| `open_waits_total` | tenant × `opened`, `refused`, `expired`, `unanswered` |
+| `open_wait_seconds` | tenant |
+| `start_failures_total` | profile × `input-too-large`, `dispatch`, `platform` |
+| `dispatch_outcomes_total` | profile × `created`, `nothing`, `unknown` |
+| `collection_failures_total` | profile × `failed`, `not_stopped`, `over_limits`, `timeout` |
+| `metrics_dropped_total` | profile × `timeout`, `error`, `duplicate`, `unknown_family`, `unknown_label`, `kind`, `label_value`, `value` |
+| `stop_failures_total`, `purge_failures_total`, `sweep_failures_total`, `plugin_placement_seconds` | profile |
+
+A tenant is seeded only while entitled to this receiver's pool. Each configured
+profile contributes the distinct models of its agent's first entry in the current
+pool terms, or the empty model when that entry lists none; a profile whose agent
+the terms do not name contributes no run tuples. Sentinel unions are deduplicated.
+The run matrix is a partial contract: runtime placement and current terms can
+produce other tuples. Run families for the `none` profile, agent and model
+`other` fallbacks, state `other`, and other valid task states stay lazy. A
+configured profile literally named `none`, or agent or model named `other`,
+is seeded normally. Plugin-emitted families stay lazy and belong to the plugin;
+`plugin_placement_seconds` belongs to the core. Gauges read current state.
+
+The rejection reasons are `run ID does not match its signer`, `duplicate
+submission`, `agent is outside the pool terms`, `model not in the pool's terms`,
+`not started by task_started_by`, `not ended by task_ended_by`, `agent does not
+match the task topic`, `selector does not match the task topic`,
+`task_started_by is past the pool's start_by_limit`, `the host does not supply
+a required credential of the agent`, `a task credential takes the target of
+one of the agent's credentials`, `git remote host outside the pool's vcs hosts`,
+`pool has no storage`, `unsupported message part`, `the task carries no envelope`,
+`task_started_by is before its append time`, `task_ended_by is before
+task_started_by`, and `task_ended_by is past task_started_by plus the 6h run cap`.
+
+Prometheus must scrape the zero before an event for its first increase to count.
+An event before the first scrape after startup, a new entitlement or a terms
+change can still be missed. The receiver does not wait for a scrape. Children
+are never reset or deleted: tenants first seen ended get no children, while
+children created during entitlement remain until the process ends.
+
+For T entitled tenants and M the sum over profiles of distinct seeded
+(agent, model) pairs, run counters add 3TM classic text series and run duration
+histograms add 48TM, excluding optional `_created` series. With P distinct
+profiles, A = |profiles union {empty}| and B = |profiles union {none}|, all
+seeded families in the table plus the construction domains add
+`11 + 34P + T(39 + 18A + P + 2B + 51M)` series, or
+`11 + 34P + T(59 + 21P + 51M)` without sentinel collisions. Existing takeovers
+add two; unlabelled counters, gauges and plugin metrics are additional.
+This is one snapshot's contribution per receiver. The retained population is
+the union across entitlement and terms changes plus lazy runtime tuples.

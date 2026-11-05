@@ -7,6 +7,7 @@ A Grafana dashboard and Prometheus alert rules for wherry receivers, built from 
 | --- | --- |
 | `wherry-dashboard.json` | Grafana dashboard of the receiver families, with `datasource`, `pool` and `instance` variables |
 | `wherry-alerts.yaml` | Prometheus alerting rules, each with a `runbook_url` |
+| `counter-zero.test.yml` | promtool tests of first counter increases in the shipped alerts |
 | `routing.test.yml` | promtool unit tests of the dashboard's Routing queries |
 
 [Metrics](https://benemon.github.io/wherry/operations#metrics) in the operator guide says how to scrape a receiver and

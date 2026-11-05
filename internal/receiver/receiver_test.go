@@ -1965,8 +1965,17 @@ func TestRegistrationDenialStopsTheReceiver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(families) != 1 || len(families[0].GetMetric()) != 1 || families[0].GetMetric()[0].GetCounter().GetValue() != 1 {
-		t.Fatalf("wherry_denials_total %v, want one denial", families)
+	if len(families) != 1 || len(families[0].GetMetric()) != 5 {
+		t.Fatalf("wherry_denials_total %v, want five operation series", families)
+	}
+	for _, metric := range families[0].GetMetric() {
+		want := float64(0)
+		if metric.GetLabel()[0].GetValue() == "write" {
+			want = 1
+		}
+		if metric.GetCounter().GetValue() != want {
+			t.Fatalf("wherry_denials_total %v, want only the write denial at 1", families)
+		}
 	}
 }
 

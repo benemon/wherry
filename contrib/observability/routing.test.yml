@@ -186,3 +186,29 @@ tests:
             value: 1
           - labels: '{pool="pool-a", instance="r1", reason="pending_run"}'
             value: 1
+
+  - interval: 1m
+    input_series:
+      - series: 'wherry_profile_ready{pool="pool-a",instance="r1",profile="a",topic="T1"}'
+        values: '1x4'
+      - series: 'wherry_admissions_total{pool="pool-a",instance="r1",profile="a",tenant="t1"}'
+        values: '0 0 1 1 1'
+    promql_expr_test:
+      - expr: 'sum by (pool, topic) (rate(wherry_admissions_total{pool=~"pool-a", instance=~"r1|r2"}[5m]) * on (pool, instance, profile) group_left (topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"} * 0 + 1))'
+        eval_time: 4m
+        exp_samples:
+          - labels: '{pool="pool-a",topic="T1"}'
+            value: 0.0033333333333333335
+
+  - interval: 1m
+    input_series:
+      - series: 'wherry_profile_ready{pool="pool-a",instance="r1",profile="a",topic="T1"}'
+        values: '1x4'
+      - series: 'wherry_admissions_total{pool="pool-a",instance="r1",profile="a",tenant="t1"}'
+        values: '1 1 1 1 1'
+    promql_expr_test:
+      - expr: 'sum by (pool, topic) (rate(wherry_admissions_total{pool=~"pool-a", instance=~"r1|r2"}[5m]) * on (pool, instance, profile) group_left (topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"} * 0 + 1))'
+        eval_time: 4m
+        exp_samples:
+          - labels: '{pool="pool-a",topic="T1"}'
+            value: 0
