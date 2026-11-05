@@ -19,7 +19,6 @@ func ReceiverTopic(receiver string) string       { return "wherry.receiver." + r
 func ReceiverProgressTopic(receiver string) string {
 	return "wherry.receiver." + receiver + ".progress"
 }
-func PoolTasksTopic(pool string) string          { return "wherry.pool." + pool + ".tasks" }
 func PoolTasksPrefix(pool string) string         { return "wherry.pool." + pool + ".tasks." }
 func PoolEventsTopic(pool string) string         { return "wherry.pool." + pool + ".events" }
 func CustodianTopic(pool string) string          { return "wherry.pool." + pool + ".custodian" }

@@ -288,6 +288,7 @@ func TestMCPSubmitWaitRoundTrip(t *testing.T) {
 	var receivers receiversOutput
 	callTool(t, ctx, session, "receivers", map[string]any{}, &receivers)
 	if len(receivers.Receivers) != 1 || receivers.Receivers[0].ReceiverID != "receiver-a" || receivers.Receivers[0].Pool != "pool-a" || receivers.Receivers[0].Status != "live" ||
+		!slices.Equal(receivers.Receivers[0].Routable, []string{"gpu", "region", "runtime"}) ||
 		!reflect.DeepEqual(receivers.Receivers[0].Profiles, []busclient.Profile{{Name: "lab", Plugin: "nomad", Agent: "claude", InlineLimit: 49152,
 			Credentials: []busclient.Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true}, {Name: "github-token", Env: "GH_TOKEN", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: true}}) {
 		t.Fatalf("receivers %#v", receivers)

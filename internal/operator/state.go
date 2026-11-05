@@ -418,7 +418,7 @@ func (state State) CheckNames() error {
 		if err := validateNames(pool); err != nil {
 			return err
 		}
-		for _, value := range []string{PoolTasksTopic(pool), PoolEventsTopic(pool), PoolGroup(pool), TransactionalPrefix(pool)} {
+		for _, value := range []string{PoolEventsTopic(pool), PoolGroup(pool), TransactionalPrefix(pool)} {
 			if err := add(value, "pool "+pool); err != nil {
 				return err
 			}

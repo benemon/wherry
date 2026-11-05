@@ -114,7 +114,7 @@ func newBus(t *testing.T) *bus {
 		{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}},
 		{TaskCredential: wire.TaskCredential{Name: "github-token", Env: "GH_TOKEN"}, Required: &optional},
 	}}}, DefaultAgent: "claude", DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
-		VCS: []string{"git.example.test"}}
+		VCS: []string{"git.example.test"}, Routable: []string{"runtime", "gpu", "region"}}
 	if err := b.service.PoolApply(ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
@@ -244,6 +244,7 @@ func (b *bus) sign(t *testing.T, record wire.Record) []byte {
 type task struct {
 	submission wire.Submission
 	hash       string
+	topic      string
 	offset     int64
 }
 
@@ -258,7 +259,7 @@ func (b *bus) tasks(t *testing.T, runID string) []task {
 	if err != nil {
 		t.Fatal(err)
 	}
-	records, err := readTopic(b.ctx, b.receiver, operator.PoolTasksTopic("pool-a"))
+	records, err := readTasks(b.ctx, b.receiver, "pool-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +271,7 @@ func (b *bus) tasks(t *testing.T, runID string) []task {
 		}
 		if submission.Wherry.Run == runID {
 			sum := sha256.Sum256(record.Value)
-			tasks = append(tasks, task{submission, hex.EncodeToString(sum[:]), record.Offset})
+			tasks = append(tasks, task{submission, hex.EncodeToString(sum[:]), record.Topic, record.Offset})
 		}
 	}
 	return tasks
@@ -291,7 +292,7 @@ func (b *bus) status(t *testing.T, task task, eventID, kind string, status wire.
 	value := &wire.RunStatus{StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: run, ContextID: run, Status: status},
 		Wherry: wire.StatusBinding{ReceiverBinding: b.binding(task), EventID: eventID, Kind: kind, TaskHash: task.hash}}
 	if kind == "claimed" {
-		value.Wherry.TaskOffset = &task.offset
+		value.Wherry.TaskTopic, value.Wherry.TaskOffset = task.topic, &task.offset
 	}
 	return b.sign(t, value)
 }
@@ -374,7 +375,7 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	wantKeys := []string{"capacity", "in_flight", "last_advertised", "pool", "profiles", "receiver_id", "status"}
+	wantKeys := []string{"capacity", "in_flight", "last_advertised", "pool", "profiles", "receiver_id", "routable_labels", "status"}
 	if !reflect.DeepEqual(keys, wantKeys) {
 		t.Fatalf("got JSON fields %v, want %v", keys, wantKeys)
 	}
@@ -387,9 +388,16 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 	if rows[0]["receiver_id"] != "receiver-a" || rows[0]["status"] != "live" || rows[0]["pool"] != "pool-a" {
 		t.Fatalf("unexpected JSON row: %#v", rows[0])
 	}
+	// The pool's routable labels, sorted, are the keys a selector may name.
+	if routable := rows[0]["routable_labels"]; !reflect.DeepEqual(routable, []any{"gpu", "region", "runtime"}) {
+		t.Fatalf("routable_labels %#v, want the pool's routable labels sorted", routable)
+	}
 	stdout.Reset()
 	if err := runReceivers(b.ctx, b.client, nil, &stdout, &stderr); err != nil {
 		t.Fatal(err)
+	}
+	if !strings.HasPrefix(stdout.String(), "receiver=receiver-a pool=pool-a routable=gpu,region,runtime capacity=1 ") {
+		t.Fatalf("receivers output %q, want the pool's routable labels sorted on the receiver line", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "  profile=lab plugin=nomad agent=claude ready=true labels=runtime=exec inline_limit=49152") {
 		t.Fatalf("receivers output %q does not carry the profile, its plugin and its inline limit", stdout.String())
@@ -413,14 +421,14 @@ func TestReceiversShowsEnded(t *testing.T) {
 	if err := runReceivers(b.ctx, b.client, nil, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	if want := "receiver=receiver-a pool=pool-a capacity=0 in_flight=0 advertisement_age=- status=ended\n"; stdout.String() != want || stderr.Len() != 0 {
+	if want := "receiver=receiver-a pool=pool-a routable=gpu,region,runtime capacity=0 in_flight=0 advertisement_age=- status=ended\n"; stdout.String() != want || stderr.Len() != 0 {
 		t.Fatalf("stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
 	}
 	stdout.Reset()
 	if err := runReceivers(b.ctx, b.client, []string{"--json"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	if want := `[{"receiver_id":"receiver-a","pool":"pool-a","profiles":[],"capacity":0,"in_flight":0,"status":"ended"}]` + "\n"; stdout.String() != want {
+	if want := `[{"receiver_id":"receiver-a","pool":"pool-a","routable_labels":["gpu","region","runtime"],"profiles":[],"capacity":0,"in_flight":0,"status":"ended"}]` + "\n"; stdout.String() != want {
 		t.Fatalf("stdout %q, want %q", stdout.String(), want)
 	}
 }
@@ -984,7 +992,7 @@ func TestSubmitGitFlags(t *testing.T) {
 			}
 		})
 	}
-	if records, err := readTopic(b.ctx, b.receiver, operator.PoolTasksTopic("pool-a")); err != nil || len(records) != 0 {
+	if records, err := readTasks(b.ctx, b.receiver, "pool-a"); err != nil || len(records) != 0 {
 		t.Fatalf("refused submissions published %d tasks, %v", len(records), err)
 	}
 	submit := func(flags ...string) wire.Submission {
@@ -1065,6 +1073,23 @@ func TestVersionNeedsNoConfigOrBroker(t *testing.T) {
 }
 
 // readTopic reads topic from its start through a reader of its own.
+// readTasks reads every task topic of pool, one after another.
+func readTasks(ctx context.Context, client *kgo.Client, pool string) ([]*kgo.Record, error) {
+	topics, err := operator.PoolTaskTopics(ctx, kadm.NewClient(client), pool)
+	if err != nil {
+		return nil, err
+	}
+	var records []*kgo.Record
+	for _, topic := range topics {
+		read, err := readTopic(ctx, client, topic)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, read...)
+	}
+	return records, nil
+}
+
 func readTopic(ctx context.Context, client *kgo.Client, topic string) ([]*kgo.Record, error) {
 	reader := operator.NewReader(client)
 	defer reader.Close()

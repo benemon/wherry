@@ -1,6 +1,6 @@
 default_agent: claude
 start_by_limit: 72h
-# Each receiver with no matching profile spends one delivery, so this covers the pool's receivers plus a margin.
+# The attempts one task may make, start failures included, plus a margin for the releases of a profile going unready.
 delivery_limit: 6
 # Above the receiver's 10s renewal interval.
 lock_duration: 30s
@@ -15,3 +15,8 @@ vcs:
 storage:
   endpoint: https://s3.example.com
   bucket: wherry
+# Label keys a selector may name; each signature, an agent and these labels, has its own task topic.
+routable_labels:
+  - platform
+  - isolation
+  - host

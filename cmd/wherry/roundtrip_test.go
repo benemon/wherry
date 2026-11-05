@@ -257,7 +257,8 @@ func TestRoundTrip(t *testing.T) {
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{
 		{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}},
 		{TaskCredential: wire.TaskCredential{Name: "github-token", Env: "GH_TOKEN"}, Required: &optional},
-	}}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+	}}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
+		Routable: []string{"gpu"}}
 	bucket := s3Oracle(t)
 	if bucket == nil {
 		bucket = fallbackS3(t)
