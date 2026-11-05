@@ -158,7 +158,7 @@ func open(t *testing.T, f *fixture, runID string, key *ecdsa.PrivateKey) (wire.S
 		t.Fatalf("local record %v, %v", local, err)
 	}
 	pool := local.Pool
-	records, err := readTopic(f.ctx, f.service.Operator, operator.PoolTasksTopic(pool))
+	records, err := readTasks(f.ctx, f.service.Operator, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestSubmitRefusesAnEnvelopeTheCheckRefuses(t *testing.T) {
 	if err := f.submitErr(t); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "envelope credential model is empty") {
 		t.Fatalf("submit = %v, want the empty credential refused", err)
 	}
-	if records, err := readTopic(f.ctx, f.service.Operator, operator.PoolTasksTopic("pool-a")); err != nil || len(records) != 0 {
+	if records, err := readTasks(f.ctx, f.service.Operator, "pool-a"); err != nil || len(records) != 0 {
 		t.Fatalf("task topic holds %d records, %v", len(records), err)
 	}
 }
@@ -326,7 +326,7 @@ func (r *testReceiver) keyLost(t *testing.T, ctx context.Context, task claimed) 
 // replacements are the tasks on pool's task topic that replace runID.
 func (f *fixture) replacements(t *testing.T, pool, runID string) [][]byte {
 	t.Helper()
-	records, err := readTopic(f.ctx, f.service.Operator, operator.PoolTasksTopic(pool))
+	records, err := readTasks(f.ctx, f.service.Operator, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +429,7 @@ func TestAStoredReplacementIsProducedAsStored(t *testing.T) {
 	receiver.keyLost(t, f.ctx, task)
 	previous := produceReplacement
 	t.Cleanup(func() { produceReplacement = previous })
-	produceReplacement = func(context.Context, *Host, wire.SubmissionBinding, []byte) error {
+	produceReplacement = func(context.Context, *Host, string, wire.SubmissionBinding, []byte) error {
 		return errors.New("injected crash")
 	}
 	if _, err := f.host.resubmit(f.ctx, runID, false); err == nil {
@@ -623,7 +623,7 @@ func TestWaitReportsAFailedResubmission(t *testing.T) {
 	injected := errors.New("injected write failure")
 	previous := produceReplacement
 	t.Cleanup(func() { produceReplacement = previous })
-	produceReplacement = func(context.Context, *Host, wire.SubmissionBinding, []byte) error { return injected }
+	produceReplacement = func(context.Context, *Host, string, wire.SubmissionBinding, []byte) error { return injected }
 	result, err := f.host.Await(f.ctx, task.submission.Wherry.Run, 5*time.Second)
 	if !errors.Is(err, injected) || !strings.Contains(err.Error(), "resubmittable until "+wire.RFC3339(task.submission.Wherry.TaskStartedBy)) || result.Status.State != wire.TaskStateFailed {
 		t.Fatalf("await = %+v, %v; want the outcome with the resubmission's error and bound", result, err)
@@ -762,4 +762,149 @@ func TestResubmitHelperProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	fmt.Printf("replacement=%s\n", replacement)
+}
+
+// signaturesFixture adds receiver-a, whose two claude profiles differ in region, so they have two signature topics, both
+// ready; it returns them, eu's first.
+func (f *fixture) signaturesFixture(t *testing.T) (*testReceiver, string, string) {
+	t.Helper()
+	profiles := []operator.ProfileSettings{
+		{Name: "eu", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}},
+		{Name: "us", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "us"}},
+	}
+	receiver := f.addReceiverConfig(t, operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2, Profiles: profiles, PluginSHA256: map[string]string{"nomad": strings.Repeat("ab", 32)}})
+	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) {
+		ad.Offers = []wire.Offer{{Profile: "eu", Agent: "claude"}, {Profile: "us", Agent: "claude"}}
+	})
+	eu, us := operator.SignatureTopic("pool-a", "claude", profiles[0].Labels), operator.SignatureTopic("pool-a", "claude", profiles[1].Labels)
+	if eu == us {
+		t.Fatal("the two profiles share a signature")
+	}
+	return receiver, eu, us
+}
+
+// favour adds receiver-b, offering only the profile whose signature is topic with more spare capacity than receiver-a,
+// so placement now would choose that signature.
+func (f *fixture) favour(t *testing.T, topic, eu string) {
+	t.Helper()
+	profile := "us"
+	if topic == eu {
+		profile = "eu"
+	}
+	config := operator.ReceiverConfig{Receiver: "receiver-b", Pool: "pool-a", Capacity: 9, Profiles: []operator.ProfileSettings{
+		{Name: "eu", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}},
+		{Name: "us", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "us"}},
+	}, PluginSHA256: map[string]string{"nomad": strings.Repeat("ab", 32)}}
+	f.addReceiverConfig(t, config).advertise(t, f.ctx, func(ad *wire.Advertisement) {
+		ad.Capacity, ad.Offers = 9, []wire.Offer{{Profile: profile, Agent: "claude"}}
+	})
+}
+
+// tasksOn are the records on topic that replace runID.
+func (f *fixture) tasksOn(t *testing.T, topic, runID string) int {
+	t.Helper()
+	records, err := readTopic(f.ctx, f.service.Operator, topic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, record := range records {
+		var task wire.Submission
+		if err := json.Unmarshal(payload(t, record.Value), &task, signed.Tolerant); err != nil {
+			t.Fatal(err)
+		}
+		if task.Wherry.Replaces == runID {
+			count++
+		}
+	}
+	return count
+}
+
+// A replacement keeps the signature topic its original was placed on, recorded before the produce, even when another
+// compatible signature is live with more spare capacity: agent and selector cannot reconstruct the signature of a task
+// placed with no selector or a partial one.
+func TestAReplacementKeepsItsSignatureTopic(t *testing.T) {
+	for name, selector := range map[string][]wire.Requirement{
+		"no selector":      nil,
+		"partial selector": {{Key: "runtime", Operator: wire.OpIn, Values: []string{"podman"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			receiver, eu, us := f.signaturesFixture(t)
+			submitted := f.submit(t, selector)
+			local, err := f.host.localRun(submitted.RunID)
+			if err != nil || local == nil || local.Topic != eu && local.Topic != us {
+				t.Fatalf("local record %+v, %v; want one of the two signature topics", local, err)
+			}
+			task := receiver.claim(t, f.ctx, submitted.RunID)[0]
+			if task.topic != local.Topic {
+				t.Fatalf("task on %s, recorded %s", task.topic, local.Topic)
+			}
+			other := eu
+			if local.Topic == eu {
+				other = us
+			}
+			f.favour(t, other, eu)
+			// Positive control: placement now chooses the other signature.
+			if placed, err := f.host.localRun(f.submit(t, selector).RunID); err != nil || placed.Topic != other {
+				t.Fatalf("a new task placed on %+v, %v; want %s", placed, err, other)
+			}
+			receiver.feed(t, f.ctx, submitted.RunID, receiver.echo(t, task), receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil))
+			receiver.keyLost(t, f.ctx, task)
+			replacement, err := f.host.resubmit(f.ctx, submitted.RunID, true)
+			if err != nil || replacement == "" {
+				t.Fatalf("resubmit = %q, %v", replacement, err)
+			}
+			if record, err := f.host.localRun(replacement); err != nil || record.Topic != local.Topic {
+				t.Fatalf("replacement record %+v, %v; want topic %s", record, err, local.Topic)
+			}
+			if on, off := f.tasksOn(t, local.Topic, submitted.RunID), f.tasksOn(t, other, submitted.RunID); on != 1 || off != 0 {
+				t.Fatalf("%d replacements on the original's topic and %d on the other; want 1 and 0", on, off)
+			}
+		})
+	}
+}
+
+// A replacement whose produce failed is retried by a new host process from its stored record, on the recorded topic, once.
+func TestAStoredReplacementIsRetriedOnItsRecordedTopic(t *testing.T) {
+	f := newFixture(t)
+	receiver, eu, us := f.signaturesFixture(t)
+	submitted := f.submit(t, nil)
+	task := receiver.claim(t, f.ctx, submitted.RunID)[0]
+	other := eu
+	if task.topic == eu {
+		other = us
+	}
+	f.favour(t, other, eu)
+	receiver.feed(t, f.ctx, submitted.RunID, receiver.echo(t, task), receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil))
+	receiver.keyLost(t, f.ctx, task)
+	previous := produceReplacement
+	t.Cleanup(func() { produceReplacement = previous })
+	produceReplacement = func(context.Context, *Host, string, wire.SubmissionBinding, []byte) error {
+		return errors.New("injected crash")
+	}
+	if _, err := f.host.resubmit(f.ctx, submitted.RunID, true); err == nil {
+		t.Fatal("resubmit succeeded through a failed write")
+	}
+	local, err := f.host.localRun(submitted.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := f.host.localRun(local.Replacement)
+	if err != nil || stored == nil || stored.Produced || stored.Topic != task.topic {
+		t.Fatalf("stored replacement %+v, %v; want it unproduced, recording topic %s", stored, err, task.topic)
+	}
+	produceReplacement = previous
+	restarted, err := NewHost(f.host.kafka, f.host.key, operator.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, nil, log.New(f.logs, "restarted: ", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if replacement, err := restarted.resubmit(f.ctx, submitted.RunID, true); err != nil || replacement != local.Replacement {
+			t.Fatalf("restarted resubmit = %q, %v; want %s", replacement, err, local.Replacement)
+		}
+	}
+	if on, off := f.tasksOn(t, task.topic, submitted.RunID), f.tasksOn(t, other, submitted.RunID); on != 1 || off != 0 {
+		t.Fatalf("%d replacements on the recorded topic and %d on the other; want 1 and 0", on, off)
+	}
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 // PoolSuspend records pool suspended, or resumed when suspend is false, and reconciles the ACLs to match.
@@ -76,15 +77,18 @@ type SuspectTask struct {
 	AppendedMS         int64
 }
 
-// RotateReport lists the retained tasks under the suspect keys. Horizon is each task topic partition's oldest retained
-// offset after the scan and OldestMS the append time of the oldest retained record, 0 with none: a task deleted by
-// retention before them is not listed. DeletedFrom is, for each partition whose log start retention moved during the
-// scan, its start before the scan: tasks from there to the horizon were deleted during it.
+// RotateReport lists the retained tasks under the suspect keys. Topics is the pool's task topics, listed once when the
+// scan starts and frozen: the report's coordinates, an inventory, not a proof that no topic was created after it.
+// Horizon is each topic's oldest retained offset after the scan and OldestMS the append time of the oldest retained
+// record, 0 with none: a task deleted by retention before them is not listed. DeletedFrom is, for each topic whose log
+// start retention moved during the scan, its start before the scan: tasks from there to the horizon were deleted during
+// it.
 type RotateReport struct {
 	SuspectKeys []string
 	Tasks       []SuspectTask
-	Horizon     map[int32]int64
-	DeletedFrom map[int32]int64
+	Topics      []string
+	Horizon     map[string]int64
+	DeletedFrom map[string]int64
 	OldestMS    int64
 }
 
@@ -117,7 +121,7 @@ func awaitSnapshot(ctx context.Context, reader *Reader, state State, pool string
 }
 
 // PoolRotateKey records a rotate-key request for a suspended pool, waits for its key custodian's snapshot rotated for it,
-// reporting the wait to progress, and then reports every task retained through the task topic's end at that point whose
+// reporting the wait to progress, and then reports every task retained through each task topic's end at that point whose
 // submit wrap is to one of suspects, by default the current key when the request is made. A task record is listed as
 // written, verified or not, since its envelope is exposed either way. Its credential names are its own and those every
 // terms record of the pool on wherry.operator gives its agent: a superset, since an incident inventory must not miss one.
@@ -165,34 +169,46 @@ func (service *Service) PoolRotateKey(ctx context.Context, pool string, suspects
 	if err != nil {
 		return RotateReport{}, err
 	}
-	// Every task appended before the rotated snapshot was read lies below these ends.
-	ends, err := ListOffsets(ctx, listing.ListEndOffsets, PoolTasksTopic(pool))
+	topics, err := PoolTaskTopics(ctx, listing, pool)
 	if err != nil {
 		return RotateReport{}, err
 	}
-	starts, err := ListOffsets(ctx, listing.ListStartOffsets, PoolTasksTopic(pool))
-	if err != nil {
-		return RotateReport{}, err
+	report := RotateReport{SuspectKeys: suspects, Topics: topics, Horizon: map[string]int64{}, DeletedFrom: map[string]int64{}}
+	ends := map[string]kadm.ListedOffsets{}
+	for _, topic := range topics {
+		// Every task appended before the rotated snapshot was read lies below these ends.
+		if ends[topic], err = ListOffsets(ctx, listing.ListEndOffsets, topic); err != nil {
+			return RotateReport{}, err
+		}
+		starts, err := ListOffsets(ctx, listing.ListStartOffsets, topic)
+		if err != nil {
+			return RotateReport{}, err
+		}
+		starts.Each(func(listed kadm.ListedOffset) { report.Horizon[topic] = listed.Offset })
 	}
-	report := RotateReport{SuspectKeys: suspects, Horizon: map[int32]int64{}, DeletedFrom: map[int32]int64{}}
-	starts.Each(func(listed kadm.ListedOffset) { report.Horizon[listed.Partition] = listed.Offset })
 	history := termsHistory(raw, pool)
-	records, err := reader.ReadFrom(ctx, PoolTasksTopic(pool), 0)
-	if err != nil {
-		return RotateReport{}, err
+	var records []*kgo.Record
+	for _, topic := range topics {
+		read, err := reader.ReadFrom(ctx, topic, 0)
+		if err != nil {
+			return RotateReport{}, err
+		}
+		records = append(records, read...)
 	}
 	// A fetch below the log start begins at the start then in effect, so the horizon is the one listed after the scan.
-	scanned, err := ListOffsets(ctx, listing.ListStartOffsets, PoolTasksTopic(pool))
-	if err != nil {
-		return RotateReport{}, err
-	}
-	scanned.Each(func(listed kadm.ListedOffset) {
-		if before := report.Horizon[listed.Partition]; listed.Offset > before {
-			report.DeletedFrom[listed.Partition], report.Horizon[listed.Partition] = before, listed.Offset
+	for _, topic := range topics {
+		scanned, err := ListOffsets(ctx, listing.ListStartOffsets, topic)
+		if err != nil {
+			return RotateReport{}, err
 		}
-	})
+		scanned.Each(func(listed kadm.ListedOffset) {
+			if before := report.Horizon[topic]; listed.Offset > before {
+				report.DeletedFrom[topic], report.Horizon[topic] = before, listed.Offset
+			}
+		})
+	}
 	for _, record := range records {
-		if end, ok := ends.Lookup(record.Topic, record.Partition); !ok || record.Offset >= end.Offset {
+		if end, ok := ends[record.Topic].Lookup(record.Topic, record.Partition); !ok || record.Offset >= end.Offset {
 			continue
 		}
 		if appended := record.Timestamp.UnixMilli(); report.OldestMS == 0 || appended < report.OldestMS {

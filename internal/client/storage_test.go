@@ -33,7 +33,6 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
-	"github.com/twmb/franz-go/pkg/kadm"
 )
 
 const testBucket = "wherry-test"
@@ -324,7 +323,7 @@ func TestSubmitUploadsS3InputsBeforePublishing(t *testing.T) {
 		t.Fatalf("submission's S3 inputs %+v", task.submission.Wherry.S3Inputs)
 	}
 	// The task carries the inputs' coordinates and no URL.
-	records, err := readTopic(f.ctx, receiver.kafka, operator.PoolTasksTopic("pool-s3"))
+	records, err := readTasks(f.ctx, receiver.kafka, "pool-s3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,17 +381,16 @@ func recordLimitFixture(t *testing.T, stored bool) (*fixture, *uploadOracle, *te
 	if err := f.service.PoolApply(f.ctx, "pool-r", terms, false); err != nil {
 		t.Fatal(err)
 	}
+	// The receiver's signature topics exist once it is added; pool apply then reads their limit.
+	receiver := f.addReceiver(t, "receiver-r", "pool-r")
 	limit := "100000"
-	if responses, err := kadm.NewClient(f.service.Operator).AlterTopicConfigs(f.ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "max.message.bytes", Value: &limit}}, operator.PoolTasksTopic("pool-r")); err != nil || responses[0].Err != nil {
-		t.Fatalf("alter topic: %v %v", err, responses)
-	}
+	f.setTaskTopicsConfig(t, "pool-r", "max.message.bytes", limit)
 	if err := f.service.PoolApply(f.ctx, "pool-r", terms, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.service.TenantPoolAdd(f.ctx, "tenant-a", "pool-r"); err != nil {
 		t.Fatal(err)
 	}
-	receiver := f.addReceiver(t, "receiver-r", "pool-r")
 	receiver.advertise(t, f.ctx, nil)
 	return f, o, receiver
 }

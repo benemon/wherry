@@ -130,13 +130,14 @@ func TestOperatorCommandUsage(t *testing.T) {
 
 func TestRotateKeyReportStatesItsHorizon(t *testing.T) {
 	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	a, b := "wherry.pool.pool-a.tasks.claude."+strings.Repeat("a", 64), "wherry.pool.pool-a.tasks.codex."+strings.Repeat("b", 64)
 	var out bytes.Buffer
-	writeRotateReport(&out, "pool-a", operator.RotateReport{SuspectKeys: []string{"kid-a", "kid-b"}, Horizon: map[int32]int64{1: 7, 0: 3}, OldestMS: now.Add(-50 * time.Hour).UnixMilli(),
+	writeRotateReport(&out, "pool-a", operator.RotateReport{SuspectKeys: []string{"kid-a", "kid-b"}, Topics: []string{a, b}, Horizon: map[string]int64{b: 7, a: 3}, OldestMS: now.Add(-50 * time.Hour).UnixMilli(),
 		Tasks: []operator.SuspectTask{{Run: "run-a", Tenant: "tenant-a", KeyID: "kid-a", Credentials: []string{"deploy", "model"}, AppendedMS: now.Add(-time.Hour).UnixMilli()}}}, now)
 	want := `pool pool-a's key custodian rotated for the rotate-key request; tasks appended through that rotation are listed
 suspect_keys=kid-a,kid-b
-horizon partition=0 oldest_retained_offset=3
-horizon partition=1 oldest_retained_offset=7
+horizon topic=` + a + ` oldest_retained_offset=3
+horizon topic=` + b + ` oldest_retained_offset=7
 horizon: the oldest retained task was appended at 2026-10-30T10:00:00Z, 50h0m0s ago; tasks deleted by retention before it are not listed
 task run=run-a tenant=tenant-a key=kid-a credentials=deploy,model appended=2026-11-01T11:00:00Z
 tasks=1
@@ -145,14 +146,15 @@ tasks=1
 		t.Fatalf("report:\n%s\nwant:\n%s", out.String(), want)
 	}
 	out.Reset()
-	writeRotateReport(&out, "pool-a", operator.RotateReport{SuspectKeys: []string{"kid-a"}, Horizon: map[int32]int64{0: 0}}, now)
-	if !strings.Contains(out.String(), "horizon: the task topic retains no task; tasks deleted by retention are not listed\n") {
+	writeRotateReport(&out, "pool-a", operator.RotateReport{SuspectKeys: []string{"kid-a"}, Topics: []string{a}, Horizon: map[string]int64{a: 0}}, now)
+	if !strings.Contains(out.String(), "horizon: the task topics retain no task; tasks deleted by retention are not listed\n") {
 		t.Fatalf("empty report states no horizon:\n%s", out.String())
 	}
 	out.Reset()
-	writeRotateReport(&out, "pool-a", operator.RotateReport{SuspectKeys: []string{"kid-a"}, Horizon: map[int32]int64{0: 9}, DeletedFrom: map[int32]int64{0: 3}}, now)
-	if !strings.Contains(out.String(), "horizon partition=0 oldest_retained_offset=9\nhorizon partition=0: retention deleted the tasks at offsets 3 to 8 during the scan; they may not be listed\n") {
-		t.Fatalf("report does not state the tasks deleted during the scan:\n%s", out.String())
+	writeRotateReport(&out, "pool-a", operator.RotateReport{SuspectKeys: []string{"kid-a"}, Topics: []string{a, b}, Horizon: map[string]int64{a: 9, b: 4}, DeletedFrom: map[string]int64{a: 3}}, now)
+	if !strings.Contains(out.String(), "horizon topic="+a+" oldest_retained_offset=9\nhorizon topic="+b+" oldest_retained_offset=4\nhorizon topic="+a+": retention deleted the tasks at offsets 3 to 8 during the scan; they may not be listed\n") ||
+		strings.Contains(out.String(), "topic="+b+": retention deleted") {
+		t.Fatalf("report does not state, per topic, the tasks deleted during the scan:\n%s", out.String())
 	}
 }
 
@@ -255,6 +257,8 @@ profiles:
       agent: claude
       labels: {}
       config: {}
+      signature: "claude\n"
+      topic: wherry.pool.pool-a.tasks.claude.98038b25280788a45a2f06c209513024c99adee81c6416b691b4b5872db7e027
 `
 	if got := wherry("receiver", "show", "receiver-a"); got != shown {
 		t.Fatalf("show printed\n%s\nwant\n%s", got, shown)
@@ -299,6 +303,8 @@ profiles:
             driver: docker
             resources:
                 cpu: 1000
+      signature: "claude\nplatform=nomad\ntier=batch\n"
+      topic: wherry.pool.pool-a.tasks.claude.cead32c5802443c217b9da08a4754cb354f23e5010c834676e5c976ab43ef341
 `
 	if dryRun != resolved {
 		t.Fatalf("dry run printed\n%s\nwant\n%s", dryRun, resolved)

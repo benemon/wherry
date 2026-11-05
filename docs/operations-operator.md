@@ -104,6 +104,12 @@ grants a concurrent command adding a receiver makes before its record. That
 command's own pass restores them, and a peer denied meanwhile exits and is
 restarted by its supervisor.
 
+A recorded profile's signature topic exists before its record. A topic
+missing afterwards was deleted outside wherry: `operator check` names it, and
+`pool apply` of the pool with the same terms recreates it before its
+no-update path. A receiver never creates a topic: its poll of a missing one logs an error
+and retries every 2 seconds.
+
 ## Create a pool
 
 Prerequisites: the working directory
@@ -123,13 +129,20 @@ limit, writes `pools/build.yaml`, then applies it. `-f PATH` applies a file
 or directory elsewhere.
 
 The [pool terms example](configuration-operator.md#pool-terms-example) sets every field,
-as one file and as a directory.
+as one file and as a directory. Each profile signature, an agent and all its
+labels, gets its own task topic; a label change moves a profile to a new one,
+as [Signatures](configuration-operator.md#pool-terms) describes.
 
-- `delivery_limit` bounds how often the broker delivers one task. Each
-  start failure, and each member with no matching plugin profile, returns a task
-  to the pool and uses a delivery. A member handed back a task it failed to
-  start releases it again, and that release uses a delivery too. Size it as
-  the pool's members times the attempts each may make, plus a margin. From
+- `delivery_limit` bounds how often the broker delivers one task. A task
+  reaches only members with a ready profile of its signature, so the limit
+  counts attempts, not hops. Each start failure returns a task to the pool and
+  uses a delivery, and the member that failed may be handed the task again
+  even when a peer with the same signature could start it. A profile that goes
+  unready between a claim's subscription and its fetch has its task released,
+  and that member's other polling slots may acquire it once each before they
+  reopen without its topic, up to the member's capacity minus 1 more
+  deliveries. Size it as the attempts one task may burn plus those
+  re-acquisitions, never by the number of members. From
   attempt `delivery_limit` minus 1, a receiver ends a run it would return to the
   pool `TASK_STATE_FAILED` with `delivery budget exhausted`, except in the
   cases the [extension](a2a-extension-v1.md#delivery-budget) lists. `pool
@@ -227,7 +240,7 @@ retention where it is, so runs submitted under the longer limit keep their
 records; `pool apply` raises the retention, and waits until the brokers
 apply it, before it records a longer limit.
 
-`pool apply` sets the retention of the pool's tasks and events topics, new and
+`pool apply` sets the retention of the pool's task and events topics, new and
 existing, to at least `start_by_limit` plus the six-hour maximum run time plus a
 one-day margin, their timestamp type to `LogAppendTime`, since a run's age
 runs from the broker's time, their `retention.bytes` to `-1` and
@@ -235,7 +248,7 @@ runs from the broker's time, their `retention.bytes` to `-1` and
 retention deletes a record within about an hour of its bound. The deadlines
 of replaced pool keys fall inside this retention
 ([Rotation](concepts.md#rotation)). The pool's snapshot topic is compacted
-and keeps its latest snapshot forever; it holds public keys only. It sets the tasks topic's retention on the progress
+and keeps its latest snapshot forever; it holds public keys only. It sets the greatest task topic's retention on the progress
 topics of the pool's live receivers. With the 72-hour default that is `367200000` ms, 4 days
 and six hours, after which a run's prompts leave the broker. Tenant feeds keep
 statuses and results, and tenant transcript topics transcripts, outputs and
@@ -244,9 +257,9 @@ hours, so `pool apply` refuses a limit above 29 days and 18 hours, and
 `tenant pool add` refuses a feed or transcript topic that keeps less. Identity and
 configuration topics stay forever. `wherry operator check` reports a topic whose
 retention drops below its bound, a pool topic whose timestamp type is not
-`LogAppendTime`, and a tasks or events topic without the hourly
+`LogAppendTime`, and a task or events topic without the hourly
 `segment.ms`, `cleanup.policy=delete` or `retention.bytes=-1`, or with more
-than one partition. `pool apply` refuses a tasks or events topic with more
+than one partition. `pool apply` refuses a task or events topic with more
 than one partition; partitions cannot be removed, so recreate the pool's topics.
 
 A tenant transcript topic whose retention is shorter than its feed's loses an
@@ -269,8 +282,9 @@ cluster policy that refuses the setting fails the command, and
 
 `pool apply` reads
 `message.max.bytes` from every broker and `max.message.bytes` from the
-pool's tasks topic and its tenants' feeds and transcript topics, records the
-tasks topic's record limit in the pool's terms, signs the largest output and
+pool's task topics and its tenants' feeds and transcript topics, records the
+task topics' lowest record limit in the pool's terms, the brokers' and the
+host's batch limit when it has none yet, signs the largest output and
 transcript chunks and results, and refuses the terms when one is over the
 limit of those tenant topics. A topic's own `max.message.bytes` overrides
 the brokers' `message.max.bytes`. `wherry operator check` measures the tenant
@@ -285,8 +299,8 @@ record limit. Input files grow by about 16/9 on the wire, since they are
 base64-encoded inside a record that is itself base64url-encoded. A host
 batches at most 1000012 bytes, franz-go's default batch maximum, which is
 below the brokers' default `message.max.bytes` of 1048588, so the host's
-batch is the tasks topic's limit with brokers and the topic at their
-defaults. Raising `message.max.bytes` or the tasks
+batch is the task topics' limit with brokers and the topics at their
+defaults. Raising `message.max.bytes` or a task
 topic's `max.message.bytes` leaves the limit there, and lowering either
 lowers it. Run `pool apply` after changing either, so the terms record the
 new limit. An output chunk holds
@@ -349,7 +363,7 @@ the host is offline until its user puts the new bundle in place.
 A receiver runs a pool's tasks on the plugin profiles of its
 [receiver configuration](configuration-receiver.md#receiver-configuration);
 [Placement](concepts.md#placement) says how a task reaches one.
-Give a host-local receiver, such as a systemd one, a pool of its own, as
+Give each host-local receiver, such as a systemd one, a `host` label of its own, as
 [systemd](plugins.md#systemd) explains.
 [Receiver on Nomad](install-receiver-nomad.md#run-the-receiver-in-nomad) adds receiver `nomad-1` and starts it
 on Nomad.
@@ -675,7 +689,7 @@ deletes them again.
    ```
 
 A drain of the key custodian while the pool is suspended keeps its keys to
-their deadlines: it does not scan the task topic, so it re-keys nothing.
+their deadlines: it does not scan the task topics, so it re-keys nothing.
 
 ## Check a deployment
 
@@ -687,8 +701,9 @@ It loads `wherry.operator`, validates every receiver configuration against its
 pool's current terms, checks that every pool's largest records still fit the
 broker's record limit, reports a tenant feed or transcript topic whose
 `max.message.bytes` is below 2 MiB, reports topic retention below the pool's required
-bounds, including a receiver's progress topic that keeps less than its
-pool's tasks topic, checks each pool's tasks and events `segment.ms`,
+bounds, including an events or progress topic that keeps less than its
+pool's greatest task topic, reports a profile of each receiver whose
+membership has not ended whose signature topic is missing, checks each pool's task and events `segment.ms`,
 `cleanup.policy`, `retention.bytes` and single partition and its
 snapshot topic's configuration and single partition, and confirms that every
 ACL the state calls for exists. It does not
@@ -715,7 +730,7 @@ platform and on Kafka directly.
 1. Stop every receiver and every `wherry host mcp` and host command.
 2. Stop and remove every run's platform job (the Nomad job, Kubernetes pod
    or systemd unit each [plugin](plugins.md) creates for a run). Once the
-   tasks topics are gone no receiver can adopt these jobs or end them at
+   task topics are gone no receiver can adopt these jobs or end them at
    their deadlines.
 3. As the super user, delete what `wherry operator` created: every topic whose
    name starts with `wherry.`, including `wherry.operator`, as

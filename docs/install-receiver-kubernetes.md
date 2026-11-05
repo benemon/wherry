@@ -18,7 +18,8 @@ Choose a Kubernetes plugin release that pairs with your wherry release.
 ## Fit the steps to this guide
 
 - The record uses pool `build` from Set up the operator.
-  With one receiver, `build` is that receiver's pool.
+  A pool is one trust and tenancy boundary; the platform is a label.
+  `build` is that boundary here.
 - The record's `broker:` line names a Kafka inside the cluster.
   Set it to the address you gave `wherry operator init`, or remove the line to use that address.
 - This guide's broker uses a private CA, `kafka-ca.pem` from Set up the operator.

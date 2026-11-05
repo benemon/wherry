@@ -11,7 +11,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +20,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
@@ -44,18 +44,77 @@ func (f fixture) setReady(t *testing.T, ready bool) {
 	}
 }
 
-// shareJoins counts the share group heartbeats that join the pool's share group from now on.
-func (f fixture) shareJoins(t *testing.T) func() int64 {
-	t.Helper()
-	var joins atomic.Int64
-	f.cluster.ControlKey(kmsg.ShareGroupHeartbeat.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
-		f.cluster.KeepControl()
-		if heartbeat := request.(*kmsg.ShareGroupHeartbeatRequest); heartbeat.GroupID == operator.PoolGroup(testPool) && heartbeat.MemberEpoch == 0 {
-			joins.Add(1)
+// shareMember is one member of the pool's share group, a share client, as its heartbeats to the cluster show it: its
+// subscription, the complete SubscribedTopicNames of its joining heartbeat, when it joined and when it left.
+type shareMember struct {
+	id           string
+	topics       []string
+	joined, left time.Time
+}
+
+// memberLog holds every member of the pool's share group the cluster saw join since the fixture began.
+type memberLog struct {
+	mu      sync.Mutex
+	members []shareMember
+}
+
+// watchMembers records, from now on, each share client joining and leaving the pool's share group.
+func watchMembers(cluster *kfake.Cluster) *memberLog {
+	members := &memberLog{}
+	cluster.ControlKey(kmsg.ShareGroupHeartbeat.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		cluster.KeepControl()
+		heartbeat := request.(*kmsg.ShareGroupHeartbeatRequest)
+		if heartbeat.GroupID != operator.PoolGroup(testPool) {
+			return nil, nil, false
+		}
+		members.mu.Lock()
+		defer members.mu.Unlock()
+		known := slices.IndexFunc(members.members, func(member shareMember) bool { return member.id == heartbeat.MemberID })
+		switch {
+		case heartbeat.MemberEpoch == 0 && known < 0:
+			members.members = append(members.members, shareMember{id: heartbeat.MemberID, topics: slices.Clone(heartbeat.SubscribedTopicNames), joined: time.Now()})
+		case heartbeat.MemberEpoch == -1 && known >= 0 && members.members[known].left.IsZero():
+			members.members[known].left = time.Now()
 		}
 		return nil, nil, false
 	})
-	return joins.Load
+	return members
+}
+
+// all is every member seen so far, in join order.
+func (m *memberLog) all() []shareMember {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.members)
+}
+
+// live counts the members that joined and have not left.
+func (f fixture) live() int {
+	n := 0
+	for _, member := range f.members.all() {
+		if member.left.IsZero() {
+			n++
+		}
+	}
+	return n
+}
+
+// joinedSince is every member that joined after since.
+func (f fixture) joinedSince(since time.Time) []shareMember {
+	var joined []shareMember
+	for _, member := range f.members.all() {
+		if member.joined.After(since) {
+			joined = append(joined, member)
+		}
+	}
+	return joined
+}
+
+// shareJoins counts the members joining the pool's share group from now on.
+func (f fixture) shareJoins(t *testing.T) func() int64 {
+	t.Helper()
+	since := time.Now()
+	return func() int64 { return int64(len(f.joinedSince(since))) }
 }
 
 // renewals records the time of every renewal the cluster receives from now on; a held run renews in share
@@ -89,19 +148,25 @@ func (f fixture) renewals(t *testing.T) func() []time.Time {
 	}
 }
 
-// mostSessions samples r.sessions() every 5 ms for d and returns the highest count seen.
-func (f fixture) mostSessions(d time.Duration) int {
+// polling counts the live members of the pool's share group that hold no run: each run the receiver holds keeps the
+// share client that fetched it.
+func (f fixture) polling() int {
+	return f.live() - int(f.receiver.held())
+}
+
+// mostMembers samples the polling members every 5 ms for d and returns the highest count seen.
+func (f fixture) mostMembers(d time.Duration) int {
 	most := 0
 	for end := time.Now().Add(d); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
-		most = max(most, f.receiver.sessions())
+		most = max(most, f.polling())
 	}
 	return most
 }
 
-// awaitSessions waits up to d for r.sessions() to satisfy ok and reports whether it did.
-func (f fixture) awaitSessions(d time.Duration, ok func(int) bool) bool {
+// awaitMembers waits up to d for the polling member count to satisfy ok and reports whether it did.
+func (f fixture) awaitMembers(d time.Duration, ok func(int) bool) bool {
 	for end := time.Now().Add(d); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
-		if ok(f.receiver.sessions()) {
+		if ok(f.polling()) {
 			return true
 		}
 	}
@@ -117,8 +182,8 @@ func TestNoReadyOfferOpensNoPoll(t *testing.T) {
 	fetches, joins := f.shareFetches(t), f.shareJoins(t)
 	f.run(t, f.ctx)
 	// The slots start only after Run's first advertisement; without a session no task is ever acquired.
-	if most := f.mostSessions(3 * time.Second); most != 0 {
-		t.Errorf("%d share sessions open while no offer is ready, want none", most)
+	if most := f.mostMembers(3 * time.Second); most != 0 {
+		t.Errorf("%d share group members open while no offer is ready, want none", most)
 	}
 	if times, _ := fetches(); len(times) != 0 {
 		t.Errorf("%d share fetches while no offer is ready, want none", len(times))
@@ -127,8 +192,8 @@ func TestNoReadyOfferOpensNoPoll(t *testing.T) {
 		t.Errorf("%d share group joins while no offer is ready, want none", joined)
 	}
 	f.setReady(t, true)
-	if !f.awaitSessions(1500*time.Millisecond, func(n int) bool { return n > 0 }) {
-		t.Errorf("no share session once an offer was ready; logs:\n%s", f.logs.String())
+	if !f.awaitMembers(1500*time.Millisecond, func(n int) bool { return n > 0 }) {
+		t.Errorf("no share group member once an offer was ready; logs:\n%s", f.logs.String())
 	}
 }
 
@@ -137,7 +202,7 @@ func TestOffersEmptyingEndsABlockedPoll(t *testing.T) {
 	f := gateFixture(t, resultStream)
 	fetches := f.shareFetches(t)
 	f.run(t, f.ctx)
-	if !f.awaitSessions(10*time.Second, func(n int) bool { return n == 2 }) {
+	if !f.awaitMembers(10*time.Second, func(n int) bool { return n == 2 }) {
 		t.Fatalf("both slots never polled; logs:\n%s", f.logs.String())
 	}
 	for times, _ := fetches(); len(times) == 0; times, _ = fetches() {
@@ -148,8 +213,8 @@ func TestOffersEmptyingEndsABlockedPoll(t *testing.T) {
 	}
 	f.setReady(t, false)
 	// The 100 ms watcher, then the client's close, which waits out a pending share fetch of up to its 1 s FetchMaxWait.
-	if !f.awaitSessions(3*time.Second, func(n int) bool { return n == 0 }) {
-		t.Errorf("poll cancelled: %d share sessions still open 3 s after the offers emptied, want 0", f.receiver.sessions())
+	if !f.awaitMembers(3*time.Second, func(n int) bool { return n == 0 }) {
+		t.Errorf("poll cancelled: %d share group members still open 3 s after the offers emptied, want 0", f.polling())
 	}
 	closed := time.Now()
 	time.Sleep(3 * time.Second)
@@ -252,36 +317,29 @@ func TestHeldRunIsNotGatedByNoOffer(t *testing.T) {
 	})
 }
 
-// (g) No offer and a start failure's back-off each hold the gate alone: clearing one leaves it closed, clearing both
-// reopens it.
+// (g) No offer and a pending run each hold the gate alone: clearing one leaves it closed, clearing both reopens it.
 func TestGateReasonsHoldIndependently(t *testing.T) {
 	f := gateFixture(t, resultStream)
-	backoff := func(d time.Duration) time.Time {
-		until := time.Now().Add(d)
-		f.receiver.mu.Lock()
-		f.receiver.backoffUntil = until
-		f.receiver.mu.Unlock()
-		return until
-	}
+	held := testActiveRun(t, f, "run-z", 1)
 	f.setReady(t, false)
-	until := backoff(2 * time.Second)
+	held.pending()
 	f.run(t, f.ctx)
-	if most := f.mostSessions(1500 * time.Millisecond); most != 0 {
-		t.Fatalf("no offer and back-off: %d share sessions, want none", most)
+	if most := f.mostMembers(1500 * time.Millisecond); most != 0 {
+		t.Fatalf("no offer and a pending run: %d share group members, want none", most)
 	}
-	time.Sleep(time.Until(until))
-	if most := f.mostSessions(1500 * time.Millisecond); most != 0 {
-		t.Fatalf("back-off cleared, no offer held: %d share sessions, want none", most)
+	held.placed()
+	if most := f.mostMembers(1500 * time.Millisecond); most != 0 {
+		t.Fatalf("pending cleared, no offer held: %d share group members, want none", most)
 	}
-	until = backoff(3 * time.Second)
+	held.pending()
 	f.setReady(t, true)
-	if most := f.mostSessions(1500 * time.Millisecond); most != 0 {
-		t.Fatalf("offer ready, back-off held: %d share sessions, want none", most)
+	if most := f.mostMembers(1500 * time.Millisecond); most != 0 {
+		t.Fatalf("offer ready, pending held: %d share group members, want none", most)
 	}
-	time.Sleep(time.Until(until))
+	held.placed()
 	// A slot asleep on the gate re-checks within its 1 s sleep.
-	if !f.awaitSessions(time.Second+500*time.Millisecond, func(n int) bool { return n > 0 }) {
-		t.Fatalf("both reasons cleared: no share session opened; logs:\n%s", f.logs.String())
+	if !f.awaitMembers(time.Second+500*time.Millisecond, func(n int) bool { return n > 0 }) {
+		t.Fatalf("both reasons cleared: no share group member joined; logs:\n%s", f.logs.String())
 	}
 }
 
@@ -300,8 +358,8 @@ func TestFalseReadyIsLogged(t *testing.T) {
 }
 
 // (e) TestNoReadyOfferOpensNoPollOnRealBroker runs a receiver with no ready offer in a broker pool; kfake does not model
-// share-group acquisition. While gated the receiver holds no partition of its pool's share group, and so acquires no
-// task; once ready it reopens and claims the task queued meanwhile at its first delivery.
+// share-group acquisition. While gated the receiver is no member of its pool's share group, and so acquires no task;
+// once ready it reopens and claims the task queued meanwhile at its first delivery.
 func TestNoReadyOfferOpensNoPollOnRealBroker(t *testing.T) {
 	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
 	if address == "" {
@@ -330,7 +388,7 @@ func TestNoReadyOfferOpensNoPollOnRealBroker(t *testing.T) {
 	plugin := &fakePlugin{stream: resultStream, unready: true}
 	r := &Receiver{id: b.receiver, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
-			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
+			return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: plugin}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
@@ -352,7 +410,7 @@ func TestNoReadyOfferOpensNoPollOnRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.PoolTasksTopic(b.pool), Key: []byte(run), Value: value}).FirstErr(); err != nil {
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: b.tasksTopic(t, ctx), Key: []byte(run), Value: value}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	admin := kadm.NewClient(b.kafka)
@@ -367,23 +425,27 @@ func TestNoReadyOfferOpensNoPollOnRealBroker(t *testing.T) {
 			t.Fatalf("describe the pool's share group: no result for %s", operator.PoolGroup(b.pool))
 		case group.Err != nil && !errors.Is(group.Err, kerr.GroupIDNotFound):
 			t.Fatalf("describe the pool's share group: %v", group.Err)
-		case group.Err == nil && len(group.AssignedPartitions()) > 0:
-			t.Fatalf("the pool's share group has assigned partitions while no offer is ready; logs:\n%s", logs.String())
-		}
-		if r.sessions() != 0 {
-			t.Fatalf("a share session opened while no offer is ready; logs:\n%s", logs.String())
+		// Membership, not assignment: a joining member is assigned nothing until its next heartbeat, 5 s later.
+		case group.Err == nil && len(group.Members) > 0:
+			t.Fatalf("the pool's share group has a member while no offer is ready; logs:\n%s", logs.String())
 		}
 	}
 	plugin.mu.Lock()
 	plugin.unready = false
 	plugin.mu.Unlock()
-	// One 200 ms advertise interval to see the offer, then a slot's 1 s gate sleep; 500 ms more for the scheduler.
+	// One 200 ms advertise interval to see the offer, then a slot's 1 s gate sleep, then the join. The join's response
+	// assigns nothing: the broker initialises the group's share-partition state after it and assigns on the next
+	// heartbeat, group.share.heartbeat.interval.ms (5 s by default, also its minimum) later; 2 s more for the scheduler.
 	ready := time.Now()
-	for r.sessions() == 0 {
-		if waited := time.Since(ready); waited > time.Second+advertiseInterval+500*time.Millisecond {
-			t.Fatalf("no share session %s after the offer became ready; logs:\n%s", waited, logs.String())
+	for {
+		groups, err := admin.DescribeShareGroups(ctx, operator.PoolGroup(b.pool))
+		if group := groups[operator.PoolGroup(b.pool)]; err == nil && group.Err == nil && len(group.AssignedPartitions()) > 0 {
+			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		if waited := time.Since(ready); waited > time.Second+advertiseInterval+5*time.Second+2*time.Second {
+			t.Fatalf("no partition assigned %s after the offer became ready; logs:\n%s", waited, logs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 	for {
 		if _, _, follows, _ := plugin.counts(); follows == 1 {
@@ -436,7 +498,7 @@ func TestPendingRunOpensNoPollOnRealBroker(t *testing.T) {
 	}
 	keys := signed.Keys{}
 	member := func(id string, plugin *fakePlugin) (*Receiver, *syncBuffer) {
-		base, err := kgo.NewClient(b.opts...)
+		base, err := kgo.NewClient(append(slices.Clone(b.opts), kgo.ClientID(id))...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -445,7 +507,7 @@ func TestPendingRunOpensNoPollOnRealBroker(t *testing.T) {
 		logs := &syncBuffer{}
 		return &Receiver{id: id, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 			factory: func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
-				return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
+				return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: plugin}, nil
 			}}, logs
 	}
 	runMember := func(r *Receiver) {
@@ -464,7 +526,7 @@ func TestPendingRunOpensNoPollOnRealBroker(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.PoolTasksTopic(b.pool), Key: []byte(run), Value: value}).FirstErr(); err != nil {
+		if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: b.tasksTopic(t, ctx), Key: []byte(run), Value: value}).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 		return run
@@ -500,15 +562,16 @@ func TestPendingRunOpensNoPollOnRealBroker(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	// The watcher's 100 ms, then the client's close, which waits out a pending fetch of up to its 1 s FetchMaxWait.
-	for closed := time.Now(); first.sessions() != 0; time.Sleep(10 * time.Millisecond) {
-		if time.Since(closed) > 100*time.Millisecond+time.Second+500*time.Millisecond {
-			t.Fatalf("%d share sessions polling 1.6 s after the run turned pending; logs:\n%s", first.sessions(), firstLogs.String())
+	// The watcher's 100 ms, then the idle client's close, which waits out a pending fetch of up to its 1 s FetchMaxWait,
+	// then its leave; the held run's client stays, the first member's one member.
+	for closed := time.Now(); b.groupMembers(t, ctx, b.receiver) != 1; time.Sleep(100 * time.Millisecond) {
+		if time.Since(closed) > 100*time.Millisecond+time.Second+2*time.Second {
+			t.Fatalf("%d members of the first receiver 3.1 s after the run turned pending, want its held run's alone; logs:\n%s", b.groupMembers(t, ctx, b.receiver), firstLogs.String())
 		}
 	}
 	queued := submit("run-queued")
 	for end := time.Now().Add(3 * time.Second); time.Now().Before(end); time.Sleep(100 * time.Millisecond) {
-		if first.sessions() != 0 || len(claims(queued)) != 0 {
+		if b.groupMembers(t, ctx, b.receiver) != 1 || len(claims(queued)) != 0 {
 			t.Fatalf("the pending member polled or claimed the queued task; logs:\n%s", firstLogs.String())
 		}
 	}
@@ -524,5 +587,25 @@ func TestPendingRunOpensNoPollOnRealBroker(t *testing.T) {
 			t.Fatalf("the ready member never claimed the queued task; logs:\n%s", laterLogs.String())
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// shareFetches records the time and session epoch of every share fetch the cluster receives from now on.
+func (f fixture) shareFetches(t *testing.T) func() ([]time.Time, []int32) {
+	t.Helper()
+	var mu sync.Mutex
+	var times []time.Time
+	var epochs []int32
+	f.cluster.ControlKey(kmsg.ShareFetch.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		f.cluster.KeepControl()
+		mu.Lock()
+		defer mu.Unlock()
+		times, epochs = append(times, time.Now()), append(epochs, request.(*kmsg.ShareFetchRequest).ShareSessionEpoch)
+		return nil, nil, false
+	})
+	return func() ([]time.Time, []int32) {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(times), slices.Clone(epochs)
 	}
 }

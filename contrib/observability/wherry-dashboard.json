@@ -554,7 +554,7 @@
       "id": 10,
       "type": "timeseries",
       "title": "Start failures by class",
-      "description": "Start failures per second: input-too-large, dispatch, platform, and offer-unavailable (a member with no matching profile).",
+      "description": "Start failures per second: input-too-large, dispatch, platform.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

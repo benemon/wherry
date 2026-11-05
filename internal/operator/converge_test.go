@@ -271,7 +271,7 @@ func TestSuspensionReassertsItsDeletionAfterItsRecord(t *testing.T) {
 	if err := service.PoolSuspend(ctx, "pool-a", true); err != nil {
 		t.Fatal(err)
 	}
-	write := ACL{TenantPrincipal("tenant-a", "host-a"), "topic", PoolTasksTopic("pool-a"), false, []string{"WRITE"}}
+	write := ACL{TenantPrincipal("tenant-a", "host-a"), "topic", PoolTasksPrefix("pool-a"), true, []string{"WRITE"}}
 	if ok, err := granted(ctx, service, write); err != nil || ok {
 		t.Fatalf("suspended pool's task topic keeps a host's WRITE: %t, %v", ok, err)
 	}
@@ -346,7 +346,7 @@ func TestAPassDuringWhichTheLogMovedRepeats(t *testing.T) {
 	if err := hostFixture(t, service, ctx, "tenant-b", "host-b", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
 		t.Fatal(err)
 	}
-	withdrawn(t, service, ACL{TenantPrincipal("tenant-a", "host-a"), "topic", PoolTasksTopic("pool-a"), false, []string{"WRITE"}})
+	withdrawn(t, service, ACL{TenantPrincipal("tenant-a", "host-a"), "topic", PoolTasksPrefix("pool-a"), true, []string{"WRITE"}})
 }
 
 func TestConvergeStopsAtItsBound(t *testing.T) {

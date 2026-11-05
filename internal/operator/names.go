@@ -1,7 +1,12 @@
 package operator
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"maps"
+	"slices"
+	"strings"
 
 	"github.com/benemon/wherry/internal/wire"
 )
@@ -15,7 +20,7 @@ func ReceiverTopic(receiver string) string       { return "wherry.receiver." + r
 func ReceiverProgressTopic(receiver string) string {
 	return "wherry.receiver." + receiver + ".progress"
 }
-func PoolTasksTopic(pool string) string          { return "wherry.pool." + pool + ".tasks" }
+func PoolTasksPrefix(pool string) string         { return "wherry.pool." + pool + ".tasks." }
 func PoolEventsTopic(pool string) string         { return "wherry.pool." + pool + ".events" }
 func CustodianTopic(pool string) string          { return "wherry.pool." + pool + ".custodian" }
 func PoolReceiversTopic(pool string) string      { return "wherry.pool." + pool + ".receivers" }
@@ -33,4 +38,22 @@ func validateNames(values ...string) error {
 		}
 	}
 	return nil
+}
+
+// Signature is the canonical encoding of a profile's signature: the agent, then key=value for each of labels' keys in
+// sorted order, each element followed by a line feed. Neither = nor a line feed is in a label key or value.
+func Signature(agent string, labels map[string]string) string {
+	var encoding strings.Builder
+	encoding.WriteString(agent + "\n")
+	for _, key := range slices.Sorted(maps.Keys(labels)) {
+		encoding.WriteString(key + "=" + labels[key] + "\n")
+	}
+	return encoding.String()
+}
+
+// SignatureTopic is the task topic of a profile's signature in pool: the agent in clear and the SHA-256 of the
+// signature's encoding in lowercase hex.
+func SignatureTopic(pool, agent string, labels map[string]string) string {
+	sum := sha256.Sum256([]byte(Signature(agent, labels)))
+	return PoolTasksPrefix(pool) + agent + "." + hex.EncodeToString(sum[:])
 }

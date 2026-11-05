@@ -119,8 +119,15 @@ receiver renews its lock every 10 seconds; wherry does not check this. The
 broker bounds it between
 `group.share.min.record.lock.duration.ms` and
 `group.share.max.record.lock.duration.ms`. Every delivery counts against
-`delivery_limit`, including a release after a start failure and a release
-by a member with no matching profile. From attempt
+`delivery_limit`, including a release after a start failure. A task reaches
+only members with a ready profile of its signature, so `delivery_limit` counts
+attempts, not hops between members, and is sized by the attempts one task may
+burn, never by the number of members. A member that failed to start a task
+may be handed it again, even when a peer with the same signature could have
+started it. A profile that goes unready between a claim's subscription and
+its fetch has its task released, and that member's other slots still polling
+may acquire it once each before they reopen without the topic: up to its
+capacity minus 1 more deliveries, which the sizing allows for. From attempt
 `delivery_limit` minus 1, a receiver ends a run `TASK_STATE_FAILED` with
 `delivery budget exhausted` where it would release it, except in the cases
 the [extension](a2a-extension-v1.md#delivery-budget) lists.
@@ -128,6 +135,21 @@ the [extension](a2a-extension-v1.md#delivery-budget) lists.
 [`pool apply`](commands.md#wherry-operator-pool-apply-pool) changes an existing
 pool's terms. A lowered `delivery_limit` applies to a task in flight at its
 next release.
+
+**Signatures.** A profile's signature is its agent plus all its labels;
+nothing in the pool terms takes part. Each signature has its own task topic,
+which `receiver apply` creates before the record that names it; `pool apply`
+recreates a recorded profile's topic that was deleted. No terms change creates
+or changes a signature.
+
+**Changing a profile's labels or agent** moves its signature: `receiver
+apply` creates the new topic before the record, and the receiver restarts on
+the new record and subscribes to it. Tasks queued on the old topic wait there
+unless another member shares the old signature, and their hosts report them
+unclaimed at `task_started_by`; the receiver ends its held runs before it
+exits, and nothing waits for or checks the tasks queued on the old signature.
+To keep service uninterrupted, quiesce the submissions that target the
+affected signature first.
 
 ### Pool terms example
 
@@ -154,7 +176,7 @@ agents:
       - {name: github-token, env: GH_TOKEN, required: false}
 default_agent: claude
 start_by_limit: 72h
-# Each receiver with no matching profile spends one delivery, so this covers the pool's receivers plus a margin.
+# The attempts one task may make, start failures included, plus a margin for the releases of a profile going unready.
 delivery_limit: 6
 # Above the receiver's 10s renewal interval.
 lock_duration: 30s
@@ -187,7 +209,7 @@ build/
 ```yaml
 default_agent: claude
 start_by_limit: 72h
-# Each receiver with no matching profile spends one delivery, so this covers the pool's receivers plus a margin.
+# The attempts one task may make, start failures included, plus a margin for the releases of a profile going unready.
 delivery_limit: 6
 # Above the receiver's 10s renewal interval.
 lock_duration: 30s
@@ -244,22 +266,23 @@ A record limit is the lower of what the record's producer batches and what
 the topic the record goes to takes, which Kafka's
 [`max.message.bytes`](https://kafka.apache.org/documentation/#topicconfigs_max.message.bytes)
 sets. wherry reads the topic's own setting, else the lowest
-`message.max.bytes` across the brokers. Submissions go to the pool's tasks
-topic from a host, which batches at most
+`message.max.bytes` across the brokers. Submissions go to the pool's task
+topics from a host, which batches at most
 [franz-go's default](https://pkg.go.dev/github.com/twmb/franz-go/pkg/kgo#ProducerBatchMaxBytes),
 1000012 bytes. Receiver records go to the feeds and transcript topics of
 the tenants entitled to the pool, from a receiver that batches at most
 2 MiB (2097152 bytes), the `max.message.bytes` wherry sets on every tenant
 feed and transcript topic. The Kafka cluster must allow a topic
 `max.message.bytes` of 2 MiB.
-`pool apply` records the tasks topic's record limit in the pool's terms,
+`pool apply` records the lowest record limit of the pool's task topics, or
+with none yet the brokers' and the host's batch limit, in the pool's terms,
 and [`submit`](commands.md#wherry-host-submit) measures each submission against it. A pool file
 does not set it.
 
 `pool apply`, `tenant pool add` and `check` compare five record-batch sizes
 against the record limits. wherry's tests build and sign each record to pin
 its size. The smallest task a host submits with a maximum envelope and its
-submit wrap, an 89326-byte batch, goes against the tasks topic's limit. Four
+submit wrap, an 89326-byte batch, goes against the task topics' limit. Four
 receiver records go against the tenant feeds' limit: the largest output
 chunk, of 256 KiB, two largest results, and the largest transcript chunk, a
 line of 512 KiB. Each result

@@ -16,8 +16,8 @@ Choose a systemd plugin release that pairs with your wherry release.
 ## Fit the steps to this guide
 
 - The record uses pool `build` from Set up the operator.
-  With one receiver, `build` is that receiver's pool.
-  It is a pool of its own, as the steps ask.
+  A pool is one trust and tenancy boundary; the platform is a label.
+  `build` is that boundary here.
 - This guide's broker uses a private CA, `kafka-ca.pem` from Set up the operator.
   Take the steps' lines for a private broker CA.
 - The steps install files from the operator machine on the receiver host: the receiver's bundle, its local

@@ -120,17 +120,17 @@ Then:
 
 ## WherryDeliveryBudgetExhausted
 
-Each start failure, and each member with no matching plugin profile, returns
-a task to the pool and spends one of its pool's `delivery_limit`
-deliveries. From attempt `delivery_limit` minus 1, a receiver ends the run
-`TASK_STATE_FAILED` with `delivery budget exhausted` instead.
+Each start failure returns a task to the pool and spends one of its pool's
+`delivery_limit` deliveries, as does each release of a task whose profile
+went unready between its claim's subscription and its fetch. From attempt
+`delivery_limit` minus 1, a receiver ends the run `TASK_STATE_FAILED` with
+`delivery budget exhausted` instead.
 `wherry_delivery_budget_exhausted_total` counts these runs by tenant and
 profile. The alert fires on any such run in the last hour, for each tenant
 and profile:
 
-- `profile="none"`: runs given back at the budget before any profile took
-  them, because no live receiver offered a profile matching their agent and
-  selector;
+- `profile="none"`: runs given back at the budget because the profile of
+  their signature went unready on the member that fetched them;
 - any other profile: runs the profile took and could not start, or
   returned to the pool after another failure, such as a failed job lookup
   or `Stop` call.
@@ -143,25 +143,67 @@ Confirm it:
    last start failure.
 2. Run `wherry events RUN_ID` to see each attempt and the receiver that
    made it.
-3. Run `wherry host receivers`. Check that a `live` receiver offers a profile
-   with `ready=true` for the run's agent, with labels that satisfy the run's
-   selector.
-4. Read the receivers' logs for
-   `run <id>: no current offer for agent <agent> satisfying its selector`,
+3. Read the receivers' logs for
+   `run <id>: no ready profile for topic <topic>; releasing`,
    `run <id>: dispatch failed: <text>` and
    `run <id>: job never started (<class>): <reason>`.
 
 Then:
 
-- For no matching offer, start or reconfigure a receiver with a profile for
-  the agent and the labels tasks select, or have the tenant change its
-  selector.
+- For releases of an unready profile, restore the profile's readiness, the
+  `readiness: not ready` lines name it.
 - For start failures, fix the cause the log names in the plugin's platform,
   such as a missing image, an unschedulable node pool or a full namespace
   quota.
-- Set `delivery_limit` to at least the number of receivers in the pool plus
-  a margin, as in [Create a pool](operations-operator.md#create-a-pool).
+- Size `delivery_limit` by the attempts one task may burn plus a margin, as
+  in [Create a pool](operations-operator.md#create-a-pool), never by the
+  number of members.
 - Resubmit the failed runs once the cause is fixed.
+
+## A task unclaimed on a signature nobody serves
+
+A task waits on its signature's topic, spending no delivery, until a member
+with a ready profile of that signature fetches it. `wherry wait` reports one
+that none fetched by its `task_started_by` with
+`not started by task_started_by (<RFC 3339 time>): no receiver claimed the task`.
+
+1. Run `wherry host receivers` and check that a `live` receiver of the pool
+   has a profile with `ready=true` for the run's agent whose labels satisfy
+   its selector.
+2. Run `wherry operator receiver show RECEIVER` for that receiver: the
+   profile's `topic` is the signature topic it subscribes to.
+
+Then start or reconfigure a receiver with a profile of that signature, or
+resubmit with a selector a live signature satisfies. A replacement of a
+key-lost run keeps its original signature's topic.
+
+## A task unclaimed while a peer sits idle
+
+A task its host reports `not started by task_started_by` while another live
+receiver with a ready profile for its agent sat idle was on a signature that
+peer does not serve. Two members share a queue only when the profile's agent
+and every label are identical; one differing label, or a label one has and the
+other lacks, is a different signature, and queued tasks never overflow to
+another signature. A receiver whose labels changed through `receiver apply`
+has moved to a new signature, leaving the tasks queued on its old one.
+
+1. Run `wherry operator receiver show RECEIVER` for the receiver the task was
+   placed on and for the idle peer, and compare each profile's `signature`
+   and `topic`.
+2. To make the peers interchangeable, give their profiles identical labels
+   and run `receiver apply` for the one that differs.
+
+Then resubmit the unclaimed run.
+
+## `operator check` names a missing signature topic
+
+`wherry operator check` fails with
+`receiver <receiver> profile <profile>: signature topic <topic> is missing; pool apply <pool> with the same terms creates it`
+when the profile of a receiver whose membership has not ended has no task
+topic: a recorded profile's topic exists before its record, so it was deleted
+outside wherry. Run
+`wherry operator pool apply <pool>` with the pool's recorded terms, then
+`wherry operator check` again.
 
 ## WherryOpenRequestsUnanswered
 

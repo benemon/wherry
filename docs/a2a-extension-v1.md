@@ -111,7 +111,7 @@ algorithm `EdDSA` (Ed25519). The protected header holds:
 
 | Record | `typ` | Signer | Topic | Kafka key |
 | --- | --- | --- | --- | --- |
-| submission | `application/vnd.wherry.submission.v1+jws` | host | `wherry.pool.<pool>.tasks` | run ID |
+| submission | `application/vnd.wherry.submission.v1+jws` | host | `wherry.pool.<pool>.tasks.<agent>.<hex>`, the task topic of the profile signature the host placed it on | run ID |
 | cancel | `application/vnd.wherry.cancel.v1+jws` | host | `wherry.pool.<pool>.events` | run ID |
 | status | `application/vnd.wherry.status.v1+jws` | receiver | `wherry.pool.<pool>.events` and `wherry.tenant.<tenant>` | run ID |
 | chunk | `application/vnd.wherry.chunk.v1+jws` | receiver | `wherry.tenant.<tenant>.transcript` | run ID |
@@ -229,7 +229,7 @@ A submission is the task of one run.
   delivered as its bytes under `filename`, and a `data` part as its JSON under
   `filename` with `.json` added. The delivered names are unique. The signed
   submission is at most the pool's recorded `record_limit` bytes, the
-  broker's record limit for the pool's tasks topic, and the `raw` and `data`
+  broker's record limit for the pool's task topics, and the `raw` and `data`
   parts together hold at most the smallest `inline_limit` the matching
   plugin profiles declare. Over either, a host carries the inputs as
   [S3 inputs](#s3-inputs-and-outputs) when the pool has storage and the host
@@ -359,10 +359,12 @@ A `terminal` status's `wherry` object adds the attempt's chunk count:
 - `task_hash` is the hash of the run's submission.
 - `event_id` identifies the fact the status reports. Readers keep one
   status per event ID.
-- `task_offset` is the offset of the claimed submission on the pool's task
-  topic, whose one partition is 0, on `claimed` only, where it is required.
-  A status of another kind carrying it, or a `claimed` status without it,
-  fails validation.
+- `task_topic` and `task_offset` are the signature task topic the claimed
+  submission was read from and its offset on that topic, whose one partition
+  is 0, on `claimed` only, where both are required. `task_topic` matches
+  `^wherry\.pool\.<name>\.tasks\.<name>\.[0-9a-f]{64}$`, `<name>` the name
+  grammar. A status of another kind carrying either, or a `claimed` status
+  without both, fails validation.
 - `log_offset` is the agent output offset an adopter follows from, on
   `started` only. The transcript is published up to at least that offset.
   Later offsets go to the receiver's [progress](#progress) topic.
@@ -377,7 +379,7 @@ A `terminal` status's `wherry` object adds the attempt's chunk count:
 
 | `kind` | State | Written when | Extra |
 | --- | --- | --- | --- |
-| `claimed` | `TASK_STATE_WORKING` | the receiver admits the run | `task_offset` |
+| `claimed` | `TASK_STATE_WORKING` | the receiver admits the run | `task_topic`, `task_offset` |
 | `placing` | `TASK_STATE_WORKING` | the job is registered and the platform has not placed it; again when the platform's reason changes | the reason as message text |
 | `started` | `TASK_STATE_WORKING` | the job has started | |
 | `rejected` | `TASK_STATE_REJECTED` | the receiver refuses the submission | the reason as message text |
@@ -691,8 +693,8 @@ An echo tells every host of a tenant where a run was admitted.
 
 A receiver writes the echo in the transaction that holds the run's
 `claimed` or `rejected` status, or its `terminal` status when the receiver
-ends at the [delivery budget](#delivery-budget) a run no ready plugin profile
-satisfies or a run it already failed to start. The echo's fields copy the
+ends at the [delivery budget](#delivery-budget) a run whose signature no
+ready plugin profile of the receiver has. The echo's fields copy the
 submission's, so the echo of a task rejected with `run ID does not match its
 signer` carries the `host` and `run_nonce` that do not derive its `run`. A
 host that has no record of the run takes the run's pool and submission hash
@@ -846,19 +848,14 @@ the receiver's log alone.
 
 `profile` is the profile the receiver routed the task to.
 
-A receiver delivered a task for which it holds its own start failure, with
-the task's `task_hash`, releases it without starting it, and fetches no
-task from the pool, in any of its slots, for the pool's lock duration, so
-the pool can deliver the task to another member. The release uses a
-delivery; at the [delivery budget](#delivery-budget) the receiver ends the
-run instead.
-
 ### Delivery budget
 
 From an attempt of the pool's `delivery_limit` minus 1, a receiver that
 would release a task to the pool ends the run `TASK_STATE_FAILED` with the
 message text `delivery budget exhausted`. The releases this covers are
-start failures, a dispatch whose outcome the receiver cannot resolve, a
+start failures, the release of a task no ready profile of the receiver has
+the signature of ([Admission](#admission) step 9), a dispatch whose outcome the receiver
+cannot resolve, a
 failed read of the pool's events or of the host's topic once the run is
 claimed, and a failure to find, stop or remove the run's job.
 
@@ -1027,13 +1024,15 @@ request only when:
 1. it verifies as the live member of the pool it names; otherwise it refuses
    `not the current claimant`;
 2. the run has no terminal status and no cancel (otherwise `terminal`), its
-   `task_hash` is the run's task, and the submission at the `task_offset` of
-   the requester's `claimed` status, read with one fetch, is under the run's
+   `task_hash` is the run's task, the requester's `claimed` status names a
+   `task_topic` under the pool's prefix `wherry.pool.<pool>.tasks.`, and the
+   submission at its `task_topic` and `task_offset`, read with one fetch,
+   never from a topic recomputed from the current terms, is under the run's
    Kafka key, passes the [signed-record checks](#signed-records), names the
    run under a run ID its signer derives, has the request's `task_hash`, and
    carries an `envelope` with bounds that hold at its append time as
    [Admission](#admission) states; otherwise `not the current claimant`. It
-   checks rules 1 and 3 before this one, and reads the task topic for no
+   checks rules 1 and 3 before this one, and reads a task topic for no
    other request;
 3. the run's latest ownership status, `claimed` or `released`, is the
    requester's `claimed` for the request's `attempt`; otherwise
@@ -1266,7 +1265,7 @@ writes, each with `v`, `kind` and `at_ms` (Unix milliseconds).
 | `rotate-key` | `pool` | asks the pool's key custodian for a new key ([Custodian snapshot](#custodian-snapshot)) |
 
 `terms` has the members of the [pool terms](configuration-operator.md#pool-terms) file
-and `record_limit`, the tasks topic's record limit that `pool apply` reads
+and `record_limit`, the lowest record limit of the pool's task topics that `pool apply` reads
 from the broker, with `start_by_limit_ms` and `lock_duration_ms` in milliseconds for its
 `start_by_limit` and `lock_duration`. `config` holds `receiver` and `pool`,
 which equal the record's, the receiver's `capacity`, `plugin_sha256`, the
@@ -1321,8 +1320,8 @@ release. Otherwise a receiver that claims a submission:
    live pool members: the first wins. Revoking the member that wrote that
    status makes the next one first;
 5. acknowledges it and writes nothing when the latest `claimed` status with
-   its task hash names another `task_offset`: it is a copy, byte for byte, of
-   the claimed submission. A redelivery of the claimed submission itself goes
+   its task hash names another `task_topic` or `task_offset`: it is a copy,
+   byte for byte, of the claimed submission. A redelivery of the claimed submission itself goes
    on;
 6. rejects it with `agent is outside the pool terms` when its agent is
    outside the pool's terms; with `model not in the pool's terms` when the agent has `models` and the
@@ -1342,14 +1341,22 @@ release. Otherwise a receiver that claims a submission:
    `task_ended_by is past task_started_by plus the 6h run cap` when its
    `task_ended_by` is more than six hours after its `task_started_by`. Its
    `rejected` status names no run's task (step 4), so a later submission of
-   the run that passes is admitted;
-9. releases it when no ready plugin profile satisfies the placement. A run
-   a member has claimed goes on without one when its `task_ended_by` has
-   passed, or when its `task_started_by` has passed with no `started` event,
-   so that the run ends as below;
+   the run that passes is admitted. The custodian refuses the open of a
+   claimed run that fails these checks, and the key custodian's re-key scan
+   skips it;
+9. rejects it with `agent does not match the task topic` when the topic it
+   was read from is not a signature task topic or names another agent than
+   its placement; releases it, logged and with no start-failure record, when
+   no ready plugin profile of this receiver has that topic as its signature
+   topic, a profile gone unready since the claim's subscription; and rejects
+   it with `selector does not match the task topic` when that profile's
+   labels do not satisfy its selector. A run a member has claimed goes on
+   without a profile when its `task_ended_by` has passed, or when its
+   `task_started_by` has passed with no `started` event, so that the run
+   ends as below;
 10. rejects a run no pool member has claimed with
     `task_started_by is past the pool's start_by_limit` when its submission
-    reached the pool's task topic more than the pool's `start_by_limit_ms`
+    reached its task topic more than the pool's `start_by_limit_ms`
     ago;
 11. rejects it with `the host does not supply a required credential of the
     agent` when the submission's `unsupplied_credentials` names a required
@@ -1361,8 +1368,8 @@ release. Otherwise a receiver that claims a submission:
     outputs and the pool's terms have no `storage`;
 13. rejects it with `unsupported message part` when a `url` part appears
     in the message;
-14. writes the echo and the `claimed` status, its `task_offset` the
-    submission's offset.
+14. writes the echo and the `claimed` status, its `task_topic` and
+    `task_offset` the submission's topic and offset.
 
 A run a cancel covers skips steps 7, 11, 12 and 13, and ends `TASK_STATE_CANCELED`
 after its `claimed` status. A redelivered run that a member has claimed
@@ -1626,7 +1633,7 @@ proto3 JSON form ([Encoding](#encoding)) inside the signed records.
 
 | A2A operation | wherry |
 | --- | --- |
-| `SendMessage` | a [submission](#submission) on the pool's tasks topic; the run ID is the task ID and the context ID. The run's records answer it |
+| `SendMessage` | a [submission](#submission) on the task topic of the signature the host placed it on; the run ID is the task ID and the context ID. The run's records answer it |
 | `CancelTask` | a [cancel](#cancel) on the pool's events topic |
 | `SubscribeToTask` | reading the tenant feed, `wherry.tenant.<tenant>`, for the run's statuses and result, and the tenant's transcript topic, `wherry.tenant.<tenant>.transcript`, for its chunks and output chunks |
 | `GetTask` | the run's latest [result](#result), or, before it has one, its latest [status](#status) |

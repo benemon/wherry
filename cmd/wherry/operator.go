@@ -330,14 +330,14 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 func writeRotateReport(out io.Writer, pool string, report operator.RotateReport, now time.Time) {
 	fmt.Fprintf(out, "pool %s's key custodian rotated for the rotate-key request; tasks appended through that rotation are listed\n", pool)
 	fmt.Fprintf(out, "suspect_keys=%s\n", strings.Join(report.SuspectKeys, ","))
-	for _, partition := range slices.Sorted(maps.Keys(report.Horizon)) {
-		fmt.Fprintf(out, "horizon partition=%d oldest_retained_offset=%d\n", partition, report.Horizon[partition])
+	for _, topic := range report.Topics {
+		fmt.Fprintf(out, "horizon topic=%s oldest_retained_offset=%d\n", topic, report.Horizon[topic])
 	}
-	for _, partition := range slices.Sorted(maps.Keys(report.DeletedFrom)) {
-		fmt.Fprintf(out, "horizon partition=%d: retention deleted the tasks at offsets %d to %d during the scan; they may not be listed\n", partition, report.DeletedFrom[partition], report.Horizon[partition]-1)
+	for _, topic := range slices.Sorted(maps.Keys(report.DeletedFrom)) {
+		fmt.Fprintf(out, "horizon topic=%s: retention deleted the tasks at offsets %d to %d during the scan; they may not be listed\n", topic, report.DeletedFrom[topic], report.Horizon[topic]-1)
 	}
 	if report.OldestMS == 0 {
-		fmt.Fprintln(out, "horizon: the task topic retains no task; tasks deleted by retention are not listed")
+		fmt.Fprintln(out, "horizon: the task topics retain no task; tasks deleted by retention are not listed")
 	} else {
 		oldest := time.UnixMilli(report.OldestMS)
 		fmt.Fprintf(out, "horizon: the oldest retained task was appended at %s, %s ago; tasks deleted by retention before it are not listed\n", oldest.UTC().Format(time.RFC3339), now.Sub(oldest).Truncate(time.Second))
@@ -348,17 +348,26 @@ func writeRotateReport(out io.Writer, pool string, report operator.RotateReport,
 	fmt.Fprintf(out, "tasks=%d\n", len(report.Tasks))
 }
 
-// showReceiver writes config's capacity, plugin pins and resolved profiles, in routing order, to out as YAML.
+// showReceiver writes config's capacity, plugin pins and resolved profiles, in routing order, to out as YAML, each profile
+// with its signature, double-quoted so its line feeds show as \n, and its signature's task topic.
 func showReceiver(out io.Writer, config operator.ReceiverConfig) error {
-	// The record decodes numbers as float64, which YAML would print as 1e+06.
-	for i := range config.Profiles {
-		config.Profiles[i].Config = integral(config.Profiles[i].Config).(map[string]any)
+	type shown struct {
+		operator.ProfileSettings `yaml:",inline"`
+		Signature                yaml.Node `yaml:"signature"`
+		Topic                    string    `yaml:"topic"`
+	}
+	profiles := make([]shown, 0, len(config.Profiles))
+	for _, profile := range config.Profiles {
+		// The record decodes numbers as float64, which YAML would print as 1e+06.
+		profile.Config = integral(profile.Config).(map[string]any)
+		signature := yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Style: yaml.DoubleQuotedStyle, Value: operator.Signature(profile.Agent, profile.Labels)}
+		profiles = append(profiles, shown{profile, signature, operator.SignatureTopic(config.Pool, profile.Agent, profile.Labels)})
 	}
 	encoded, err := yaml.Marshal(struct {
-		Capacity     int64                      `yaml:"capacity"`
-		PluginSHA256 map[string]string          `yaml:"plugin_sha256,omitempty"`
-		Profiles     []operator.ProfileSettings `yaml:"profiles"`
-	}{config.Capacity, config.PluginSHA256, config.Profiles})
+		Capacity     int64             `yaml:"capacity"`
+		PluginSHA256 map[string]string `yaml:"plugin_sha256,omitempty"`
+		Profiles     []shown           `yaml:"profiles"`
+	}{config.Capacity, config.PluginSHA256, profiles})
 	if err != nil {
 		return err
 	}

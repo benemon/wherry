@@ -21,9 +21,7 @@ func TestSnapshotTopicIsCompactedSinglePartitionAndKeptForever(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
-		t.Fatal(err)
-	}
+	poolWithReceiver(t, service)
 	topic := CustodianTopic("pool-a")
 	want := map[string]string{"cleanup.policy": "compact", "retention.ms": "-1", "message.timestamp.type": "LogAppendTime"}
 	configs := func(topic string, names ...string) map[string]string {
@@ -48,7 +46,7 @@ func TestSnapshotTopicIsCompactedSinglePartitionAndKeptForever(t *testing.T) {
 	if partitions := len(topics[topic].Partitions); partitions != 1 {
 		t.Fatalf("%s has %d partitions, want 1", topic, partitions)
 	}
-	for _, pooled := range []string{PoolTasksTopic("pool-a"), PoolEventsTopic("pool-a")} {
+	for _, pooled := range []string{modelTopic("pool-a"), PoolEventsTopic("pool-a")} {
 		if got := configs(pooled, "segment.ms")["segment.ms"]; got != "3600000" {
 			t.Fatalf("%s segment.ms %s, want 3600000", pooled, got)
 		}
@@ -218,17 +216,17 @@ func TestCheckReportsSnapshotTopicAndSegmentDrift(t *testing.T) {
 			addPartition(t, service, PoolReceiversTopic("pool-a"))
 		}, PoolReceiversTopic("pool-a") + " has 2 partitions"},
 		{"tasks topic partitioned", func(t *testing.T, service *Service) {
-			addPartition(t, service, PoolTasksTopic("pool-a"))
-		}, PoolTasksTopic("pool-a") + " has 2 partitions"},
+			addPartition(t, service, modelTopic("pool-a"))
+		}, modelTopic("pool-a") + " has 2 partitions"},
 		{"events topic compacted", func(t *testing.T, service *Service) {
 			setTopicConfig(t, service, PoolEventsTopic("pool-a"), "cleanup.policy", "compact")
 		}, PoolEventsTopic("pool-a") + " cleanup.policy is compact, want delete"},
 		{"tasks retention.bytes finite", func(t *testing.T, service *Service) {
-			setTopicConfig(t, service, PoolTasksTopic("pool-a"), "retention.bytes", "1073741824")
-		}, PoolTasksTopic("pool-a") + " retention.bytes is 1073741824, want -1"},
+			setTopicConfig(t, service, modelTopic("pool-a"), "retention.bytes", "1073741824")
+		}, modelTopic("pool-a") + " retention.bytes is 1073741824, want -1"},
 		{"tasks segment.ms unset", func(t *testing.T, service *Service) {
-			deleteTopicConfig(t, service, PoolTasksTopic("pool-a"), "segment.ms")
-		}, PoolTasksTopic("pool-a") + " segment.ms"},
+			deleteTopicConfig(t, service, modelTopic("pool-a"), "segment.ms")
+		}, modelTopic("pool-a") + " segment.ms"},
 		{"events segment.ms unset", func(t *testing.T, service *Service) {
 			deleteTopicConfig(t, service, PoolEventsTopic("pool-a"), "segment.ms")
 		}, PoolEventsTopic("pool-a") + " segment.ms"},
@@ -237,9 +235,7 @@ func TestCheckReportsSnapshotTopicAndSegmentDrift(t *testing.T) {
 			_, service, closeFixture := kfakeService(t)
 			defer closeFixture()
 			ctx := context.Background()
-			if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
-				t.Fatal(err)
-			}
+			poolWithReceiver(t, service)
 			if err := service.Check(ctx); err != nil {
 				t.Fatalf("check before drift: %v", err)
 			}
@@ -268,16 +264,14 @@ func TestPreflightRefusesATasksTopicTooSmallForAMaximumEnvelope(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
-		t.Fatal(err)
-	}
-	setTopicLimit(t, service, PoolTasksTopic("pool-a"), "88000")
+	poolWithReceiver(t, service)
+	setTopicLimit(t, service, modelTopic("pool-a"), "88000")
 	for name, err := range map[string]error{"pool apply": service.PoolApply(ctx, "pool-a", modelTerms(), false), "check": service.Check(ctx)} {
 		if err == nil || !strings.Contains(err.Error(), "a task with a maximum envelope record is ") || !strings.Contains(err.Error(), "88000-byte record limit") {
 			t.Fatalf("%s = %v; want the maximum envelope refused against the tasks topic's limit", name, err)
 		}
 	}
-	setTopicLimit(t, service, PoolTasksTopic("pool-a"), "100000")
+	setTopicLimit(t, service, modelTopic("pool-a"), "100000")
 	if err := service.Check(ctx); err != nil {
 		t.Fatalf("check at 100000 bytes = %v; want a maximum envelope to fit", err)
 	}

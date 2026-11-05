@@ -985,7 +985,7 @@ func TestHandoverNearTheDeadlineEndsWithinTheBoundKeepingTheKeys(t *testing.T) {
 	t.Cleanup(func() { close(release) })
 	f.cluster.ControlKey(kmsg.ListOffsets.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
 		f.cluster.KeepControl()
-		if slices.ContainsFunc(request.(*kmsg.ListOffsetsRequest).Topics, func(topic kmsg.ListOffsetsRequestTopic) bool { return topic.Topic == operator.PoolTasksTopic(testPool) }) {
+		if slices.ContainsFunc(request.(*kmsg.ListOffsetsRequest).Topics, func(topic kmsg.ListOffsetsRequestTopic) bool { return topic.Topic == f.tasksTopic() }) {
 			f.cluster.SleepControl(func() { <-release })
 		}
 		return nil, nil, false
@@ -1070,7 +1070,7 @@ func failTaskListing(f fixture) {
 	f.cluster.ControlKey(kmsg.ListOffsets.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
 		f.cluster.KeepControl()
 		req := request.(*kmsg.ListOffsetsRequest)
-		if !slices.ContainsFunc(req.Topics, func(topic kmsg.ListOffsetsRequestTopic) bool { return topic.Topic == operator.PoolTasksTopic(testPool) }) {
+		if !slices.ContainsFunc(req.Topics, func(topic kmsg.ListOffsetsRequestTopic) bool { return topic.Topic == f.tasksTopic() }) {
 			return nil, nil, false
 		}
 		response := kmsg.NewPtrListOffsetsResponse()
@@ -1429,17 +1429,34 @@ func holdProduces(t *testing.T, f fixture, topic string, held *atomic.Bool) <-ch
 	return arrived
 }
 
-// A task its host built under the old key and appended after the drain's scan is not re-keyed: it fails before it
-// starts, key-lost, and its host resubmits it once under the successor's key, where it completes.
+// A task its host built under the old key and appended after the drain's scan, on the second of the pool's task topics,
+// is not re-keyed: it fails before it starts, key-lost, and its host resubmits it once under the successor's key, where
+// it completes. The same holds when the scan's listing leaves every task topic out, as stale metadata would.
 func TestTaskAppendedAfterTheDrainScanIsResubmittedOnce(t *testing.T) {
-	f := newBareFixture(t)
+	for name, emptyListing := range map[string]bool{"second topic": false, "empty listing": true} {
+		t.Run(name, func(t *testing.T) { taskAppendedAfterTheDrainScan(t, emptyListing) })
+	}
+}
+
+func taskAppendedAfterTheDrainScan(t *testing.T, emptyListing bool) {
+	terms := testTerms()
+	config := func(receiver string) operator.ReceiverConfig {
+		config := testConfig(receiver)
+		config.Profiles = []operator.ProfileSettings{
+			{Name: "nomad", Plugin: "fake", Agent: "claude", Labels: map[string]string{"zone": "dc1"}, Config: map[string]any{}},
+			{Name: "nomad-2", Plugin: "fake", Agent: "claude", Labels: map[string]string{"zone": "dc2"}, Config: map[string]any{}},
+		}
+		return config
+	}
+	second := &fakePlugin{stream: resultStream}
+	f := newBareFixtureWith(t, terms, config(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}, "nomad-2": second})
 	f.receiver.drainTimeout = 15 * time.Second
 	drain := custodyUntilDrained(t, f.ctx, f.receiver)
 	// The drained custodian serves opens while its held runs end, as Run does.
 	go f.receiver.every(f.ctx, openInterval, f.receiver.serveOpens)
 	f.awaitSnapshots(t, 1)
 	awaitActing(t, f, f.receiver)
-	successor, successorLogs := f.newReceiver(t, testConfig("receiver-b"))
+	successor, successorLogs := f.newReceiver(t, config("receiver-b"))
 	runUntilStopped(t, f.ctx, successor)
 	for !strings.Contains(successorLogs.String(), "configured:") {
 		time.Sleep(20 * time.Millisecond)
@@ -1447,9 +1464,13 @@ func TestTaskAppendedAfterTheDrainScanIsResubmittedOnce(t *testing.T) {
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatal(err)
 	}
+	first, secondTopic := f.profileTopic(t, "nomad"), f.profileTopic(t, "nomad-2")
+	if first == secondTopic {
+		t.Fatal("the profiles share a topic")
+	}
 	var held atomic.Bool
 	held.Store(true)
-	arrived := holdProduces(t, f, operator.PoolTasksTopic(testPool), &held)
+	arrived := holdProduces(t, f, secondTopic, &held)
 	t.Setenv("WHERRY_TEST_TOKEN", testToken)
 	kafka, err := kgo.NewClient(append(f.service.Operator.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
 	if err != nil {
@@ -1464,7 +1485,7 @@ func TestTaskAppendedAfterTheDrainScanIsResubmittedOnce(t *testing.T) {
 	submitted := make(chan client.SubmitResult, 1)
 	go func() {
 		for f.ctx.Err() == nil {
-			result, err := host.Submit(f.ctx, client.SubmitInput{Agent: "claude", Prompt: "hello", StartBy: time.Now().Add(time.Minute), EndBy: time.Now().Add(time.Minute)})
+			result, err := host.Submit(f.ctx, client.SubmitInput{Agent: "claude", Selector: []wire.Requirement{in("zone", "dc2")}, Prompt: "hello", StartBy: time.Now().Add(time.Minute), EndBy: time.Now().Add(time.Minute)})
 			if err == nil {
 				submitted <- result
 				return
@@ -1477,10 +1498,18 @@ func TestTaskAppendedAfterTheDrainScanIsResubmittedOnce(t *testing.T) {
 	case <-f.ctx.Done():
 		t.Fatal("the host never produced its task")
 	}
+	restore := func() {}
+	if emptyListing {
+		restore = omitFromListings(f, first, secondTopic)
+	}
 	drain()
+	restore()
 	records := f.snapshotRecords(t)
 	if parseSnapshot(t, records[len(records)-1], "receiver-b", successor.signing).Reason != "takeover" || len(heldKeys(t, f.receiver)) != 0 {
 		t.Fatalf("want receiver-b's takeover and the old keys deleted; logs:\n%s", f.logs.String())
+	}
+	if emptyListing && !strings.Contains(f.logs.String(), "re-keyed 0 tasks") {
+		t.Fatalf("the scan saw a task topic; logs:\n%s", f.logs.String())
 	}
 	held.Store(false)
 	var result client.SubmitResult
@@ -1494,14 +1523,139 @@ func TestTaskAppendedAfterTheDrainScanIsResubmittedOnce(t *testing.T) {
 		t.Fatalf("await %+v, %v, want the run resubmitted once and completed; logs:\n%s", awaited, err, successorLogs.String())
 	}
 	lost := false
+	var topics []string
 	for _, record := range f.records(t, operator.PoolEventsTopic(testPool)) {
 		var status wire.RunStatus
 		if wire.ParseRecord(record.Value, signed.Keys{"receiver-b": {Current: successor.signing.Public().(ed25519.PublicKey)}}, &status) == nil {
 			lost = lost || status.Wherry.Run == result.RunID && status.Wherry.Event == wire.EventKeyLost
+			if status.Wherry.Kind == "claimed" {
+				topics = append(topics, status.Wherry.TaskTopic)
+			}
 		}
 	}
-	if dispatches, _, _ := f.dispatched(t); !lost || dispatches != 1 {
+	if dispatches, _, _, _ := second.counts(); !lost || dispatches != 1 {
 		t.Fatalf("key-lost %v, dispatches %d, want the late task failed key-lost and only its replacement dispatched", lost, dispatches)
+	}
+	if !slices.Equal(topics, []string{secondTopic, secondTopic}) {
+		t.Fatalf("claims on %v, want the task and its replacement on the second topic", topics)
+	}
+}
+
+// Recovery before and after the bound: a late old-key task acquired before task_started_by ends key-lost, but its host,
+// observing that only once the bound has passed, makes no replacement; one acquired only after the bound is rejected not
+// started by task_started_by, and again no replacement is made.
+func TestLateOldKeyTaskIsNotReplacedPastItsBound(t *testing.T) {
+	for name, acquiredAfter := range map[string]bool{"acquired before the bound": false, "acquired after the bound": true} {
+		t.Run(name, func(t *testing.T) { lateTaskPastItsBound(t, acquiredAfter) })
+	}
+}
+
+func lateTaskPastItsBound(t *testing.T, acquiredAfter bool) {
+	f := newBareFixture(t)
+	f.receiver.drainTimeout = 15 * time.Second
+	drain := custodyUntilDrained(t, f.ctx, f.receiver)
+	go f.receiver.every(f.ctx, openInterval, f.receiver.serveOpens)
+	f.awaitSnapshots(t, 1)
+	awaitActing(t, f, f.receiver)
+	successor, successorLogs := f.newReceiver(t, testConfig("receiver-b"))
+	// A run the successor holds pending gates its slots until the test lets it claim.
+	gate := &activeRun{receiver: successor}
+	if acquiredAfter {
+		gate.pending()
+	}
+	runUntilStopped(t, f.ctx, successor)
+	for !strings.Contains(successorLogs.String(), "configured:") {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := f.receiver.refresh(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	var held atomic.Bool
+	held.Store(true)
+	arrived := holdProduces(t, f, f.tasksTopic(), &held)
+	t.Setenv("WHERRY_TEST_TOKEN", testToken)
+	kafka, err := kgo.NewClient(append(f.service.Operator.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := client.NewHost(kafka, f.host, operator.TenantPrincipal(testTenant, testHost), filepath.Join(t.TempDir(), "host"),
+		map[string]credential.Source{credentialName: {Env: "WHERRY_TEST_TOKEN"}}, nil, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	startBy := time.Now().Add(12 * time.Second)
+	submitted := make(chan client.SubmitResult, 1)
+	go func() {
+		for f.ctx.Err() == nil {
+			result, err := host.Submit(f.ctx, client.SubmitInput{Agent: "claude", Prompt: "hello", StartBy: startBy, EndBy: startBy.Add(time.Minute)})
+			if err == nil {
+				submitted <- result
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+	select {
+	case <-arrived:
+	case <-f.ctx.Done():
+		t.Fatal("the host never produced its task")
+	}
+	drain()
+	if len(heldKeys(t, f.receiver)) != 0 {
+		t.Fatalf("the old keys were kept; logs:\n%s", f.logs.String())
+	}
+	held.Store(false)
+	var result client.SubmitResult
+	select {
+	case result = <-submitted:
+	case <-f.ctx.Done():
+		t.Fatal("submit never returned")
+	}
+	records := f.records(t, f.tasksTopic())
+	if appended := records[len(records)-1].Timestamp; !appended.Before(startBy.Truncate(time.Second)) {
+		t.Fatalf("the late task was appended at %s, past its task_started_by %s; the drain took too long", appended, startBy)
+	}
+	keys := signed.Keys{"receiver-b": {Current: successor.signing.Public().(ed25519.PublicKey)}}
+	statuses := func() []wire.RunStatus {
+		var found []wire.RunStatus
+		for _, record := range f.records(t, operator.PoolEventsTopic(testPool)) {
+			var status wire.RunStatus
+			if wire.ParseRecord(record.Value, keys, &status) == nil && status.Wherry.Run == result.RunID {
+				found = append(found, status)
+			}
+		}
+		return found
+	}
+	if acquiredAfter {
+		passed(startBy.Unix())
+		gate.placed()
+	}
+	// The successor acquires the task, before the bound or after it, and ends it.
+	for !slices.ContainsFunc(statuses(), func(status wire.RunStatus) bool { return wire.Terminal(status.StatusUpdate.Status.State) }) {
+		if f.ctx.Err() != nil {
+			t.Fatalf("the late task never ended; logs:\n%s", successorLogs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	ended := statuses()
+	last := ended[len(ended)-1]
+	switch {
+	case acquiredAfter && (last.Wherry.Kind != "rejected" || last.StatusUpdate.Status.Message.Parts[0].Text != wire.NotStartedBy(startBy.Unix())):
+		t.Fatalf("status %s %+v, want the rejection not started by task_started_by", last.Wherry.Kind, last.StatusUpdate.Status)
+	case !acquiredAfter && last.Wherry.Event != wire.EventKeyLost:
+		t.Fatalf("status %s %+v, want key-lost", last.Wherry.Kind, last.StatusUpdate.Status)
+	case !acquiredAfter && !time.Now().Before(wire.PastBound(startBy.Unix())):
+		t.Fatal("the key-lost terminal came after the bound; the test observes it only past the bound")
+	}
+	passed(startBy.Unix())
+	awaited, err := host.Await(f.ctx, result.RunID, 30*time.Second)
+	want := map[bool]wire.TaskState{false: wire.TaskStateFailed, true: wire.TaskStateRejected}[acquiredAfter]
+	if err != nil || awaited.Status.State != want || !slices.Equal(awaited.Runs, []string{result.RunID}) {
+		t.Fatalf("await %+v, %v, want the run %s with no replacement", awaited, err, want)
+	}
+	if dispatches, _, _ := f.dispatched(t); dispatches != 0 {
+		t.Fatalf("%d dispatches, want none", dispatches)
 	}
 }
 
@@ -1514,7 +1668,7 @@ func TestHandoverVerifiesEachTaskRecordOnce(t *testing.T) {
 	for i := range runs {
 		run := fmt.Sprintf("run-%d", i)
 		record := f.turn(t, run, 1)
-		f.produce(t, operator.PoolTasksTopic(testPool), string(record.Key), record.Value)
+		f.produce(t, f.tasksTopic(), string(record.Key), record.Value)
 		f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
 		f.turn(t, run, 2)
 	}
@@ -1556,7 +1710,7 @@ func TestDrainRekeysEachLiveHashOnce(t *testing.T) {
 		task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = time.Now().Unix()+1, time.Now().Unix()+1
 	})
 	live := f.turn(t, "run-live", 1)
-	f.produce(t, operator.PoolTasksTopic(testPool), string(live.Key), live.Value)
+	f.produce(t, f.tasksTopic(), string(live.Key), live.Value)
 	f.publishStatus(t, live, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
 	f.turn(t, "run-live", 2)
 	f.turn(t, "run-open", 1)

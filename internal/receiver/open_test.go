@@ -557,11 +557,12 @@ func (f fixture) requestOf(t *testing.T, run, hash, receiver string, key ed25519
 	return wire.Digest(value)
 }
 
-// claimOf writes, signed by key, receiver's claimed status for attempt of run's task hash at offset.
+// claimOf writes, signed by key, receiver's claimed status for attempt of run's task hash at offset on the claude task
+// topic.
 func (f fixture) claimOf(t *testing.T, run, hash string, offset int64, receiver string, key ed25519.PrivateKey, attempt int64) {
 	t.Helper()
 	status := f.receiver.status(&wire.Submission{Wherry: wire.SubmissionBinding{Tenant: testTenant, Run: run}}, hash, attempt, "claimed", taskStatus(wire.TaskStateWorking, ""), nil)
-	status.Wherry.Receiver, status.Wherry.TaskOffset = receiver, &offset
+	status.Wherry.Receiver, status.Wherry.TaskTopic, status.Wherry.TaskOffset = receiver, f.tasksTopic(), &offset
 	f.produce(t, operator.PoolEventsTopic(testPool), run, must(t)(wire.SignRecord(status, key)))
 }
 
@@ -571,7 +572,7 @@ func (f fixture) statusAs(t *testing.T, record *kgo.Record, receiver string, key
 	status := f.receiver.status(f.parse(t, record), wire.TaskHash(record.Value), attempt, kind, taskStatus(wire.TaskStateWorking, ""), nil)
 	status.Wherry.Receiver = receiver
 	if kind == "claimed" {
-		status.Wherry.TaskOffset = &record.Offset
+		status.Wherry.TaskTopic, status.Wherry.TaskOffset = record.Topic, &record.Offset
 	}
 	value := must(t)(wire.SignRecord(status, key))
 	f.produce(t, operator.PoolEventsTopic(testPool), string(record.Key), value)
@@ -1391,7 +1392,7 @@ func TestMismatchingEarlierRecordsNeverWin(t *testing.T) {
 		f.submit(t, f.tenantB(t), asTenantB)
 		f.submit(t, f.hostOf(t, testTenant, "host-b"), func(task *wire.Submission) { task.Wherry.Host = "host-b" })
 		record := f.submit(t, f.host, nil)
-		record.Offset = f.records(t, operator.PoolTasksTopic(testPool))[2].Offset
+		record.Offset = f.records(t, f.tasksTopic())[2].Offset
 		return f, record
 	}
 	t.Run("opened", func(t *testing.T) {
@@ -1452,7 +1453,7 @@ func TestARejectedHashIsNeverTheRunsTask(t *testing.T) {
 				test.edit(invalid)
 				f.seal(t, invalid)
 			}
-			record := f.produce(t, operator.PoolTasksTopic(testPool), testRun("run-a"), must(t)(wire.SignRecord(invalid, f.host)))
+			record := f.produce(t, f.tasksTopic(), testRun("run-a"), must(t)(wire.SignRecord(invalid, f.host)))
 			record.Timestamp = record.Timestamp.Add(test.appended)
 			f.rejected(t, record, test.reason)
 			if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
@@ -1673,13 +1674,13 @@ func TestClaimCheckRefusesAClaimWhoseOffsetHoldsNoTaskOfTheRun(t *testing.T) {
 		"a record under another key": {func(t *testing.T, f fixture) (string, string, int64) {
 			task := testSubmission("run-a")
 			f.seal(t, task)
-			record := f.produce(t, operator.PoolTasksTopic(testPool), testRun("run-b"), must(t)(wire.SignRecord(task, f.host)))
+			record := f.produce(t, f.tasksTopic(), testRun("run-b"), must(t)(wire.SignRecord(task, f.host)))
 			return testRun("run-a"), wire.TaskHash(record.Value), record.Offset
 		}, wire.RefusedNotClaimant},
 		"a binding run unequal to the key": {func(t *testing.T, f fixture) (string, string, int64) {
 			task := testSubmission("run-b")
 			f.seal(t, task)
-			record := f.produce(t, operator.PoolTasksTopic(testPool), testRun("run-a"), must(t)(wire.SignRecord(task, f.host)))
+			record := f.produce(t, f.tasksTopic(), testRun("run-a"), must(t)(wire.SignRecord(task, f.host)))
 			return testRun("run-a"), wire.TaskHash(record.Value), record.Offset
 		}, wire.RefusedNotClaimant},
 		"another hash": {func(t *testing.T, f fixture) (string, string, int64) {
@@ -1819,11 +1820,11 @@ func TestTheClaimCheckReadsABoundedAmountOfALongTrailingLog(t *testing.T) {
 	record := f.submit(t, f.host, nil)
 	const trailing = 20
 	for range trailing {
-		f.produce(t, operator.PoolTasksTopic(testPool), testRun("run-filler"), []byte("filler"))
+		f.produce(t, f.tasksTopic(), testRun("run-filler"), []byte("filler"))
 	}
 	// Every fetch of the task topic returns one record batch, and each record above was produced alone, so reading the
 	// log from the claim's offset to its end takes a fetch per trailing record.
-	topic := operator.PoolTasksTopic(testPool)
+	topic := f.tasksTopic()
 	details, err := kadm.NewClient(f.service.Operator).ListTopics(f.ctx, topic)
 	if err != nil || details[topic].Err != nil {
 		t.Fatalf("list %s: %v %v", topic, err, details[topic].Err)

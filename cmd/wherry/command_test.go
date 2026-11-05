@@ -244,6 +244,7 @@ func (b *bus) sign(t *testing.T, record wire.Record) []byte {
 type task struct {
 	submission wire.Submission
 	hash       string
+	topic      string
 	offset     int64
 }
 
@@ -258,7 +259,7 @@ func (b *bus) tasks(t *testing.T, runID string) []task {
 	if err != nil {
 		t.Fatal(err)
 	}
-	records, err := readTopic(b.ctx, b.receiver, operator.PoolTasksTopic("pool-a"))
+	records, err := readTasks(b.ctx, b.receiver, "pool-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +271,7 @@ func (b *bus) tasks(t *testing.T, runID string) []task {
 		}
 		if submission.Wherry.Run == runID {
 			sum := sha256.Sum256(record.Value)
-			tasks = append(tasks, task{submission, hex.EncodeToString(sum[:]), record.Offset})
+			tasks = append(tasks, task{submission, hex.EncodeToString(sum[:]), record.Topic, record.Offset})
 		}
 	}
 	return tasks
@@ -291,7 +292,7 @@ func (b *bus) status(t *testing.T, task task, eventID, kind string, status wire.
 	value := &wire.RunStatus{StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: run, ContextID: run, Status: status},
 		Wherry: wire.StatusBinding{ReceiverBinding: b.binding(task), EventID: eventID, Kind: kind, TaskHash: task.hash}}
 	if kind == "claimed" {
-		value.Wherry.TaskOffset = &task.offset
+		value.Wherry.TaskTopic, value.Wherry.TaskOffset = task.topic, &task.offset
 	}
 	return b.sign(t, value)
 }
@@ -984,7 +985,7 @@ func TestSubmitGitFlags(t *testing.T) {
 			}
 		})
 	}
-	if records, err := readTopic(b.ctx, b.receiver, operator.PoolTasksTopic("pool-a")); err != nil || len(records) != 0 {
+	if records, err := readTasks(b.ctx, b.receiver, "pool-a"); err != nil || len(records) != 0 {
 		t.Fatalf("refused submissions published %d tasks, %v", len(records), err)
 	}
 	submit := func(flags ...string) wire.Submission {
@@ -1062,6 +1063,23 @@ func TestVersionNeedsNoConfigOrBroker(t *testing.T) {
 	if len(lines) < 2 || !strings.HasPrefix(lines[0], "version=") || !strings.HasPrefix(lines[1], "revision=") {
 		t.Fatalf("version printed %q, want version= and revision= lines", stdout.String())
 	}
+}
+
+// readTasks reads every task topic of pool, one after another.
+func readTasks(ctx context.Context, client *kgo.Client, pool string) ([]*kgo.Record, error) {
+	topics, err := operator.PoolTaskTopics(ctx, kadm.NewClient(client), pool)
+	if err != nil {
+		return nil, err
+	}
+	var records []*kgo.Record
+	for _, topic := range topics {
+		read, err := readTopic(ctx, client, topic)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, read...)
+	}
+	return records, nil
 }
 
 // readTopic reads topic from its start through a reader of its own.

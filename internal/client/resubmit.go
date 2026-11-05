@@ -22,8 +22,8 @@ import (
 // produceReplacement and replacing are variables so tests can fail a replacement's write and hold a pass between
 // reading a failed run's record and recording its replacement.
 var (
-	produceReplacement = func(ctx context.Context, h *Host, binding wire.SubmissionBinding, encoded []byte) error {
-		return h.produceTask(ctx, binding, encoded)
+	produceReplacement = func(ctx context.Context, h *Host, topic string, binding wire.SubmissionBinding, encoded []byte) error {
+		return h.produceTask(ctx, topic, binding, encoded)
 	}
 	replacing = func(string) {}
 )
@@ -146,7 +146,7 @@ func (h *Host) resubmit(ctx context.Context, runID string, lost bool) (string, e
 		}
 		if replacement != nil && len(replacement.Signed) > 0 {
 			if !replacement.Produced {
-				if err := produceReplacement(ctx, h, replacement.Task.Wherry, replacement.Signed); err != nil {
+				if err := produceReplacement(ctx, h, replacement.Topic, replacement.Task.Wherry, replacement.Signed); err != nil {
 					return "", err
 				}
 				replacement.Produced = true
@@ -205,7 +205,9 @@ func (h *Host) resubmit(ctx context.Context, runID string, lost bool) (string, e
 	if err != nil {
 		return "", err
 	}
-	record, err := h.newRecord(ctx, &submission, encoded, now, redactionKey)
+	// The replacement keeps the original's signature topic: agent and selector cannot reconstruct the signature a task
+	// was placed on.
+	record, err := h.newRecord(ctx, &submission, local.Topic, encoded, now, redactionKey)
 	if err != nil {
 		return "", err
 	}
@@ -213,7 +215,7 @@ func (h *Host) resubmit(ctx context.Context, runID string, lost bool) (string, e
 	if err := h.writeRun(record); err != nil {
 		return "", err
 	}
-	if err := produceReplacement(ctx, h, submission.Wherry, encoded); err != nil {
+	if err := produceReplacement(ctx, h, record.Topic, submission.Wherry, encoded); err != nil {
 		return "", err
 	}
 	record.Produced = true

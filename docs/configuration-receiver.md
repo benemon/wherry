@@ -200,10 +200,12 @@ own, as [Plugin profile merge](#plugin-profile-merge) describes. A
 `credential` key in the merged `config` names a [platform
 credential](#platform-credentials), and its value is a string.
 
-The receiver routes a run to the first ready profile, in order within its
-plugin, whose agent and labels satisfy the task. It visits the plugins in
-the order of their names, so the host and the receiver compute the same
-match. Labels choose between plugins. The record on `wherry.operator` holds each profile with
+A receiver subscribes to the signature topics of its ready profiles. A
+claimed task goes to its first ready profile in recorded order with the
+claimed topic's signature. The selector guards against a host publishing to
+the wrong topic; it does not choose between profiles. If no profile of that
+signature is ready, the receiver releases the task unless it is cleaning up
+an ending run. The record on `wherry.operator` holds each profile with
 its name, plugin, agent, labels and merged `config`.
 
 ### Plugin profile merge
@@ -419,9 +421,10 @@ config:
           --sandbox workspace-write - < "$NOMAD_TASK_DIR/prompt.txt"
 ```
 
-A task runs on the first ready profile of its agent whose labels satisfy its
-selector. Each profile here launches a different agent, so a task for
-`claude`, the pool's default agent, runs on `container`, and
+A selector is matched against a profile's labels, and those labels, with the
+profile's agent, are its signature: a task runs on a ready profile whose
+signature is the task's. Each profile here launches a different agent, so a
+task for `claude`, the pool's default agent, runs on `container`, and
 `--selector isolation=host` leaves it no profile.
 
 ### Plugin profile settings

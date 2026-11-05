@@ -26,7 +26,7 @@ func TestShareDeliveryCarriesTheRecordsPositionAndAppendTimeOnRealBroker(t *test
 	}
 	reader := NewReader(s.service.Operator)
 	defer reader.Close()
-	records, err := reader.ReadFrom(context.Background(), PoolTasksTopic(s.pool), 0)
+	records, err := reader.ReadFrom(context.Background(), modelTopic(s.pool), 0)
 	if err != nil {
 		t.Fatal(err)
 	}

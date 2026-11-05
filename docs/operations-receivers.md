@@ -147,12 +147,31 @@ Each plugin's README runs the receiver on its platform, with its steps:
 
 [Plugins](plugins.md) embeds each example.
 
+### What a receiver subscribes to
+
+A receiver subscribes, through its pool's share group, to the signature task
+topics of its ready profiles: one topic per profile signature, a profile's
+agent and all its labels. A task on another signature never reaches it.
+After an advertisement, every 30 seconds, that changes the set, it closes its
+idle polls and reopens them with the new set; the close waits out an
+in-flight fetch, and the join takes the broker's group round trip. A slot
+holding a run keeps its share session. A label or agent change comes through
+`receiver apply`, which restarts the receiver on the new record and moves the
+profile's signature to a new topic.
+
+A profile that goes unready between a claim's subscription and its fetch has
+its task released to the pool, logged as
+`run <run>: no ready profile for topic <topic>; releasing`, with no metric
+and no start-failure record. The member's other slots still polling may
+acquire the task once each before they reopen without the topic, and each
+acquisition spends a delivery.
+
 ### A receiver with no ready offer
 
 A receiver offers a profile only while the profile's plugin reports it ready.
-A receiver with no ready offer fetches no tasks from its pool.
-It closes any poll it has open, usually within about a second.
-It fetches again within about a second of its next advertisement with a ready offer, unless its pool is suspended, a back-off after a failed start is still running, or it holds a [pending run](#a-receiver-with-a-pending-run).
+A receiver with no ready offer has an empty subscription and fetches no tasks from its pool.
+It closes its idle polls when it observes the empty subscription.
+After an advertisement makes a profile ready, it reopens with the new set, unless its pool is suspended or it holds a [pending run](#a-receiver-with-a-pending-run); closing waits for the in-flight fetch, and joining takes the broker's round trip.
 Its held runs keep running, renewing and reading cancels.
 
 Each advertisement logs a line for every profile whose plugin reports it not ready:
@@ -170,9 +189,8 @@ When every member of a pool has no ready offer, you see these consequences:
 - A queued task that its host cancelled gets its terminal status only once a member is ready again.
 - None of these waits has a fixed bound.
 
-A receiver with at least one ready offer still fetches every task in its pool.
-It releases a task it cannot offer, and each release spends one delivery.
-To keep that from exhausting a task's budget, make sure some member can offer each agent the pool's terms allow.
+A receiver with ready offers fetches only the tasks of their signatures.
+A task on a signature no live member serves waits on its topic and spends no delivery; its host reports it at `task_started_by` with `no receiver claimed the task`.
 
 ### A receiver with a pending run
 
@@ -184,7 +202,7 @@ The receiver writes the run's `placing` status, `waiting for placement (<reason>
 A receiver that observes any held run pending stops claiming:
 
 - It opens no new poll of its pool while any held run is pending.
-- It ends an open idle poll within 100 ms plus `FetchMaxWait`, 1 second, and admits a task that poll returns.
+- It ends an open idle poll and admits a task that poll returns.
 - It claims again only when no held run is pending.
 - Its held runs keep running, renewing and reading cancels.
 
