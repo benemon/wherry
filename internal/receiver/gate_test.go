@@ -358,8 +358,8 @@ func TestFalseReadyIsLogged(t *testing.T) {
 }
 
 // (e) TestNoReadyOfferOpensNoPollOnRealBroker runs a receiver with no ready offer in a broker pool; kfake does not model
-// share-group acquisition. While gated the receiver holds no partition of its pool's share group, and so acquires no
-// task; once ready it reopens and claims the task queued meanwhile at its first delivery.
+// share-group acquisition. While gated the receiver is no member of its pool's share group, and so acquires no task;
+// once ready it reopens and claims the task queued meanwhile at its first delivery.
 func TestNoReadyOfferOpensNoPollOnRealBroker(t *testing.T) {
 	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
 	if address == "" {
@@ -425,16 +425,17 @@ func TestNoReadyOfferOpensNoPollOnRealBroker(t *testing.T) {
 			t.Fatalf("describe the pool's share group: no result for %s", operator.PoolGroup(b.pool))
 		case group.Err != nil && !errors.Is(group.Err, kerr.GroupIDNotFound):
 			t.Fatalf("describe the pool's share group: %v", group.Err)
-		case group.Err == nil && len(group.AssignedPartitions()) > 0:
-			t.Fatalf("the pool's share group has assigned partitions while no offer is ready; logs:\n%s", logs.String())
+		// Membership, not assignment: a joining member is assigned nothing until its next heartbeat, 5 s later.
+		case group.Err == nil && len(group.Members) > 0:
+			t.Fatalf("the pool's share group has a member while no offer is ready; logs:\n%s", logs.String())
 		}
 	}
 	plugin.mu.Lock()
 	plugin.unready = false
 	plugin.mu.Unlock()
-	// One 200 ms advertise interval to see the offer, then a slot's 1 s gate sleep, then the join. The broker assigns on
-	// a later heartbeat, group.share.heartbeat.interval.ms (5 s by default, which is also its minimum) after the join;
-	// 2 s more for the scheduler.
+	// One 200 ms advertise interval to see the offer, then a slot's 1 s gate sleep, then the join. The join's response
+	// assigns nothing: the broker initialises the group's share-partition state after it and assigns on the next
+	// heartbeat, group.share.heartbeat.interval.ms (5 s by default, also its minimum) later; 2 s more for the scheduler.
 	ready := time.Now()
 	for {
 		groups, err := admin.DescribeShareGroups(ctx, operator.PoolGroup(b.pool))
