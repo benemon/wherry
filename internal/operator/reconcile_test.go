@@ -16,6 +16,7 @@ import (
 
 // operator check fails without any grant operator init gives wherry.operator.
 func TestCheckRequiresTheOperatorsGrants(t *testing.T) {
+	t.Parallel()
 	for _, acl := range OperatorACLs {
 		for _, operation := range acl.Operations {
 			t.Run(acl.ResourceType+"/"+operation, func(t *testing.T) {
@@ -47,6 +48,7 @@ func TestCheckRequiresTheOperatorsGrants(t *testing.T) {
 // verifyACLs retries, within topicWait, a describe that omits an expected operation, as brokers apply an ACL creation in
 // turn, and returns any other failure at once.
 func TestVerifyACLsWaitsForBrokers(t *testing.T) {
+	t.Parallel()
 	grant := ACL{TenantPrincipal("tenant-a", "host-a"), "topic", TenantTopic("tenant-a"), false, []string{"READ"}}
 	create := func(t *testing.T, service *Service, acl ACL) {
 		builder, err := aclBuilder(acl)

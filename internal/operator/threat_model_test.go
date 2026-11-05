@@ -812,6 +812,7 @@ func operatorReady(operator *kgo.Client, brokers []int32) error {
 // operatorReady waits out a broker that refuses the operator's login and fails on any other error, a wrong password
 // once topicWait passes, or no broker to probe.
 func TestOperatorReadyWaitsForEveryBroker(t *testing.T) {
+	t.Parallel()
 	brokers := []int32{0, 1, 2}
 	// fixture starts three brokers with operator-password and connects as wherry.operator with password through the
 	// first only, so another broker's login is the probe's own.

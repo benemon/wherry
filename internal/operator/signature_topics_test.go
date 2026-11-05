@@ -289,6 +289,7 @@ func deleteTopics(t *testing.T, service *Service, topics ...string) {
 // operator check names a live profile's missing signature topic, a signature topic's drifted config or second partition,
 // and a missing prefixed grant.
 func TestCheckNamesSignatureTopicDrift(t *testing.T) {
+	t.Parallel()
 	host := ACL{TenantPrincipal("tenant-a", "host-a"), "topic", PoolTasksPrefix("pool-a"), true, []string{"WRITE"}}
 	for _, test := range []struct {
 		name   string
