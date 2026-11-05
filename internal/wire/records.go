@@ -237,7 +237,9 @@ type StatusBinding struct {
 	Kind      string `json:"kind"`
 	TaskHash  string `json:"task_hash"`
 	LogOffset *int64 `json:"log_offset,omitzero"`
-	// TaskOffset is the claimed task record's offset on the pool's task topic, present exactly on a claimed status.
+	// TaskTopic and TaskOffset are the claimed task record's signature task topic and offset on it, present exactly on a
+	// claimed status.
+	TaskTopic  string `json:"task_topic,omitzero"`
 	TaskOffset *int64 `json:"task_offset,omitzero"`
 	// TranscriptChunks is the number of transcript chunks the attempt wrote, on a terminal status.
 	TranscriptChunks int64 `json:"transcript_chunks,omitzero"`
@@ -708,7 +710,8 @@ func (value *RunStatus) validate() error {
 	}
 	if update.TaskID != binding.Run || update.ContextID != binding.Run || !ValidHash(binding.TaskHash) ||
 		binding.TranscriptChunks < 0 || binding.TranscriptChunks > 0 && binding.Kind != "terminal" ||
-		(binding.TaskOffset != nil) != (binding.Kind == "claimed") || binding.TaskOffset != nil && *binding.TaskOffset < 0 {
+		(binding.TaskOffset != nil) != (binding.Kind == "claimed") || binding.TaskOffset != nil && *binding.TaskOffset < 0 ||
+		(binding.TaskTopic != "") != (binding.Kind == "claimed") || binding.TaskTopic != "" && !taskTopic.MatchString(binding.TaskTopic) {
 		return errors.New("invalid status")
 	}
 	if err := validateTaskStatus(&update.Status); err != nil {

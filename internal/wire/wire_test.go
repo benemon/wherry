@@ -49,9 +49,12 @@ func validStatus() *RunStatus {
 			State: TaskStateWorking, Timestamp: "2026-10-17T10:00:00.000Z",
 			Message: &Message{MessageID: "status-1", Role: RoleAgent, Parts: []Part{{Text: "working"}}, Extensions: []string{ExtensionURI}},
 		}},
-		Wherry: StatusBinding{ReceiverBinding: receiverBinding(), EventID: "event-1", Kind: "claimed", TaskHash: wireHash, TaskOffset: new(int64(0))},
+		Wherry: StatusBinding{ReceiverBinding: receiverBinding(), EventID: "event-1", Kind: "claimed", TaskHash: wireHash, TaskTopic: testTaskTopic, TaskOffset: new(int64(0))},
 	}
 }
+
+// testTaskTopic is a signature task topic of pool-1.
+const testTaskTopic = "wherry.pool.pool-1.tasks.agent-1.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func validChunk() *Chunk {
 	return &Chunk{

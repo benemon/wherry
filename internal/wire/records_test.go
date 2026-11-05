@@ -184,14 +184,14 @@ func TestRecordSignedByAnotherOwnerIsRejected(t *testing.T) {
 func TestClaimedStatusCarriesTaskOffsetZero(t *testing.T) {
 	keys, _, receiver := testKeys(t)
 	status := testRecords()["status"].(*RunStatus)
-	status.Wherry.Kind, status.Wherry.TaskOffset = "claimed", new(int64(0))
+	status.Wherry.Kind, status.Wherry.TaskTopic, status.Wherry.TaskOffset = "claimed", testTaskTopic, new(int64(0))
 	encoded, err := SignRecord(status, receiver)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var decoded RunStatus
-	if err := ParseRecord(encoded, keys, &decoded); err != nil || decoded.Wherry.TaskOffset == nil || *decoded.Wherry.TaskOffset != 0 {
-		t.Fatalf("decoded task offset %v, %v; want 0", decoded.Wherry.TaskOffset, err)
+	if err := ParseRecord(encoded, keys, &decoded); err != nil || decoded.Wherry.TaskOffset == nil || *decoded.Wherry.TaskOffset != 0 || decoded.Wherry.TaskTopic != testTaskTopic {
+		t.Fatalf("decoded task topic %q, offset %v, %v; want %s at 0", decoded.Wherry.TaskTopic, decoded.Wherry.TaskOffset, err, testTaskTopic)
 	}
 }
 
@@ -287,7 +287,7 @@ func TestRecordValidation(t *testing.T) {
 		},
 		"claimed status without its task offset": func(r map[string]Record) Record {
 			value := r["status"].(*RunStatus)
-			value.Wherry.Kind = "claimed"
+			value.Wherry.Kind, value.Wherry.TaskTopic = "claimed", testTaskTopic
 			return value
 		},
 		"started status with a task offset": func(r map[string]Record) Record {
@@ -297,7 +297,22 @@ func TestRecordValidation(t *testing.T) {
 		},
 		"claimed status at a negative task offset": func(r map[string]Record) Record {
 			value := r["status"].(*RunStatus)
-			value.Wherry.Kind, value.Wherry.TaskOffset = "claimed", new(int64(-1))
+			value.Wherry.Kind, value.Wherry.TaskTopic, value.Wherry.TaskOffset = "claimed", testTaskTopic, new(int64(-1))
+			return value
+		},
+		"started status with a task topic": func(r map[string]Record) Record {
+			value := r["status"].(*RunStatus)
+			value.Wherry.TaskTopic = testTaskTopic
+			return value
+		},
+		"claimed status without a task topic": func(r map[string]Record) Record {
+			value := r["status"].(*RunStatus)
+			value.Wherry.Kind, value.Wherry.TaskOffset = "claimed", new(int64(0))
+			return value
+		},
+		"claimed status on an off-pattern task topic": func(r map[string]Record) Record {
+			value := r["status"].(*RunStatus)
+			value.Wherry.Kind, value.Wherry.TaskTopic, value.Wherry.TaskOffset = "claimed", "wherry.pool.pool-1.tasks", new(int64(0))
 			return value
 		},
 		"status attempt 0": func(r map[string]Record) Record {
