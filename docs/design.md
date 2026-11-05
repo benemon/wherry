@@ -95,9 +95,9 @@ keep them forever and are kept after revocation, and a pool's snapshot topic
 keeps them forever.
 
 A deployment has 1 + 2R + 3P + S + 2T + H topics for R receivers, P pools,
-S signature task topics, T tenants and H hosts. S counts the distinct
-(agent, all labels) pairs ever recorded across the pools' profiles, plus the
-topics an apply created before it failed. No topic is deleted, so removing or
+S signature task topics, T tenants and H hosts. S sums, over the pools, the
+distinct (agent, all labels) pairs ever recorded for each pool's profiles, plus
+the topics an apply created before it failed. No topic is deleted, so removing or
 relabelling a profile leaves its old topic: the count depends on the
 configuration and its history, with no fixed bound.
 
