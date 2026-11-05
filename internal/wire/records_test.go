@@ -195,6 +195,47 @@ func TestClaimedStatusCarriesTaskOffsetZero(t *testing.T) {
 	}
 }
 
+// A placing status is working, with one text part and no log offset; it encodes, validates and decodes.
+func TestPlacingStatus(t *testing.T) {
+	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	keys := signed.Keys{"receiver-a": signed.KeyState{Current: key.Public().(ed25519.PublicKey)}}
+	text := func(parts ...Part) *Message {
+		return &Message{MessageID: "msg-a", Role: RoleAgent, Parts: parts, Extensions: []string{ExtensionURI}}
+	}
+	waiting := Part{Text: "waiting for placement (1 nodes evaluated, 1 filtered, 0 exhausted)"}
+	for name, test := range map[string]struct {
+		state   TaskState
+		message *Message
+		offset  *int64
+		valid   bool
+	}{
+		"working with its text":         {TaskStateWorking, text(waiting), nil, true},
+		"working with its text raw":     {TaskStateWorking, text(Part{Raw: StdBytes(`waiting for placement ("""")`), MediaType: "text/plain"}), nil, true},
+		"with a log offset":             {TaskStateWorking, text(waiting), new(int64(0)), false},
+		"submitted":                     {TaskStateSubmitted, text(waiting), nil, false},
+		"failed":                        {TaskStateFailed, text(waiting), nil, false},
+		"without a message":             {TaskStateWorking, nil, nil, false},
+		"with two parts":                {TaskStateWorking, text(waiting, waiting), nil, false},
+		"with a data part":              {TaskStateWorking, text(Part{Data: []byte(`{}`), MediaType: "application/json"}), nil, false},
+		"with a raw part of other type": {TaskStateWorking, text(Part{Raw: StdBytes("x"), MediaType: "application/octet-stream"}), nil, false},
+	} {
+		status := &RunStatus{StatusUpdate: TaskStatusUpdateEvent{TaskID: "run-a", ContextID: "run-a", Status: TaskStatus{State: test.state, Timestamp: testTime, Message: test.message}},
+			Wherry: StatusBinding{ReceiverBinding: testBinding(), EventID: "event-a", Kind: "placing", TaskHash: testHash, LogOffset: test.offset}}
+		encoded, err := SignRecord(status, key)
+		if (err == nil) != test.valid {
+			t.Errorf("%s: sign = %v, want valid %v", name, err, test.valid)
+			continue
+		}
+		if !test.valid {
+			continue
+		}
+		var decoded RunStatus
+		if err := ParseRecord(encoded, keys, &decoded); err != nil || decoded.Wherry.Kind != "placing" || decoded.StatusUpdate.Status.State != TaskStateWorking {
+			t.Errorf("%s: decoded %+v, %v; want the placing status", name, decoded, err)
+		}
+	}
+}
+
 func TestRecordTypesAreNotInterchangeable(t *testing.T) {
 	keys, _, receiver := testKeys(t)
 	encoded, err := SignRecord(testRecords()["status"], receiver)

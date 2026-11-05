@@ -514,6 +514,25 @@ func TestMCPCancel(t *testing.T) {
 	})
 }
 
+func TestMCPStatusAndEventsShowPlacing(t *testing.T) {
+	b, runID, times := placingRun(t)
+	session := mcpSession(t, b.connect(t), nil)
+	var status statusOutput
+	callTool(t, b.ctx, session, "status", map[string]any{"id": runID}, &status)
+	if len(status.Runs) != 1 || status.Runs[0].State != string(wire.TaskStateWorking) || status.Runs[0].Message != placingExhausted {
+		t.Fatalf("status %#v, want WORKING with the latest placing text", status)
+	}
+	var events eventsOutput
+	callTool(t, b.ctx, session, "events", map[string]any{"id": runID}, &events)
+	want := []eventOutput{
+		{Attempt: 1, Kind: "placing", State: string(wire.TaskStateWorking), Receiver: "receiver-a", Time: times[0], Message: placingFiltered},
+		{Attempt: 1, Kind: "placing", State: string(wire.TaskStateWorking), Receiver: "receiver-a", Time: times[1], Message: placingExhausted},
+	}
+	if len(events.Events) != 3 || events.Events[0].Kind != "claimed" || !reflect.DeepEqual(events.Events[1:], want) {
+		t.Fatalf("events %#v, want claimed then both placing statuses", events.Events)
+	}
+}
+
 func TestMCPSubmitNamesTheInvalidRule(t *testing.T) {
 	b := newBus(t)
 	ctx := b.ctx

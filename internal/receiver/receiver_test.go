@@ -80,6 +80,8 @@ type fakePlugin struct {
 	dispatchErr error
 	// outcome is what Dispatch reports, OutcomeCreated when zero, or beside dispatchErr OutcomeUnknown when zero.
 	outcome pluginsdk.Outcome
+	// dispatchBlocks makes Dispatch wait until its context ends before it reports, as one returning at the bound.
+	dispatchBlocks bool
 	// handleSize is the length of the handle data Dispatch and Lookup return.
 	handleSize int
 	// jobName is the handle name Dispatch and Lookup return, or else agent- and the run ID.
@@ -87,8 +89,24 @@ type fakePlugin struct {
 	lastRun pluginsdk.Run
 	// lastDeadline is the deadline of the context Follow last ran under.
 	lastDeadline time.Time
-	// placing makes Dispatch and Lookup wait, as for a job the platform never places, until their context ends.
-	placing bool
+	// placing makes Lookup report a dispatched job pending with placingReason, as for a job the platform never places;
+	// reasons makes it report one pending with each in turn, then running.
+	placing       bool
+	placingReason string
+	reasons       []string
+	// placedRuns are the runs placing leaves out; vanish makes Lookup find a dispatched job absent.
+	placedRuns map[string]bool
+	vanish     bool
+	// lookupHold makes Lookup wait until it is closed, whatever its context, and lookupCtxs records each such Lookup's
+	// context.
+	lookupHold chan struct{}
+	lookupCtxs []context.Context
+	// created holds the runs Dispatch created; Lookup finds each running unless placing, reasons or neverStarted say
+	// otherwise. Dispatch's handle is not Lookup's: wrongHandles counts the Follows and Collects given Dispatch's.
+	created      map[string]bool
+	wrongHandles int
+	// lookupHook runs as Lookup returns, with the state it reports.
+	lookupHook func(pluginsdk.JobState)
 	// afterLookup, when set, runs after Lookup reports an absent job, as a receiver shutting down at that moment.
 	afterLookup func()
 	// lookupBlocks makes Lookup alone wait until its context ends, as a platform call that hangs.
@@ -97,6 +115,12 @@ type fakePlugin struct {
 	// lookupErr fails every Lookup, or else the first lookupFailures of them.
 	lookupErr      error
 	lookupFailures int
+	// followedJob, when set, is the state Lookup reports once the job has been followed; followedErr fails the Lookups
+	// after the first Follow, every one or else the first followedFailures of them.
+	followedJob      *pluginsdk.JobState
+	followedErr      error
+	followedFailures int
+	followedLookups  int
 	// job is the state Lookup reports; jobProfile and jobAgent override the metadata it reports.
 	job                  pluginsdk.JobState
 	jobProfile, jobAgent string
@@ -170,24 +194,44 @@ func (f *fakePlugin) handle(runID string) pluginsdk.Handle {
 	return pluginsdk.Handle{Data: []byte(runID + strings.Repeat("h", max(0, f.handleSize-len(runID)))), Name: cmp.Or(f.jobName, "agent-"+runID)}
 }
 
+// dispatchedPrefix marks the data of Dispatch's handle.
+const dispatchedPrefix = "dispatch:"
+
+// lookupHandle counts a Follow or Collect given Dispatch's handle, and reports whether it was.
+func (f *fakePlugin) lookupHandle(handle pluginsdk.Handle) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if strings.HasPrefix(string(handle.Data), dispatchedPrefix) {
+		f.wrongHandles++
+		return false
+	}
+	return true
+}
+
 func (f *fakePlugin) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk.Outcome, pluginsdk.Handle, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.dispatches++
-	f.lastRun = run
-	if f.placing {
+	if f.dispatchBlocks {
 		f.mu.Unlock()
 		<-ctx.Done()
 		f.mu.Lock()
-		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, ctx.Err()
 	}
+	f.dispatches++
+	f.lastRun = run
 	if f.dispatchErr != nil {
 		return f.outcome, pluginsdk.Handle{}, f.dispatchErr
 	}
 	if f.outcome == pluginsdk.OutcomeNothingCreated {
 		return f.outcome, pluginsdk.Handle{}, nil
 	}
-	return cmp.Or(f.outcome, pluginsdk.OutcomeCreated), f.handle(run.ID), nil
+	if f.created == nil {
+		f.created = map[string]bool{}
+	}
+	f.created[run.ID] = true
+	// Dispatch's handle is as long as Lookup's.
+	handle := f.handle(run.ID)
+	handle.Data = append([]byte(dispatchedPrefix), handle.Data...)[:max(len(handle.Data), len(dispatchedPrefix))]
+	return cmp.Or(f.outcome, pluginsdk.OutcomeCreated), handle, nil
 }
 
 func (f *fakePlugin) Lookup(ctx context.Context, runID string) (pluginsdk.Job, error) {
@@ -200,14 +244,19 @@ func (f *fakePlugin) Lookup(ctx context.Context, runID string) (pluginsdk.Job, e
 		f.mu.Lock()
 		return pluginsdk.Job{}, ctx.Err()
 	}
-	if f.placing {
+	if hold := f.lookupHold; hold != nil {
+		f.lookupCtxs = append(f.lookupCtxs, ctx)
 		f.mu.Unlock()
-		<-ctx.Done()
+		<-hold
 		f.mu.Lock()
-		return pluginsdk.Job{}, ctx.Err()
 	}
 	if f.lookupErr != nil {
 		return pluginsdk.Job{}, f.lookupErr
+	}
+	if f.follows > 0 && f.followedErr != nil {
+		if f.followedLookups++; f.followedFailures == 0 || f.followedLookups <= f.followedFailures {
+			return pluginsdk.Job{}, f.followedErr
+		}
 	}
 	if f.lookups <= f.lookupFailures {
 		return pluginsdk.Job{}, errors.New("lookup down")
@@ -215,17 +264,49 @@ func (f *fakePlugin) Lookup(ctx context.Context, runID string) (pluginsdk.Job, e
 	if err := ctx.Err(); err != nil {
 		return pluginsdk.Job{}, err
 	}
-	if f.job == pluginsdk.JobAbsent {
+	job := pluginsdk.Job{State: f.job, Handle: f.handle(runID), Attempt: 1, Profile: cmp.Or(f.jobProfile, f.name), Agent: cmp.Or(f.jobAgent, f.agent)}
+	if f.follows > 0 && f.followedJob != nil {
+		job.State = *f.followedJob
+	} else if job.State == pluginsdk.JobAbsent && f.created[runID] {
+		switch {
+		case f.vanish:
+		case f.neverStarted:
+			job.State = pluginsdk.JobNeverStarted
+		case f.placing && !f.placedRuns[runID]:
+			job.State, job.Reason = pluginsdk.JobPending, f.placingReason
+		case len(f.reasons) > 0:
+			job.State, job.Reason, f.reasons = pluginsdk.JobPending, f.reasons[0], f.reasons[1:]
+		default:
+			job.State = pluginsdk.JobRunning
+		}
+	}
+	switch job.State {
+	case pluginsdk.JobAbsent:
 		if f.afterLookup != nil {
 			f.afterLookup()
 		}
-		return pluginsdk.Job{}, nil
+		job = pluginsdk.Job{}
+	case pluginsdk.JobPending:
+		if f.job == pluginsdk.JobPending {
+			job.Reason = f.placingReason
+		}
+	case pluginsdk.JobNeverStarted:
+		job.Class, job.Reason = f.neverClass, f.neverReason
+		if f.neverStarted {
+			job.Class = cmp.Or(f.neverClass, "driver")
+		}
 	}
-	return pluginsdk.Job{State: f.job, Handle: f.handle(runID), Attempt: 1, Profile: cmp.Or(f.jobProfile, f.name), Agent: cmp.Or(f.jobAgent, f.agent)}, nil
+	if f.lookupHook != nil {
+		f.lookupHook(job.State)
+	}
+	return job, nil
 }
 
 // Follow emits the stream, then ends the job after endDelay or when its context ends.
-func (f *fakePlugin) Follow(ctx context.Context, _ pluginsdk.Handle, from int64, lines chan<- pluginsdk.Line) (pluginsdk.Terminal, error) {
+func (f *fakePlugin) Follow(ctx context.Context, handle pluginsdk.Handle, from int64, lines chan<- pluginsdk.Line) (pluginsdk.Terminal, error) {
+	if !f.lookupHandle(handle) {
+		return pluginsdk.Terminal{}, errors.New("read allocation: the handle is Dispatch's")
+	}
 	f.mu.Lock()
 	f.follows++
 	f.froms = append(f.froms, from)
@@ -291,7 +372,10 @@ func (f *fakePlugin) Stop(context.Context, pluginsdk.Handle) error {
 	return err
 }
 
-func (f *fakePlugin) Collect(ctx context.Context, _ pluginsdk.Handle, limits pluginsdk.Limits, out chan<- pluginsdk.Output) error {
+func (f *fakePlugin) Collect(ctx context.Context, handle pluginsdk.Handle, limits pluginsdk.Limits, out chan<- pluginsdk.Output) error {
+	if !f.lookupHandle(handle) {
+		return errors.New("read allocation: the handle is Dispatch's")
+	}
 	f.mu.Lock()
 	f.collects++
 	f.limits = limits
@@ -461,7 +545,7 @@ func testConfig(receiver string) operator.ReceiverConfig {
 }
 
 func shortIntervals(t *testing.T) {
-	for _, interval := range []*time.Duration{&renewInterval, &advertiseInterval, &refreshInterval, &cancelReadInterval, &reconcileInterval, &custodyInterval, &openInterval} {
+	for _, interval := range []*time.Duration{&renewInterval, &advertiseInterval, &refreshInterval, &cancelReadInterval, &reconcileInterval, &custodyInterval, &openInterval, &startPollInterval} {
 		previous := *interval
 		*interval = 200 * time.Millisecond
 		t.Cleanup(func() { *interval = previous })

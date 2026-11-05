@@ -15,6 +15,13 @@ import (
 
 const maxHandle = 4 << 10
 
+// PollDeadline bounds each poll of a dispatched job until it starts or ends: one deadline covers every Lookup, which
+// runs under it, and every delay between them. A variable so tests can shorten it.
+var PollDeadline = 2 * time.Minute
+
+// pollInterval separates those Lookups.
+const pollInterval = time.Second
+
 // Credentials are the credentials the completing job's run carries, one at each kind of target.
 var Credentials = []pluginsdk.Secret{
 	{Name: "conformance-env", Env: "CONFORMANCE_TOKEN", Value: []byte("conformance-env-value")},
@@ -23,9 +30,10 @@ var Credentials = []pluginsdk.Secret{
 
 // Run checks the profiles factory, the one a plugin hands Serve, builds against the plugin contract on their
 // platform, giving it a logger that discards. completes configures a profile whose job runs for at least ten seconds
-// and exits 0; neverStarts one whose job the platform ends before its agent starts. Every job the suite creates is
-// purged. inlineLimit is the cap both configured profiles report. The completing job's run carries Credentials.
-func Run(t *testing.T, factory func(pluginsdk.Settings, hclog.Logger) (pluginsdk.Plugin, error), completes, neverStarts pluginsdk.Settings, inlineLimit int64) {
+// and exits 0; neverStarts one whose job the platform ends before its agent starts; pending, optional, one whose job
+// the platform never places and says why, which zero Settings skip. Every job the suite creates is purged.
+// inlineLimit is the cap every configured profile reports. The completing job's run carries Credentials.
+func Run(t *testing.T, factory func(pluginsdk.Settings, hclog.Logger) (pluginsdk.Plugin, error), completes, neverStarts, pending pluginsdk.Settings, inlineLimit int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
 	running, err := factory(completes, hclog.NewNullLogger())
@@ -38,6 +46,15 @@ func Run(t *testing.T, factory func(pluginsdk.Settings, hclog.Logger) (pluginsdk
 	}
 	if running.InlineLimit() != inlineLimit || failing.InlineLimit() != inlineLimit {
 		t.Fatalf("inline limits = %d and %d, want %d", running.InlineLimit(), failing.InlineLimit(), inlineLimit)
+	}
+	var unplaced pluginsdk.Plugin
+	if !reflect.DeepEqual(pending, pluginsdk.Settings{}) {
+		if unplaced, err = factory(pending, hclog.NewNullLogger()); err != nil {
+			t.Fatalf("configure %s: %v", pending.Name, err)
+		}
+		if unplaced.InlineLimit() != inlineLimit {
+			t.Fatalf("inline limit of %s = %d, want %d", pending.Name, unplaced.InlineLimit(), inlineLimit)
+		}
 	}
 	id := runID(t)
 
@@ -62,9 +79,9 @@ func Run(t *testing.T, factory func(pluginsdk.Settings, hclog.Logger) (pluginsdk
 		if _, again := dispatchOutcome(t, ctx, running, run); again.Name != handle.Name {
 			t.Fatalf("second dispatch of the same run returned job %q, first %q", again.Name, handle.Name)
 		}
-		job, err := running.Lookup(ctx, run.ID)
+		job, err := poll(ctx, running, run.ID, pluginsdk.JobRunning)
 		if err != nil || job.State != pluginsdk.JobRunning {
-			t.Fatalf("lookup while running = %+v, %v; want running", job, err)
+			t.Fatalf("lookup while running = %+v, %v; want running within %s", job, err, PollDeadline)
 		}
 		if again, err := running.Lookup(ctx, run.ID); err != nil || !reflect.DeepEqual(again, job) {
 			t.Fatalf("second lookup while running = %+v, %v; want %+v", again, err, job)
@@ -72,7 +89,7 @@ func Run(t *testing.T, factory func(pluginsdk.Settings, hclog.Logger) (pluginsdk
 		if job.Attempt != run.Attempt || job.Profile != run.Profile || job.Agent != run.Agent || job.Handle.Name != handle.Name {
 			t.Fatalf("lookup metadata %+v; want attempt %d, profile %s, agent %s, job %s", job, run.Attempt, run.Profile, run.Agent, handle.Name)
 		}
-		terminal, end := follow(t, ctx, running, handle, 0)
+		terminal, end := follow(t, ctx, running, job.Handle, 0)
 		if !terminal.Started || terminal.ExitCode != 0 {
 			t.Fatalf("terminal %+v; want started with exit code 0", terminal)
 		}
@@ -80,10 +97,10 @@ func Run(t *testing.T, factory func(pluginsdk.Settings, hclog.Logger) (pluginsdk
 			t.Fatalf("lookup after the job ended = %+v, %v; want ended", job, err)
 		}
 		outputs := make(chan pluginsdk.Output, 1)
-		if err := running.Collect(ctx, handle, pluginsdk.Limits{Files: 256, FileBytes: 1 << 20, TotalBytes: 1 << 20}, outputs); err != nil || len(outputs) != 0 {
+		if err := running.Collect(ctx, job.Handle, pluginsdk.Limits{Files: 256, FileBytes: 1 << 20, TotalBytes: 1 << 20}, outputs); err != nil || len(outputs) != 0 {
 			t.Fatalf("collect from a job that wrote no outputs = %d outputs, %v; want none", len(outputs), err)
 		}
-		if replay, _ := follow(t, ctx, running, handle, end); replay != terminal {
+		if replay, _ := follow(t, ctx, running, job.Handle, end); replay != terminal {
 			t.Fatalf("follow from offset %d after the end = %+v; want the terminal %+v", end, replay, terminal)
 		}
 		if _, again := dispatchOutcome(t, ctx, running, run); again.Name != handle.Name {
@@ -116,14 +133,64 @@ func Run(t *testing.T, factory func(pluginsdk.Settings, hclog.Logger) (pluginsdk
 		run := pluginsdk.Run{ID: id + "-never", Profile: neverStarts.Name, Agent: neverStarts.Agent, Attempt: 1, Prompt: []byte("conformance prompt")}
 		purgeAfter(t, failing, run)
 		handle := dispatch(t, ctx, failing, run)
-		if job, err := failing.Lookup(ctx, run.ID); err != nil || job.State != pluginsdk.JobNeverStarted {
-			t.Fatalf("lookup = %+v, %v; want never started", job, err)
+		job, err := poll(ctx, failing, run.ID, pluginsdk.JobNeverStarted)
+		if err != nil || job.State != pluginsdk.JobNeverStarted {
+			t.Fatalf("lookup = %+v, %v; want never started within %s", job, err, PollDeadline)
 		}
-		if terminal, _ := follow(t, ctx, failing, handle, 0); terminal.Started {
+		if terminal, _ := follow(t, ctx, failing, job.Handle, 0); terminal.Started {
 			t.Fatalf("terminal %+v; want not started", terminal)
 		}
 		idempotent(t, ctx, failing, run.ID, handle)
 	})
+
+	if unplaced == nil {
+		return
+	}
+	t.Run("Pending", func(t *testing.T) {
+		run := pluginsdk.Run{ID: id + "-pending", Profile: pending.Name, Agent: pending.Agent, Attempt: 1, Prompt: []byte("conformance prompt")}
+		purgeAfter(t, unplaced, run)
+		dispatchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		handle := dispatch(t, dispatchCtx, unplaced, run)
+		cancel()
+		// A platform that never decides leaves Lookup waiting, which fails the profile.
+		for _, which := range []string{"first", "second"} {
+			lookupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			job, err := unplaced.Lookup(lookupCtx, run.ID)
+			cancel()
+			if err != nil || job.State != pluginsdk.JobPending || job.Reason == "" {
+				t.Fatalf("%s lookup of an unplaced job = %+v, %v; want pending with a reason", which, job, err)
+			}
+		}
+		if err := unplaced.Stop(ctx, handle); err != nil {
+			t.Fatalf("stop of an unplaced job: %v", err)
+		}
+		if job, err := unplaced.Lookup(ctx, run.ID); err != nil || job.State == pluginsdk.JobRunning {
+			t.Fatalf("lookup after stop = %+v, %v; want the job not running", job, err)
+		}
+		if err := unplaced.Purge(ctx, run.ID); err != nil {
+			t.Fatalf("purge of an unplaced job: %v", err)
+		}
+		if job, err := unplaced.Lookup(ctx, run.ID); err != nil || job.State != pluginsdk.JobAbsent {
+			t.Fatalf("lookup after purge = %+v, %v; want absent", job, err)
+		}
+	})
+}
+
+// poll repeats Lookup until it reports want, an error or another state that is not pending, or PollDeadline passes.
+func poll(ctx context.Context, a pluginsdk.Plugin, runID string, want pluginsdk.JobState) (pluginsdk.Job, error) {
+	ctx, cancel := context.WithTimeout(ctx, PollDeadline)
+	defer cancel()
+	for {
+		job, err := a.Lookup(ctx, runID)
+		if err != nil || job.State != pluginsdk.JobPending || job.State == want {
+			return job, err
+		}
+		select {
+		case <-ctx.Done():
+			return job, ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
 }
 
 func runID(t *testing.T) string {

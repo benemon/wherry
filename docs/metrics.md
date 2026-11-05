@@ -56,8 +56,13 @@ before any profile took it, has `profile="none"` in `wherry_runs_total` and
 | `wherry_plugin_platform_errors_total` | counter | `profile`, `class` | platform API errors: `unavailable`, `denied`, `conflict`, `timeout`, `other` |
 | `wherry_plugin_cleanup_pending` | gauge | `profile` | the profile's ended jobs awaiting cleanup |
 | `wherry_plugin_sweep_deletions_total` | counter | `profile`, `kind` | material a sweep deleted: `job`, `variable`, `directory` |
-| `wherry_plugin_placement_seconds` | histogram | `profile` | time from dispatch to the agent task starting |
+| `wherry_plugin_placement_seconds` | histogram | `profile` | time from Dispatch returning to the first observation of the agent task started, by the receiver's clock |
 | `wherry_plugin_storage_free_bytes` | gauge | `profile` | free bytes of the storage the profile's runs share |
+
+The other `wherry_plugin_` families come from the plugins. The receiver
+observes `wherry_plugin_placement_seconds` itself, only for an attempt whose
+Dispatch returned the job created, so an adopter observes nothing. It drops a
+plugin's sample of it and counts the sample in `wherry_metrics_dropped_total`.
 
 ## Reasons and outcomes
 

@@ -152,7 +152,7 @@ Each plugin's README runs the receiver on its platform, with its steps:
 A receiver offers a profile only while the profile's plugin reports it ready.
 A receiver with no ready offer fetches no tasks from its pool.
 It closes any poll it has open, usually within about a second.
-It fetches again within about a second of its next advertisement with a ready offer, unless its pool is suspended or a back-off after a failed start is still running.
+It fetches again within about a second of its next advertisement with a ready offer, unless its pool is suspended, a back-off after a failed start is still running, or it holds a [pending run](#a-receiver-with-a-pending-run).
 Its held runs keep running, renewing and reading cancels.
 
 Each advertisement logs a line for every profile whose plugin reports it not ready:
@@ -173,6 +173,33 @@ When every member of a pool has no ready offer, you see these consequences:
 A receiver with at least one ready offer still fetches every task in its pool.
 It releases a task it cannot offer, and each release spends one delivery.
 To keep that from exhausting a task's budget, make sure some member can offer each agent the pool's terms allow.
+
+### A receiver with a pending run
+
+A run is pending while the platform holds its job and has not placed it.
+Pending means not placed only: queued in Nomad, or held by a blocked evaluation with no allocation, and unschedulable or scheduling-gated in Kubernetes.
+A systemd job is never pending.
+The receiver writes the run's `placing` status, `waiting for placement (<reason>)` with the platform's reason, and writes it again each time the reason changes.
+
+A receiver that observes any held run pending stops claiming:
+
+- It opens no new poll of its pool while any held run is pending.
+- It ends an open idle poll within 100 ms plus `FetchMaxWait`, 1 second, and admits a task that poll returns.
+- It claims again only when no held run is pending.
+- Its held runs keep running, renewing and reading cancels.
+
+A receiver holds at most its capacity of runs, so at most that many of its runs are pending at once.
+A pending run past its `task_started_by` is stopped and fails with `not started by task_started_by (<RFC 3339 time>)`.
+
+While a member holds a pending run, a redelivery, an `ending` cleanup or a queued cancel of another task waits for that member to claim again or for another member.
+None of these waits has a fixed bound.
+
+A shutdown while a run is pending releases the claim and leaves the job for the adopter.
+A plugin exit or Kafka authorisation error leaves the job and writes nothing.
+A queued job left that way with no later adopter waits for the plugin's sweep.
+
+Suspending a pool does not stop jobs already queued on the platform.
+The key custodian still serves an adopting open on a suspended pool, pending jobs included.
 
 ### Metrics
 

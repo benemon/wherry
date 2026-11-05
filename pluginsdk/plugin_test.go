@@ -200,8 +200,8 @@ func TestConfigureReportsVersion(t *testing.T) {
 		t.Fatalf("version before Configure = %q, want none", version)
 	}
 	configured(t, p, "a", "{}")
-	if version, protocol := p.Version(); version != "v0.0.0-test" || protocol != 10 {
-		t.Fatalf("version = %q, protocol %d; want v0.0.0-test, 10", version, protocol)
+	if version, protocol := p.Version(); version != "v0.0.0-test" || protocol != 11 {
+		t.Fatalf("version = %q, protocol %d; want v0.0.0-test, 11", version, protocol)
 	}
 }
 
@@ -266,6 +266,65 @@ func TestTerminalReasonCrossesTheLink(t *testing.T) {
 	terminal, err := a.Follow(context.Background(), Handle{Data: []byte("h")}, 0, make(chan Line, 4))
 	if want := (Terminal{Class: "validation", Node: "fake-node", Reason: "failed to interpolate ${BAD:-x}"}); err != nil || terminal != want {
 		t.Fatalf("follow = %+v, %v; want %+v", terminal, err, want)
+	}
+}
+
+// A pending job's reason and a never-started job's class and reason cross the link from Lookup.
+func TestLookupCarriesPendingAndNeverStarted(t *testing.T) {
+	p, _, _ := launch(t)
+	pending := configured(t, p, "pending", `{"jobs":true,"pending":"0 nodes evaluated, 0 filtered, 0 exhausted; no nodes available in datacenter dc2"}`)
+	never := configured(t, p, "never", `{"jobs":true,"never_started":"failed to pull image ${BAD:-x}"}`)
+	for _, test := range []struct {
+		profile Plugin
+		want    Job
+	}{
+		{pending, Job{State: JobPending, Reason: "0 nodes evaluated, 0 filtered, 0 exhausted; no nodes available in datacenter dc2"}},
+		{never, Job{State: JobNeverStarted, Class: "validation", Reason: "failed to pull image ${BAD:-x}"}},
+	} {
+		if _, _, err := test.profile.Dispatch(context.Background(), Run{ID: "run-a", Profile: "p", Agent: "claude", Attempt: 2}); err != nil {
+			t.Fatal(err)
+		}
+		job, err := test.profile.Lookup(context.Background(), "run-a")
+		if err != nil || job.State != test.want.State || job.Class != test.want.Class || job.Reason != test.want.Reason || job.Attempt != 2 || job.Agent != "claude" {
+			t.Fatalf("lookup = %+v, %v; want %+v", job, err, test.want)
+		}
+	}
+}
+
+// A job placed after Dispatch is followed with Lookup's handle, not Dispatch's: the lines, then the terminal. A job
+// that started and ended between two Lookups is found ended, and Follow reads its whole log and its terminal.
+func TestPlacedJobFollowsWithLookupsHandle(t *testing.T) {
+	for _, test := range []struct {
+		name, placed string
+		state        JobState
+	}{{"running", "", JobRunning}, {"ended between lookups", "ended", JobEnded}} {
+		t.Run(test.name, func(t *testing.T) {
+			p, _, _ := launch(t)
+			marker := filepath.Join(t.TempDir(), "placed")
+			a := configured(t, p, "a", fmt.Sprintf(`{"jobs":true,"finish":true,"pending":"queued","placed":%q}`, marker))
+			_, dispatched, err := a.Dispatch(context.Background(), Run{ID: "run-a", Profile: "a", Agent: "claude"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if job, err := a.Lookup(context.Background(), "run-a"); err != nil || job.State != JobPending || job.Reason != "queued" || job.Class != "" {
+				t.Fatalf("lookup before placement = %+v, %v; want pending, queued", job, err)
+			}
+			if err := os.WriteFile(marker, []byte(test.placed), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			job, err := a.Lookup(context.Background(), "run-a")
+			if err != nil || job.State != test.state || job.Reason != "" || job.Handle.Name != dispatched.Name || bytes.Equal(job.Handle.Data, dispatched.Data) {
+				t.Fatalf("lookup after placement = %+v, %v; want %d with a handle of its own", job, err, test.state)
+			}
+			if _, err := a.Follow(context.Background(), dispatched, 0, make(chan Line, 4)); err == nil || !strings.Contains(err.Error(), "read allocation") {
+				t.Fatalf("follow with Dispatch's handle = %v; want refused", err)
+			}
+			lines := make(chan Line, 4)
+			terminal, err := a.Follow(context.Background(), job.Handle, 0, lines)
+			if err != nil || !terminal.Started || len(lines) != 2 {
+				t.Fatalf("follow with Lookup's handle = %+v, %v, %d lines; want both lines and a started terminal", terminal, err, len(lines))
+			}
+		})
 	}
 }
 
@@ -682,9 +741,9 @@ func TestServeHandsTheProfileItsLogger(t *testing.T) {
 	})
 }
 
-// A plugin serving only protocol version 9, the one before this, or only 11, the one after, is refused.
+// A plugin serving only protocol version 10, the one before this, or only 12, the one after, is refused.
 func TestOtherProtocolVersionsAreRefused(t *testing.T) {
-	for _, version := range []int{9, 11} {
+	for _, version := range []int{10, 12} {
 		script := filepath.Join(t.TempDir(), "wherry-plugin-other")
 		if err := os.WriteFile(script, fmt.Appendf(nil, "#!/bin/sh\necho '1|%d|tcp|127.0.0.1:1|grpc'\nsleep 5\n", version), 0o700); err != nil {
 			t.Fatal(err)
@@ -694,14 +753,15 @@ func TestOtherProtocolVersionsAreRefused(t *testing.T) {
 			p.Close()
 			t.Fatalf("launched a version %d plugin", version)
 		}
-		if want := fmt.Sprintf("incompatible API version with plugin. Plugin version: %d, Client versions: [10]", version); !strings.Contains(err.Error(), want) {
+		if want := fmt.Sprintf("incompatible API version with plugin. Plugin version: %d, Client versions: [11]", version); !strings.Contains(err.Error(), want) {
 			t.Fatalf("launch error %v; want %q", err, want)
 		}
 	}
 }
 
 // A plugin and a receiver built before VersionedPlugins, naming protocol version 10 through
-// HandshakeConfig.ProtocolVersion, run with this SDK's.
+// HandshakeConfig.ProtocolVersion, are refused by this SDK's, and refuse it, in both directions: protocol 11 is a clean
+// break.
 func TestProtocolTenBeforeVersionedPlugins(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "wherry-plugin-protocol10")
 	build := exec.Command("go", "build", "-o", binary, ".")
@@ -711,24 +771,24 @@ func TestProtocolTenBeforeVersionedPlugins(t *testing.T) {
 	}
 	t.Run("its plugin under this Launch", func(t *testing.T) {
 		p, err := Launch("protocol10", fixed(binary), sha256Of(t, binary), &syncBuffer{})
-		if err != nil {
-			t.Fatal(err)
+		if err == nil {
+			p.Close()
+			t.Fatal("launched a protocol 10 plugin")
 		}
-		defer p.Close()
-		configured(t, p, "a", "{}")
-		if version, protocol := p.Version(); version != "v0.0.0-protocol10" || protocol != 10 {
-			t.Fatalf("version = %q, protocol %d; want v0.0.0-protocol10, 10", version, protocol)
+		if want := "incompatible API version with plugin. Plugin version: 10, Client versions: [11]"; !strings.Contains(err.Error(), want) {
+			t.Fatalf("launch error %v; want %q", err, want)
 		}
 	})
 	t.Run("this Serve under its Launch", func(t *testing.T) {
 		t.Setenv("WHERRY_TESTPLUGIN_RECORD", filepath.Join(t.TempDir(), "record.jsonl"))
-		if output, err := exec.Command(binary, testPlugin).Output(); err != nil || string(output) != "v0.0.0-test 10\n" {
-			t.Fatalf("launch = %q, %v; want version v0.0.0-test and protocol 10", output, err)
+		output, err := exec.Command(binary, testPlugin).CombinedOutput()
+		if err == nil || !strings.Contains(string(output), "Plugin version: 11, Client versions: [10]") {
+			t.Fatalf("launch = %q, %v; want the protocol 11 plugin refused", output, err)
 		}
 	})
 }
 
-// A plugin serves protocol version 10 only under the WHERRY_PLUGIN cookie, and refuses to serve without it.
+// A plugin serves protocol version 11 only under the WHERRY_PLUGIN cookie, and refuses to serve without it.
 func TestServeHandshakeUsesThePluginCookie(t *testing.T) {
 	if handshake.MagicCookieKey != "WHERRY_PLUGIN" {
 		t.Fatalf("handshake %+v; want cookie key WHERRY_PLUGIN", handshake)
@@ -750,8 +810,8 @@ func TestServeHandshakeUsesThePluginCookie(t *testing.T) {
 		return line, err
 	}
 	line, err := serve("WHERRY_PLUGIN=" + handshake.MagicCookieValue)
-	if err != nil || !strings.HasPrefix(line, "1|10|") {
-		t.Fatalf("handshake line %q, %v; want core protocol 1 and plugin protocol 10", line, err)
+	if err != nil || !strings.HasPrefix(line, "1|11|") {
+		t.Fatalf("handshake line %q, %v; want core protocol 1 and plugin protocol 11", line, err)
 	}
 	if line, err := serve(); err == nil || line != "" {
 		t.Fatalf("served %q without the cookie", line)

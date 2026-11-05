@@ -228,7 +228,7 @@ func TestOneProcessPerPlugin(t *testing.T) {
 		t.Fatalf("profiles configured in processes %v; want exec and podman in one, edge in another", processes)
 	}
 	// Each plugin's identity is logged once, when it starts.
-	if want := "receiver: plugin fake: version v0.0.0-test protocol 10\nreceiver: plugin other: version v0.0.0-test protocol 10\n"; logged.String() != want {
+	if want := "receiver: plugin fake: version v0.0.0-test protocol 11\nreceiver: plugin other: version v0.0.0-test protocol 11\n"; logged.String() != want {
 		t.Fatalf("logged %q, want %q", logged.String(), want)
 	}
 }

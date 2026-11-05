@@ -14,6 +14,11 @@ Its releases use `pluginsdk/v*` tags.
 2. Call `pluginsdk.Serve` with your factory.
 3. Run `pluginsdktest` against your target platform.
 
+`pluginsdktest.Run` takes a profile whose job completes, one whose job never
+starts and, optionally, one whose job the platform never places and says why.
+Zero `Settings` skip the pending profile. The suite repeats `Lookup` until a
+job runs or never starts, within `pluginsdktest.PollDeadline`, 2 minutes.
+
 The factory receives a logger.
 The receiver relays its JSON log lines at their original level.
 The receiver logs your plugin's version at startup.
@@ -22,8 +27,9 @@ The receiver logs your plugin's version at startup.
 
 The receiver and plugin use gRPC over [go-plugin](https://github.com/hashicorp/go-plugin).
 Each start creates a certificate pair for mutual TLS.
-The protocol version is 10.
+The protocol version is 11.
 The receiver refuses other protocol versions and plugins without a TLS certificate.
+A protocol 11 plugin refuses a protocol 10 receiver, so upgrade a receiver and its plugins together.
 Every call names its profile.
 The maximum plugin message size is 64 MiB.
 
@@ -66,11 +72,38 @@ receiver reads them.
 A plugin may report, with a job that never started, the platform's reason
 in `Terminal.Reason`. The receiver redacts it and writes it to its log only.
 
+### Dispatch and Lookup
+
+`Dispatch` returns once the platform holds the job, placed or not, with
+`OutcomeCreated` and a handle. A dispatch that converges on an existing job
+returns its handle at once. The receiver passes that handle to `Stop` and
+`Purge`, which work on a job the platform has not placed.
+
+`Lookup` makes one observation of a run's job. It returns at once with
+`JobPending` while the platform has not placed the job, and with
+`JobRunning`, `JobEnded` or `JobNeverStarted` once the job has started or
+ended. Any other observation waits, bounded by the call's context: a placed
+job whose task is starting, or a job the platform has not yet decided on. A
+`Lookup` cut short returns the context's error and removes nothing.
+
+Pending means not placed only. A Nomad job is pending while it is queued, or
+while a blocked evaluation holds it with no allocation. A Kubernetes pod is
+pending while its `PodScheduled` condition is `False` with reason
+`Unschedulable` or `SchedulingGated`. A systemd unit is never pending.
+
+For a pending job, `Job.Reason` is the platform's account of why the job is
+not placed, and may be empty. The receiver redacts it and publishes it in the
+run's [`placing` status](a2a-extension-v1.md#status). For a job that never
+started, `Job.Class` and `Job.Reason` carry what `Follow`'s `Terminal`
+carries. Both are empty otherwise.
+
 ### Follow
 
-A plugin's `Follow` may fail at any time. The receiver recovers the stream,
-so a plugin need not. A plugin's `Follow` on an ended job reads the rest of
-the log and returns its `Terminal`.
+The receiver calls `Follow` and `Collect` with the handle of a later `Lookup`
+that reported the job running or ended. A plugin's `Follow` may fail at any
+time. The receiver recovers the stream, so a plugin need not. A plugin's
+`Follow` on an ended job reads the rest of the log and returns its
+`Terminal`.
 
 ## Readiness
 
@@ -81,12 +114,11 @@ advertise interval, 30 seconds. A call that runs out counts as not ready.
 
 Each scrape of the receiver's `/metrics` calls every profile's `Metrics`,
 within 2 seconds. A plugin answers with samples of the `wherry_plugin_`
-families, each a family name, labels, and a counter or gauge value or a
-histogram. A histogram gives the cumulative count at each bound of
-`pluginsdk.PlacementBuckets`, its sum and its count. The receiver sets every
-sample's `profile` label to the profile it answered for, and drops a sample
-outside the [families](metrics.md#families) as
-[Plugins](commands.md#plugins) lists.
+families, each a family name, labels, and a counter or gauge value. The
+receiver sets every sample's `profile` label to the profile it answered for,
+and drops a sample outside the [families](metrics.md#families) as
+[Plugins](commands.md#plugins) lists. The receiver observes
+`wherry_plugin_placement_seconds` itself and drops a plugin's sample of it.
 
 ## Errors
 

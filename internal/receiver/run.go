@@ -58,6 +58,8 @@ var (
 	shutdownTimeout = 5 * time.Second
 	// reconcileInterval separates the Lookups that resolve an ambiguous Dispatch.
 	reconcileInterval = time.Second
+	// startPollInterval separates the Lookups of a job not yet started.
+	startPollInterval = 2 * time.Second
 	// purgeDeadline bounds the Purge retries of a start failure.
 	purgeDeadline = 5 * time.Minute
 	// followRetryInterval separates the Follows and Lookups of a run whose log stream failed.
@@ -65,6 +67,10 @@ var (
 	// collectTimeout bounds a plugin's collection of a run's outputs, during which the claim is renewed.
 	collectTimeout = 2 * time.Minute
 )
+
+// clock is the receiver's clock for placement: when Dispatch returned and when each Lookup of the await-start phase
+// completed. A variable so tests can control it.
+var clock = time.Now
 
 // claimLoop holds one slot: a dedicated share client per claimed record,
 // because renews do not survive a poll and held records are tied to the connection.
@@ -81,10 +87,10 @@ func (r *Receiver) claimLoop(claiming, running context.Context, idle func()) {
 	}
 }
 
-// claimGated reports that no new poll of the pool may open: a suspended pool, no ready offer or an active back-off. r.mu
-// must be held, and never across a poll, a client close, a sleep or a plugin call.
+// claimGated reports that no new poll of the pool may open: a suspended pool, no ready offer, an active back-off or a
+// held run observed pending. r.mu must be held, and never across a poll, a client close, a sleep or a plugin call.
 func (r *Receiver) claimGated() bool {
-	return r.state.Suspended[r.config.Pool] || len(r.offers) == 0 || time.Now().Before(r.backoffUntil)
+	return r.state.Suspended[r.config.Pool] || len(r.offers) == 0 || time.Now().Before(r.backoffUntil) || len(r.pending) > 0
 }
 
 // gated is claimGated taking r.mu.
@@ -574,6 +580,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		delete(r.live, run)
 		r.liveMu.Unlock()
 	}()
+	defer run.placed()
 	pastDeadline := r.metrics.pastDeadline.WithLabelValues(admitted.profile.Name)
 	// A timer firing as the run ends must not count it after its decrement.
 	var overdueMu sync.Mutex
@@ -639,9 +646,11 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		defer cancelLookup()
 	}
 	var handle pluginsdk.Handle
+	var job pluginsdk.Job
 	adopted, neverStarted := false, false
 	if attempt > 1 {
-		job, found, err := run.findJob(ctx, lookupCtx)
+		var found bool
+		job, found, err = run.findJob(ctx, lookupCtx)
 		// An unresolved Lookup is asked again while the claim is held, until task_ended_by passes; no open is requested
 		// before the job's state is known.
 		for err != nil {
@@ -673,16 +682,26 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if run.profile.Plugin == nil {
 		return run.expired(ctx, nil, nil)
 	}
-	// A job no started event reported by task_started_by is located only to be stopped.
+	// A job no started event reported by task_started_by is located only to be stopped; a pending one past both bounds
+	// names the end bound.
 	if !started && adopted && !admitted.cancelled && startCtx.Err() != nil && ctx.Err() == nil {
+		if job.State == pluginsdk.JobPending {
+			return run.expired(ctx, &handle, nil)
+		}
 		return run.stopAndFail(ctx, handle, wire.NotStartedBy(task.Wherry.TaskStartedBy), nil)
 	}
 	if !started && neverStarted && startCtx.Err() != nil && ctx.Err() == nil {
 		return run.expired(ctx, nil, nil)
 	}
 	if neverStarted {
-		return run.startFailure(ctx, "platform", "job never started")
+		return run.neverStarted(ctx, handle, pluginsdk.Terminal{Class: job.Class, Reason: job.Reason}, nil)
 	}
+	// unplaced is an adopted job Lookup found pending; awaiting marks a run whose job is observed until it starts, from
+	// first when a Lookup's result is already in hand.
+	unplaced := adopted && job.State == pluginsdk.JobPending
+	awaiting := unplaced
+	var first *lookupResult
+	var dispatchedAt time.Time
 	if startCtx.Err() != nil && ctx.Err() == nil && !adopted {
 		return run.expired(ctx, nil, nil)
 	}
@@ -716,6 +735,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				run.terms().ReplyLimit) + prompt(admitted.history)),
 			Inputs: admitted.inputs, Credentials: secrets, Fetches: fetches,
 		})
+		returned := clock()
 		var tooLarge *pluginsdk.InputTooLargeError
 		var failure *pluginsdk.Error
 		switch {
@@ -751,6 +771,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		switch dispatched {
 		case pluginsdk.OutcomeCreated:
 			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "created").Inc()
+			awaiting, dispatchedAt = true, returned
 		case pluginsdk.OutcomeNothingCreated:
 			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "nothing").Inc()
 			r.logger.Printf("run %s: profile %s created no job", runID, named.Name)
@@ -765,14 +786,21 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			case job.State == pluginsdk.JobAbsent:
 				return run.startFailure(ctx, "dispatch", "profile "+named.Name+" created no job")
 			case job.State == pluginsdk.JobNeverStarted:
-				return run.startFailure(ctx, "platform", "job never started")
+				return run.neverStarted(ctx, job.Handle, pluginsdk.Terminal{Class: job.Class, Reason: job.Reason}, nil)
+			case job.State == pluginsdk.JobPending:
+				run.pending()
+				awaiting, first = true, &lookupResult{job: job}
 			}
 			dispatchedHandle = job.Handle
 		}
 		handle = dispatchedHandle
 		run.labels = admitted.profile.Labels
 	}
-	if len(handle.Data) > maxHandle || len(handle.Name) > wire.MaxJobName {
+	// oversized stops a job whose handle is over the bounds and returns the task.
+	oversized := func(handle pluginsdk.Handle) (kgo.AckStatus, bool) {
+		if len(handle.Data) <= maxHandle && len(handle.Name) <= wire.MaxJobName {
+			return 0, false
+		}
 		if len(handle.Data) > maxHandle {
 			r.logger.Printf("run %s: profile %s returned a handle over %d bytes", runID, run.profile.Name, maxHandle)
 		} else {
@@ -782,7 +810,10 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			r.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 			r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
 		}
-		return run.returnTask(ctx, nil)
+		return run.returnTask(ctx, nil), true
+	}
+	if status, over := oversized(handle); over {
+		return status
 	}
 	run.job = handle.Name
 	if adopted && admitted.cancelled {
@@ -812,20 +843,49 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			ended <- followed{terminal, err}
 		}()
 	}
-	follow(offset)
 	// An adopter holds the job's lines until its own open gives it the values to redact; the input URLs the job
-	// fetched with are not delivered again.
+	// fetched with are not delivered again. An unplaced job is followed only once it has started.
 	var held []pluginsdk.Line
 	if adopted {
-		release := run.hold(lines)
+		var release func() []pluginsdk.Line
+		if !unplaced {
+			follow(offset)
+			release = run.hold(lines)
+		}
 		values, status, ok := run.awaitOpen(ctx, runCtx, &handle)
-		held = release()
+		if release != nil {
+			held = release()
+		}
 		if !ok {
 			return status
 		}
 		run.redactionKey = values.RedactionKey
 		run.deliver(values.Credentials)
 		_, run.puts = run.presigned(values, nil, outputNames)
+	}
+	if unplaced {
+		switch {
+		case ctx.Err() != nil:
+			return kgo.AckRelease
+		case run.cancelHeld():
+			return run.stopAndCancel(ctx, handle, nil)
+		case startCtx.Err() != nil:
+			return run.expired(ctx, &handle, nil)
+		}
+	}
+	if awaiting {
+		observed, status, done := run.awaitStart(ctx, startCtx, handle, dispatchedAt, first)
+		if done {
+			return status
+		}
+		handle = observed.Handle
+		if status, over := oversized(handle); over {
+			return status
+		}
+		run.job = handle.Name
+	}
+	if !adopted || unplaced {
+		follow(offset)
 	}
 	r.logger.Printf("run %s: attempt %d in profile %s with %s (%s)", runID, attempt, run.profile.Name, wire.TermsText(admitted.profile.Labels), handle.Name)
 	var pending []pluginsdk.Line
@@ -895,7 +955,8 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		job, lookupErr := run.profile.Plugin.Lookup(lookupCtx, runID)
 		cancel()
 		switch {
-		case lookupErr != nil:
+		// A started job is never pending again; a Lookup that says so is an observation error.
+		case lookupErr != nil || job.State == pluginsdk.JobPending:
 			recovering("lookup failed")
 			lookupRetry, retry = true, time.After(followRetryInterval)
 			return 0, false
@@ -919,10 +980,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	var followErr error
 	// stopHeld ends the run when the receiver holds its cancel.
 	stopHeld := func() (kgo.AckStatus, bool) {
-		r.mu.Lock()
-		cancelled := r.cancelled[runKey{task.Wherry.Tenant, runID}]
-		r.mu.Unlock()
-		if cancelled {
+		if run.cancelHeld() {
 			stopFollow()
 			return run.stopAndCancel(ctx, handle, pending), true
 		}
@@ -969,13 +1027,8 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				if status, done := recoverFollow(end.err); done {
 					return status
 				}
-			case !end.terminal.Started && end.terminal.Class == pluginsdk.ClassFetch:
-				r.logger.Printf("run %s: job never started: an S3 input was not fetched%s", runID, run.startReason(end.terminal))
-				return run.stopAndFail(ctx, handle, "an S3 input was not fetched, or did not match its size and SHA-256", pending)
 			case !end.terminal.Started:
-				cause := "job never started (" + end.terminal.Class + ")" + run.startReason(end.terminal)
-				r.logger.Printf("run %s: %s", runID, cause)
-				return run.startFailure(ctx, "platform", cause)
+				return run.neverStarted(ctx, handle, end.terminal, pending)
 			default:
 				return run.conclude(ctx, handle, pending, end.terminal)
 			}
@@ -1018,6 +1071,237 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			reported = at
 		}
 	}
+}
+
+// lookupResult is one Lookup of a job not yet started, with the receiver's clock when it completed.
+type lookupResult struct {
+	job         pluginsdk.Job
+	err         error
+	completedAt time.Time
+}
+
+// action is what the await-start phase does when it wakes.
+type action int
+
+const (
+	// awaitAction acts on nothing yet.
+	awaitAction action = iota
+	// leaveAction gives the run up: released on a shutdown, abandoned on a halt.
+	leaveAction
+	cancelAction
+	resultAction
+	expireAction
+)
+
+// decide is the await-start phase's action when it wakes, the first that holds of: ctx ended, the run's cancel held,
+// a bound fired with a result accepted against bound, a bound fired, a result.
+func decide(ctxDone, cancelled bool, result *lookupResult, boundFired bool, bound time.Time) action {
+	switch {
+	case ctxDone:
+		return leaveAction
+	case cancelled:
+		return cancelAction
+	case boundFired && result != nil && result.err == nil && accepted(result.job.State, result.completedAt, bound):
+		return resultAction
+	case boundFired:
+		return expireAction
+	case result != nil:
+		return resultAction
+	}
+	return awaitAction
+}
+
+// accepted reports a result acted on once a bound has fired: the job running or ended, by a Lookup completed before
+// bound.
+func accepted(state pluginsdk.JobState, completedAt, bound time.Time) bool {
+	return (state == pluginsdk.JobRunning || state == pluginsdk.JobEnded) && completedAt.Before(bound)
+}
+
+// awaitStart observes a job not yet started, one Lookup at a time under a child of startCtx, until it starts or ends,
+// and returns it running or ended, or done with the run's acknowledgement. first is a result already in hand, and
+// dispatched when this attempt's Dispatch returned created, zero for none. A Lookup is never joined: ending the phase
+// cancels it and drops its late result.
+func (run *activeRun) awaitStart(ctx, startCtx context.Context, handle pluginsdk.Handle, dispatched time.Time, first *lookupResult) (pluginsdk.Job, kgo.AckStatus, bool) {
+	r, runID := run.receiver, run.task.Wherry.Run
+	bound := wire.PastBound(run.task.Wherry.TaskStartedBy)
+	results := make(chan lookupResult, 1)
+	cancelLookup := func() {}
+	defer func() { cancelLookup() }()
+	lookup := func() {
+		lookupCtx, cancel := context.WithCancel(startCtx)
+		cancelLookup = cancel
+		go func() {
+			job, err := run.profile.Plugin.Lookup(lookupCtx, runID)
+			results <- lookupResult{job: job, err: err, completedAt: clock()}
+		}()
+	}
+	// No Lookup is issued under a startCtx already ended; the bound is acted on below.
+	if first != nil {
+		results <- *first
+	} else if startCtx.Err() == nil {
+		lookup()
+	}
+	checks := time.NewTicker(stateCheckInterval)
+	defer checks.Stop()
+	var next <-chan time.Time
+	logged := map[string]bool{}
+	for {
+		var result *lookupResult
+		select {
+		case got := <-results:
+			result = &got
+		case <-next:
+			next = nil
+			if startCtx.Err() == nil {
+				lookup()
+				continue
+			}
+		case <-ctx.Done():
+		case <-startCtx.Done():
+		case <-checks.C:
+		}
+		// The bound is read after the cancel, so a result is judged against the bound as it stands when acted on.
+		cancelled := run.cancelHeld()
+		boundFired := startCtx.Err() != nil
+		if boundFired && result == nil {
+			select {
+			case got := <-results:
+				result = &got
+			default:
+			}
+		}
+		switch decide(ctx.Err() != nil, cancelled, result, boundFired, bound) {
+		case awaitAction:
+			continue
+		case leaveAction:
+			cancelLookup()
+			return pluginsdk.Job{}, kgo.AckRelease, true
+		case cancelAction:
+			cancelLookup()
+			return pluginsdk.Job{}, run.stopAndCancel(ctx, handle, nil), true
+		case expireAction:
+			cancelLookup()
+			return pluginsdk.Job{}, run.expired(ctx, &handle, nil), true
+		}
+		job := result.job
+		switch {
+		case result.err != nil || !slices.Contains([]pluginsdk.JobState{pluginsdk.JobAbsent, pluginsdk.JobRunning, pluginsdk.JobEnded, pluginsdk.JobNeverStarted, pluginsdk.JobPending}, job.State):
+			class := "error"
+			var failure *pluginsdk.Error
+			switch {
+			case result.err == nil:
+				class = "state " + strconv.Itoa(int(job.State))
+			case errors.Is(result.err, pluginsdk.ErrLinkLost):
+				class = "link lost"
+			case errors.As(result.err, &failure):
+				class = "class " + failure.Class
+			}
+			if !logged[class] {
+				logged[class] = true
+				text := class
+				if result.err != nil {
+					text = logText(run.redactText, result.err)
+				}
+				r.logger.Printf("run %s: lookup in profile %s failed (%s); looking up again", runID, run.profile.Name, text)
+			}
+			next = time.After(startPollInterval)
+		case job.State == pluginsdk.JobPending:
+			run.pending()
+			if status, done := run.placing(ctx, job.Reason); done {
+				return pluginsdk.Job{}, status, true
+			}
+			next = time.After(startPollInterval)
+		case job.State == pluginsdk.JobRunning || job.State == pluginsdk.JobEnded:
+			run.placed()
+			if !dispatched.IsZero() {
+				r.metrics.placement.WithLabelValues(run.profile.Name).Observe(result.completedAt.Sub(dispatched).Seconds())
+			}
+			return job, 0, false
+		case job.State == pluginsdk.JobNeverStarted:
+			run.placed()
+			if job.Handle.Data != nil {
+				handle = job.Handle
+			}
+			return pluginsdk.Job{}, run.neverStarted(ctx, handle, pluginsdk.Terminal{Class: job.Class, Reason: job.Reason}, nil), true
+		default:
+			run.placed()
+			r.logger.Printf("run %s: job removed before it started", runID)
+			return pluginsdk.Job{}, run.startFailure(ctx, "platform", "job removed before it started"), true
+		}
+	}
+}
+
+// placing publishes the run's placing status for reason, unless this attempt's last one has the same normalised text;
+// done carries the acknowledgement of a write that failed.
+func (run *activeRun) placing(ctx context.Context, reason string) (kgo.AckStatus, bool) {
+	text := logText(run.redactText, errors.New(reason))
+	if run.placingPublished && text == run.placingText {
+		return 0, false
+	}
+	message := "waiting for placement"
+	if text != "" {
+		message += " (" + text + ")"
+	}
+	if err := run.commit(ctx, run.statusRecords("placing", taskStatus(wire.TaskStateWorking, message), nil, nil)...); err != nil {
+		if ctx.Err() != nil {
+			return kgo.AckRelease, true
+		}
+		return run.abandon(err), true
+	}
+	run.placingPublished, run.placingText = true, text
+	return 0, false
+}
+
+// pending enters this execution into the receiver's pending set, which closes its claim gate; placed leaves it.
+func (run *activeRun) pending() {
+	r := run.receiver
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.pending == nil {
+		r.pending = map[*activeRun]struct{}{}
+	}
+	r.pending[run] = struct{}{}
+}
+
+func (run *activeRun) placed() {
+	r := run.receiver
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.pending, run)
+}
+
+// unplaced reports that this execution's latest observation of its job found it pending.
+func (run *activeRun) unplaced() bool {
+	r := run.receiver
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, pending := r.pending[run]
+	return pending
+}
+
+// cancelHeld reports that the receiver holds the run's cancel.
+func (run *activeRun) cancelHeld() bool {
+	r := run.receiver
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cancelled[runKey{run.task.Wherry.Tenant, run.task.Wherry.Run}]
+}
+
+// neverStarted ends the attempt of a run whose job ended before its agent started, as terminal's class and reason
+// say: a fetch failure fails the run; any other class is a start failure.
+func (run *activeRun) neverStarted(ctx context.Context, handle pluginsdk.Handle, terminal pluginsdk.Terminal, pending []pluginsdk.Line) kgo.AckStatus {
+	runID := run.task.Wherry.Run
+	if terminal.Class == pluginsdk.ClassFetch {
+		run.receiver.logger.Printf("run %s: job never started: an S3 input was not fetched%s", runID, run.startReason(terminal))
+		return run.stopAndFail(ctx, handle, "an S3 input was not fetched, or did not match its size and SHA-256", pending)
+	}
+	cause := "job never started"
+	if terminal.Class != "" {
+		cause += " (" + terminal.Class + ")"
+	}
+	cause += run.startReason(terminal)
+	run.receiver.logger.Printf("run %s: %s", runID, cause)
+	return run.startFailure(ctx, "platform", cause)
 }
 
 // hold reads lines until the returned release, which gives back the most recent of them within heldLimit bytes and
@@ -1124,6 +1408,9 @@ type activeRun struct {
 	next int64
 	// firstDelivery marks the task's first claim, at attempt 1: no job can exist for it.
 	firstDelivery bool
+	// placingText is the normalised reason of this attempt's last placing status, once placingPublished.
+	placingText      string
+	placingPublished bool
 	// event is the wherry event of the run's terminal status; kept leaves the run's material to the plugin's cleanup.
 	event string
 	kept  bool
@@ -1291,8 +1578,13 @@ func (run *activeRun) abandon(err error) kgo.AckStatus {
 	return kgo.AckRelease
 }
 
+// stopAndFail and stopAndCancel write nothing once ctx has ended during the Stop: the task is released, or on a halt left.
 func (run *activeRun) stopAndFail(ctx context.Context, handle pluginsdk.Handle, reason string, pending []pluginsdk.Line) kgo.AckStatus {
-	if err := run.profile.Plugin.Stop(ctx, handle); err != nil {
+	err := run.profile.Plugin.Stop(ctx, handle)
+	if ctx.Err() != nil {
+		return kgo.AckRelease
+	}
+	if err != nil {
 		run.receiver.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		return run.returnTask(ctx, pending)
@@ -1301,7 +1593,11 @@ func (run *activeRun) stopAndFail(ctx context.Context, handle pluginsdk.Handle, 
 }
 
 func (run *activeRun) stopAndCancel(ctx context.Context, handle pluginsdk.Handle, pending []pluginsdk.Line) kgo.AckStatus {
-	if err := run.profile.Plugin.Stop(ctx, handle); err != nil {
+	err := run.profile.Plugin.Stop(ctx, handle)
+	if ctx.Err() != nil {
+		return kgo.AckRelease
+	}
+	if err != nil {
 		run.receiver.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		return run.returnTask(ctx, pending)
@@ -1431,6 +1727,9 @@ func (run *activeRun) findJob(ctx, lookupCtx context.Context) (pluginsdk.Job, bo
 			}
 			r.logger.Printf("run %s: purged a job from profile %q agent %q", runID, job.Profile, job.Agent)
 			continue
+		}
+		if job.State == pluginsdk.JobPending {
+			run.pending()
 		}
 		r.logger.Printf("run %s: found attempt %d's job in profile %s", runID, job.Attempt, named.Name)
 		run.profile = named

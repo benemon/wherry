@@ -378,11 +378,12 @@ A `terminal` status's `wherry` object adds the attempt's chunk count:
 | `kind` | State | Written when | Extra |
 | --- | --- | --- | --- |
 | `claimed` | `TASK_STATE_WORKING` | the receiver admits the run | `task_offset` |
+| `placing` | `TASK_STATE_WORKING` | the job is registered and the platform has not placed it; again when the platform's reason changes | the reason as message text |
 | `started` | `TASK_STATE_WORKING` | the job has started | |
 | `rejected` | `TASK_STATE_REJECTED` | the receiver refuses the submission | the reason as message text |
 | `terminal` | `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED` or `TASK_STATE_CANCELED` | the run has ended | the agent's message from its [outcome file](configuration-receiver.md#agent-contract), or the reason as message text |
 | `released` | `TASK_STATE_SUBMITTED` | the receiver gives back its claim, before it returns the task to the pool | |
-| `adopting` | `TASK_STATE_WORKING` | the receiver found the run's job running or ended, before its [open request](#open-request) | |
+| `adopting` | `TASK_STATE_WORKING` | the receiver found the run's job running, ended or pending, before its [open request](#open-request) | |
 | `reconciling` | `TASK_STATE_WORKING` | the receiver, refused `key unavailable`, holds the claim while Lookup does not answer ([Open refusal](#open-refusal)) | |
 
 A receiver writes `released`, `adopting` and `reconciling` to the pool's
@@ -412,6 +413,9 @@ otherwise its preview. It travels as a `raw` part with media type
 `text/plain` when escaping it as a JSON string would make it longer than
 base64 does. The fixed texts are:
 
+- working: `waiting for placement (<reason>)`, with the platform's reason,
+  redacted, on one line of at most 512 bytes, or `waiting for placement`
+  when the platform gives no reason;
 - rejected: `agent is outside the pool terms`,
   `model not in the pool's terms`, `duplicate submission`,
   `the task carries no envelope`,
@@ -1370,9 +1374,9 @@ A claimed run whose job has not started by `task_started_by`, while it
 waits for its open or for the platform to place its job, ends
 `TASK_STATE_FAILED` with
 `not started by task_started_by (<RFC 3339 time>)`, and the receiver
-purges the job when one exists. A redelivered run with no `started` event
+stops or purges the job when one exists. A redelivered run with no `started` event
 past `task_started_by` ends the same way: the receiver stops a job its
-lookup reports running or ended, and purges one that never started. A job
+lookup reports pending, running or ended, and purges one that never started. A job
 that has started runs on past `task_started_by` until `task_ended_by`. A
 redelivered run whose lookup does not answer is held and asked again, with or
 without a `started` event, until `task_ended_by` passes, when it ends

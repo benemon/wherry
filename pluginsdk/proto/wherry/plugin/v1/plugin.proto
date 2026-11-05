@@ -1,4 +1,4 @@
-// The plugin protocol, version 10: the receiver core calls a plugin's profiles
+// The plugin protocol, version 11: the receiver core calls a plugin's profiles
 // over this service, and every request names its profile.
 syntax = "proto3";
 
@@ -37,6 +37,7 @@ enum JobState {
   JOB_STATE_RUNNING = 1;
   JOB_STATE_ENDED = 2;
   JOB_STATE_NEVER_STARTED = 3;
+  JOB_STATE_PENDING = 4;
 }
 
 message Handle {
@@ -86,6 +87,11 @@ message Job {
   int64 attempt = 3;
   string profile = 4;
   string agent = 5;
+  // reason is, for a pending job, why the platform has not placed it, and for a job that never started what its
+  // terminal's reason is; it may be empty.
+  string reason = 6;
+  // class is, for a job that never started, its terminal's class.
+  string class = 7;
 }
 
 message Terminal {

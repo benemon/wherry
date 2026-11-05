@@ -127,8 +127,6 @@ func TestPluginSamplesAreValidated(t *testing.T) {
 		`wherry_plugin_platform_errors_total{class="denied",pool="pool-a",profile="nomad"} 4`,
 		`wherry_plugin_cleanup_pending{pool="pool-a",profile="nomad"} 2`,
 		`wherry_plugin_sweep_deletions_total{kind="variable",pool="pool-a",profile="nomad"} 7`,
-		`wherry_plugin_placement_seconds_bucket{pool="pool-a",profile="nomad",le="2"} 1`,
-		`wherry_plugin_placement_seconds_count{pool="pool-a",profile="nomad"} 3`,
 		`wherry_plugin_storage_free_bytes{pool="pool-a",profile="nomad"} 5e+09`,
 		`wherry_plugin_sweep_deletions_total{kind="directory",pool="pool-a",profile="nomad"} 6`,
 		`wherry_metrics_dropped_total{pool="pool-a",profile="nomad",reason="unknown_family"} `,
@@ -136,7 +134,8 @@ func TestPluginSamplesAreValidated(t *testing.T) {
 		`wherry_metrics_dropped_total{pool="pool-a",profile="nomad",reason="label_value"} `,
 		`wherry_metrics_dropped_total{pool="pool-a",profile="nomad",reason="kind"} `,
 	)
-	for _, dropped := range []string{"wherry_plugin_jobs_total", "node-1", testRun("run-a"), "} 11\n", "} 12\n", "} 13\n", "} 14\n"} {
+	// The receiver observes placement itself, so a plugin's sample of it is an unknown family's.
+	for _, dropped := range []string{"wherry_plugin_placement_seconds", "wherry_plugin_jobs_total", "node-1", testRun("run-a"), "} 11\n", "} 12\n", "} 13\n", "} 14\n"} {
 		if strings.Contains(text, dropped) {
 			t.Fatalf("scrape holds the dropped %q:\n%s", dropped, text)
 		}
@@ -150,7 +149,7 @@ func TestPluginFamiliesAreExportedAsWherryPlugin(t *testing.T) {
 		if !strings.HasPrefix(family.name, "wherry_plugin_") {
 			t.Fatalf("family %s; want the wherry_plugin_ prefix", family.name)
 		}
-		sample := pluginsdk.Sample{Family: family.name, Kind: family.kind, Value: 1, Histogram: placement(0, 0, 0, 0, 0, 0, 0, 0, 0, 1)}
+		sample := pluginsdk.Sample{Family: family.name, Kind: family.kind, Value: 1}
 		if family.label != "" {
 			sample.Labels = map[string]string{family.label: family.values[0]}
 		}
