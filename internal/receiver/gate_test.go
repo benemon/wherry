@@ -437,7 +437,7 @@ func TestNoReadyOfferOpensNoPollOnRealBroker(t *testing.T) {
 	// One 200 ms advertise interval to see the offer, then a slot's 1 s gate sleep, then the join. The group has not
 	// initialised the topic, so the join's response assigns nothing and a later heartbeat,
 	// group.share.heartbeat.interval.ms (5 s by default) apart, assigns once initialisation completes; 2 s more for the
-	// scheduler. An allowance for this fixture's defaults, not a bound.
+	// scheduler. An allowance for this fixture's defaults, not a broker guarantee.
 	ready := time.Now()
 	for {
 		groups, err := admin.DescribeShareGroups(ctx, operator.PoolGroup(b.pool))
