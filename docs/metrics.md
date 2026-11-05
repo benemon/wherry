@@ -16,6 +16,10 @@ A run ended without a plugin profile, one whose profile went unready between
 its claim's subscription and its fetch and that was given back at the
 delivery budget, has `profile="none"` in `wherry_runs_total` and
 `wherry_delivery_budget_exhausted_total`.
+`topic` is the configured profile's signature task topic: its pool and agent in
+clear, followed by the SHA-256 of the canonical agent-and-label signature
+encoding. It carries configuration, not placement values; the deterministic
+hash is not secret protection.
 
 ## Families
 
@@ -33,6 +37,8 @@ delivery budget, has `profile="none"` in `wherry_runs_total` and
 | `wherry_in_flight` | gauge | `profile` | tasks held |
 | `wherry_capacity` | gauge | none | the configured capacity |
 | `wherry_runs_past_deadline` | gauge | `profile` | tasks held past their task_ended_by that have not ended |
+| `wherry_profile_ready` | gauge | `profile`, `topic` | 1 when the profile is in the receiver's current ready offers; 0 otherwise |
+| `wherry_claim_gated` | gauge | `reason` | 1 while the restriction prevents a new poll: `suspended`, `no_ready_offer`, `pending_run` |
 | `wherry_advertised_timestamp_seconds` | gauge | none | Unix time of the latest advertisement Kafka acknowledged, 0 before the first |
 | `wherry_start_failures_total` | counter | `profile`, `class` | start failures: `input-too-large`, `dispatch`, `platform` |
 | `wherry_dispatch_outcomes_total` | counter | `profile`, `outcome` | dispatches: `created`, `nothing`, `unknown` |
