@@ -321,6 +321,7 @@ func TestCheckNamesSignatureTopicDrift(t *testing.T) {
 		}, "missing WRITE ACL on " + PoolTasksPrefix("pool-a") + " for " + TenantPrincipal("tenant-a", "host-a")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			_, service, closeFixture := kfakeService(t)
 			defer closeFixture()
 			ctx := context.Background()

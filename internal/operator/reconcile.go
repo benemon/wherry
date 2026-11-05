@@ -182,21 +182,37 @@ func managed(described kadm.DescribedACL) string {
 
 func (service *Service) verifyACLs(ctx context.Context, acls []ACL) error {
 	client := kadm.NewClient(service.Operator)
+	// Brokers apply an ACL creation in turn, so a describe can briefly omit it; retry within topicWait.
+	deadline := time.Now().Add(topicWait)
 	for _, acl := range acls {
 		builder, err := aclBuilder(acl)
 		if err != nil {
 			return err
 		}
-		results, err := client.DescribeACLs(ctx, builder)
-		if err != nil {
-			return err
-		}
-		for _, result := range results {
-			if result.Err != nil {
-				return result.Err
+		for {
+			results, err := client.DescribeACLs(ctx, builder)
+			if err != nil {
+				return err
 			}
-			if len(result.Described) == 0 {
-				return fmt.Errorf("missing %s ACL on %s for %s", result.Operation, acl.Resource, acl.Principal)
+			var missing error
+			for _, result := range results {
+				if result.Err != nil {
+					return result.Err
+				}
+				if missing == nil && len(result.Described) == 0 {
+					missing = fmt.Errorf("missing %s ACL on %s for %s", result.Operation, acl.Resource, acl.Principal)
+				}
+			}
+			if missing == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				return missing
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(listBackoff):
 			}
 		}
 	}
@@ -209,7 +225,7 @@ func (service *Service) deletePrincipalACLs(ctx context.Context, principal strin
 	return service.deleteACLs(ctx, builder)
 }
 
-// deleteACLs deletes the ACLs builder matches and waits until no broker describes one.
+// deleteACLs deletes the ACLs builder matches and waits until a describe reports no matching ACLs.
 func (service *Service) deleteACLs(ctx context.Context, builder *kadm.ACLBuilder) error {
 	results, err := kadm.NewClient(service.Operator).DeleteACLs(ctx, builder)
 	if err != nil {
