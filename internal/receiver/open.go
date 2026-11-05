@@ -166,24 +166,24 @@ func (run *activeRun) openOnce(ctx, bound context.Context, job *pluginsdk.Handle
 		case cancelled:
 			return nil, "", run.cancel(ctx, nil), true
 		case bound.Err() != nil:
-			waited("expired")
+			waited(openOutcomeExpired)
 			return nil, "", run.expired(ctx, job, nil), true
 		case failure != "":
-			waited("opened")
+			waited(openOutcomeOpened)
 			r.logger.Printf("run %s: %s", runID, failure)
 			if job != nil {
 				return nil, "", run.stopAndFail(ctx, *job, failure, nil), true
 			}
 			return nil, "", run.fail(ctx, failure, nil), true
 		case values != nil:
-			waited("opened")
+			waited(openOutcomeOpened)
 			return values, "", 0, true
 		case refused != "":
-			waited("refused")
+			waited(openOutcomeRefused)
 			return nil, refused, 0, false
 		case !time.Now().Before(deadline):
 			// Silence asserts nothing about the key: the task goes back to the pool.
-			waited("unanswered")
+			waited(openOutcomeUnanswered)
 			r.logger.Printf("run %s: no answer to the open request for attempt %d", runID, run.attempt)
 			return nil, "", kgo.AckRelease, true
 		}

@@ -431,8 +431,10 @@ func TestTaskForAnUnreadyProfileIsReleased(t *testing.T) {
 	if after := len(f.records(t, operator.PoolEventsTopic(testPool))); after != before {
 		t.Fatalf("pool events %d -> %d, want nothing written", before, after)
 	}
-	if strings.Contains(scrape(t, f.receiver), "wherry_start_failures_total{") {
-		t.Fatalf("a start failure counted for the release:\n%s", scrape(t, f.receiver))
+	for key, value := range zeroSamples(t, f.receiver) {
+		if strings.HasPrefix(key, "wherry_start_failures_total{") && value != 0 {
+			t.Fatalf("a start failure counted for the release: %s = %g", key, value)
+		}
 	}
 	f.run(t, f.ctx)
 	f.awaitMember(t, 10*time.Second, []string{topicB})

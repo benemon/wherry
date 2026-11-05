@@ -412,6 +412,7 @@ func (r *Receiver) refresh(ctx context.Context) error {
 	if err != nil {
 		return r.deny(err, capRead)
 	}
+	r.metrics.initialize(state, r.config.Pool, r.profiles)
 	// Revocation removes an ended receiver's write access before it records the end, so the broker refuses any record
 	// it signs afterwards: its keys verify only what it wrote while a member.
 	r.mu.Lock()

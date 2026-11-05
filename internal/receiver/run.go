@@ -270,10 +270,10 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	}
 	// A mismatch's rejection carries its signer's tenant and hash, which every reader of the run's statuses filters by.
 	if err := wire.CheckRunID(task.Wherry); err != nil {
-		return reject(err.Error())
+		return rejectAs(rejectionReasonRunID, err.Error())
 	}
 	if first := events.task(run); first != "" && first != hash {
-		return reject("duplicate submission")
+		return reject(rejectionReasonDuplicate)
 	}
 	// A copy of the claimed record, byte for byte at another topic or offset, is acknowledged without a claim before
 	// anything is written under the run's key.
@@ -285,10 +285,10 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	placement := task.Wherry.Placement
 	agent := slices.IndexFunc(terms.Agents, func(agent operator.AgentTerms) bool { return agent.Name == placement.Agent })
 	if agent < 0 {
-		return reject("agent is outside the pool terms")
+		return reject(rejectionReasonAgent)
 	}
 	if !modelInTerms(terms.Agents[agent], placement.Model) {
-		return reject("model not in the pool's terms")
+		return reject(rejectionReasonModel)
 	}
 	cancelled := r.cancelledRun(ctx, events, run, task.Wherry.Tenant)
 	// A run a member already claimed is past the age and bound checks; its redelivery goes on to adoption.
@@ -298,10 +298,10 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	// The receiver's clock decides both bounds, each passed only when now is past its whole second.
 	now := time.Now().Unix()
 	if !claimed && !cancelled && now > task.Wherry.TaskStartedBy {
-		return rejectAs("not started by task_started_by", wire.NotStartedBy(task.Wherry.TaskStartedBy))
+		return rejectAs(rejectionReasonStartBound, wire.NotStartedBy(task.Wherry.TaskStartedBy))
 	}
 	if !claimed && !cancelled && now > task.Wherry.TaskEndedBy {
-		return rejectAs("not ended by task_ended_by", wire.NotEndedBy(task.Wherry.TaskEndedBy))
+		return rejectAs(rejectionReasonEndBound, wire.NotEndedBy(task.Wherry.TaskEndedBy))
 	}
 	if reason := inadmissible(runSubmission{&task, hash, record.Timestamp}, terms); !claimed && reason != "" {
 		return reject(reason)
@@ -314,7 +314,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	// The record's topic routes the task: its agent is the placement's, and the profile it reached is ready and serves
 	// the selector, or the host computed the wrong topic.
 	if _, topicAgent, ok := wire.ParseTaskTopic(record.Topic); !ok || topicAgent != placement.Agent {
-		return reject("agent does not match the task topic")
+		return reject(rejectionReasonTopicAgent)
 	}
 	profile, offered := r.offerFor(record.Topic)
 	if !offered && !ending {
@@ -323,10 +323,10 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		return giveBack()
 	}
 	if offered && !wire.Satisfies(placement.Selector, profile.Labels) {
-		return reject("selector does not match the task topic")
+		return reject(rejectionReasonSelector)
 	}
 	if !claimed && time.Since(record.Timestamp) > terms.StartByLimit() {
-		return reject("task_started_by is past the pool's start_by_limit")
+		return reject(rejectionReasonStartLimit)
 	}
 	history := []wire.Message{task.Message}
 	admitted := &admission{task: &task, taskHash: hash, profile: profile, history: history, cancelled: cancelled}
@@ -340,21 +340,21 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		case !slices.Contains(declared.Unsupplied, credential.Name):
 			supplied = append(supplied, credential.TaskCredential)
 		case !credential.Optional():
-			return reject("the host does not supply a required credential of the agent")
+			return reject(rejectionReasonRequiredCredential)
 		}
 	}
 	for _, credential := range declared.Credentials {
 		if slices.ContainsFunc(terms.Agents[agent].Targets(), func(target wire.TaskCredential) bool { return target.Target() == credential.Target() }) {
-			return reject("a task credential takes the target of one of the agent's credentials")
+			return reject(rejectionReasonCredentialTarget)
 		}
 	}
 	if declared.Git != nil {
 		if host := declared.Git.VCSHost(); !slices.Contains(terms.VCS, host) {
-			return rejectAs("git remote host outside the pool's vcs hosts", "git remote host "+host+" is not in pool "+r.config.Pool+"'s vcs hosts")
+			return rejectAs(rejectionReasonVCS, "git remote host "+host+" is not in pool "+r.config.Pool+"'s vcs hosts")
 		}
 	}
 	if (len(declared.S3Inputs) > 0 || len(s3Outputs(declared.Outputs)) > 0) && terms.Storage == nil {
-		return rejectAs("pool has no storage", "pool "+r.config.Pool+" has no storage for S3 inputs and outputs")
+		return rejectAs(rejectionReasonStorage, "pool "+r.config.Pool+" has no storage for S3 inputs and outputs")
 	}
 	inputs, rejection := deliverables(history, declared.Git)
 	if rejection != "" {
@@ -396,7 +396,7 @@ func deliverables(history []wire.Message, git *wire.GitInput) ([]pluginsdk.File,
 				// Decoding refused repeated input names, so each is unique.
 				inputs = append(inputs, pluginsdk.File{Name: wire.InputName(part), Data: append(slices.Clone([]byte(part.Raw)), part.Data...)})
 			default:
-				return nil, "unsupported message part"
+				return nil, rejectionReasonPart
 			}
 		}
 	}
@@ -487,15 +487,15 @@ func inadmissible(submission runSubmission, terms operator.Terms) string {
 	binding, appended := submission.record.Wherry, submission.submitted
 	switch {
 	case binding.Envelope == "":
-		return "the task carries no envelope"
+		return rejectionReasonEnvelope
 	case appended.Unix() > binding.TaskStartedBy:
-		return "task_started_by is before its append time"
+		return rejectionReasonAppendTime
 	case binding.TaskStartedBy > appended.Add(terms.StartByLimit()).Unix():
-		return "task_started_by is past the pool's start_by_limit"
+		return rejectionReasonStartLimit
 	case binding.TaskStartedBy > binding.TaskEndedBy:
-		return "task_ended_by is before task_started_by"
+		return rejectionReasonBoundOrder
 	case binding.TaskEndedBy > binding.TaskStartedBy+operator.MaxRunDurationMS/1000:
-		return "task_ended_by is past task_started_by plus the 6h run cap"
+		return rejectionReasonRunCap
 	}
 	return ""
 }
@@ -730,23 +730,23 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		// A dispatch that errs may have created a job; it is returned unpurged, and its redelivery locates the job and
 		// stops it if the bound has passed.
 		case err != nil && startCtx.Err() != nil && ctx.Err() == nil:
-			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "unknown").Inc()
+			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, dispatchOutcomeUnknown).Inc()
 			return run.returnTask(ctx, nil)
 		case errors.As(err, &tooLarge) && dispatched == pluginsdk.OutcomeNothingCreated:
-			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "nothing").Inc()
+			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, dispatchOutcomeNothing).Inc()
 			// The plugin's name for the input reaches the status only when it is one of the run's inputs.
 			name := "an input"
 			if slices.ContainsFunc(admitted.inputs, func(input pluginsdk.File) bool { return input.Name == tooLarge.Name }) {
 				name = "input " + tooLarge.Name
 			}
 			r.logger.Printf("run %s: profile %s cannot deliver %s", runID, named.Name, name)
-			if err := run.commit(ctx, r.startFailure(task, run.taskHash, attempt, named.Name, "input-too-large")); err != nil {
+			if err := run.commit(ctx, r.startFailure(task, run.taskHash, attempt, named.Name, startClassInputTooLarge)); err != nil {
 				return run.abandon(err)
 			}
-			r.metrics.startFailures.WithLabelValues(named.Name, "input-too-large").Inc()
+			r.metrics.startFailures.WithLabelValues(named.Name, startClassInputTooLarge).Inc()
 			return run.fail(ctx, name+" takes the run's inputs over what profile "+named.Name+" delivers", nil)
 		case errors.As(err, &failure) && failure.Class == pluginsdk.ClassFetch && dispatched == pluginsdk.OutcomeNothingCreated:
-			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "nothing").Inc()
+			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, dispatchOutcomeNothing).Inc()
 			r.logger.Printf("run %s: dispatch failed: an S3 input was not fetched", runID)
 			return run.fail(ctx, "an S3 input was not fetched, or did not match its size and SHA-256", nil)
 		case errors.Is(err, pluginsdk.ErrMessageTooLarge):
@@ -758,21 +758,21 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		}
 		switch dispatched {
 		case pluginsdk.OutcomeCreated:
-			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "created").Inc()
+			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, dispatchOutcomeCreated).Inc()
 			awaiting, dispatchedAt = true, returned
 		case pluginsdk.OutcomeNothingCreated:
-			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "nothing").Inc()
+			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, dispatchOutcomeNothing).Inc()
 			r.logger.Printf("run %s: profile %s created no job", runID, named.Name)
-			return run.startFailure(ctx, "dispatch", "profile "+named.Name+" created no job")
+			return run.startFailure(ctx, startClassDispatch, "profile "+named.Name+" created no job")
 		default:
-			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "unknown").Inc()
+			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, dispatchOutcomeUnknown).Inc()
 			job, resolved := run.reconcile(startCtx)
 			switch {
 			case !resolved:
 				r.logger.Printf("run %s: dispatch unresolved", runID)
 				return run.returnTask(ctx, nil)
 			case job.State == pluginsdk.JobAbsent:
-				return run.startFailure(ctx, "dispatch", "profile "+named.Name+" created no job")
+				return run.startFailure(ctx, startClassDispatch, "profile "+named.Name+" created no job")
 			case job.State == pluginsdk.JobNeverStarted:
 				return run.neverStarted(ctx, job.Handle, pluginsdk.Terminal{Class: job.Class, Reason: job.Reason}, nil)
 			case job.State == pluginsdk.JobPending:
@@ -959,7 +959,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			return 0, false
 		case job.State == pluginsdk.JobNeverStarted:
 			r.logger.Printf("run %s: job never started", runID)
-			return run.startFailure(ctx, "platform", "job never started"), true
+			return run.startFailure(ctx, startClassPlatform, "job never started"), true
 		}
 		// A dropped stream does not mean the task ended; stop it rather than leave it running.
 		r.logger.Printf("run %s: follow failed: %s", runID, logText(run.redactText, err))
@@ -1214,7 +1214,7 @@ func (run *activeRun) awaitStart(ctx, startCtx context.Context, handle pluginsdk
 		default:
 			run.placed()
 			r.logger.Printf("run %s: job removed before it started", runID)
-			return pluginsdk.Job{}, run.startFailure(ctx, "platform", "job removed before it started"), true
+			return pluginsdk.Job{}, run.startFailure(ctx, startClassPlatform, "job removed before it started"), true
 		}
 	}
 }
@@ -1289,7 +1289,7 @@ func (run *activeRun) neverStarted(ctx context.Context, handle pluginsdk.Handle,
 	}
 	cause += run.startReason(terminal)
 	run.receiver.logger.Printf("run %s: %s", runID, cause)
-	return run.startFailure(ctx, "platform", cause)
+	return run.startFailure(ctx, startClassPlatform, cause)
 }
 
 // hold reads lines until the returned release, which gives back the most recent of them within heldLimit bytes and
@@ -1833,14 +1833,14 @@ func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stop
 	stored := map[string]storedOutput{}
 	collected, err := run.collected(ctx, handle, stopped, limit, stored)
 	if err != nil {
-		reason := "failed"
+		reason := collectionReasonFailed
 		switch {
 		case !stopped:
-			reason = "not_stopped"
+			reason = collectionReasonNotStopped
 		case errors.Is(err, errOverLimits):
-			reason = "over_limits"
+			reason = collectionReasonOverLimits
 		case errors.Is(err, context.DeadlineExceeded):
-			reason = "timeout"
+			reason = collectionReasonTimeout
 		}
 		run.receiver.metrics.collectionFailures.WithLabelValues(run.profile.Name, reason).Inc()
 		run.receiver.logger.Printf("run %s: outputs not collected: %s", run.task.Wherry.Run, logText(run.redactText, err))
