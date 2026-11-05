@@ -1118,11 +1118,6 @@ func TestReceiverUpdateKeepsThePrincipal(t *testing.T) {
 	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
 		t.Fatal(err)
 	}
-	// kfake's SCRAM handshake always names 4096 iterations.
-	upsert := kadm.UpsertSCRAM{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}
-	if altered, err := kadm.NewClient(service.Operator).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
-		t.Fatalf("re-salt: %v %v", err, altered.Error())
-	}
 	login := func() error {
 		client, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()))
 		if err != nil {

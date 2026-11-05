@@ -34,7 +34,7 @@ type initBroker struct {
 	address, caFile, superUser, superPasswordFile string
 	root                                          *kgo.Client
 	fake                                          *kfake.Cluster // nil on a real broker
-	// login makes the broker take the password operator.password in dir holds.
+	// login checks the broker was given the password operator.password in dir holds.
 	login func(t *testing.T, dir string)
 }
 
@@ -48,8 +48,7 @@ func (b initBroker) init(t *testing.T, dir string) error {
 	return err
 }
 
-// scramRecorder records the last SCRAM credential cluster is given for each user. kfake's handshake names 4096
-// iterations, so one set at wherry's 8192 cannot log in until re-salted; holds proves which password it was.
+// scramRecorder records the last SCRAM credential cluster is given for each user; holds proves which password it was.
 type scramRecorder struct {
 	mu  sync.Mutex
 	got map[string]kmsg.AlterUserSCRAMCredentialsRequestUpsertion
@@ -104,10 +103,6 @@ func kfakeInitBroker(t *testing.T) (initBroker, *scramRecorder) {
 		password := operatorPassword(t, dir)
 		if !recorder.holds(t, operator.OperatorPrincipal, password) {
 			t.Fatal("the broker does not hold the password operator.password holds")
-		}
-		upsert := kadm.UpsertSCRAM{User: operator.OperatorPrincipal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: password}
-		if altered, err := kadm.NewClient(b.root).AlterUserSCRAMs(context.Background(), nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
-			t.Fatal(err, altered.Error())
 		}
 	}
 	return b, recorder

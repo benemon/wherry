@@ -52,7 +52,6 @@ func newInitHost(t *testing.T, pools map[string]operator.Terms) initHost {
 	if err := service.HostAdd(ctx, "tenant-a", "host-a", h.bundle, false); err != nil {
 		t.Fatal(err)
 	}
-	resalt(t, service, h.bundle)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}

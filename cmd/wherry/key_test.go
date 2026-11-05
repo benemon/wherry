@@ -50,7 +50,6 @@ func newKeyHost(t *testing.T) keyHost {
 			t.Fatal(err)
 		}
 	}
-	resalt(t, service, bundle)
 	caFile := filepath.Join(dir, "ca.pem")
 	if err := os.WriteFile(caFile, []byte(ca), 0o600); err != nil {
 		t.Fatal(err)
@@ -228,7 +227,6 @@ func TestReceiverRotateKey(t *testing.T) {
 	if err := service.ReceiverAdd(ctx, config, service.Broker, bundle); err != nil {
 		t.Fatal(err)
 	}
-	resalt(t, service, bundle)
 	topic := operator.ReceiverTopic("receiver-a")
 	folded := func() ([]*kgo.Record, signed.KeyState) {
 		t.Helper()

@@ -224,23 +224,6 @@ func TestKafkaOptsAskApiVersionsOncePerConnection(t *testing.T) {
 	}
 }
 
-// resalt works around kfake's SCRAM handshake, which always names 4096 iterations.
-func resalt(t *testing.T, service *operator.Service, bundlePath string) {
-	t.Helper()
-	encoded, err := os.ReadFile(bundlePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var bundle operator.Bundle
-	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
-		t.Fatal(err)
-	}
-	upsert := kadm.UpsertSCRAM{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}
-	if altered, err := kadm.NewClient(service.Operator).AlterUserSCRAMs(context.Background(), nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
-		t.Fatalf("re-salt %s: %v %v", bundle.Principal, err, altered.Error())
-	}
-}
-
 // TestRoundTrip runs a task from a host's Submit through a receiver and the test plugin process to the host's Await,
 // on records each side produces for the other: provisioning through wherry operator, bundles, the host and receiver
 // constructors, plugin discovery and the plugin link, the platform credential's local source, the real claim, admission, the
@@ -280,9 +263,6 @@ func TestRoundTrip(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	resalt(t, service, hostBundle)
-	resalt(t, service, otherBundle)
-	resalt(t, service, receiverBundle)
 
 	encoded, err := os.ReadFile(receiverBundle)
 	if err != nil {
@@ -691,7 +671,6 @@ func TestPlatformCredentialIsRedactedFromTheReceiverLog(t *testing.T) {
 	if err := service.ReceiverAdd(ctx, config, service.Broker, bundlePath); err != nil {
 		t.Fatal(err)
 	}
-	resalt(t, service, bundlePath)
 	bundle, err := operator.ReadBundle(bundlePath)
 	if err != nil {
 		t.Fatal(err)

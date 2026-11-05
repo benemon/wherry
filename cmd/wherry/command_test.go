@@ -194,10 +194,6 @@ func (b *bus) kafka(t *testing.T, path string) (*kgo.Client, string) {
 	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
 		t.Fatal(err)
 	}
-	// kfake's SCRAM server always offers 4096 iterations, so the 8192 that operator provisions never authenticates.
-	if _, err := kadm.NewClient(b.service.Operator).AlterUserSCRAMs(b.ctx, nil, []kadm.UpsertSCRAM{{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}}); err != nil {
-		t.Fatal(err)
-	}
 	kafka, err := kgo.NewClient(kgo.SeedBrokers(b.service.Broker), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()),
 		kgo.FetchMaxWait(10*time.Millisecond), kgo.FetchIsolationLevel(kgo.ReadCommitted()))
 	if err != nil {

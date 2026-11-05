@@ -1291,7 +1291,7 @@ func Password() (string, error) {
 
 // setSCRAM creates user's SCRAM credential, or replaces it, with password.
 func setSCRAM(ctx context.Context, client *kgo.Client, user, password string) error {
-	results, err := kadm.NewClient(client).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{{User: user, Mechanism: kadm.ScramSha512, Iterations: 8192, Password: password}})
+	results, err := kadm.NewClient(client).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{{User: user, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: password}})
 	if err != nil {
 		return err
 	}
