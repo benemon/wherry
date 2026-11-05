@@ -432,15 +432,16 @@ func TestNoReadyOfferOpensNoPollOnRealBroker(t *testing.T) {
 	plugin.mu.Lock()
 	plugin.unready = false
 	plugin.mu.Unlock()
-	// One 200 ms advertise interval to see the offer, then a slot's 1 s gate sleep, then the join; 2 s more for the
-	// broker's assignment.
+	// One 200 ms advertise interval to see the offer, then a slot's 1 s gate sleep, then the join. The broker assigns on
+	// a later heartbeat, group.share.heartbeat.interval.ms (5 s by default, which is also its minimum) after the join;
+	// 2 s more for the scheduler.
 	ready := time.Now()
 	for {
 		groups, err := admin.DescribeShareGroups(ctx, operator.PoolGroup(b.pool))
 		if group := groups[operator.PoolGroup(b.pool)]; err == nil && group.Err == nil && len(group.AssignedPartitions()) > 0 {
 			break
 		}
-		if waited := time.Since(ready); waited > time.Second+advertiseInterval+2*time.Second {
+		if waited := time.Since(ready); waited > time.Second+advertiseInterval+5*time.Second+2*time.Second {
 			t.Fatalf("no partition assigned %s after the offer became ready; logs:\n%s", waited, logs.String())
 		}
 		time.Sleep(50 * time.Millisecond)
