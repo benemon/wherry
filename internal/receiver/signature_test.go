@@ -74,11 +74,11 @@ func (f fixture) ready(t *testing.T, profile string, ready bool) {
 // profileTopic is the signature topic of the receiver's profile.
 func (f fixture) profileTopic(t *testing.T, profile string) string {
 	t.Helper()
-	index := slices.IndexFunc(f.receiver.profiles, func(named Named) bool { return named.Name == profile })
+	index := slices.IndexFunc(f.profiles, func(named operator.ProfileSettings) bool { return named.Name == profile })
 	if index < 0 {
 		t.Fatalf("no profile %s", profile)
 	}
-	named := f.receiver.profiles[index]
+	named := f.profiles[index]
 	return operator.SignatureTopic(testPool, named.Agent, named.Labels)
 }
 

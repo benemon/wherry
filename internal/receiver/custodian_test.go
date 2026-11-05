@@ -120,10 +120,7 @@ func runUntilStopped(t *testing.T, ctx context.Context, r *Receiver) func() {
 			t.Fatal("Run did not return")
 		}
 	}
-	t.Cleanup(func() {
-		cancel()
-		<-done
-	})
+	t.Cleanup(stop)
 	return stop
 }
 

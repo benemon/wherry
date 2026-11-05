@@ -511,6 +511,7 @@ type fixture struct {
 	cluster  *kfake.Cluster
 	service  *operator.Service
 	host     ed25519.PrivateKey
+	profiles []operator.ProfileSettings
 	receiver *Receiver
 	plugin   *fakePlugin
 	logs     *syncBuffer
@@ -666,7 +667,7 @@ func newBareFixtureWith(t *testing.T, terms operator.Terms, config operator.Rece
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := fixture{ctx: ctx, cluster: cluster, service: service, host: host, plugins: plugins, plugin: plugins["nomad"], members: watchMembers(cluster), serving: &atomic.Bool{}}
+	f := fixture{ctx: ctx, cluster: cluster, service: service, host: host, profiles: slices.Clone(config.Profiles), plugins: plugins, plugin: plugins["nomad"], members: watchMembers(cluster), serving: &atomic.Bool{}}
 	f.produce(t, operator.HostTopic(testTenant, testHost), "", must(t)(signed.RegisterKey(signed.HostOwner(testTenant, testHost), host)))
 	f.receiver, f.logs = f.newReceiver(t, config)
 	r := f.receiver
@@ -804,7 +805,7 @@ func (f fixture) taskTopic(t *testing.T, placement wire.Placement) string {
 
 // signatureTopic is taskTopic without the topic's creation, and reports whether a profile places the task.
 func (f fixture) signatureTopic(placement wire.Placement) (string, bool) {
-	for _, named := range f.receiver.profiles {
+	for _, named := range f.profiles {
 		if named.Agent == placement.Agent && wire.Satisfies(placement.Selector, named.Labels) {
 			return operator.SignatureTopic(testPool, named.Agent, named.Labels), true
 		}

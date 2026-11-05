@@ -817,11 +817,20 @@ func TestServeHandshakeUsesThePluginCookie(t *testing.T) {
 	if handshake.MagicCookieKey != "WHERRY_PLUGIN" {
 		t.Fatalf("handshake %+v; want cookie key WHERRY_PLUGIN", handshake)
 	}
+	short, err := os.MkdirTemp("/tmp", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(short); err != nil {
+			t.Error(err)
+		}
+	})
 	serve := func(env ...string) (string, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, testPlugin)
-		cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "TMPDIR=" + t.TempDir()}, env...)
+		cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "TMPDIR=" + short}, env...)
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			t.Fatal(err)
