@@ -574,9 +574,9 @@ func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Reco
 	return answer(&wire.AttemptWrap{Custodian: r.id, TaskHash: task.hash, Request: opened.digest, Receiver: request.Receiver, Attempt: request.Attempt, JWE: string(jwe)})
 }
 
-// lookup applies rules 1 and 3 and the terminal or cancelled refusal to request, then rule 2: the claim's task topic and
-// offset hold the run's task. It returns the indexes of the run's ownership events of the task, the claim last, and the task,
-// or the refusal; an error leaves the request unanswered.
+// lookup applies rules 1 and 3 and the terminal or cancelled refusal to request, then rule 2: the claim's task topic
+// and offset hold the run's task. It returns the indexes of the run's ownership events of the task, the claim last, and
+// the task, or the refusal; an error leaves the request unanswered.
 func (r *Receiver) lookup(ctx context.Context, events poolEvents, request *wire.OpenRequest) ([]int, *runSubmission, string, error) {
 	// Rule 1: the request verifies as the live pool member it names.
 	if state, _, _ := r.snapshot(); request == nil || !poolMember(state, r.config.Pool, request.Receiver) {
@@ -600,8 +600,8 @@ func (r *Receiver) lookup(ctx context.Context, events poolEvents, request *wire.
 	if events.committedTerminal(request.Run, request.TaskHash) || r.cancelledRun(ctx, events, request.Run, claim.Wherry.Tenant) {
 		return nil, nil, wire.RefusedTerminal, nil
 	}
-	// Rule 2: the record at the claim's task topic and offset is the run's task, an authorised host's under the run's key and
-	// derived ID, its bounds holding at its append time.
+	// Rule 2: the record at the claim's task topic and offset is the run's task, an authorised host's under the run's key
+	// and derived ID, its bounds holding at its append time.
 	if events.task(request.Run) != request.TaskHash {
 		return nil, nil, wire.RefusedNotClaimant, nil
 	}
