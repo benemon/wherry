@@ -240,6 +240,7 @@ func acquirePlugin(ctx context.Context, cache, name string, prev *devPlugin, pro
 		}
 	}
 	tufCache := filepath.Join(cache, "tuf")
+	accepted := pluginsdk.Protocols()
 	for _, release := range releases {
 		archive := fmt.Sprintf("wherry-plugin-nomad_%s_%s_%s.tar.gz", strings.TrimPrefix(release.Tag, "nomad/"), runtime.GOOS, runtime.GOARCH)
 		urls := []string{release.asset("checksums.txt"), release.asset("checksums.txt.sigstore.json"), release.asset(archive)}
@@ -277,14 +278,19 @@ func acquirePlugin(ctx context.Context, cache, name string, prev *devPlugin, pro
 			return nil, fmt.Errorf("%s: %w", archive, err)
 		}
 		protocol, err := handshake(binary, sum)
-		if err != nil && strings.Contains(strings.ToLower(err.Error()), "incompatible api version") {
-			os.Remove(binary)
-			fmt.Fprintf(progress, "plugin: %s speaks another protocol; trying the next older release\n", release.Tag)
-			continue
-		}
 		if err != nil {
 			os.Remove(binary)
-			return nil, fmt.Errorf("%s handshake: %w", release.Tag, err)
+			spoken, ok := refusedProtocol(err.Error())
+			if !ok {
+				return nil, fmt.Errorf("%s handshake: %w", release.Tag, err)
+			}
+			// Each release serves one protocol, and protocols never increase as the walk moves from newer to older
+			// releases, so no older release speaks an accepted protocol.
+			if spoken < accepted[0] {
+				return nil, fmt.Errorf("no nomad plugin release speaks plugin protocols %v; %s and older speak %d or lower; a plugin release must follow the protocol change", accepted, release.Tag, spoken)
+			}
+			fmt.Fprintf(progress, "plugin: %s speaks another protocol; trying the next older release\n", release.Tag)
+			continue
 		}
 		if err := os.Rename(binary, file); err != nil {
 			return nil, err
@@ -292,6 +298,23 @@ func acquirePlugin(ctx context.Context, cache, name string, prev *devPlugin, pro
 		return &devPlugin{Tag: release.Tag, Protocol: protocol, File: name, SHA256: sum, Verified: "checksums.txt+sigstore"}, nil
 	}
 	return nil, errors.New("no nomad plugin release speaks this wherry's plugin protocol; a plugin release must follow the protocol change")
+}
+
+// incompatibleProtocol is go-plugin's refusal of a plugin that serves none of the client's protocols, as Launch wraps
+// it.
+var incompatibleProtocol = regexp.MustCompile(`(?:^|: )incompatible API version with plugin\. Plugin version: ([0-9]+), Client versions: \[[0-9]+(?: [0-9]+)*\]$`)
+
+// refusedProtocol is the protocol a plugin served in a handshake error message that incompatibleProtocol matches.
+func refusedProtocol(message string) (int, bool) {
+	match := incompatibleProtocol.FindStringSubmatch(message)
+	if match == nil {
+		return 0, false
+	}
+	protocol, err := strconv.Atoi(match[1])
+	if err != nil {
+		return 0, false
+	}
+	return protocol, true
 }
 
 // handshake starts the plugin at path, pinned to its SHA-256 hex sum, and stops it, returning the protocol version it
