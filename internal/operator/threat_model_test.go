@@ -11,22 +11,18 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
-	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
-	"github.com/twmb/franz-go/pkg/kmsg"
 	"github.com/twmb/franz-go/pkg/sasl/plain"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 	"gopkg.in/yaml.v3"
@@ -759,166 +755,12 @@ func realService(t *testing.T) (*Service, func()) {
 	if err := Delegate(context.Background(), root, strings.TrimSpace(string(password))); err != nil {
 		t.Fatal(err)
 	}
+	service := &Service{Operator: root, Broker: os.Getenv("WHERRY_TRUST_BROKER"), CA: ca}
+	if err := service.WaitOperatorCredential(context.Background(), strings.TrimSpace(string(password))); err != nil {
+		t.Fatal(err)
+	}
 	operator := realClient(t, OperatorPrincipal, os.Getenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE"))
-	closeOperator := sync.OnceFunc(operator.Close)
-	t.Cleanup(closeOperator)
-	metadata, err := kadm.NewClient(root).BrokerMetadata(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := operatorReady(operator, metadata.Brokers.NodeIDs()); err != nil {
-		t.Fatal(err)
-	}
-	return &Service{Operator: operator, Broker: os.Getenv("WHERRY_TRUST_BROKER"), CA: ca}, closeOperator
-}
-
-// operatorReady waits, within topicWait, until each of brokers accepts operator's login. Brokers apply a SCRAM
-// credential in turn; production has no in-process consumer of a new operator credential on a multi-broker cluster, so
-// only the fixture waits.
-func operatorReady(operator *kgo.Client, brokers []int32) error {
-	if len(brokers) == 0 {
-		return errors.New("no brokers")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), topicWait)
-	defer cancel()
-	// A broker answers INVALID_REQUEST to an ApiVersions request without a client software name and version.
-	request := kmsg.NewPtrApiVersionsRequest()
-	request.ClientSoftwareName, request.ClientSoftwareVersion = "wherry-fixture", "0"
-	for _, broker := range brokers {
-		var refused error
-		for {
-			response, err := request.RequestWith(ctx, operator.Broker(int(broker)))
-			if err == nil {
-				err = kerr.ErrorForCode(response.ErrorCode)
-			}
-			if err == nil {
-				break
-			}
-			if errors.Is(err, kerr.SaslAuthenticationFailed) {
-				refused = err
-			} else if ctx.Err() == nil || refused == nil {
-				return fmt.Errorf("broker %d as %s: %w", broker, OperatorPrincipal, err)
-			}
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("broker %d as %s: %w", broker, OperatorPrincipal, refused)
-			case <-time.After(listBackoff):
-			}
-		}
-	}
-	return nil
-}
-
-// operatorReady waits out a broker that refuses the operator's login and fails on any other error, a wrong password
-// once topicWait passes, or no broker to probe.
-func TestOperatorReadyWaitsForEveryBroker(t *testing.T) {
-	t.Parallel()
-	brokers := []int32{0, 1, 2}
-	// fixture starts three brokers with operator-password and connects as wherry.operator with password through the
-	// first only, so another broker's login is the probe's own.
-	fixture := func(t *testing.T, password string) (*kfake.Cluster, *kgo.Client) {
-		cluster := kfake.MustCluster(kfake.NumBrokers(len(brokers)), kfake.EnableSASL(), kfake.Superuser("SCRAM-SHA-512", OperatorPrincipal, "operator-password"))
-		t.Cleanup(cluster.Close)
-		operator, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()[0]), kgo.SASL(scram.Auth{User: OperatorPrincipal, Pass: password}.AsSha512Mechanism()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(operator.Close)
-		return cluster, operator
-	}
-	// refuse answers node's first times logins with code, counting each node's refused and accepted SASL exchanges.
-	refuse := func(cluster *kfake.Cluster, node int32, times int, code int16) (refused, accepted map[int32]int) {
-		refused, accepted = map[int32]int{}, map[int32]int{}
-		cluster.ControlKey(int16(kmsg.SASLAuthenticate), func(request kmsg.Request) (kmsg.Response, error, bool) {
-			cluster.KeepControl()
-			current := cluster.CurrentNode()
-			if current == node && refused[current] < times {
-				refused[current]++
-				response := request.ResponseKind().(*kmsg.SASLAuthenticateResponse)
-				response.ErrorCode = code
-				return response, nil, true
-			}
-			accepted[current]++
-			return nil, nil, false
-		})
-		return refused, accepted
-	}
-
-	t.Run("a login refused twice then accepted", func(t *testing.T) {
-		t.Parallel()
-		cluster, operator := fixture(t, "operator-password")
-		refused, accepted := refuse(cluster, 0, 2, kerr.SaslAuthenticationFailed.Code)
-		if err := operatorReady(operator, brokers); err != nil {
-			t.Fatal(err)
-		}
-		if refused[0] != 2 || accepted[0] == 0 {
-			t.Fatalf("broker 0 refused %d and accepted %d logins; want 2 refused, then one accepted", refused[0], accepted[0])
-		}
-	})
-
-	t.Run("one broker lagging", func(t *testing.T) {
-		t.Parallel()
-		cluster, operator := fixture(t, "operator-password")
-		refused, accepted := refuse(cluster, 2, 3, kerr.SaslAuthenticationFailed.Code)
-		if err := operatorReady(operator, brokers); err != nil {
-			t.Fatal(err)
-		}
-		if refused[2] != 3 || accepted[2] == 0 {
-			t.Fatalf("broker 2 refused %d and accepted %d logins; want 3 refused, then one accepted", refused[2], accepted[2])
-		}
-	})
-
-	// kfake closes the connection on a wrong SCRAM password where Kafka answers SASL_AUTHENTICATION_FAILED.
-	t.Run("a wrong password", func(t *testing.T) {
-		t.Parallel()
-		cluster, operator := fixture(t, "wrong-password")
-		refuse(cluster, 0, math.MaxInt, kerr.SaslAuthenticationFailed.Code)
-		start := time.Now()
-		err := operatorReady(operator, brokers)
-		if err == nil || !strings.HasPrefix(err.Error(), "broker 0 as "+OperatorPrincipal+": ") || !errors.Is(err, kerr.SaslAuthenticationFailed) {
-			t.Fatalf("ready = %v; want broker 0's refused login", err)
-		}
-		if elapsed := time.Since(start); elapsed < topicWait {
-			t.Fatalf("ready failed after %v; want at least %v", elapsed, topicWait)
-		}
-	})
-
-	t.Run("a login failing otherwise", func(t *testing.T) {
-		t.Parallel()
-		cluster, operator := fixture(t, "operator-password")
-		refused, _ := refuse(cluster, 0, len(brokers), kerr.IllegalSaslState.Code)
-		if err := operatorReady(operator, brokers); !errors.Is(err, kerr.IllegalSaslState) {
-			t.Fatalf("ready = %v; want the login's error", err)
-		}
-		if refused[0] != 1 {
-			t.Fatalf("%d logins refused; want the first to end the wait", refused[0])
-		}
-	})
-
-	t.Run("no brokers", func(t *testing.T) {
-		t.Parallel()
-		_, operator := fixture(t, "operator-password")
-		if err := operatorReady(operator, nil); err == nil {
-			t.Fatal("ready with no brokers succeeded")
-		}
-	})
-
-	t.Run("an ApiVersions error", func(t *testing.T) {
-		t.Parallel()
-		cluster, operator := fixture(t, "operator-password")
-		cluster.ControlKey(int16(kmsg.ApiVersions), func(request kmsg.Request) (kmsg.Response, error, bool) {
-			cluster.KeepControl()
-			if request.(*kmsg.ApiVersionsRequest).ClientSoftwareName == "kgo" {
-				return nil, nil, false
-			}
-			response := request.ResponseKind().(*kmsg.ApiVersionsResponse)
-			response.ErrorCode = kerr.UnknownServerError.Code
-			return response, nil, true
-		})
-		if err := operatorReady(operator, brokers); !errors.Is(err, kerr.UnknownServerError) {
-			t.Fatalf("ready = %v; want the ApiVersions error", err)
-		}
-	})
+	return &Service{Operator: operator, Broker: os.Getenv("WHERRY_TRUST_BROKER"), CA: ca}, operator.Close
 }
 
 // realRoot connects to the disposable broker as the Kafka super user, for what a test does beyond provisioning.

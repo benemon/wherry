@@ -17,7 +17,8 @@ var OperatorACLs = []ACL{
 }
 
 // Delegate, connected as the Kafka super user, grants wherry.operator OperatorACLs, creates the wherry.operator
-// topic and then sets wherry.operator's password, creating the principal or replacing its password.
+// topic and then sets wherry.operator's password, creating the principal or replacing its password. A caller that uses
+// the new password at once calls Service.WaitOperatorCredential first, since brokers apply it in turn.
 func Delegate(ctx context.Context, superUser *kgo.Client, password string) error {
 	client := kadm.NewClient(superUser)
 	for _, acl := range OperatorACLs {
