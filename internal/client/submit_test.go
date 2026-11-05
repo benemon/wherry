@@ -14,10 +14,8 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/credential"
-	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
-	"github.com/twmb/franz-go/pkg/kadm"
 )
 
 // anotherRun submits a second run and admits it through receiver.
@@ -71,7 +69,7 @@ func TestAFailedTaskWriteLeavesNoRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.host.publish(cancelled, fresh, encoded, time.Now(), make([]byte, 32)); err == nil {
+	if err := f.host.publish(cancelled, fresh, f.taskTopics(t, "pool-a")[0], encoded, time.Now(), make([]byte, 32)); err == nil {
 		t.Fatal("publish succeeded on a cancelled context")
 	}
 	if local, err := f.host.localRun("run-fresh"); err != nil || local != nil {
@@ -164,7 +162,7 @@ func TestSubmitRefusesAnUnconfiguredCredential(t *testing.T) {
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "auth required: credential absent is not in this host's configuration") {
 		t.Fatalf("submit = %v; want the unconfigured credential named", err)
 	}
-	if records, _ := readTopic(f.ctx, f.service.Operator, operator.PoolTasksTopic("pool-a")); len(records) != 0 {
+	if records, _ := readTasks(f.ctx, f.service.Operator, "pool-a"); len(records) != 0 {
 		t.Fatal("published a task naming an unconfigured credential")
 	}
 }
@@ -274,7 +272,7 @@ func TestSubmitRefusesALongCredentialName(t *testing.T) {
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "credential names are at most 32") {
 		t.Fatalf("submit = %v; want the name refused", err)
 	}
-	if records, _ := readTopic(f.ctx, f.service.Operator, operator.PoolTasksTopic("pool-a")); len(records) != 0 {
+	if records, _ := readTasks(f.ctx, f.service.Operator, "pool-a"); len(records) != 0 {
 		t.Fatal("published a credential name over 32 characters")
 	}
 }
@@ -290,7 +288,7 @@ func TestSubmitRefusesOver256ExpectedOutputs(t *testing.T) {
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "a submission expects at most 256 outputs") {
 		t.Fatalf("submit = %v; want the outputs refused", err)
 	}
-	if records, _ := readTopic(f.ctx, f.service.Operator, operator.PoolTasksTopic("pool-a")); len(records) != 0 {
+	if records, _ := readTasks(f.ctx, f.service.Operator, "pool-a"); len(records) != 0 {
 		t.Fatal("published over 256 expected outputs")
 	}
 }
@@ -299,13 +297,24 @@ func TestSubmitNamesARecordTheBrokerRefuses(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
 	limit := "2000"
-	if responses, err := kadm.NewClient(f.service.Operator).AlterTopicConfigs(f.ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "max.message.bytes", Value: &limit}}, operator.PoolTasksTopic("pool-a")); err != nil || responses[0].Err != nil {
-		t.Fatalf("alter topic: %v %v", err, responses)
-	}
+	f.setTaskTopicsConfig(t, "pool-a", "max.message.bytes", limit)
 	random := make([]byte, 10000)
 	rand.Read(random)
 	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: hex.EncodeToString(random), EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "-byte record, over the broker's record limit; shorten the prompt or the input files") {
 		t.Fatalf("submit = %v; want the record size and a remedy", err)
+	}
+}
+
+// Submit refuses a selector naming a key outside the pool's routable labels and publishes nothing.
+func TestSubmitRefusesANonRoutableSelectorKey(t *testing.T) {
+	f := newFixture(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: []wire.Requirement{{Key: "gpu", Operator: wire.OpExists}}, Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "selector keys gpu are not routable in pool pool-a (routable: region, runtime)") {
+		t.Fatalf("submit = %v; want the key refused", err)
+	}
+	if n := f.tasksEnd(t, "pool-a"); n != 0 {
+		t.Fatalf("pool tasks hold %d records after a refused selector", n)
 	}
 }

@@ -114,8 +114,10 @@ type CancelResult struct {
 // Receiver describes a receiver of a pool the tenant is entitled to, its profiles as wherry.operator records them and its
 // latest advertisement.
 type Receiver struct {
-	ReceiverID     string    `json:"receiver_id"`
-	Pool           string    `json:"pool"`
+	ReceiverID string `json:"receiver_id"`
+	Pool       string `json:"pool"`
+	// Routable is the label keys a selector may name in the pool, from its terms.
+	Routable       []string  `json:"routable_labels"`
 	Profiles       []Profile `json:"profiles"`
 	Capacity       int64     `json:"capacity"`
 	InFlight       int64     `json:"in_flight"`
@@ -332,11 +334,12 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		age := now.Sub(time.UnixMilli(ad.AtMS))
 		return age > liveness || age < -liveness
 	})
-	pool, placement, err := resolvePlacement(v.state, h.tenant, input.Agent, input.Model, input.Selector, ads)
+	pool, placement, topic, err := resolvePlacement(v.state, h.tenant, input.Agent, input.Model, input.Selector, ads)
 	if err != nil {
 		return SubmitResult{}, err
 	}
-	// Before any credential resolves or input uploads.
+	// Before any credential resolves or input uploads. The state is loaded before the snapshot is read and the snapshot
+	// before the produce, so a task carries the outgoing key only if it was read before a successor's snapshot.
 	poolKey, err := h.poolKey(ctx, v, pool)
 	if err != nil {
 		return SubmitResult{}, err
@@ -378,7 +381,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		input.Parts = parts
 		stored = true
 	}
-	if limit, limiting := profileInlineLimit(v.state, pool, placement, declared); limit > 0 {
+	if limit, limiting := profileInlineLimit(v.state, pool, topic, declared); limit > 0 {
 		if err := wire.ValidateInputs(input.Parts, limit); err != nil {
 			if !storable {
 				return SubmitResult{}, fmt.Errorf("%w: inline inputs are over profile %s's %d-byte limit; a pool with storage and a host storage credential would carry the inputs through S3", ErrInvalidInput, limiting, limit)
@@ -437,7 +440,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		err = fmt.Errorf("%w: with its envelope the submission is a %d-byte record, over pool %s's %d-byte record limit", ErrInvalidInput, len(encoded), pool, limit)
 	}
 	if err == nil {
-		err = h.publish(ctx, submission, encoded, now, redactionKey)
+		err = h.publish(ctx, submission, topic, encoded, now, redactionKey)
 	}
 	if err != nil {
 		if stored {
@@ -611,17 +614,17 @@ func (h *Host) submission(runID, nonce, pool string, placement wire.Placement, p
 	}, nil
 }
 
-// publish records the run locally, then writes encoded, the signed submission, to its pool's task topic. A failed write
-// removes the record.
-func (h *Host) publish(ctx context.Context, submission *wire.Submission, encoded []byte, now time.Time, redactionKey []byte) error {
-	record, err := h.newRecord(ctx, submission, encoded, now, redactionKey)
+// publish records the run locally, then writes encoded, the signed submission, to topic, its signature's task topic. A
+// failed write removes the record.
+func (h *Host) publish(ctx context.Context, submission *wire.Submission, topic string, encoded []byte, now time.Time, redactionKey []byte) error {
+	record, err := h.newRecord(ctx, submission, topic, encoded, now, redactionKey)
 	if err != nil {
 		return err
 	}
 	if err := h.writeRun(record); err != nil {
 		return err
 	}
-	if err := h.produceTask(ctx, submission.Wherry, encoded); err != nil {
+	if err := h.produceTask(ctx, topic, submission.Wherry, encoded); err != nil {
 		if path, ok := h.runPath(record.Run); ok {
 			os.Remove(path)
 		}
@@ -630,14 +633,14 @@ func (h *Host) publish(ctx context.Context, submission *wire.Submission, encoded
 	return nil
 }
 
-// newRecord is the local record of a run whose signed submission is encoded, holding redactionKey, the envelope's, and
-// the submission without its envelope as the run's resubmission template.
-func (h *Host) newRecord(ctx context.Context, submission *wire.Submission, encoded []byte, now time.Time, redactionKey []byte) (runRecord, error) {
+// newRecord is the local record of a run whose signed submission is encoded, bound for topic, holding redactionKey, the
+// envelope's, and the submission without its envelope as the run's resubmission template.
+func (h *Host) newRecord(ctx context.Context, submission *wire.Submission, topic string, encoded []byte, now time.Time, redactionKey []byte) (runRecord, error) {
 	binding := submission.Wherry
 	template := *submission
 	template.Wherry.Envelope, template.Wherry.Wrap = "", ""
 	record := runRecord{
-		Run: binding.Run, Pool: binding.Pool, Placement: binding.Placement, TaskHash: wire.TaskHash(encoded), SubmittedMS: now.UnixMilli(), TaskStartedBy: binding.TaskStartedBy,
+		Run: binding.Run, Pool: binding.Pool, Topic: topic, Placement: binding.Placement, TaskHash: wire.TaskHash(encoded), SubmittedMS: now.UnixMilli(), TaskStartedBy: binding.TaskStartedBy,
 		TaskEndedBy: binding.TaskEndedBy, RedactionKey: redactionKey, Task: &template,
 	}
 	for _, credential := range binding.Credentials {
@@ -659,9 +662,9 @@ func (h *Host) newRecord(ctx context.Context, submission *wire.Submission, encod
 	return record, nil
 }
 
-// produceTask writes encoded, a signed submission, to its pool's task topic.
-func (h *Host) produceTask(ctx context.Context, binding wire.SubmissionBinding, encoded []byte) error {
-	err := h.produce(ctx, &kgo.Record{Topic: operator.PoolTasksTopic(binding.Pool), Key: []byte(binding.Run), Value: encoded})
+// produceTask writes encoded, a signed submission, to topic, a task topic of its pool.
+func (h *Host) produceTask(ctx context.Context, topic string, binding wire.SubmissionBinding, encoded []byte) error {
+	err := h.produce(ctx, &kgo.Record{Topic: topic, Key: []byte(binding.Run), Value: encoded})
 	switch {
 	case errors.Is(err, kerr.MessageTooLarge):
 		return fmt.Errorf("%w: the submission is a %d-byte record, over the broker's record limit; shorten the prompt or the input files", ErrInvalidInput, len(encoded))
@@ -687,7 +690,7 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 			continue
 		}
 		receiver := Receiver{
-			ReceiverID: id, Pool: config.Pool, Profiles: []Profile{}, Status: "silent",
+			ReceiverID: id, Pool: config.Pool, Routable: slices.Sorted(slices.Values(v.state.Pools[config.Pool].Routable)), Profiles: []Profile{}, Status: "silent",
 		}
 		ended := v.state.Ended[operator.ReceiverPrincipal(id)]
 		ad, advertised := ads[id]
@@ -740,8 +743,10 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 // runRecord is the submitting host's own record of a run, which lets it report the run before a
 // receiver echoes it.
 type runRecord struct {
-	Run       string         `json:"run"`
-	Pool      string         `json:"pool"`
+	Run  string `json:"run"`
+	Pool string `json:"pool"`
+	// Topic is the signature task topic the run was produced to, which a replacement keeps.
+	Topic     string         `json:"topic"`
 	Placement wire.Placement `json:"placement"`
 	TaskHash  string         `json:"task_hash"`
 	// SubmittedMS is when this host published the run.

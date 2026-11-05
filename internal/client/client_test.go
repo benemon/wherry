@@ -91,6 +91,7 @@ func testTerms() operator.Terms {
 		},
 		DefaultAgent:  "claude",
 		DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
+		Routable: []string{"runtime", "region"},
 	}
 }
 
@@ -292,6 +293,7 @@ func (f *fixture) submit(t *testing.T, selector []wire.Requirement) SubmitResult
 type claimed struct {
 	submission wire.Submission
 	hash       string
+	topic      string
 	offset     int64
 }
 
@@ -307,7 +309,7 @@ func (r *testReceiver) claim(t *testing.T, ctx context.Context, runID string) []
 	if err != nil {
 		t.Fatal(err)
 	}
-	records, err := readTopic(ctx, r.kafka, operator.PoolTasksTopic(r.pool))
+	records, err := readTasks(ctx, r.kafka, r.pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +321,7 @@ func (r *testReceiver) claim(t *testing.T, ctx context.Context, runID string) []
 		}
 		if submission.Wherry.Run == runID {
 			sum := sha256.Sum256(record.Value)
-			tasks = append(tasks, claimed{submission, hex.EncodeToString(sum[:]), record.Offset})
+			tasks = append(tasks, claimed{submission, hex.EncodeToString(sum[:]), record.Topic, record.Offset})
 		}
 	}
 	return tasks
@@ -343,7 +345,7 @@ func (r *testReceiver) status(t *testing.T, task claimed, attempt int64, eventID
 		Wherry:       wire.StatusBinding{ReceiverBinding: r.binding(task, attempt), EventID: eventID, Kind: kind, TaskHash: task.hash},
 	}
 	if kind == "claimed" {
-		status.Wherry.TaskOffset = &task.offset
+		status.Wherry.TaskTopic, status.Wherry.TaskOffset = task.topic, &task.offset
 	}
 	if mutate != nil {
 		mutate(status)
@@ -508,7 +510,7 @@ func TestNewHostParsesPrincipal(t *testing.T) {
 
 func (f *fixture) tasksEnd(t *testing.T, pool string) int {
 	t.Helper()
-	records, err := readTopic(f.ctx, f.service.Operator, operator.PoolTasksTopic(pool))
+	records, err := readTasks(f.ctx, f.service.Operator, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -610,6 +612,32 @@ func TestSubmitIgnoresInlineLimitOfOfferOutsideSelector(t *testing.T) {
 	}
 }
 
+// The profile inline limit is the smallest among the advertised profiles, of any age, whose signature is the chosen
+// one: a profile of the same signature that differs in an informational label counts, one of another signature does not.
+func TestProfileInlineLimitIsTheChosenSignatures(t *testing.T) {
+	state := operator.NewState()
+	state.Pools["pool-a"] = testTerms()
+	eu := map[string]string{"runtime": "podman", "region": "eu"}
+	profiles := []operator.ProfileSettings{
+		{Name: "a100", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu", "gpu": "a100"}},
+		{Name: "h100", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu", "gpu": "h100"}},
+		{Name: "us", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "us"}},
+	}
+	for _, id := range []string{"receiver-a", "receiver-b"} {
+		state.Receivers[id] = operator.ReceiverConfig{Receiver: id, Pool: "pool-a", Profiles: profiles}
+	}
+	topic := operator.SignatureTopic("pool-a", state.Pools["pool-a"], "claude", eu)
+	ads := map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", AtMS: time.Now().UnixMilli(),
+		Offers: []wire.Offer{{Profile: "a100", InlineLimit: 5000}, {Profile: "h100", InlineLimit: 100}, {Profile: "us", InlineLimit: 50}}}}
+	if limit, profile := profileInlineLimit(state, "pool-a", topic, ads); limit != 100 || profile != "h100" {
+		t.Fatalf("limit %d of %q, want h100's 100", limit, profile)
+	}
+	ads["receiver-b"] = wire.Advertisement{Receiver: "receiver-b", Pool: "pool-a", AtMS: time.Now().Add(-time.Hour).UnixMilli(), Offers: []wire.Offer{{Profile: "a100", InlineLimit: 70}}}
+	if limit, profile := profileInlineLimit(state, "pool-a", topic, ads); limit != 70 || profile != "a100" {
+		t.Fatalf("limit %d of %q, want the stale advertisement's 70", limit, profile)
+	}
+}
+
 // modelPool creates pool-b, whose claude runs haiku or sonnet and defaultModel by default, with an advertising member.
 func (f *fixture) modelPool(t *testing.T, defaultModel string) *testReceiver {
 	t.Helper()
@@ -691,24 +719,24 @@ func TestResolvePlacementModel(t *testing.T) {
 		"fallback skips the default lacking model": {"", "sonnet", "claude", "sonnet"},
 		"explicit agent's default model":           {"claude", "", "claude", "haiku"},
 	} {
-		_, placement, err := resolvePlacement(state, "tenant-a", test.agent, test.model, nil, ads)
+		_, placement, _, err := resolvePlacement(state, "tenant-a", test.agent, test.model, nil, ads)
 		if err != nil || placement.Agent != test.wantAgent || placement.Model != test.wantModel {
 			t.Fatalf("%s: placed %#v, %v; want %s running %s", name, placement, err, test.wantAgent, test.wantModel)
 		}
 	}
-	if _, _, err := resolvePlacement(state, "tenant-a", "", "opus", nil, ads); !errors.Is(err, ErrInvalidInput) {
+	if _, _, _, err := resolvePlacement(state, "tenant-a", "", "opus", nil, ads); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("a model no agent holds placed: %v", err)
 	}
 	// claude, now the default agent, has models and no default model, so a task naming none falls to codex.
 	terms.DefaultAgent, terms.Agents[0].DefaultModel = "claude", ""
 	state.Pools["pool-a"] = terms
-	if _, placement, err := resolvePlacement(state, "tenant-a", "", "", nil, ads); err != nil || placement.Agent != "codex" || placement.Model != "gpt-5-mini" {
+	if _, placement, _, err := resolvePlacement(state, "tenant-a", "", "", nil, ads); err != nil || placement.Agent != "codex" || placement.Model != "gpt-5-mini" {
 		t.Fatalf("fallback placed %#v, %v; want codex past the agent requiring a model", placement, err)
 	}
-	if _, _, err := resolvePlacement(state, "tenant-a", "claude", "", nil, ads); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "agent claude in pool pool-a requires a model") {
+	if _, _, _, err := resolvePlacement(state, "tenant-a", "claude", "", nil, ads); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "agent claude in pool pool-a requires a model") {
 		t.Fatalf("explicit agent requiring a model without one: %v", err)
 	}
-	if _, placement, err := resolvePlacement(state, "tenant-a", "claude", "sonnet", nil, ads); err != nil || placement.Model != "sonnet" {
+	if _, placement, _, err := resolvePlacement(state, "tenant-a", "claude", "sonnet", nil, ads); err != nil || placement.Model != "sonnet" {
 		t.Fatalf("explicit agent requiring a model, given one: %#v, %v", placement, err)
 	}
 }
@@ -761,7 +789,7 @@ func TestSubmitChoosesPoolOfMostSpareMember(t *testing.T) {
 	}
 	f.receivers["receiver-a"].advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity, ad.InFlight = 4, 1 })
 	if result := f.submit(t, defaultSelector()); result.Pool != "pool-a" {
-		t.Fatalf("pool %q, want pool-a through the lower receiver ID on equal spare capacity", result.Pool)
+		t.Fatalf("pool %q, want pool-a through the lower topic on equal spare capacity", result.Pool)
 	}
 }
 
@@ -769,7 +797,9 @@ func TestResolvePlacement(t *testing.T) {
 	terms := testTerms()
 	terms.Agents = append(terms.Agents, operator.AgentTerms{Name: "gemini"})
 	terms.DefaultAgent = "codex"
-	// The declared agent order is claude, codex, gemini; codex is the default.
+	terms.Routable = []string{"runtime", "region", "gpu"}
+	// The declared agent order is claude, codex, gemini; codex is the default. Equal spare capacity leaves the lowest
+	// topic, which sorts by agent first.
 	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{
 		{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu", "gpu": "a100"}},
 		{Name: "batch", Plugin: "nomad", Agent: "gemini", Labels: map[string]string{"runtime": "exec", "region": "us"}},
@@ -795,38 +825,43 @@ func TestResolvePlacement(t *testing.T) {
 		want     string
 	}{
 		"default agent first":                     {"", nil, ready, "codex"},
-		"declared order after the default":        {"", []wire.Requirement{requirement("region", wire.OpExists)}, ready, "claude"},
+		"lowest topic after the default":          {"", []wire.Requirement{requirement("region", wire.OpExists)}, ready, "claude"},
 		"explicit agent":                          {"gemini", nil, ready, "gemini"},
 		"explicit agent outside the terms":        {"other", nil, ready, ""},
 		"explicit agent no ready profile matches": {"claude", []wire.Requirement{requirement("region", wire.OpIn, "us")}, ready, ""},
-		"In":                                  {"", []wire.Requirement{requirement("region", wire.OpIn, "us", "ap")}, ready, "gemini"},
-		"NotIn":                               {"", []wire.Requirement{requirement("runtime", wire.OpNotIn, "exec")}, ready, "claude"},
-		"NotIn passes an absent key":          {"", []wire.Requirement{requirement("gpu", wire.OpNotIn, "a100")}, ready, "codex"},
-		"Exists":                              {"", []wire.Requirement{requirement("gpu", wire.OpExists)}, ready, "claude"},
-		"DoesNotExist":                        {"", []wire.Requirement{requirement("region", wire.OpDoesNotExist)}, ready, "codex"},
-		"all requirements on one profile":     {"", []wire.Requirement{requirement("runtime", wire.OpIn, "exec"), requirement("gpu", wire.OpExists)}, ready, ""},
-		"not-ready profile never chosen":      {"", []wire.Requirement{requirement("runtime", wire.OpIn, "wasm")}, ready, ""},
-		"not-ready default falls to declared": {"", nil, ready[:2], "claude"},
-		"advertised agent ignored":            {"claude", nil, []wire.Offer{offer("cloud", "claude")}, ""},
-		"profile outside the record":          {"", nil, []wire.Offer{offer("edge", "codex")}, ""},
+		"In":                                {"", []wire.Requirement{requirement("region", wire.OpIn, "us", "ap")}, ready, "gemini"},
+		"NotIn":                             {"", []wire.Requirement{requirement("runtime", wire.OpNotIn, "exec")}, ready, "claude"},
+		"NotIn passes an absent key":        {"", []wire.Requirement{requirement("gpu", wire.OpNotIn, "a100")}, ready, "codex"},
+		"Exists":                            {"", []wire.Requirement{requirement("gpu", wire.OpExists)}, ready, "claude"},
+		"DoesNotExist":                      {"", []wire.Requirement{requirement("region", wire.OpDoesNotExist)}, ready, "codex"},
+		"all requirements on one profile":   {"", []wire.Requirement{requirement("runtime", wire.OpIn, "exec"), requirement("gpu", wire.OpExists)}, ready, ""},
+		"not-ready profile never chosen":    {"", []wire.Requirement{requirement("runtime", wire.OpIn, "wasm")}, ready, ""},
+		"not-ready default falls to lowest": {"", nil, ready[:2], "claude"},
+		"advertised agent ignored":          {"claude", nil, []wire.Offer{offer("cloud", "claude")}, ""},
+		"profile outside the record":        {"", nil, []wire.Offer{offer("edge", "codex")}, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			ads := map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Offers: test.offers, Capacity: 1}}
-			pool, placement, err := resolvePlacement(state, "tenant-a", test.agent, "", test.selector, ads)
+			pool, placement, topic, err := resolvePlacement(state, "tenant-a", test.agent, "", test.selector, ads)
 			if err == nil && (pool != "pool-a" || !reflect.DeepEqual(placement.Selector, test.selector)) {
 				t.Fatalf("pool %q placement %#v, want pool-a under the submitted selector", pool, placement)
+			}
+			if _, agent, ok := wire.ParseTaskTopic(topic); err == nil && (!ok || agent != placement.Agent) {
+				t.Fatalf("topic %q, want a signature topic of agent %s", topic, placement.Agent)
 			}
 			if placement.Agent != test.want {
 				t.Fatalf("placed %q, want %q", placement.Agent, test.want)
 			}
 		})
 	}
-	if _, _, err := resolvePlacement(state, "tenant-b", "", "", nil, map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Offers: ready}}); err == nil {
+	if _, _, _, err := resolvePlacement(state, "tenant-b", "", "", nil, map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Offers: ready}}); err == nil {
 		t.Fatal("placed a task for a tenant not entitled to the pool")
 	}
 }
 
-func TestResolvePlacementChoosesMostSpareThenLowestID(t *testing.T) {
+// Placement's unit is a signature: each live member adds its spare capacity to every signature it offers, and the
+// signature with the most spare wins, the lowest topic on a tie.
+func TestResolvePlacementSumsSpareBySignatureThenLowestTopic(t *testing.T) {
 	state := operator.NewState()
 	state.Pools["pool-a"], state.Pools["pool-b"], state.Pools["pool-c"] = testTerms(), testTerms(), testTerms()
 	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true, "pool-b": true}
@@ -837,18 +872,102 @@ func TestResolvePlacementChoosesMostSpareThenLowestID(t *testing.T) {
 		}}
 		ads[id] = wire.Advertisement{Receiver: id, Pool: pool, Capacity: capacity, InFlight: inFlight, Offers: []wire.Offer{{Profile: profile, Agent: "x"}}}
 	}
-	member("receiver-d", "pool-b", 5, 2, "lab")   // spare 3
-	member("receiver-c", "pool-a", 5, 2, "lab")   // spare 3, lower ID
+	member("receiver-d", "pool-b", 5, 1, "lab")   // spare 4
+	member("receiver-c", "pool-a", 5, 2, "lab")   // spare 3
+	member("receiver-e", "pool-a", 4, 2, "lab")   // spare 2, the same signature as receiver-c: 5 together
 	member("receiver-b", "pool-a", 9, 0, "cloud") // most spare, but its ready profile launches codex
 	member("receiver-a", "pool-c", 9, 0, "lab")   // most spare, pool not entitled
-	member("receiver-e", "pool-a", 4, 2, "lab")   // spare 2
-	pool, placement, err := resolvePlacement(state, "tenant-a", "claude", "", nil, ads)
-	if err != nil || pool != "pool-a" || placement.Agent != "claude" {
-		t.Fatalf("placed %q %#v %v, want pool-a through receiver-c", pool, placement, err)
+	poolA, poolB := operator.SignatureTopic("pool-a", testTerms(), "claude", nil), operator.SignatureTopic("pool-b", testTerms(), "claude", nil)
+	pool, placement, topic, err := resolvePlacement(state, "tenant-a", "claude", "", nil, ads)
+	if err != nil || pool != "pool-a" || placement.Agent != "claude" || topic != poolA {
+		t.Fatalf("placed %q %#v on %s, %v; want pool-a's claude signature, spare 5 over pool-b's 4", pool, placement, topic, err)
 	}
-	ads["receiver-d"] = wire.Advertisement{Receiver: "receiver-d", Pool: "pool-b", Capacity: 5, InFlight: 1, Offers: ads["receiver-d"].Offers}
-	if pool, _, _ := resolvePlacement(state, "tenant-a", "claude", "", nil, ads); pool != "pool-b" {
-		t.Fatalf("pool %q, want pool-b through receiver-d's larger spare capacity", pool)
+	ads["receiver-d"] = wire.Advertisement{Receiver: "receiver-d", Pool: "pool-b", Capacity: 6, Offers: ads["receiver-d"].Offers}
+	if pool, _, topic, _ := resolvePlacement(state, "tenant-a", "claude", "", nil, ads); pool != "pool-b" || topic != poolB {
+		t.Fatalf("placed %q on %s, want pool-b's signature with spare 6", pool, topic)
+	}
+	ads["receiver-d"] = wire.Advertisement{Receiver: "receiver-d", Pool: "pool-b", Capacity: 5, Offers: ads["receiver-d"].Offers}
+	if pool, _, topic, _ := resolvePlacement(state, "tenant-a", "claude", "", nil, ads); pool != "pool-a" || topic != poolA {
+		t.Fatalf("placed %q on %s, want pool-a's signature, the lower topic on equal spare", pool, topic)
+	}
+}
+
+// A member offering two profiles of one signature adds its spare to that signature once.
+func TestResolvePlacementAddsAMembersSpareOncePerSignature(t *testing.T) {
+	terms := testTerms()
+	state := operator.NewState()
+	state.Pools["pool-a"], state.Pools["pool-b"] = terms, terms
+	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true, "pool-b": true}
+	// receiver-a's two profiles differ only in an informational label, so they share one signature.
+	state.Receivers["receiver-a"] = operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{
+		{Name: "one", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "gpu": "a100"}},
+		{Name: "two", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "gpu": "h100"}},
+	}}
+	state.Receivers["receiver-b"] = operator.ReceiverConfig{Receiver: "receiver-b", Pool: "pool-b", Profiles: []operator.ProfileSettings{
+		{Name: "one", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman"}},
+	}}
+	ads := map[string]wire.Advertisement{
+		"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Capacity: 3, Offers: []wire.Offer{{Profile: "one"}, {Profile: "two"}}},
+		"receiver-b": {Receiver: "receiver-b", Pool: "pool-b", Capacity: 4, Offers: []wire.Offer{{Profile: "one"}}},
+	}
+	if pool, _, _, err := resolvePlacement(state, "tenant-a", "claude", "", nil, ads); err != nil || pool != "pool-b" {
+		t.Fatalf("placed %q, %v; want pool-b's spare 4 over receiver-a's 3 counted once", pool, err)
+	}
+}
+
+// A selector key outside a pool's routable labels excludes the pool before any advertisement counts: with every entitled
+// pool excluded the refusal names the first, sorted; with one left the task places there; a model refusal then outranks
+// no matching receiver.
+func TestResolvePlacementRefusesNonRoutableSelectorKeys(t *testing.T) {
+	routable := testTerms()
+	none := testTerms()
+	none.Routable = nil
+	state := operator.NewState()
+	state.Pools["pool-a"], state.Pools["pool-b"] = routable, none
+	state.Entitlements["tenant-a"] = map[string]bool{"pool-b": true, "pool-a": true}
+	for id, pool := range map[string]string{"receiver-a": "pool-a", "receiver-b": "pool-b"} {
+		state.Receivers[id] = operator.ReceiverConfig{Receiver: id, Pool: pool, Profiles: []operator.ProfileSettings{
+			{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu", "gpu": "a100"}},
+		}}
+	}
+	selector := func(keys ...string) []wire.Requirement {
+		var requirements []wire.Requirement
+		for _, key := range keys {
+			requirements = append(requirements, wire.Requirement{Key: key, Operator: wire.OpExists})
+		}
+		return requirements
+	}
+	// No advertisement at all: the key refusal does not depend on one.
+	_, _, _, err := resolvePlacement(state, "tenant-a", "", "", selector("zone", "gpu", "runtime"), nil)
+	if !errors.Is(err, ErrInvalidInput) || err.Error() != "invalid input: selector keys gpu, zone are not routable in pool pool-a (routable: region, runtime)" {
+		t.Fatalf("every pool excluded: %v", err)
+	}
+	ads := map[string]wire.Advertisement{
+		"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Offers: []wire.Offer{{Profile: "lab"}}},
+		"receiver-b": {Receiver: "receiver-b", Pool: "pool-b", Capacity: 9, Offers: []wire.Offer{{Profile: "lab"}}},
+	}
+	if _, _, _, err := resolvePlacement(state, "tenant-a", "", "", selector("gpu"), ads); !errors.Is(err, ErrInvalidInput) || !strings.HasSuffix(err.Error(), "selector keys gpu are not routable in pool pool-a (routable: region, runtime)") {
+		t.Fatalf("every pool excluded, with live members: %v", err)
+	}
+	// pool-b, routing on nothing, is excluded by runtime; pool-a takes the task despite pool-b's spare capacity.
+	if pool, _, _, err := resolvePlacement(state, "tenant-a", "", "", selector("runtime"), ads); err != nil || pool != "pool-a" {
+		t.Fatalf("placed %q, %v; want pool-a, the pool routing on runtime", pool, err)
+	}
+	delete(state.Entitlements["tenant-a"], "pool-a")
+	if _, _, _, err := resolvePlacement(state, "tenant-a", "", "", selector("runtime"), ads); !errors.Is(err, ErrInvalidInput) || !strings.HasSuffix(err.Error(), "selector keys runtime are not routable in pool pool-b (routable: none)") {
+		t.Fatalf("a pool routing on nothing: %v", err)
+	}
+	// One pool excluded by a key and the other refusing the model: the model refusal.
+	state.Entitlements["tenant-a"]["pool-a"] = true
+	modelled := routable
+	modelled.Agents = slices.Clone(routable.Agents)
+	modelled.Agents[0].Models = []string{"haiku"}
+	state.Pools["pool-a"] = modelled
+	if _, _, _, err := resolvePlacement(state, "tenant-a", "claude", "opus", selector("runtime"), ads); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "model opus is not in agent claude's models in pool pool-a") {
+		t.Fatalf("one pool excluded, the other refusing the model: %v", err)
+	}
+	if _, _, _, err := resolvePlacement(state, "tenant-a", "claude", "", selector("region"), map[string]wire.Advertisement{}); !errors.Is(err, ErrNoMatchingReceiver) || err.Error() != "no matching live receiver" {
+		t.Fatalf("one pool excluded, the other with no live member: %v", err)
 	}
 }
 
@@ -864,10 +983,10 @@ func TestResolvePlacementPrefersTheDefaultAgentOverSpareCapacity(t *testing.T) {
 		state.Receivers[member.id] = operator.ReceiverConfig{Receiver: member.id, Pool: "pool-a", Profiles: []operator.ProfileSettings{{Name: member.agent, Plugin: "nomad", Agent: member.agent}}}
 		ads[member.id] = wire.Advertisement{Receiver: member.id, Pool: "pool-a", Capacity: member.spare, Offers: []wire.Offer{{Profile: member.agent, Agent: member.agent}}}
 	}
-	if _, placement, err := resolvePlacement(state, "tenant-a", "", "", nil, ads); err != nil || placement.Agent != "claude" {
+	if _, placement, _, err := resolvePlacement(state, "tenant-a", "", "", nil, ads); err != nil || placement.Agent != "claude" {
 		t.Fatalf("placed %#v %v, want the default agent claude through receiver-b despite receiver-a's spare capacity", placement, err)
 	}
-	if _, placement, err := resolvePlacement(state, "tenant-a", "codex", "", nil, ads); err != nil || placement.Agent != "codex" {
+	if _, placement, _, err := resolvePlacement(state, "tenant-a", "codex", "", nil, ads); err != nil || placement.Agent != "codex" {
 		t.Fatalf("placed %#v %v, want the named agent codex", placement, err)
 	}
 }
@@ -1177,7 +1296,7 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	if want := []string{"receiver-a", "receiver-c", "receiver-d", "receiver-b"}; len(order) != len(want) || order[0] != want[0] || order[1] != want[1] || order[2] != want[2] || order[3] != want[3] {
 		t.Fatalf("receivers %v, want %v", order, want)
 	}
-	if a := got["receiver-a"]; a.Status != "live" || a.Capacity != 3 || a.InFlight != 1 ||
+	if a := got["receiver-a"]; a.Status != "live" || a.Capacity != 3 || a.InFlight != 1 || !slices.Equal(a.Routable, []string{"region", "runtime"}) ||
 		!reflect.DeepEqual(a.Profiles, []Profile{
 			{Name: "lab", Plugin: "nomad", Agent: "claude", InlineLimit: 49152, Credentials: []Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true},
 			{Name: "cloud", Plugin: "aws", Agent: "codex", Credentials: []Credential{{Name: "openai", Env: "OPENAI_API_KEY", Configured: true}, {Name: "github-token", Env: "GH_TOKEN", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
@@ -2235,6 +2354,47 @@ func readTopic(ctx context.Context, client *kgo.Client, topic string) ([]*kgo.Re
 	reader := operator.NewReader(client)
 	defer reader.Close()
 	return reader.ReadFrom(ctx, topic, 0)
+}
+
+// taskTopics lists pool's task topics.
+func (f *fixture) taskTopics(t *testing.T, pool string) []string {
+	t.Helper()
+	topics, err := operator.PoolTaskTopics(f.ctx, kadm.NewClient(f.service.Operator), pool)
+	if err != nil || len(topics) == 0 {
+		t.Fatalf("pool %s task topics %v, %v", pool, topics, err)
+	}
+	return topics
+}
+
+// setTaskTopicsConfig sets name to value on every task topic of pool.
+func (f *fixture) setTaskTopicsConfig(t *testing.T, pool, name, value string) {
+	t.Helper()
+	responses, err := kadm.NewClient(f.service.Operator).AlterTopicConfigs(f.ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: name, Value: &value}}, f.taskTopics(t, pool)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, response := range responses {
+		if response.Err != nil {
+			t.Fatalf("alter topic %s: %v", response.Name, response.Err)
+		}
+	}
+}
+
+// readTasks reads every task topic of pool, as listed under its prefix.
+func readTasks(ctx context.Context, client *kgo.Client, pool string) ([]*kgo.Record, error) {
+	topics, err := operator.PoolTaskTopics(ctx, kadm.NewClient(client), pool)
+	if err != nil {
+		return nil, err
+	}
+	var records []*kgo.Record
+	for _, topic := range topics {
+		read, err := readTopic(ctx, client, topic)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, read...)
+	}
+	return records, nil
 }
 
 func TestPlacementSkipsRemovedEntitlement(t *testing.T) {
