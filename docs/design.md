@@ -28,9 +28,8 @@ already runs Kafka adds topics and principals to it.
 Kafka cannot filter records on the broker, so records consumed
 differently live on different topics. Kafka is the filter and the router:
 a pool has one task topic per profile signature, a profile's agent and all
-its labels, and a member subscribes
-to the signatures of its ready profiles, so a task reaches only members
-that can serve it.
+its labels. Each profile replica subscribes only to that signature, while its
+profile is ready, so a task reaches only eligible loops.
 
 | Topic | Writers | Readers | Holds |
 | --- | --- | --- | --- |
@@ -119,9 +118,8 @@ names, hosts, entitlements and pools.
 
 ## Configuration delivery
 
-A receiver's configuration is a record on `wherry.operator`: its capacity
-(the runs it holds at once) and its plugin profiles, each with a name, its plugin's
-type, an agent, labels and its merged settings for the plugin. It holds no
+A receiver's configuration is a record on `wherry.operator`: its plugin profiles, each with a name, its plugin's
+type, an agent, labels, optional replicas and its merged settings for the plugin. It holds no
 secrets and names no agent credential: every profile of an agent delivers
 the agent's credentials as the pool's terms give them. A profile's settings
 may name a platform credential, whose source the receiver's local
@@ -145,6 +143,19 @@ the runs it holds end and exits, so its platform restarts it with the new
 configuration. A restart through its platform applies a change at once: the
 receiver stops within its `drain_timeout` and releases the tasks it holds,
 and runs in flight are then adopted on redelivery.
+
+
+### Claim topology
+
+Each configured profile has its own single-topic claim loop for each effective
+replica (default one). Idle clients persist across empty polls. A loop holds one
+record at a time and admits fresh tasks through its own profile, including when
+another profile has the same signature. Readiness withdrawal closes only that
+profile's idle clients; held clients keep renewing. Suspension and an observed
+pending job gate polling receiver-wide. A redelivery may adopt another profile's
+existing job; advertised capacity is the sum of effective replicas and bounds
+held records. Configuration, readiness checks and job lookup stay per profile.
+
 
 ## Key custody
 

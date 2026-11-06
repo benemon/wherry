@@ -139,9 +139,8 @@ as [Signatures](configuration-operator.md#pool-terms) describes.
   uses a delivery, and the member that failed may be handed the task again
   even when a peer with the same signature could start it. A profile that goes
   unready between a claim's subscription and its fetch has its task released,
-  and that member's other polling slots may acquire it once each before they
-  reopen without its topic, up to the member's capacity minus 1 more
-  deliveries. Size it as the attempts one task may burn plus those
+  and sibling loops subscribing to the same signature may acquire it once each
+  before their idle clients close. Size it as the attempts one task may burn plus those
   re-acquisitions, never by the number of members. From
   attempt `delivery_limit` minus 1, a receiver ends a run it would return to the
   pool `TASK_STATE_FAILED` with `delivery budget exhausted`, except in the
@@ -400,7 +399,6 @@ host that meets [Run a receiver](operations-receivers.md#run-a-receiver).
    pool: build
    plugin_sha256:
      nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-   capacity: 3
    ```
 
    `plugins/nomad/plugin.yaml`, the `config` every profile inherits, with the

@@ -129,7 +129,7 @@ func newBus(t *testing.T) *bus {
 		t.Fatal(err)
 	}
 	receiverBundle := filepath.Join(t.TempDir(), "receiver.yaml")
-	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []operator.ProfileSettings{{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "exec"}}},
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "exec"}}},
 		PluginSHA256: map[string]string{"nomad": fakeSHA256}}
 	if err := b.service.ReceiverAdd(ctx, config, b.service.Broker, receiverBundle); err != nil {
 		t.Fatal(err)
@@ -348,7 +348,7 @@ func (b *bus) admitted(t *testing.T) task {
 
 func TestReceiversJSONOutputShape(t *testing.T) {
 	b := newBus(t)
-	silent := operator.ReceiverConfig{Receiver: "receiver-b", Pool: "pool-a", Capacity: 1, Profiles: []operator.ProfileSettings{{Name: "lab", Plugin: "nomad", Agent: "claude"}}, PluginSHA256: map[string]string{"nomad": fakeSHA256}}
+	silent := operator.ReceiverConfig{Receiver: "receiver-b", Pool: "pool-a", Profiles: []operator.ProfileSettings{{Name: "lab", Plugin: "nomad", Agent: "claude"}}, PluginSHA256: map[string]string{"nomad": fakeSHA256}}
 	if err := b.service.ReceiverAdd(b.ctx, silent, b.service.Broker, filepath.Join(t.TempDir(), "receiver.yaml")); err != nil {
 		t.Fatal(err)
 	}

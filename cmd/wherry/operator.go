@@ -348,11 +348,12 @@ func writeRotateReport(out io.Writer, pool string, report operator.RotateReport,
 	fmt.Fprintf(out, "tasks=%d\n", len(report.Tasks))
 }
 
-// showReceiver writes config's capacity, plugin pins and resolved profiles, in routing order, to out as YAML, each profile
+// showReceiver writes config's plugin pins and resolved profiles, in routing order, to out as YAML, each profile
 // with its signature, double-quoted so its line feeds show as \n, and its signature's task topic.
 func showReceiver(out io.Writer, config operator.ReceiverConfig) error {
 	type shown struct {
 		operator.ProfileSettings `yaml:",inline"`
+		Replicas                 int       `yaml:"replicas,omitempty"`
 		Signature                yaml.Node `yaml:"signature"`
 		Topic                    string    `yaml:"topic"`
 	}
@@ -361,13 +362,16 @@ func showReceiver(out io.Writer, config operator.ReceiverConfig) error {
 		// The record decodes numbers as float64, which YAML would print as 1e+06.
 		profile.Config = integral(profile.Config).(map[string]any)
 		signature := yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Style: yaml.DoubleQuotedStyle, Value: operator.Signature(profile.Agent, profile.Labels)}
-		profiles = append(profiles, shown{profile, signature, operator.SignatureTopic(config.Pool, profile.Agent, profile.Labels)})
+		replicas := profile.Replicas
+		if replicas <= 1 {
+			replicas = 0
+		}
+		profiles = append(profiles, shown{profile, replicas, signature, operator.SignatureTopic(config.Pool, profile.Agent, profile.Labels)})
 	}
 	encoded, err := yaml.Marshal(struct {
-		Capacity     int64             `yaml:"capacity"`
 		PluginSHA256 map[string]string `yaml:"plugin_sha256,omitempty"`
 		Profiles     []shown           `yaml:"profiles"`
-	}{config.Capacity, config.PluginSHA256, profiles})
+	}{config.PluginSHA256, profiles})
 	if err != nil {
 		return err
 	}
@@ -467,20 +471,20 @@ type receiverPlugin struct {
 }
 
 type receiverProfile struct {
-	Name   string             `yaml:"name"`
-	Agent  string             `yaml:"agent"`
-	Labels map[string]*string `yaml:"labels"`
-	Config map[string]any     `yaml:"config"`
+	Replicas int                `yaml:"replicas"`
+	Name     string             `yaml:"name"`
+	Agent    string             `yaml:"agent"`
+	Labels   map[string]*string `yaml:"labels"`
+	Config   map[string]any     `yaml:"config"`
 }
 
-// readReceiverConfig reads a receiver config from a single file holding its head, capacity and plugins, or from a
-// directory holding receiver.yaml, with its head and capacity, and, for each plugin, plugins/<type>/plugin.yaml with plugins/<type>/profiles/*.yaml,
+// readReceiverConfig reads a receiver config from a single file holding its head and plugins, or from a
+// directory holding receiver.yaml, with its head, and, for each plugin, plugins/<type>/plugin.yaml with plugins/<type>/profiles/*.yaml,
 // where profile file order is routing order within the plugin.
 func readReceiverConfig(path string, directory bool) (operator.ReceiverConfig, error) {
 	if !directory {
 		var file struct {
 			receiverHead `yaml:",inline"`
-			Capacity     int64                     `yaml:"capacity"`
 			Plugins      map[string]receiverPlugin `yaml:"plugins"`
 		}
 		if err := readYAML(path, &file); err != nil {
@@ -491,7 +495,7 @@ func readReceiverConfig(path string, directory bool) (operator.ReceiverConfig, e
 			where := fmt.Sprintf("%s: plugins.%s", path, kind)
 			plugins = append(plugins, plugin{where, kind, value.Labels, value.Config, labelled(where, "profiles", value.Profiles)})
 		}
-		return receiverConfig(file.receiverHead, file.Capacity, plugins)
+		return receiverConfig(file.receiverHead, plugins)
 	}
 	entries, err := os.ReadDir(path)
 	if err != nil {
@@ -504,7 +508,6 @@ func readReceiverConfig(path string, directory bool) (operator.ReceiverConfig, e
 	}
 	var receiver struct {
 		receiverHead `yaml:",inline"`
-		Capacity     int64 `yaml:"capacity"`
 	}
 	if err := readYAML(filepath.Join(path, "receiver.yaml"), &receiver); err != nil {
 		return operator.ReceiverConfig{}, err
@@ -544,7 +547,7 @@ func readReceiverConfig(path string, directory bool) (operator.ReceiverConfig, e
 		}
 		plugins = append(plugins, plugin{dir, kind.Name(), settings.Labels, settings.Config, profiles})
 	}
-	return receiverConfig(receiver.receiverHead, receiver.Capacity, plugins)
+	return receiverConfig(receiver.receiverHead, plugins)
 }
 
 // plugin is a decoded plugin entry with the place it was read from, which errors name.
@@ -596,8 +599,8 @@ type receiverHead struct {
 
 // receiverConfig is head's receiver with the profiles of plugins sorted by type, each plugin's in their order, every
 // profile's labels and config merged onto its plugin's.
-func receiverConfig(head receiverHead, capacity int64, plugins []plugin) (operator.ReceiverConfig, error) {
-	config := operator.ReceiverConfig{Pool: head.Pool, Capacity: cmp.Or(capacity, 1), PluginSHA256: head.PluginSHA256, Broker: head.Broker}
+func receiverConfig(head receiverHead, plugins []plugin) (operator.ReceiverConfig, error) {
+	config := operator.ReceiverConfig{Pool: head.Pool, PluginSHA256: head.PluginSHA256, Broker: head.Broker}
 	if config.PluginSHA256 == nil {
 		config.PluginSHA256 = map[string]string{}
 	}
@@ -642,7 +645,7 @@ func receiverConfig(head receiverHead, capacity int64, plugins []plugin) (operat
 			if err != nil {
 				return config, fmt.Errorf("%s: profile %q: labels %w", e.where, profile.Name, err)
 			}
-			settings := operator.ProfileSettings{Name: profile.Name, Plugin: p.kind, Agent: profile.Agent, Config: merged}
+			settings := operator.ProfileSettings{Name: profile.Name, Plugin: p.kind, Agent: profile.Agent, Replicas: profile.Replicas, Config: merged}
 			for key, value := range mergedLabels {
 				if settings.Labels == nil {
 					settings.Labels = map[string]string{}

@@ -189,7 +189,7 @@ func (f *fixture) newHost(t *testing.T, host, stateDir string) *Host {
 // key.
 func (f *fixture) addReceiver(t *testing.T, id, pool string) *testReceiver {
 	t.Helper()
-	config := operator.ReceiverConfig{Receiver: id, Pool: pool, Capacity: 2, Profiles: []operator.ProfileSettings{
+	config := operator.ReceiverConfig{Receiver: id, Pool: pool, Profiles: []operator.ProfileSettings{
 		{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}},
 		{Name: "cloud", Plugin: "aws", Agent: "codex", Labels: map[string]string{"runtime": "exec"}},
 	}, PluginSHA256: map[string]string{"nomad": strings.Repeat("ab", 32), "aws": strings.Repeat("cd", 32)}}
@@ -589,7 +589,7 @@ func TestSubmitKeepsInputsWithinProfileInlineLimit(t *testing.T) {
 
 func TestSubmitIgnoresInlineLimitOfOfferOutsideSelector(t *testing.T) {
 	f := newFixture(t)
-	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2, Profiles: []operator.ProfileSettings{
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{
 		{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman"}},
 		{Name: "other", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "exec"}},
 	}, PluginSHA256: map[string]string{"nomad": strings.Repeat("ab", 32)}}
@@ -1026,7 +1026,7 @@ func TestResolvePlacementBySignature(t *testing.T) {
 func TestSubmitCountsOnlyLiveSpareForASignature(t *testing.T) {
 	f := newFixture(t)
 	us := operator.ProfileSettings{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "us"}}
-	config := operator.ReceiverConfig{Receiver: "receiver-b", Pool: "pool-a", Capacity: 2, Profiles: []operator.ProfileSettings{us}, PluginSHA256: map[string]string{"nomad": strings.Repeat("ab", 32)}}
+	config := operator.ReceiverConfig{Receiver: "receiver-b", Pool: "pool-a", Profiles: []operator.ProfileSettings{us}, PluginSHA256: map[string]string{"nomad": strings.Repeat("ab", 32)}}
 	receiver := f.addReceiverConfig(t, config)
 	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity = 2 })
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity = 1 })

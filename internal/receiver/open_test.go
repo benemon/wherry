@@ -1906,7 +1906,7 @@ func TestWaitingRunReleasesWhenEntitlementEnds(t *testing.T) {
 		t.Fatalf("dispatched %d runs", n)
 	}
 	before := len(f.records(t, operator.PoolEventsTopic(testPool)))
-	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckReject {
+	if admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckReject {
 		t.Fatalf("redelivery admitted=%v ack=%v", admitted != nil, ack)
 	}
 	if len(f.records(t, operator.PoolEventsTopic(testPool))) != before {

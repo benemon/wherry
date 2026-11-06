@@ -142,8 +142,9 @@ type fakePlugin struct {
 	sweeps   int
 	sweepErr error
 	// endDelay holds the job open after its stream before it ends; pauses hold it that long before the line at each index.
-	endDelay time.Duration
-	pauses   map[int]time.Duration
+	followHold <-chan struct{}
+	endDelay   time.Duration
+	pauses     map[int]time.Duration
 	// ended makes Follow end with that terminal after the stream, rather than an exit of 0.
 	ended *pluginsdk.Terminal
 	// linkLost makes that many Follows end with lostErr, or else pluginsdk.ErrLinkLost, after at most one line; froms
@@ -317,6 +318,7 @@ func (f *fakePlugin) Follow(ctx context.Context, handle pluginsdk.Handle, from i
 	}
 	f.lastDeadline, _ = ctx.Deadline()
 	lost, lostErr := f.follows <= f.linkLost, cmp.Or(f.lostErr, pluginsdk.ErrLinkLost)
+	hold := f.followHold
 	stream, followErr, endDelay, pauses, neverStarted, neverClass, neverReason, ended := append([]string(nil), f.stream...), f.followErr, f.endDelay, f.pauses, f.neverStarted, f.neverClass, f.neverReason, f.ended
 	f.mu.Unlock()
 	var offset int64
@@ -347,6 +349,13 @@ func (f *fakePlugin) Follow(ctx context.Context, handle pluginsdk.Handle, from i
 	}
 	if followErr != nil {
 		return pluginsdk.Terminal{}, followErr
+	}
+	if hold != nil {
+		select {
+		case <-hold:
+		case <-ctx.Done():
+			return pluginsdk.Terminal{}, ctx.Err()
+		}
 	}
 	select {
 	case <-time.After(endDelay):
@@ -544,7 +553,7 @@ var testPluginSHA256 = strings.Repeat("ab", 32)
 
 func testConfig(receiver string) operator.ReceiverConfig {
 	return operator.ReceiverConfig{
-		Receiver: receiver, Pool: testPool, Capacity: 1,
+		Receiver: receiver, Pool: testPool,
 		Profiles:     []operator.ProfileSettings{{Name: "nomad", Plugin: "fake", Agent: "claude", Labels: map[string]string{"zone": "dc1", "example.com/gpu": "none"}, Config: map[string]any{}}},
 		PluginSHA256: map[string]string{"fake": testPluginSHA256},
 	}
@@ -1033,7 +1042,14 @@ func decodeObject(t *testing.T, value []byte) map[string]any {
 // admitted admits record, failing the test when it is not admitted.
 func (f fixture) admitted(t *testing.T, record *kgo.Record) *admission {
 	t.Helper()
-	admitted, ack := f.receiver.admit(f.ctx, record)
+	profile := f.receiver.profiles[0]
+	for _, named := range f.receiver.profiles {
+		if operator.SignatureTopic(f.receiver.config.Pool, named.Agent, named.Labels) == record.Topic {
+			profile = named
+			break
+		}
+	}
+	admitted, ack := f.receiver.admit(f.ctx, record, profile)
 	if admitted == nil {
 		t.Fatalf("not admitted (ack %v); logs:\n%s", ack, f.logs.String())
 	}
@@ -1244,7 +1260,7 @@ func TestRunExitsOnConfigChange(t *testing.T) {
 	default:
 	}
 	config := testConfig(testReceiver)
-	config.Capacity = 2
+	config.Profiles[0].Replicas = 2
 	f.appendConfig(t, config)
 	select {
 	case err := <-done:
@@ -1419,7 +1435,7 @@ func TestReceiverWithNoReadyProfileAdvertisesNoOffers(t *testing.T) {
 	if advertisement := f.advertisedOffers(t); len(advertisement.Offers) != 0 || advertisement.Capacity != 1 {
 		t.Fatalf("advertisement %#v, want a live advertisement with no offers", advertisement)
 	}
-	if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, nil)); admitted != nil || ack != kgo.AckRelease {
+	if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, nil), f.receiver.profiles[0]); admitted != nil || ack != kgo.AckRelease {
 		t.Fatalf("admitted=%v ack=%v, want a start failure and release", admitted != nil, ack)
 	}
 }
@@ -1636,12 +1652,12 @@ func TestStopReleasesHeldTaskOnce(t *testing.T) {
 	for name, want := range map[string]error{"cancelled": context.Canceled} {
 		t.Run(name, func(t *testing.T) {
 			terms, config := testTerms(), testConfig(testReceiver)
-			terms.DeliveryLimit, config.Capacity = 5, 6
+			terms.DeliveryLimit, config.Profiles[0].Replicas = 5, 6
 			f := newFixtureWith(t, noResultStream, terms, config, map[string]*fakePlugin{"nomad": {stream: noResultStream, endDelay: time.Minute}})
 			ctx, stop := context.WithCancel(f.ctx)
 			defer stop()
-			done := f.run(t, ctx)
 			f.submit(t, f.host, nil)
+			done := f.run(t, ctx)
 			for {
 				if _, _, follows, _ := f.plugin.counts(); follows == 1 {
 					break
@@ -1677,8 +1693,8 @@ func holdRun(t *testing.T, f fixture) (<-chan error, context.CancelFunc) {
 	t.Helper()
 	ctx, stop := context.WithCancel(f.ctx)
 	t.Cleanup(stop)
-	done := f.run(t, ctx)
 	f.submit(t, f.host, nil)
+	done := f.run(t, ctx)
 	for {
 		if _, _, follows, _ := f.plugin.counts(); follows == 1 {
 			return done, stop
@@ -1716,7 +1732,7 @@ func TestConfigChangeDrainsHeldRun(t *testing.T) {
 	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, endDelay: 3 * time.Second}})
 	done, _ := holdRun(t, f)
 	config := testConfig(testReceiver)
-	config.Capacity = 2
+	config.Profiles[0].Replicas = 2
 	f.appendConfig(t, config)
 	f.submit(t, f.host, func(task *wire.Submission) {
 		named(task, "run-b")
@@ -1760,7 +1776,7 @@ func TestCancelStopsADrainingRun(t *testing.T) {
 	f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: noResultStream, endDelay: time.Minute}})
 	done, _ := holdRun(t, f)
 	config := testConfig(testReceiver)
-	config.Capacity = 2
+	config.Profiles[0].Replicas = 2
 	f.appendConfig(t, config)
 	for !strings.Contains(f.logs.String(), "configuration changed") {
 		time.Sleep(50 * time.Millisecond)
@@ -1922,7 +1938,7 @@ func TestRevocationLeavesAHeldRunToAnAdopter(t *testing.T) {
 			done, _ := holdRun(t, f)
 			if c.draining {
 				config := testConfig(testReceiver)
-				config.Capacity = 2
+				config.Profiles[0].Replicas = 2
 				f.appendConfig(t, config)
 				for !strings.Contains(f.logs.String(), "configuration changed") {
 					time.Sleep(50 * time.Millisecond)

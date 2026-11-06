@@ -72,14 +72,19 @@ var (
 // completed. A variable so tests can control it.
 var clock = time.Now
 
+// newClaimClient lets tests identify replicas with identical subscriptions.
+var newClaimClient = func(r *Receiver, _ Named, opts ...kgo.Opt) (*kgo.Client, error) {
+	return r.newClient(opts...)
+}
+
 // claimLoop holds one slot: a dedicated share client per claimed record,
 // because renews do not survive a poll and held records are tied to the connection.
 // It claims until claiming ends and runs a held task until running ends. idle is called once the slot's
 // idle share client has closed, or once claiming ends while the slot holds a task.
-func (r *Receiver) claimLoop(claiming, running context.Context, idle func()) {
+func (r *Receiver) claimLoop(claiming, running context.Context, profile Named, idle func()) {
 	defer idle()
 	for claiming.Err() == nil {
-		if err := r.claimOne(claiming, running, idle); err != nil && claiming.Err() == nil {
+		if err := r.claimOne(claiming, running, profile, idle); err != nil && claiming.Err() == nil {
 			r.deny(err, capClaim)
 			r.logger.Printf("claim: %v", err)
 			sleep(claiming, 2*time.Second)
@@ -87,41 +92,25 @@ func (r *Receiver) claimLoop(claiming, running context.Context, idle func()) {
 	}
 }
 
-// claimGated reports that no new poll of the pool may open: a suspended pool, no ready offer, which is an empty
-// subscription, or a held run observed pending. r.mu must be held, and never across a poll, a client close, a sleep or
-// a plugin call.
+// claimGated reports that no new poll may open: a suspended pool, no ready offer or a held run observed pending.
+// r.mu must be held, and never across a poll, a client close, a sleep or a plugin call.
 func (r *Receiver) claimGated() bool {
 	return r.state.Suspended[r.config.Pool] || len(r.offers) == 0 || len(r.pending) > 0
 }
 
-// subscription is the sorted signature topics of the ready profiles, each once. A
-// profile joins only through its own signature. r.mu must be held.
-func (r *Receiver) subscription() []string {
-	var topics []string
-	for _, named := range r.profiles {
-		if slices.ContainsFunc(r.offers, func(offer wire.Offer) bool { return offer.Profile == named.Name }) {
-			topics = append(topics, operator.SignatureTopic(r.config.Pool, named.Agent, named.Labels))
-		}
-	}
-	slices.Sort(topics)
-	return slices.Compact(topics)
-}
-
-// claimable is claimGated and the subscription, read together under r.mu.
-func (r *Receiver) claimable() (bool, []string) {
+func (r *Receiver) gated(profile Named) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.claimGated(), r.subscription()
+	return r.claimGated() || !r.ready(profile.Name)
 }
 
-func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
-	gated, topics := r.claimable()
-	if gated {
+func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle func()) error {
+	if r.gated(profile) {
 		sleep(claiming, time.Second)
 		return nil
 	}
-	share, err := r.newClient(
-		kgo.ConsumeTopics(topics...),
+	share, err := newClaimClient(r, profile,
+		kgo.ConsumeTopics(operator.SignatureTopic(r.config.Pool, profile.Agent, profile.Labels)),
 		kgo.ShareGroup(operator.PoolGroup(r.config.Pool)),
 		kgo.ShareMaxRecords(1),
 		kgo.ShareMaxRecordsStrict(),
@@ -146,10 +135,9 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		defer cancel()
 		return share.FlushAcks(flushCtx)
 	}
-	// stale reports the gate holding or the subscription no longer the client's, so the slot reopens with the new set.
+	// A held client keeps renewing through readiness changes.
 	stale := func() bool {
-		gated, current := r.claimable()
-		return gated || !slices.Equal(current, topics)
+		return r.gated(profile)
 	}
 	var record *kgo.Record
 	for record == nil {
@@ -182,7 +170,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		record.Ack(kgo.AckRelease)
 		return flush()
 	}
-	admitted, ack := r.admit(ctx, record)
+	admitted, ack := r.admit(ctx, record, profile)
 	if admitted == nil {
 		record.Ack(ack)
 		return flush()
@@ -222,7 +210,7 @@ type admission struct {
 }
 
 // admit decides whether record's task runs here; a nil admission carries the acknowledgement.
-func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, kgo.AckStatus) {
+func (r *Receiver) admit(ctx context.Context, record *kgo.Record, profile Named) (*admission, kgo.AckStatus) {
 	hash := wire.TaskHash(record.Value)
 	// Released even at the delivery budget: without the events, a terminal could repeat a committed one.
 	events, err := r.readEvents(ctx)
@@ -313,17 +301,22 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	ending := claimed && (now > task.Wherry.TaskStartedBy && !started || now > task.Wherry.TaskEndedBy)
 	// The record's topic routes the task: its agent is the placement's, and the profile it reached is ready and serves
 	// the selector, or the host computed the wrong topic.
-	if _, topicAgent, ok := wire.ParseTaskTopic(record.Topic); !ok || topicAgent != placement.Agent {
+	if _, topicAgent, ok := wire.ParseTaskTopic(record.Topic); !ok || topicAgent != placement.Agent || record.Topic != operator.SignatureTopic(r.config.Pool, profile.Agent, profile.Labels) {
 		return reject(rejectionReasonTopicAgent)
 	}
-	profile, offered := r.offerFor(record.Topic)
+	r.mu.Lock()
+	offered := r.ready(profile.Name)
+	r.mu.Unlock()
 	if !offered && !ending {
 		// A profile that went unready since this slot subscribed: another member, or this one once ready, takes it.
 		r.logger.Printf("run %s: no ready profile for topic %s; releasing", run, record.Topic)
 		return giveBack()
 	}
-	if offered && !wire.Satisfies(placement.Selector, profile.Labels) {
+	if !wire.Satisfies(placement.Selector, profile.Labels) {
 		return reject(rejectionReasonSelector)
+	}
+	if !offered && ending {
+		profile = Named{}
 	}
 	if !claimed && time.Since(record.Timestamp) > terms.StartByLimit() {
 		return reject(rejectionReasonStartLimit)

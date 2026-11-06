@@ -839,7 +839,9 @@ func (f fixture) lastEvent(t *testing.T) string {
 
 // gated reports the receiver's claim gate as a slot reads it.
 func gated(f fixture) bool {
-	gated, _ := f.receiver.claimable()
+	f.receiver.mu.Lock()
+	gated := f.receiver.claimGated()
+	f.receiver.mu.Unlock()
 	return gated
 }
 
@@ -950,7 +952,7 @@ func TestSuspendedPoolServesAPendingAdoption(t *testing.T) {
 func pendingGateFixture(t *testing.T) fixture {
 	t.Helper()
 	config := testConfig(testReceiver)
-	config.Capacity = 6
+	config.Profiles[0].Replicas = 6
 	return newFixtureWith(t, resultStream, testTerms(), config, map[string]*fakePlugin{
 		"nomad": {stream: resultStream, placing: true, placingReason: "queued", placedRuns: map[string]bool{}},
 	})

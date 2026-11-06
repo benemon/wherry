@@ -398,8 +398,9 @@ func TestBudgetEndCountsOncePerTenantAndProfile(t *testing.T) {
 	if status := run.returnTask(f.ctx, nil); status != kgo.AckReject {
 		t.Fatalf("status %v, want reject", status)
 	}
-	unoffered := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Placement.Agent = "codex" })
-	if admitted, ack := f.receiver.admit(f.ctx, unoffered); admitted != nil || ack != kgo.AckReject {
+	f.setReady(t, false)
+	unoffered := f.submit(t, f.host, nil)
+	if admitted, ack := f.receiver.admit(f.ctx, unoffered, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckReject {
 		t.Fatalf("admitted=%v ack=%v, want reject", admitted != nil, ack)
 	}
 	run.attempt--
@@ -431,9 +432,9 @@ func gaugeLines(t *testing.T, text, name string) []string {
 }
 
 // Each profile has one wherry_profile_ready sample naming its signature topic, 1 exactly while it is in the ready
-// offers, and the topics at 1 are the subscription.
+// offers, including duplicate signatures.
 func TestProfileReadyNamesEachProfilesTopic(t *testing.T) {
-	f := signatureFixture(t, 1,
+	f := signatureFixture(t,
 		signatureProfile("a", "claude", map[string]string{"gpu": "1"}),
 		signatureProfile("b", "claude", map[string]string{"gpu": "2"}),
 		signatureProfile("c", "claude", map[string]string{"gpu": "1"}))
@@ -452,19 +453,6 @@ func TestProfileReadyNamesEachProfilesTopic(t *testing.T) {
 		got := gaugeLines(t, text, "wherry_profile_ready")
 		if !slices.Equal(got, want) {
 			t.Fatalf("wherry_profile_ready samples\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
-		}
-		var ready []string
-		for _, line := range got {
-			if strings.HasSuffix(line, " 1") {
-				ready = append(ready, line[strings.Index(line, `topic="`)+len(`topic="`):strings.LastIndex(line, `"}`)])
-			}
-		}
-		slices.Sort(ready)
-		f.receiver.mu.Lock()
-		subscription := f.receiver.subscription()
-		f.receiver.mu.Unlock()
-		if !slices.Equal(slices.Compact(ready), subscription) {
-			t.Fatalf("topics at 1 %v; subscription %v", ready, subscription)
 		}
 	}
 	f.ready(t, "b", false)
@@ -903,7 +891,7 @@ func TestFixedMetricDomains(t *testing.T) {
 				case "append":
 					record.Timestamp = record.Timestamp.Add(2 * time.Minute)
 				}
-				if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckReject {
+				if admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckReject {
 					t.Fatalf("admitted=%v ack=%v; %s", admitted != nil, ack, f.logs.String())
 				}
 				scraped(t, f.receiver, series+" 1")

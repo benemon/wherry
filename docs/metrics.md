@@ -35,7 +35,7 @@ hash is not secret protection.
 | `wherry_adoptions_total` | counter | `tenant`, `profile` | runs that adopted an earlier attempt's job |
 | `wherry_redeliveries_total` | counter | `tenant`, `profile` | runs executed on a redelivery |
 | `wherry_in_flight` | gauge | `profile` | tasks held |
-| `wherry_capacity` | gauge | none | the configured capacity |
+| `wherry_capacity` | gauge | none | maximum held records: the sum of effective profile replicas |
 | `wherry_runs_past_deadline` | gauge | `profile` | tasks held past their task_ended_by that have not ended |
 | `wherry_profile_ready` | gauge | `profile`, `topic` | 1 when the profile is in the receiver's current ready offers; 0 otherwise |
 | `wherry_claim_gated` | gauge | `reason` | 1 while the restriction prevents a new poll: `suspended`, `no_ready_offer`, `pending_run` |

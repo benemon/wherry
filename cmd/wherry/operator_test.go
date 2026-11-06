@@ -202,7 +202,7 @@ func TestRevokeRefusesAWaitThatIsNotPositive(t *testing.T) {
 // The record decodes numbers as float64; show prints a whole one as an integer.
 func TestReceiverShowPrintsWholeNumbersAsIntegers(t *testing.T) {
 	var out bytes.Buffer
-	config := operator.ReceiverConfig{Capacity: 1, Profiles: []operator.ProfileSettings{{Name: "p", Plugin: "nomad", Agent: "claude",
+	config := operator.ReceiverConfig{Profiles: []operator.ProfileSettings{{Name: "p", Plugin: "nomad", Agent: "claude",
 		Config: map[string]any{"memory_mb": float64(1 << 20), "ratio": 0.5, "sizes": []any{float64(2048000)}}}}}
 	if err := showReceiver(&out, config); err != nil {
 		t.Fatal(err)
@@ -222,7 +222,7 @@ func TestReceiverShowAndDryRun(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
-	recorded := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 3, Profiles: []operator.ProfileSettings{{Name: "old", Plugin: "nomad", Agent: "claude"}},
+	recorded := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{{Name: "old", Plugin: "nomad", Agent: "claude"}},
 		PluginSHA256: map[string]string{"nomad": fakeSHA256}}
 	bundle, err := bundlePath(".", "receivers", true, "receiver-a")
 	if err != nil {
@@ -248,8 +248,7 @@ func TestReceiverShowAndDryRun(t *testing.T) {
 		}
 		return stdout.String()
 	}
-	shown := `capacity: 3
-plugin_sha256:
+	shown := `plugin_sha256:
     nomad: ` + fakeSHA256 + `
 profiles:
     - name: old
@@ -281,8 +280,7 @@ profiles:
 	if records() != before {
 		t.Fatal("apply --dry-run produced a record")
 	}
-	resolved := `capacity: 1
-plugin_sha256:
+	resolved := `plugin_sha256:
     nomad: ` + fakeSHA256 + `
 profiles:
     - name: claude

@@ -392,7 +392,7 @@ func TestProfileCredentialReachesThePluginInPlaceOfItsName(t *testing.T) {
 	plugins := &plugins{dir: installPlugin(t), credentials: map[string]credential.Source{"nomad-token": {File: token}}, hold: func(string, []byte) {},
 		logs: io.Discard, logger: discard, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
-	settings := operator.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": "nomad-token", "outputs": true}}
+	settings := operator.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude", Replicas: 3, Config: map[string]any{"credential": "nomad-token", "outputs": true}}
 	if _, err := plugins.profile("build", settings, fakeSHA256); err != nil {
 		t.Fatal(err)
 	}

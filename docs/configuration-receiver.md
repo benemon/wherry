@@ -173,7 +173,6 @@ from the command. Unknown fields are errors.
 | `pool` | string | required for a new receiver | Name the pool whose terms this receiver serves. |
 | `plugin_sha256` | mapping | required | Pin each plugin binary by its 64 lowercase hex SHA-256 digits. |
 | `broker` | string | broker in `operator.yaml` | Set the address written in this receiver's bundle. |
-| `capacity` | integer | `1` | Bound the number of runs the receiver holds at once. |
 | `plugins` | mapping | required | Declare plugins and their profiles. |
 
 A plugin entry's key is a [plugin](plugins.md) name; the receiver
@@ -192,21 +191,31 @@ Each profile entry:
 | --- | --- | --- | --- |
 | `name` | string | required | profile name, unique in the receiver |
 | `agent` | string | required | the agent it launches, from the pool's terms |
+| `replicas` | integer | `1` | fresh-dispatch lanes; 0 also means one; negatives are refused |
 | `labels` | mapping | none | optional; [labels](commands.md#labels) for placement |
 | `config` | mapping | none | the plugin's settings for this profile |
+
+A profile may set `replicas: N` for N fresh-dispatch lanes. Omitted, 0 and 1 each mean one
+replica; negative values are refused. Replicas stay separate from plugin `config` and
+labels. Each replica holds at most one record and subscribes only to its profile's
+signature topic. The receiver advertises the sum of effective replicas, including
+unready profiles. Profiles with the same signature still have their own loops.
+
+On redelivery, a loop may adopt an existing job owned by another configured profile.
+The sum of replicas bounds held records, rather than executions per adopted profile.
+A pending observation gates polling across the receiver; held clients keep renewing.
 
 A plugin profile's `config` and `labels` are its plugin's merged with its
 own, as [Plugin profile merge](#plugin-profile-merge) describes. A
 `credential` key in the merged `config` names a [platform
 credential](#platform-credentials), and its value is a string.
 
-A receiver subscribes to the signature topics of its ready profiles. A
-claimed task goes to its first ready profile in recorded order with the
-claimed topic's signature. The selector guards against a host publishing to
-the wrong topic; it does not choose between profiles. If no profile of that
-signature is ready, the receiver releases the task unless it is cleaning up
-an ending run. The record on `wherry.operator` holds each profile with
-its name, plugin, agent, labels and merged `config`.
+Each replica subscribes only to its profile's signature topic and admits fresh
+tasks through that profile. The selector guards against a host publishing to
+the wrong topic. If the loop's profile is unready it releases the task unless
+it is cleaning up an ending run. Redelivery may adopt a job in another profile.
+The record on `wherry.operator` holds each profile with its name, plugin,
+agent, optional replicas, labels and merged `config`.
 
 ### Plugin profile merge
 
@@ -289,7 +298,7 @@ plugins/
 | File | Fields |
 | --- | --- |
 | `config.yaml` | optional: receiver local configuration, kept outside the receiver record |
-| `receiver.yaml` | `pool`, `plugin_sha256`, `broker` and `capacity` |
+| `receiver.yaml` | `pool`, `plugin_sha256`, `broker` |
 | `plugins/<type>/plugin.yaml` | optional: the plugin's `labels` and `config` |
 | `plugins/<type>/profiles/*.yaml` | one plugin profile entry; routing order within the plugin is the lexical order of the file names |
 
@@ -316,7 +325,6 @@ As one file for
 pool: build
 plugin_sha256:
   nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-capacity: 3
 plugins:
   nomad:
     # Every plugin profile of this plugin inherits these keys and can override them.
@@ -366,14 +374,12 @@ nomad-1/
         20-host.yaml
 ```
 
-`receiver.yaml`, with the single file's `pool`, `plugin_sha256`, `broker`
-and `capacity`:
+`receiver.yaml`, with the single file's `pool`, `plugin_sha256`, `broker`:
 
 ```yaml
 pool: build
 plugin_sha256:
   nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-capacity: 3
 ```
 
 `plugins/nomad/plugin.yaml`:

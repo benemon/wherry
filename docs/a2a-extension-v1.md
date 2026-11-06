@@ -705,7 +705,9 @@ when its `task_hash` equals the hash of the run's submission.
 
 ## Advertisement
 
-An advertisement reports a receiver's liveness and capacity.
+An advertisement reports a receiver's liveness and capacity: the sum of its
+profiles' effective replicas (0 or absent means one). This bounds held records;
+a redelivery may adopt another profile's existing job.
 
 ```json
 {
@@ -1268,11 +1270,12 @@ writes, each with `v`, `kind` and `at_ms` (Unix milliseconds).
 and `record_limit`, the lowest record limit of the pool's task topics that `pool apply` reads
 from the broker, with `start_by_limit_ms` and `lock_duration_ms` in milliseconds for its
 `start_by_limit` and `lock_duration`. `config` holds `receiver` and `pool`,
-which equal the record's, the receiver's `capacity`, `plugin_sha256`, the
+which equal the record's, the receiver's `plugin_sha256`, the
 lowercase hex SHA-256 pinned for each plugin type, and its `profiles` in
 routing order, the plugins in the order of their names. Each plugin profile is the
 [profile entry](configuration-receiver.md#receiver-configuration) as `name`, `plugin`
-naming its plugin, `agent`, `labels` when set, and the merged
+naming its plugin, `agent`, optional `replicas` (omitted when 0; 0 means one),
+`labels` when set, and the merged
 `config`, which keeps a `credential` name and never a credential value. An `end` names
 exactly one subject: `receiver`, `tenant` and `host`, `tenant` and `pool`, or `tenant` alone. Tenant and entitlement ends use keys `end.tenant.<T>` and `end.entitlement.<T>.<P>` and live outside principal revocation sets. A `revoking` names exactly one of `receiver`, or
 `tenant` and `host`, and no other member.

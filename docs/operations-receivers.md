@@ -18,7 +18,7 @@ For Nomad, follow the plugin's [receiver policy](https://github.com/benemon/wher
    Use `drain_timeout: 20s` with a 30-second stop window.
 5. Run `wherry receiver run --config-file FILE` through the supervisor.
    Without the flag, it reads `/etc/wherry/config.yaml`.
-6. Check the logs for `registered key: signing=<key id>` and `configured: pool=<pool> profiles=<n> capacity=<n>`.
+6. Check the logs for `registered key: signing=<key id>` and `configured: pool=<pool> profiles=<n> replicas=<n>`.
    `waiting for configuration` means the configuration record is missing.
 7. Run `wherry host receivers` from an entitled tenant's host.
    Check that the receiver is `live` after its first advertisement.
@@ -149,15 +149,13 @@ Each plugin's README runs the receiver on its platform, with its steps:
 
 ### What a receiver subscribes to
 
-A receiver subscribes, through its pool's share group, to the signature task
-topics of its ready profiles: one topic per profile signature, a profile's
-agent and all its labels. A task on another signature never reaches it.
-After an advertisement, every 30 seconds, that changes the set, it closes its
-idle polls and reopens them with the new set; the close waits out an
-in-flight fetch, and the join takes the broker's group round trip. A slot
-holding a run keeps its share session. A label or agent change comes through
-`receiver apply`, which restarts the receiver on the new record and moves the
-profile's signature to a new topic.
+Each profile has one share client per effective replica, subscribing only to that
+profile's signature topic through the pool's share group. An idle loop keeps its
+client across empty polls. When its profile becomes unready it closes its idle
+client; when ready again it rejoins after that close completes. Other profiles'
+idle clients keep their identity. Held clients keep renewing through readiness
+changes. A label, agent or replica change through `receiver apply` exits the
+receiver after its held runs end, so its platform restarts it on the new record.
 
 `wherry_profile_ready` names each configured profile's signature topic and
 whether its latest local readiness evaluation included it in the ready
@@ -172,22 +170,20 @@ advertisement. No fixed freshness bound applies. A ready profile reads 1 even
 while the claim gate is closed; `wherry_claim_gated` says, by reason, whether
 a restriction prevents a new poll, and its `no_ready_offer` reason is 1
 exactly when every `wherry_profile_ready` of the receiver is 0. Two profiles
-with the same agent and labels name the same topic, which the receiver
-subscribes once.
+with the same agent and labels name the same topic, with one subscriber per replica of each profile.
 
 A profile that goes unready between a claim's subscription and its fetch has
 its task released to the pool, logged as
 `run <run>: no ready profile for topic <topic>; releasing`, with no metric
-and no start-failure record. The member's other slots still polling may
-acquire the task once each before they reopen without the topic, and each
-acquisition spends a delivery.
+and no start-failure record. Sibling loops subscribing to the same signature may acquire the task once each
+before their idle clients close; each acquisition spends a delivery.
 
 ### A receiver with no ready offer
 
 A receiver offers a profile only while the profile's plugin reports it ready.
 A receiver with no ready offer has an empty subscription and fetches no tasks from its pool.
 It closes its idle polls when it observes the empty subscription.
-After an advertisement makes a profile ready, it reopens with the new set, unless its pool is suspended (`wherry_claim_gated{reason="suspended"}`) or it holds a [pending run](#a-receiver-with-a-pending-run) (`wherry_claim_gated{reason="pending_run"}`); closing waits for the in-flight fetch, and joining takes the broker's round trip.
+After an advertisement makes a profile ready, it reopens each ready profile's loops, unless its pool is suspended (`wherry_claim_gated{reason="suspended"}`) or it holds a [pending run](#a-receiver-with-a-pending-run) (`wherry_claim_gated{reason="pending_run"}`); closing waits for the in-flight fetch, and joining takes the broker's round trip.
 Its held runs keep running, renewing and reading cancels.
 `wherry_claim_gated{reason="no_ready_offer"}` is 1 while it has no ready offer; it reports a restriction on opening new polls, not observed polling.
 
@@ -225,7 +221,10 @@ A receiver that observes any held run pending stops claiming:
 
 `wherry_claim_gated{reason="pending_run"}` is 1 while it holds a pending run; it reports a restriction on opening new polls, not observed polling.
 
-A receiver holds at most its capacity of runs, so at most that many of its runs are pending at once.
+A receiver holds at most the sum of its profiles' effective replicas in records,
+with each profile's fresh tasks bounded by its replicas. Redelivery can adopt a
+job in another profile. One pending observation gates every idle loop; records
+already fetched remain admissible under the admission checks.
 A pending run past its `task_started_by` is stopped and fails with `not started by task_started_by (<RFC 3339 time>)`.
 
 While a member holds a pending run, a redelivery, an `ending` cleanup or a queued cancel of another task waits for that member to claim again or for another member.

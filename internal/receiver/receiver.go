@@ -251,9 +251,12 @@ func (r *Receiver) Run(ctx context.Context) error {
 	// Held tasks are released only once every idle slot's share client has closed: a closing client releases what its
 	// pending fetch acquired, so a task released earlier would hop through each, one delivery per hop.
 	var idle, slots sync.WaitGroup
-	idle.Add(int(r.config.Capacity))
-	for slot := int64(0); slot < r.config.Capacity; slot++ {
-		slots.Go(func() { r.claimLoop(ctx, running, sync.OnceFunc(idle.Done)) })
+	idle.Add(r.replicas())
+	for i, profile := range r.profiles {
+		for range replicasOf(r.config.Profiles[i]) {
+			idleDone := sync.OnceFunc(idle.Done)
+			slots.Go(func() { r.claimLoop(ctx, running, profile, idleDone) })
+		}
 	}
 	idle.Wait()
 	go func() {
@@ -376,8 +379,8 @@ func (r *Receiver) configure(ctx context.Context) error {
 			}
 			r.config, r.profiles = config, profiles
 			r.metrics.registerFor(r)
-			r.metrics.capacity.Set(float64(config.Capacity))
-			r.logger.Printf("configured: pool=%s profiles=%d capacity=%d", config.Pool, len(profiles), config.Capacity)
+			r.metrics.capacity.Set(float64(r.replicas()))
+			r.logger.Printf("configured: pool=%s profiles=%d replicas=%d", config.Pool, len(profiles), r.replicas())
 			return r.refresh(ctx)
 		}
 		if !waiting {
@@ -592,7 +595,7 @@ func (r *Receiver) advertise(ctx context.Context) error {
 	inFlight := r.inFlight
 	r.mu.Unlock()
 	value, err := wire.SignRecord(&wire.Advertisement{
-		Receiver: r.id, Pool: r.config.Pool, Offers: offers, Capacity: r.config.Capacity, InFlight: inFlight, AtMS: time.Now().UnixMilli(),
+		Receiver: r.id, Pool: r.config.Pool, Offers: offers, Capacity: int64(r.replicas()), InFlight: inFlight, AtMS: time.Now().UnixMilli(),
 	}, r.signing)
 	if err != nil {
 		return err
@@ -605,18 +608,24 @@ func (r *Receiver) advertise(ctx context.Context) error {
 	return nil
 }
 
-// offerFor returns this receiver's first profile, in record order, that is in its current offers and whose signature
-// topic is topic.
-func (r *Receiver) offerFor(topic string) (Named, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, named := range r.profiles {
-		if operator.SignatureTopic(r.config.Pool, named.Agent, named.Labels) == topic &&
-			slices.ContainsFunc(r.offers, func(offer wire.Offer) bool { return offer.Profile == named.Name }) {
-			return named, true
-		}
+func replicasOf(settings operator.ProfileSettings) int {
+	if settings.Replicas == 0 {
+		return 1
 	}
-	return Named{}, false
+	return settings.Replicas
+}
+
+func (r *Receiver) replicas() int {
+	var total int
+	for _, settings := range r.config.Profiles {
+		total += replicasOf(settings)
+	}
+	return total
+}
+
+// ready requires r.mu.
+func (r *Receiver) ready(name string) bool {
+	return slices.ContainsFunc(r.offers, func(offer wire.Offer) bool { return offer.Profile == name })
 }
 
 // poolEvents is one read of the pool's events topic.

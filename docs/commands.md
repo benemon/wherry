@@ -515,7 +515,7 @@ lowercase hex digits is an error; either refusal writes nothing. Its
 `operator.yaml` when it is empty. The [guided path](#operator-commands) asks
 for the pool, the plugin type (default `nomad`), its pin and its `config` as
 a YAML flow mapping, the agents (one plugin profile each, named after its
-agent) with their labels, the capacity (default 1) and the broker address
+agent) with their labels and the broker address
 (default the operator's).
 
 Before recording, you provide the receiver's [local configuration](configuration-receiver.md#generate-or-provide-the-local-configuration).
@@ -583,16 +583,14 @@ receiver's configuration record, and takes no `-f` or `--dry-run`.
 wherry operator receiver show RECEIVER
 ```
 
-Prints the receiver's recorded configuration as YAML: `capacity`, then
-`plugin_sha256`, the SHA-256 pinned for each plugin type, then
+Prints the receiver's recorded configuration as YAML: `plugin_sha256`, the SHA-256 pinned for each plugin type, then
 `profiles`, each plugin profile resolved, in routing order, with its
-`name`, `plugin`, `agent`, `labels` and merged `config`
+`name`, `plugin`, `agent`, `replicas` when above 1, `labels` and merged `config`
 ([Plugin profile merge](configuration-receiver.md#plugin-profile-merge)),
 its `signature`, the agent and every label, double-quoted with each line
 feed shown as `\n`, and the signature's task `topic`:
 
 ```yaml
-capacity: 3
 plugin_sha256:
     nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 profiles:

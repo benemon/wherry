@@ -112,7 +112,8 @@ is at most 120 seconds old is live. For each live receiver, each agent the
 task may run and each ready profile that launches it with labels the selector
 accepts, the client counts the profile's signature, and adds the receiver's
 spare capacity once to each signature it offers: an estimate, since a
-receiver's capacity is shared across its signatures. With no agent named, a
+receiver's capacity is partitioned by profile replicas; spare is an aggregate
+estimate. With no agent named, a
 signature of the pool's default agent wins over any other; with no
 default-agent signature matching, the choice among the other agents'
 signatures is by spare capacity. Among the signatures that remain, the one
@@ -121,14 +122,14 @@ selector no live signature satisfies is refused. The client signs the agent,
 the selector and the chosen pool into the task and writes it to the
 signature's task topic.
 
-**The receiver subscribes** to the signature topics of its ready profiles.
-A claimed task goes to its first ready profile in recorded order with that
-topic's signature. All profiles sharing a signature have the same agent and
-labels. The selector is checked as a guard against a host publishing to the
-wrong topic; it does not route the task between profiles. If the signature
-has become unready, the receiver releases the task without recording an
+**Each profile replica subscribes** only to that profile's signature topic while
+ready. A fresh task goes through the profile of the loop that claimed it,
+including when profiles share a signature. The selector guards against a
+host publishing to the wrong topic; it does not choose between profiles.
+If the loop's profile becomes unready, it releases the task without an
 offer-unavailable start failure. An ending run can still clean up its job
-without a ready profile.
+without a ready profile. A redelivery may adopt another profile's existing
+job. Receiver-wide suspension and pending observations gate idle polling.
 
 **A label change moves a signature.** `receiver apply` creating a profile's
 new signature creates its topic before the record; the receiver restarts on

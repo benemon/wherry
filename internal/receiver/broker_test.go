@@ -111,7 +111,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 			defer cancel()
 			b := newBrokerPool(t, ctx, address)
-			b.configure(t, ctx, 6)
+			b.configure(t, ctx, brokerProfile(6))
 			b.deliveryLimit(t, ctx, 5)
 			opts, kafka, receiverID, pool, tenant, host := b.opts, b.kafka, b.receiver, b.pool, b.tenant, b.host
 			_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
@@ -246,11 +246,11 @@ func (b brokerPool) groupMembers(t *testing.T, ctx context.Context, clientID str
 	return n
 }
 
-// configure records the receiver's configuration with capacity.
-func (b brokerPool) configure(t *testing.T, ctx context.Context, capacity int64) {
+// configure records the receiver's profiles.
+func (b brokerPool) configure(t *testing.T, ctx context.Context, profiles ...operator.ProfileSettings) {
 	t.Helper()
 	config := testConfig(b.receiver)
-	config.Pool, config.Capacity = b.pool, capacity
+	config.Pool, config.Profiles = b.pool, profiles
 	if _, err := b.service.ReceiverUpdate(ctx, config, false); err != nil {
 		t.Fatal(err)
 	}
@@ -474,10 +474,8 @@ func TestOneBrokenOneWorkingMemberOnRealBroker(t *testing.T) {
 	}
 }
 
-// TestUnreadyReleaseSpendsAtMostTwoDeliveriesOnRealBroker runs a member of capacity 2 subscribed to profiles A and B and
-// makes A unready as a task on A's topic arrives: a slot that fetches it releases it and the other slot, still polling,
-// may re-acquire it once before its watcher acts, so the task has spent at most two deliveries when another member
-// subscribed to A's topic later receives it.
+// Only A's loop subscribes to A's topic. A readiness transition can release a fetched record;
+// B's loop cannot acquire that release. Sibling replicas of A could spend further deliveries.
 func TestUnreadyReleaseSpendsAtMostTwoDeliveriesOnRealBroker(t *testing.T) {
 	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
 	if address == "" {
@@ -489,7 +487,7 @@ func TestUnreadyReleaseSpendsAtMostTwoDeliveriesOnRealBroker(t *testing.T) {
 	b := newBrokerPool(t, ctx, address)
 	b.applyTerms(t, ctx, testTerms())
 	config := testConfig(b.receiver)
-	config.Pool, config.Capacity = b.pool, 2
+	config.Pool = b.pool
 	config.Profiles = []operator.ProfileSettings{
 		{Name: "a", Plugin: "fake", Agent: "claude", Labels: map[string]string{"sig": "a"}, Config: map[string]any{}},
 		{Name: "b", Plugin: "fake", Agent: "claude", Labels: map[string]string{"sig": "b"}, Config: map[string]any{}},
@@ -879,7 +877,7 @@ func TestBrokerPoolPassesOperatorCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := newBrokerPool(t, ctx, cluster.ListenAddrs()[0])
-	b.configure(t, ctx, 6)
+	b.configure(t, ctx, brokerProfile(6))
 	b.deliveryLimit(t, ctx, 4)
 	b.member(t, ctx, b.receiver+"-b")
 	if err := b.service.Check(ctx); err != nil {
@@ -1022,3 +1020,91 @@ func TestEndedHostKeyReadsOnRealBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func brokerProfile(replicas int) operator.ProfileSettings {
+	profile := testConfig(testReceiver).Profiles[0]
+	profile.Replicas = replicas
+	return profile
+}
+
+func TestThreeProfilesHoldTogetherOnRealBroker(t *testing.T) {
+	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
+	if address == "" {
+		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
+	}
+	shortIntervals(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	b := newBrokerPool(t, ctx, address)
+	profiles := []operator.ProfileSettings{
+		signatureProfile("a", "claude", map[string]string{"sig": "a"}),
+		signatureProfile("b", "claude", map[string]string{"sig": "b"}),
+		signatureProfile("c", "claude", map[string]string{"sig": "c"}),
+	}
+	b.configure(t, ctx, profiles...)
+	release := make(chan struct{})
+	defer close(release)
+	plugins := map[string]*fakePlugin{}
+	expected := map[string]bool{}
+	for _, p := range profiles {
+		plugins[p.Name] = &fakePlugin{stream: resultStream, followHold: release}
+		expected[operator.SignatureTopic(b.pool, p.Agent, p.Labels)] = true
+	}
+	r, logs := b.laneMember(t, b.receiver, signed.Keys{}, plugins)
+	runLane(t, ctx, r)
+	b.joined(t, ctx, logs)
+	host := b.laneHost(t, ctx)
+	for _, p := range profiles {
+		b.laneTask(t, ctx, host, "run-"+p.Name, operator.SignatureTopic(b.pool, p.Agent, p.Labels), func(task *wire.Submission) { task.Wherry.Placement.Selector = []wire.Requirement{in("sig", p.Name)} })
+	}
+	for {
+		r.mu.Lock()
+		held := r.inFlight
+		r.mu.Unlock()
+		following := true
+		for _, plugin := range plugins {
+			_, _, n, _ := plugin.counts()
+			following = following && n == 1
+		}
+		if held == 3 && following {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("three records never held together; logs:\n%s", logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	groups, err := kadm.NewClient(b.kafka).DescribeShareGroups(ctx, operator.PoolGroup(b.pool))
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := groups[operator.PoolGroup(b.pool)]
+	if group.Err != nil || len(group.Members) != 3 {
+		t.Fatalf("group: %+v", group)
+	}
+	seen := map[string]bool{}
+	for _, member := range group.Members {
+		if len(member.SubscribedTopicNames) != 1 || !expected[member.SubscribedTopicNames[0]] {
+			t.Fatalf("member subscription %v; want one expected signature", member.SubscribedTopicNames)
+		}
+		topic := member.SubscribedTopicNames[0]
+		assigned := member.Assignment
+		if len(assigned) != 1 || len(assigned[topic]) != 1 || !hasPartitionZero(assigned[topic]) {
+			t.Fatalf("member assignment %v; want %s partition 0", assigned, topic)
+		}
+		seen[topic] = true
+	}
+	if len(seen) != 3 {
+		t.Fatalf("signature coverage %v", seen)
+	}
+	for _, p := range plugins {
+		p.mu.Lock()
+		ended := p.collects
+		p.mu.Unlock()
+		if ended != 0 {
+			t.Fatal("run ended before release")
+		}
+	}
+}
+
+func hasPartitionZero(partitions map[int32]struct{}) bool { _, ok := partitions[0]; return ok }
