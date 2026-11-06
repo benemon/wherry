@@ -138,13 +138,14 @@ type fakePlugin struct {
 	releaseErr    error
 	releaseIDs    []string
 	// calls records Purge and Release in order.
-	calls    []string
-	sweeps   int
-	sweepErr error
+	calls        []string
+	sweeps       int
+	sweepErr     error
+	dispatchHold <-chan struct{}
+	followHold   <-chan struct{}
 	// endDelay holds the job open after its stream before it ends; pauses hold it that long before the line at each index.
-	followHold <-chan struct{}
-	endDelay   time.Duration
-	pauses     map[int]time.Duration
+	endDelay time.Duration
+	pauses   map[int]time.Duration
 	// ended makes Follow end with that terminal after the stream, rather than an exit of 0.
 	ended *pluginsdk.Terminal
 	// linkLost makes that many Follows end with lostErr, or else pluginsdk.ErrLinkLost, after at most one line; froms
@@ -219,6 +220,16 @@ func (f *fakePlugin) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk
 		f.mu.Lock()
 	}
 	f.dispatches++
+	if hold := f.dispatchHold; hold != nil {
+		f.mu.Unlock()
+		select {
+		case <-hold:
+		case <-ctx.Done():
+			f.mu.Lock()
+			return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, ctx.Err()
+		}
+		f.mu.Lock()
+	}
 	f.lastRun = run
 	if f.dispatchErr != nil {
 		return f.outcome, pluginsdk.Handle{}, f.dispatchErr
@@ -1654,6 +1665,9 @@ func TestStopReleasesHeldTaskOnce(t *testing.T) {
 			terms, config := testTerms(), testConfig(testReceiver)
 			terms.DeliveryLimit, config.Profiles[0].Replicas = 5, 6
 			f := newFixtureWith(t, noResultStream, terms, config, map[string]*fakePlugin{"nomad": {stream: noResultStream, endDelay: time.Minute}})
+			previous := openWait
+			openWait = 10 * time.Second
+			t.Cleanup(func() { openWait = previous })
 			ctx, stop := context.WithCancel(f.ctx)
 			defer stop()
 			f.submit(t, f.host, nil)
@@ -1666,6 +1680,16 @@ func TestStopReleasesHeldTaskOnce(t *testing.T) {
 					t.Fatalf("run never started; logs:\n%s", f.logs.String())
 				}
 				time.Sleep(50 * time.Millisecond)
+			}
+			waitFor(t, f, func() bool { return f.live() == 6 })
+			var claims []int64
+			for _, status := range f.eventStatuses(t) {
+				if status.Wherry.Kind == "claimed" {
+					claims = append(claims, status.Wherry.Attempt)
+				}
+			}
+			if !slices.Equal(claims, []int64{1}) {
+				t.Fatalf("claims before stop %v, want only attempt 1", claims)
 			}
 			stop()
 			select {

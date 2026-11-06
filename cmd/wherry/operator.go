@@ -94,6 +94,19 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		if len(pos) != 3 {
 			return errors.New(operatorUsage[command])
 		}
+		var path string
+		var directory bool
+		var config operator.ReceiverConfig
+		if !force {
+			path, directory, err = objectFile(dir, "receivers", pos[2], options, dryRun, stderr, receiverFields, func(p *prompter) (any, error) { return promptReceiver(p, service.Broker) })
+			if err != nil {
+				return err
+			}
+			config, err = readReceiverConfig(path, directory)
+			if err != nil {
+				return err
+			}
+		}
 		state, err := service.LoadState(ctx)
 		if err != nil {
 			return err
@@ -118,14 +131,6 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 				return err
 			}
 			return service.ReceiverReissue(ctx, pos[2], broker, bundle)
-		}
-		path, directory, err := objectFile(dir, "receivers", pos[2], options, dryRun, stderr, receiverFields, func(p *prompter) (any, error) { return promptReceiver(p, service.Broker) })
-		if err != nil {
-			return err
-		}
-		config, err := readReceiverConfig(path, directory)
-		if err != nil {
-			return err
 		}
 		config.Receiver, config.Broker = pos[2], cmp.Or(config.Broker, service.Broker)
 		if exists && config.Pool != "" && config.Pool != current.Pool {
@@ -353,7 +358,6 @@ func writeRotateReport(out io.Writer, pool string, report operator.RotateReport,
 func showReceiver(out io.Writer, config operator.ReceiverConfig) error {
 	type shown struct {
 		operator.ProfileSettings `yaml:",inline"`
-		Replicas                 int       `yaml:"replicas,omitempty"`
 		Signature                yaml.Node `yaml:"signature"`
 		Topic                    string    `yaml:"topic"`
 	}
@@ -362,11 +366,10 @@ func showReceiver(out io.Writer, config operator.ReceiverConfig) error {
 		// The record decodes numbers as float64, which YAML would print as 1e+06.
 		profile.Config = integral(profile.Config).(map[string]any)
 		signature := yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Style: yaml.DoubleQuotedStyle, Value: operator.Signature(profile.Agent, profile.Labels)}
-		replicas := profile.Replicas
-		if replicas <= 1 {
-			replicas = 0
+		if profile.Replicas == 1 {
+			profile.Replicas = 0
 		}
-		profiles = append(profiles, shown{profile, replicas, signature, operator.SignatureTopic(config.Pool, profile.Agent, profile.Labels)})
+		profiles = append(profiles, shown{profile, signature, operator.SignatureTopic(config.Pool, profile.Agent, profile.Labels)})
 	}
 	encoded, err := yaml.Marshal(struct {
 		PluginSHA256 map[string]string `yaml:"plugin_sha256,omitempty"`
@@ -471,9 +474,9 @@ type receiverPlugin struct {
 }
 
 type receiverProfile struct {
-	Replicas int                `yaml:"replicas"`
 	Name     string             `yaml:"name"`
 	Agent    string             `yaml:"agent"`
+	Replicas int                `yaml:"replicas"`
 	Labels   map[string]*string `yaml:"labels"`
 	Config   map[string]any     `yaml:"config"`
 }

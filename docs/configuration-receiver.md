@@ -210,10 +210,9 @@ own, as [Plugin profile merge](#plugin-profile-merge) describes. A
 `credential` key in the merged `config` names a [platform
 credential](#platform-credentials), and its value is a string.
 
-Each replica subscribes only to its profile's signature topic and admits fresh
-tasks through that profile. The selector guards against a host publishing to
-the wrong topic. If the loop's profile is unready it releases the task unless
-it is cleaning up an ending run. Redelivery may adopt a job in another profile.
+Each replica admits fresh tasks through its profile. The selector guards against
+a host publishing to the wrong topic. If the loop's profile is unready it releases the task unless
+it is cleaning up an ending run.
 The record on `wherry.operator` holds each profile with its name, plugin,
 agent, optional replicas, labels and merged `config`.
 

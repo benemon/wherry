@@ -209,10 +209,10 @@ type ReceiverConfig struct {
 // operator declares for it, and its plugin's config merged with its own, which the plugin decodes (runtime, node pool
 // and the like stay there).
 type ProfileSettings struct {
-	Replicas int               `json:"replicas,omitzero" yaml:"-"`
 	Name     string            `json:"name"`
 	Plugin   string            `json:"plugin"`
 	Agent    string            `json:"agent"`
+	Replicas int               `json:"replicas,omitzero" yaml:"replicas,omitempty"`
 	Labels   map[string]string `json:"labels,omitzero"`
 	Config   map[string]any    `json:"config"`
 }

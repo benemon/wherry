@@ -11,11 +11,13 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/pluginsdk"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 const labPlugin = `config:
@@ -487,6 +489,28 @@ func TestReceiverRejectsCapacity(t *testing.T) {
 				}
 				if _, err := readReceiverConfig(path, directory); err == nil || !strings.Contains(err.Error(), "invalid or unknown field at line 1") {
 					t.Fatalf("capacity %s: %v", n, err)
+				}
+				cluster, ca := tlsCluster(t)
+				dir := writeTree(t, map[string]string{"ca.pem": ca, "operator.password": "operator-password\n"})
+				if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{cluster.ListenAddrs()[0], "ca.pem", "operator.password"}); err != nil {
+					t.Fatal(err)
+				}
+				t.Chdir(dir)
+				noTerminal(t)
+				var reads atomic.Int32
+				// Observe every metadata/offset/fetch request: no broker read is allowed before decoding.
+				for _, key := range []int16{int16(kmsg.Metadata), int16(kmsg.ListOffsets), int16(kmsg.Fetch)} {
+					cluster.ControlKey(key, func(kmsg.Request) (kmsg.Response, error, bool) {
+						reads.Add(1)
+						return nil, nil, false
+					})
+				}
+				err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", path}, io.Discard, io.Discard)
+				if got := reads.Load(); got != 0 {
+					t.Fatalf("wherry.operator metadata/offset/fetch reads = %d, want 0", got)
+				}
+				if err == nil || !strings.Contains(err.Error(), "invalid or unknown field at line 1") {
+					t.Fatalf("runOperator capacity %s: %v", n, err)
 				}
 			})
 		}

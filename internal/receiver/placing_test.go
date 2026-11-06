@@ -963,9 +963,19 @@ func pendingGateFixture(t *testing.T) fixture {
 // gate reopens only once no run is pending.
 func TestPendingRunClosesTheGate(t *testing.T) {
 	f := pendingGateFixture(t)
+	hold := make(chan struct{})
+	release := sync.OnceFunc(func() { close(hold) })
+	defer release()
+	f.plugin.dispatchHold = hold
 	f.submit(t, f.host, nil)
 	f.submit(t, f.host, func(task *wire.Submission) { named(task, "run-b") })
 	f.run(t, f.ctx)
+	waitFor(t, f, func() bool { n, _, _, _ := f.plugin.counts(); return n == 2 })
+	if n := f.pendingRuns(); n != 0 {
+		t.Fatalf("%d pending runs before dispatch barrier release, want zero", n)
+	}
+	t.Log("dispatch barrier: dispatches == 2, pending == 0")
+	release()
 	// Both tasks are fetched by slots that polled before any pending observation, so both are admitted.
 	for placing := 0; placing < 2; placing = len(placingTexts(f.eventStatuses(t))) {
 		if f.ctx.Err() != nil {

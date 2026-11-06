@@ -585,7 +585,7 @@ wherry operator receiver show RECEIVER
 
 Prints the receiver's recorded configuration as YAML: `plugin_sha256`, the SHA-256 pinned for each plugin type, then
 `profiles`, each plugin profile resolved, in routing order, with its
-`name`, `plugin`, `agent`, `replicas` when above 1, `labels` and merged `config`
+`name`, `plugin`, `agent`, `replicas` when above 1, `labels` and merged `config`, in that order
 ([Plugin profile merge](configuration-receiver.md#plugin-profile-merge)),
 its `signature`, the agent and every label, double-quoted with each line
 feed shown as `\n`, and the signature's task `topic`:

@@ -72,7 +72,7 @@ var (
 // completed. A variable so tests can control it.
 var clock = time.Now
 
-// newClaimClient lets tests identify replicas with identical subscriptions.
+// newClaimClient lets tests tell apart the members of profiles that share a signature topic.
 var newClaimClient = func(r *Receiver, _ Named, opts ...kgo.Opt) (*kgo.Client, error) {
 	return r.newClient(opts...)
 }

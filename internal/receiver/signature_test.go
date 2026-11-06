@@ -187,15 +187,23 @@ func TestIdleSlotReopensOnlyAfterTheOldClientCloses(t *testing.T) {
 
 func TestHeldProfileWithdrawalKeepsRenewingAndOtherMember(t *testing.T) {
 	f := twoSignatures(t)
-	f.plugin.endDelay = 6 * time.Second
+	hold := make(chan struct{})
+	release := sync.OnceFunc(func() { close(hold) })
+	defer release()
+	f.plugin.followHold = hold
+	topicA := f.profileTopic(t, "a")
 	renewals := f.renewals(t)
 	f.submit(t, f.host, nil)
 	f.run(t, f.ctx)
 	waitFor(t, f, func() bool { _, _, n, _ := f.plugin.counts(); return n == 1 })
+	a := f.awaitMember(t, 10*time.Second, []string{topicA})
 	b := f.awaitMember(t, 10*time.Second, []string{f.profileTopic(t, "b")})
 	changed := time.Now()
 	f.ready(t, "a", false)
 	time.Sleep(time.Second)
+	if !f.shareMember(a.id).left.IsZero() {
+		t.Fatal("held A left when its readiness withdrew")
+	}
 	if !f.shareMember(b.id).left.IsZero() {
 		t.Fatal("B left when held A withdrew readiness")
 	}
@@ -209,7 +217,11 @@ func TestHeldProfileWithdrawalKeepsRenewingAndOtherMember(t *testing.T) {
 	if !found {
 		t.Fatal("held A stopped renewing")
 	}
+	release()
 	f.await(t, testRun("run-a"), func(task wire.Task) bool { return task.Status.State == wire.TaskStateCompleted })
+	if slices.Contains(f.kinds(t), "released") {
+		t.Fatal("held A was released")
+	}
 }
 
 // Gate: with an idle slot free, no run pending and the task eligible again, the slot that failed to start it joins again
@@ -313,8 +325,9 @@ func TestTaskWhoseSelectorItsTopicsSignatureFailsIsRejected(t *testing.T) {
 	}
 }
 
-// Unready release: a task on a profile's topic fetched after the profile went unready is released, logged, with no
-// record and no metric; the slot's replacement client subscribes to the ready profile's topic alone.
+// Unready release: a non-ending task below the delivery-budget threshold is released without a start-failure
+// record or incrementing wherry_start_failures_total; the authorised claim still increments wherry_claims_total.
+// A's unready loop stays closed; B's own loop subscribes only to B's topic.
 func TestTaskForAnUnreadyProfileIsReleased(t *testing.T) {
 	f := twoSignatures(t)
 	topicA, topicB := f.profileTopic(t, "a"), f.profileTopic(t, "b")
@@ -635,6 +648,9 @@ func TestLabelChangeMovesTheReceiversSignature(t *testing.T) {
 
 func labelChange(t *testing.T, shared bool) {
 	f := signatureFixture(t, signatureProfile("nomad", "claude", map[string]string{"zone": "a"}))
+	previous := openWait
+	openWait = 10 * time.Second
+	t.Cleanup(func() { openWait = previous })
 	f.plugin.endDelay = 4 * time.Second
 	topicA := f.profileTopic(t, "nomad")
 	topicB := operator.SignatureTopic(testPool, "claude", map[string]string{"zone": "b"})
@@ -663,6 +679,9 @@ func labelChange(t *testing.T, shared bool) {
 	}
 	defer host.Close()
 	startBy := time.Now().Add(15 * time.Second)
+	if shared {
+		startBy = startBy.Add(30 * time.Second)
+	}
 	queued, err := host.Submit(f.ctx, client.SubmitInput{Agent: "claude", Prompt: "hello", StartBy: startBy, EndBy: startBy.Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)

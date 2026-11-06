@@ -173,9 +173,11 @@ exactly when every `wherry_profile_ready` of the receiver is 0. Two profiles
 with the same agent and labels name the same topic, with one subscriber per replica of each profile.
 
 A profile that goes unready between a claim's subscription and its fetch has
-its task released to the pool, logged as
-`run <run>: no ready profile for topic <topic>; releasing`, with no metric
-and no start-failure record. Sibling loops subscribing to the same signature may acquire the task once each
+its non-ending task released to the pool below the delivery-budget threshold, logged as
+`run <run>: no ready profile for topic <topic>; releasing`, without a start-failure record or incrementing `wherry_start_failures_total`;
+the authorised claim still increments `wherry_claims_total`. At attempt `delivery_limit - 1`
+and above, give-back publishes the existing budget terminal and rejects, subject to
+commit failure handling. Ending redeliveries may continue cleanup. Sibling loops subscribing to the same signature may acquire the task once each
 before their idle clients close; each acquisition spends a delivery.
 
 ### A receiver with no ready offer
@@ -183,7 +185,7 @@ before their idle clients close; each acquisition spends a delivery.
 A receiver offers a profile only while the profile's plugin reports it ready.
 A receiver with no ready offer has an empty subscription and fetches no tasks from its pool.
 It closes its idle polls when it observes the empty subscription.
-After an advertisement makes a profile ready, it reopens each ready profile's loops, unless its pool is suspended (`wherry_claim_gated{reason="suspended"}`) or it holds a [pending run](#a-receiver-with-a-pending-run) (`wherry_claim_gated{reason="pending_run"}`); closing waits for the in-flight fetch, and joining takes the broker's round trip.
+After an advertisement makes a profile ready, that profile's loops rejoin, unless its pool is suspended (`wherry_claim_gated{reason="suspended"}`) or it holds a [pending run](#a-receiver-with-a-pending-run) (`wherry_claim_gated{reason="pending_run"}`); closing waits for the in-flight fetch, and joining takes the broker's round trip.
 Its held runs keep running, renewing and reading cancels.
 `wherry_claim_gated{reason="no_ready_offer"}` is 1 while it has no ready offer; it reports a restriction on opening new polls, not observed polling.
 
