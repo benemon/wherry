@@ -966,7 +966,7 @@ func TestFollowLinkLossResumesFromOffset(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.plugin.linkLost = 1
 	f.submit(t, f.host, nil)
-	if err := f.receiver.claimOne(f.ctx, f.ctx, func() {}); err != nil {
+	if err := f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], func() {}); err != nil {
 		t.Fatal(err)
 	}
 	if task := f.lastTask(t); task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "done" {
@@ -1000,7 +1000,7 @@ func TestFollowErrorResumesFromOffsetByJobState(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.plugin.linkLost, f.plugin.lostErr, f.plugin.job = 1, errors.New("stream reset"), test.state
 			f.submit(t, f.host, nil)
-			if err := f.receiver.claimOne(f.ctx, f.ctx, func() {}); err != nil {
+			if err := f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], func() {}); err != nil {
 				t.Fatal(err)
 			}
 			if task := f.lastTask(t); task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "done" {
@@ -1061,7 +1061,7 @@ func TestFollowFailureRetriesUntilTaskEndedBy(t *testing.T) {
 				task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = endBy, endBy
 			})
 			done := make(chan error, 1)
-			go func() { done <- f.receiver.claimOne(f.ctx, f.ctx, func() {}) }()
+			go func() { done <- f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], func() {}) }()
 			select {
 			case err := <-done:
 				if err != nil {
@@ -1134,7 +1134,7 @@ func TestFollowRetryChecksTheRunDeadline(t *testing.T) {
 			f.submit(t, f.host, func(task *wire.Submission) {
 				task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = endBy, endBy
 			})
-			if err := f.receiver.claimOne(f.ctx, f.ctx, func() {}); err != nil {
+			if err := f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], func() {}); err != nil {
 				t.Fatal(err)
 			}
 			if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != wire.NotEndedBy(endBy) {
@@ -1671,7 +1671,7 @@ func TestShutdownDuringACommitCommitsTheDeliveredLine(t *testing.T) {
 			t.Cleanup(base.Close)
 			f.receiver.base = base
 			f.submit(t, f.host, nil)
-			if err := f.receiver.claimOne(ctx, ctx, func() {}); err != nil && !errors.Is(err, context.Canceled) {
+			if err := f.receiver.claimOne(ctx, ctx, f.receiver.profiles[0], func() {}); err != nil && !errors.Is(err, context.Canceled) {
 				t.Fatalf("claimOne after shutdown: %v", err)
 			}
 			for _, chunk := range f.chunks(t) {
@@ -1903,7 +1903,7 @@ func TestAmbiguousCommitAbandonsToRedelivery(t *testing.T) {
 			}
 			commitTransaction = previous
 			tasks := f.records(t, f.tasksTopic())
-			admitted, ack := f.receiver.admit(f.ctx, tasks[len(tasks)-1])
+			admitted, ack := f.receiver.admit(f.ctx, tasks[len(tasks)-1], f.receiver.profiles[0])
 			if test.applied && (admitted != nil || ack != kgo.AckAccept) {
 				t.Fatalf("redelivered holder admitted=%v ack=%v, want accept without running", admitted != nil, ack)
 			}

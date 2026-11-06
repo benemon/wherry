@@ -222,7 +222,7 @@ func TestReceiverRotateKey(t *testing.T) {
 	dir := t.TempDir()
 	bundle, stateDir := filepath.Join(dir, "receiver.yaml"), filepath.Join(dir, "state")
 	keyPath := filepath.Join(stateDir, "signing.key")
-	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1,
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a",
 		Profiles: []operator.ProfileSettings{{Name: "fake", Plugin: "fake", Agent: "claude"}}, PluginSHA256: map[string]string{"fake": fakeSHA256}}
 	if err := service.ReceiverAdd(ctx, config, service.Broker, bundle); err != nil {
 		t.Fatal(err)

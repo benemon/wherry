@@ -133,7 +133,7 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m.runDuration = histograms("run_duration_seconds", "Time from claim to a run's terminal state.", "tenant", "profile", "agent", "model", "state")
 	m.queueWait = histograms("queue_wait_seconds", "Time from submission to first claim.", "tenant", "profile")
 	m.inFlight = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "wherry_in_flight", Help: "Tasks held, by the profile they were routed to."}, []string{"profile"})
-	m.capacity = prometheus.NewGauge(prometheus.GaugeOpts{Name: "wherry_capacity", Help: "Tasks the receiver holds at once."})
+	m.capacity = prometheus.NewGauge(prometheus.GaugeOpts{Name: "wherry_capacity", Help: "Maximum records the receiver holds at once: the sum of its profiles' replicas."})
 	m.pastDeadline = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "wherry_runs_past_deadline", Help: "Tasks held past their task_ended_by, by the profile they were routed to."}, []string{"profile"})
 	m.advertised = prometheus.NewGauge(prometheus.GaugeOpts{Name: "wherry_advertised_timestamp_seconds", Help: "Unix time of the receiver's latest advertisement Kafka acknowledged."})
 	m.collectors = append(m.collectors, m.inFlight, m.capacity, m.pastDeadline, m.advertised)
@@ -279,7 +279,7 @@ func (m *metrics) registerFor(r *Receiver) {
 }
 
 // routingCollector collects each profile's signature topic and readiness, and the claim gate's operands, at scrape
-// time from the state claimGated and subscription read.
+// time from the state claimGated and ready read.
 type routingCollector struct{ receiver *Receiver }
 
 func (c routingCollector) Describe(descs chan<- *prometheus.Desc) {
@@ -307,8 +307,7 @@ func (c routingCollector) Collect(out chan<- prometheus.Metric) {
 		profiles = append(profiles, profileSample{
 			profile: named.Name,
 			topic:   operator.SignatureTopic(r.config.Pool, named.Agent, named.Labels),
-			// The test subscription uses.
-			ready: slices.ContainsFunc(r.offers, func(offer wire.Offer) bool { return offer.Profile == named.Name }),
+			ready:   r.ready(named.Name),
 		})
 	}
 	r.mu.Unlock()

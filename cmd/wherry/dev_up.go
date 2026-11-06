@@ -918,7 +918,7 @@ func devBootstrap(ctx context.Context, env devEnv, agents []string, service oper
 	if err != nil {
 		return err
 	}
-	receiver := operator.ReceiverConfig{Receiver: devReceiver, Pool: devPool, Capacity: 2, Profiles: devProfiles(env, agents),
+	receiver := operator.ReceiverConfig{Receiver: devReceiver, Pool: devPool, Profiles: devProfiles(env, agents),
 		PluginSHA256: map[string]string{"nomad": env.manifest.Plugin.SHA256}}
 	if err := service.ReceiverAdd(ctx, receiver, service.Broker, receiverBundle); err != nil {
 		return fmt.Errorf("receiver apply: %w", err)

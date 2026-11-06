@@ -14,8 +14,9 @@ import (
 // resolvePlacement chooses, among live advertisements in the tenant's entitled pools, a signature: a pool and the task
 // topic of a ready profile launching the agent with labels satisfying selector. Labels come from the operator's config
 // record, never the advertisement. Each member adds its spare capacity once to every signature it offers, an estimate:
-// capacity is shared across a member's signatures. A default-agent signature wins, then the greatest spare, then the
-// lowest topic. When nothing places the task and a pool's terms refuse its model, the error is that refusal.
+// spare is aggregate while capacity is partitioned by profile replicas. A default-agent signature wins, then the
+// greatest spare, then the lowest topic. When nothing places the task and a pool's terms refuse its model, the error is
+// that refusal.
 func resolvePlacement(state operator.State, tenant, agent, model string, selector []wire.Requirement, ads map[string]wire.Advertisement) (string, wire.Placement, string, error) {
 	type signature struct {
 		pool, topic string

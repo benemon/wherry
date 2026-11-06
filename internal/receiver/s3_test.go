@@ -272,7 +272,7 @@ func TestS3UseWithoutPoolStorageIsRejected(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, edit)); admitted != nil || ack != kgo.AckReject {
+			if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, edit), f.receiver.profiles[0]); admitted != nil || ack != kgo.AckReject {
 				t.Fatalf("admitted %v with ack %v", admitted, ack)
 			}
 			if status := f.feedStatuses(t); len(status) != 1 || status[0].StatusUpdate.Status.Message.Parts[0].Text != "pool pool-a has no storage for S3 inputs and outputs" {

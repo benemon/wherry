@@ -393,13 +393,12 @@ func promptPool(p *prompter) (any, error) {
 }
 
 // receiverFields are what a receiver file gives without a terminal, as receiver apply's prompts ask for them.
-const receiverFields = "pool, plugin_sha256, capacity, plugins (each with its config and profiles, a profile with its agent and labels) and broker, which defaults to the operator's"
+const receiverFields = "pool, plugin_sha256, plugins (each with its config and profiles, a profile with its agent, labels and optional replicas) and broker, which defaults to the operator's"
 
 type receiverFile struct {
 	Pool         string                    `yaml:"pool"`
 	Broker       string                    `yaml:"broker"`
 	PluginSHA256 map[string]string         `yaml:"plugin_sha256"`
-	Capacity     int64                     `yaml:"capacity"`
 	Plugins      map[string]receiverPlugin `yaml:"plugins"`
 }
 
@@ -444,12 +443,6 @@ func promptReceiver(p *prompter, broker string) (any, error) {
 		plugin.Profiles = append(plugin.Profiles, profile)
 	}
 	file.Plugins[kind] = plugin
-	if answer, err = p.ask("Capacity, the runs it holds at once", "1"); err != nil {
-		return nil, err
-	}
-	if file.Capacity, err = strconv.ParseInt(answer, 10, 64); err != nil {
-		return nil, fmt.Errorf("capacity: %w", err)
-	}
 	if file.Broker, err = p.ask("Broker address the receiver connects to", broker); err != nil {
 		return nil, err
 	}

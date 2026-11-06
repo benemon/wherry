@@ -772,7 +772,7 @@ func (f *fixture) signaturesFixture(t *testing.T) (*testReceiver, string, string
 		{Name: "eu", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}},
 		{Name: "us", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "us"}},
 	}
-	receiver := f.addReceiverConfig(t, operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2, Profiles: profiles, PluginSHA256: map[string]string{"nomad": strings.Repeat("ab", 32)}})
+	receiver := f.addReceiverConfig(t, operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: profiles, PluginSHA256: map[string]string{"nomad": strings.Repeat("ab", 32)}})
 	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) {
 		ad.Offers = []wire.Offer{{Profile: "eu", Agent: "claude"}, {Profile: "us", Agent: "claude"}}
 	})
@@ -791,7 +791,7 @@ func (f *fixture) favour(t *testing.T, topic, eu string) {
 	if topic == eu {
 		profile = "eu"
 	}
-	config := operator.ReceiverConfig{Receiver: "receiver-b", Pool: "pool-a", Capacity: 9, Profiles: []operator.ProfileSettings{
+	config := operator.ReceiverConfig{Receiver: "receiver-b", Pool: "pool-a", Profiles: []operator.ProfileSettings{
 		{Name: "eu", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}},
 		{Name: "us", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "us"}},
 	}, PluginSHA256: map[string]string{"nomad": strings.Repeat("ab", 32)}}

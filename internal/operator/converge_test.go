@@ -480,7 +480,7 @@ func TestReceiverUpdateConverges(t *testing.T) {
 		t.Fatal(err)
 	}
 	grant(t, service, stray)
-	config.Capacity = 2
+	config.Profiles[0].Replicas = 2
 	if _, err := service.ReceiverUpdate(ctx, config, false); err != nil {
 		t.Fatal(err)
 	}

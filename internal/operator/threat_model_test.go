@@ -664,7 +664,7 @@ func modelTerms() Terms {
 }
 
 func modelConfig(receiver, pool string) ReceiverConfig {
-	return ReceiverConfig{Receiver: receiver, Pool: pool, Capacity: 1, Profiles: []ProfileSettings{{Name: "profile-a", Plugin: "fake", Agent: "agent-a"}},
+	return ReceiverConfig{Receiver: receiver, Pool: pool, Profiles: []ProfileSettings{{Name: "profile-a", Plugin: "fake", Agent: "agent-a"}},
 		PluginSHA256: map[string]string{"fake": strings.Repeat("ab", 32)}}
 }
 
@@ -972,7 +972,7 @@ func TestReceiverUpdateKeepsThePrincipal(t *testing.T) {
 		t.Fatal(err)
 	}
 	changed := modelConfig("receiver-a", "pool-b")
-	changed.Capacity = 3
+	changed.Profiles[0].Replicas = 3
 	if _, err := service.ReceiverUpdate(ctx, changed, false); err != nil {
 		t.Fatal(err)
 	}
@@ -980,8 +980,8 @@ func TestReceiverUpdateKeepsThePrincipal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config := state.Receivers["receiver-a"]; config.Capacity != 3 || config.Pool != "pool-a" {
-		t.Fatalf("configuration %+v; want capacity 3 in the receiver's own pool", config)
+	if config := state.Receivers["receiver-a"]; config.Profiles[0].Replicas != 3 || config.Pool != "pool-a" {
+		t.Fatalf("configuration %+v; want replicas 3 in the receiver's own pool", config)
 	}
 	if err := login(); err != nil {
 		t.Fatalf("configure changed the receiver's credential: %v", err)

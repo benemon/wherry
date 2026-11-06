@@ -29,7 +29,7 @@ import (
 func gateFixture(t *testing.T, stream []string) fixture {
 	t.Helper()
 	config := testConfig(testReceiver)
-	config.Capacity = 2
+	config.Profiles[0].Replicas = 2
 	return newFixtureWith(t, stream, testTerms(), config, map[string]*fakePlugin{"nomad": {stream: stream}})
 }
 
@@ -234,7 +234,7 @@ func TestNoOfferAtTheBudgetEnds(t *testing.T) {
 	terms.DeliveryLimit = 2
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	f.setReady(t, false)
-	if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, nil)); admitted != nil || ack != kgo.AckReject {
+	if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, nil), f.receiver.profiles[0]); admitted != nil || ack != kgo.AckReject {
 		t.Fatalf("admitted=%v ack=%v, want reject; logs:\n%s", admitted != nil, ack, f.logs.String())
 	}
 	if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != budgetReason {
@@ -369,7 +369,7 @@ func TestNoReadyOfferOpensNoPollOnRealBroker(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	b := newBrokerPool(t, ctx, address)
-	b.configure(t, ctx, 2)
+	b.configure(t, ctx, brokerProfile(2))
 	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
 	registration, err := signed.RegisterKey(signed.HostOwner(b.tenant, b.host), hostKey)
 	if err != nil {
@@ -487,7 +487,7 @@ func TestPendingRunOpensNoPollOnRealBroker(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	b := newBrokerPool(t, ctx, address)
-	b.configure(t, ctx, 2)
+	b.configure(t, ctx, brokerProfile(2))
 	second := b.receiver + "-b"
 	b.member(t, ctx, second)
 	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)

@@ -2,18 +2,22 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/pluginsdk"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 const labPlugin = `config:
@@ -70,7 +74,7 @@ func writeTree(t *testing.T, files map[string]string) string {
 func labTree(t *testing.T, replace map[string]string, remove ...string) string {
 	t.Helper()
 	files := map[string]string{
-		"receiver.yaml":                               "capacity: 2\n",
+		"receiver.yaml":                               "{}\n",
 		"plugins/nomad/plugin.yaml":                   labPlugin,
 		"plugins/nomad/profiles/10-nomad-podman.yaml": labPodman,
 		"plugins/nomad/profiles/20-nomad-exec.yaml":   labExec,
@@ -97,7 +101,7 @@ func item(document, prefix string) string {
 }
 
 func TestReceiverConfigDirectoryMatchesSingleFile(t *testing.T) {
-	single := writeTree(t, map[string]string{"receiver.yaml": "capacity: 2\nplugins:\n  nomad:\n" + indent(labPlugin, "    ") + "    profiles:\n" +
+	single := writeTree(t, map[string]string{"receiver.yaml": "plugins:\n  nomad:\n" + indent(labPlugin, "    ") + "    profiles:\n" +
 		item(labPodman, "      ") + item(labExec, "      ")})
 	want, err := readReceiverConfig(filepath.Join(single, "receiver.yaml"), false)
 	if err != nil {
@@ -436,7 +440,7 @@ func TestReceiverConfigDirectoryIgnoresHiddenFiles(t *testing.T) {
 }
 
 func TestReceiverConfigFileRefusesIdentity(t *testing.T) {
-	file := writeTree(t, map[string]string{"receiver.yaml": "receiver: receiver-a\ncapacity: 2\n"})
+	file := writeTree(t, map[string]string{"receiver.yaml": "receiver: receiver-a\n"})
 	if _, err := readReceiverConfig(filepath.Join(file, "receiver.yaml"), false); err == nil {
 		t.Fatal("a receiver config file naming its receiver was accepted")
 	}
@@ -460,8 +464,8 @@ func TestOperatorArgsParseAsFlags(t *testing.T) {
 
 func TestReceiverDefaults(t *testing.T) {
 	config, err := readReceiverConfig(labTree(t, map[string]string{"receiver.yaml": "{}\n"}), true)
-	if err != nil || config.Capacity != 1 {
-		t.Fatalf("capacity %d, %v; want 1 when receiver.yaml leaves it out", config.Capacity, err)
+	if err != nil || config.Profiles[0].Replicas != 0 {
+		t.Fatalf("replicas %d, %v; want stored zero when omitted", config.Profiles[0].Replicas, err)
 	}
 	var stderr bytes.Buffer
 	local := filepath.Join(t.TempDir(), "config.yaml")
@@ -471,5 +475,126 @@ func TestReceiverDefaults(t *testing.T) {
 	err = run([]string{"receiver", "run", "--config-file", local}, io.Discard, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "read bundle") {
 		t.Fatalf("receiver run with a config naming only its bundle = %v; want it to read the bundle", err)
+	}
+}
+
+func TestReceiverRejectsCapacity(t *testing.T) {
+	for _, directory := range []bool{false, true} {
+		for _, n := range []string{"0", "1", "3"} {
+			t.Run(n+fmt.Sprint(directory), func(t *testing.T) {
+				head := "capacity: " + n + "\n"
+				path := labTree(t, map[string]string{"receiver.yaml": head})
+				if !directory {
+					path = filepath.Join(writeTree(t, map[string]string{"receiver.yaml": head + "plugins:\n  nomad:\n" + indent(labPlugin, "    ") + "    profiles:\n" + item(labPodman, "      ")}), "receiver.yaml")
+				}
+				if _, err := readReceiverConfig(path, directory); err == nil || !strings.Contains(err.Error(), "invalid or unknown field at line 1") {
+					t.Fatalf("capacity %s: %v", n, err)
+				}
+				cluster, ca := tlsCluster(t)
+				dir := writeTree(t, map[string]string{"ca.pem": ca, "operator.password": "operator-password\n"})
+				if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{cluster.ListenAddrs()[0], "ca.pem", "operator.password"}); err != nil {
+					t.Fatal(err)
+				}
+				t.Chdir(dir)
+				noTerminal(t)
+				var reads atomic.Int32
+				// Observe every metadata/offset/fetch request: no broker read is allowed before decoding.
+				for _, key := range []int16{int16(kmsg.Metadata), int16(kmsg.ListOffsets), int16(kmsg.Fetch)} {
+					cluster.ControlKey(key, func(kmsg.Request) (kmsg.Response, error, bool) {
+						reads.Add(1)
+						return nil, nil, false
+					})
+				}
+				err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", path}, io.Discard, io.Discard)
+				if got := reads.Load(); got != 0 {
+					t.Fatalf("wherry.operator metadata/offset/fetch reads = %d, want 0", got)
+				}
+				if err == nil || !strings.Contains(err.Error(), "invalid or unknown field at line 1") {
+					t.Fatalf("runOperator capacity %s: %v", n, err)
+				}
+			})
+		}
+	}
+}
+
+func TestProfileReplicasConfigurations(t *testing.T) {
+	for _, directory := range []bool{false, true} {
+		for _, n := range []int{0, 1, 3, -1} {
+			for _, explicit := range []bool{false, true} {
+				if !explicit && n != 0 {
+					continue
+				}
+				t.Run(fmt.Sprintf("directory=%t/n=%d/explicit=%t", directory, n, explicit), func(t *testing.T) {
+					first := labPodman
+					if explicit {
+						first += "replicas: " + strconv.Itoa(n) + "\n"
+					}
+					path := labTree(t, map[string]string{"plugins/nomad/profiles/10-nomad-podman.yaml": first})
+					if !directory {
+						path = filepath.Join(writeTree(t, map[string]string{"receiver.yaml": "plugins:\n  nomad:\n" + indent(labPlugin, "    ") + "    profiles:\n" + item(first, "      ") + item(labExec, "      ")}), "receiver.yaml")
+					}
+					config, err := readReceiverConfig(path, directory)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if config.Profiles[0].Replicas != n || config.Profiles[1].Replicas != 0 {
+						t.Fatalf("replicas %+v", config.Profiles)
+					}
+					if _, ok := config.Profiles[0].Config["replicas"]; ok {
+						t.Fatal("replicas entered plugin Config")
+					}
+					config.Receiver, config.Pool = "receiver-a", "pool-a"
+					config.PluginSHA256 = map[string]string{"nomad": fakeSHA256}
+					terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}}
+					err = operator.ValidateConfig(config, terms)
+					if n < 0 {
+						if err == nil {
+							t.Fatal("negative replicas validated")
+						}
+						return
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					record := operator.Record{Kind: "receiver", Receiver: config.Receiver, Pool: config.Pool, Config: &config}
+					encoded, err := operator.EncodeRecord(record)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if n == 0 && bytes.Contains(encoded, []byte(`"replicas"`)) {
+						t.Fatal("zero replicas encoded")
+					}
+					if bytes.Contains(encoded, []byte(`"capacity"`)) {
+						t.Fatal("capacity encoded")
+					}
+					decoded, err := operator.DecodeRecord(encoded)
+					if err != nil {
+						t.Fatal(err)
+					}
+					state, err := operator.Fold([]operator.Record{{Kind: "pool", Pool: config.Pool, Terms: &terms}, decoded})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if state.Receivers[config.Receiver].Profiles[0].Replicas != n {
+						t.Fatal("replicas lost in fold")
+					}
+					old := bytes.Replace(encoded, []byte(`"config":{`), []byte(`"config":{"capacity":3,`), 1)
+					if _, err := operator.DecodeRecord(old); err != nil {
+						t.Fatalf("legacy capacity refused: %v", err)
+					}
+					var shown bytes.Buffer
+					if err := showReceiver(&shown, config); err != nil {
+						t.Fatal(err)
+					}
+					if strings.Contains(shown.String(), "capacity:") {
+						t.Fatal("show carries capacity")
+					}
+					count := strings.Count(shown.String(), "replicas:")
+					if n <= 1 && count != 0 || n > 1 && (count != 1 || !strings.Contains(shown.String(), "replicas: 3")) {
+						t.Fatalf("replicas display:\n%s", shown.String())
+					}
+				})
+			}
+		}
 	}
 }

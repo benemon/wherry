@@ -48,7 +48,7 @@ func TestCompletedRunRedeliveredAfterSelfRotation(t *testing.T) {
 			if rotate {
 				rotateSelf(t, &f)
 			}
-			admitted, ack := f.receiver.admit(f.ctx, record)
+			admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0])
 			if admitted != nil || ack != kgo.AckAccept {
 				t.Errorf("a committed terminal was not acknowledged on redelivery")
 			}
@@ -62,7 +62,7 @@ func TestCompletedRunPastStartByAfterSelfRotation(t *testing.T) {
 	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy = time.Now().Add(-time.Second).Unix() })
 	f.publishStatus(t, record, testReceiver, f.receiver.signing, "terminal", wire.TaskStateCompleted, nil)
 	rotateSelf(t, &f)
-	admitted, ack := f.receiver.admit(f.ctx, record)
+	admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0])
 	if admitted != nil || ack != kgo.AckAccept {
 		t.Errorf("a committed terminal was not acknowledged on redelivery")
 	}
@@ -91,7 +91,7 @@ func TestHeldRunPastStartBy(t *testing.T) {
 			f.publishStatus(t, record, test.holder, key, "started", wire.TaskStateWorking, nil)
 			passed(startBy)
 			test.rotate(t, &f, key)
-			admitted, _ := f.receiver.admit(f.ctx, record)
+			admitted, _ := f.receiver.admit(f.ctx, record, f.receiver.profiles[0])
 			if admitted == nil {
 				t.Errorf("a held run was not admitted for adoption")
 			}
@@ -123,7 +123,7 @@ func TestCancelOfHeldRunAfterSelfRotation(t *testing.T) {
 	f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
 	rotateSelf(t, &f)
 	f.publishCancel(t, testRun("run-a"), 1, f.host, nil)
-	admitted, _ := f.receiver.admit(f.ctx, record)
+	admitted, _ := f.receiver.admit(f.ctx, record, f.receiver.profiles[0])
 	if admitted == nil || !admitted.cancelled {
 		t.Errorf("the redelivered run does not carry its cancel")
 	}
@@ -184,7 +184,7 @@ func TestRetiredKeyAfterRotationRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	admitted, ack := f.receiver.admit(f.ctx, record)
+	admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0])
 	if len(events.statuses[testRun("run-a")]) != 0 || admitted != nil || ack != kgo.AckReject {
 		t.Errorf("a status signed by the retired key after the rotation counted")
 	}

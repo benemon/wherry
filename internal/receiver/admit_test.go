@@ -25,7 +25,7 @@ import (
 
 func (f fixture) rejected(t *testing.T, record *kgo.Record, reason string) {
 	t.Helper()
-	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckReject {
+	if admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckReject {
 		t.Fatalf("admitted=%v ack=%v, want rejection %q", admitted != nil, ack, reason)
 	}
 	if !strings.Contains(f.logs.String(), reason) {
@@ -56,7 +56,7 @@ func TestCommittedTerminalAcknowledgedWithoutWrites(t *testing.T) {
 	record := f.submit(t, f.host, nil)
 	f.publishStatus(t, record, testReceiver, f.receiver.signing, "terminal", wire.TaskStateCompleted, nil)
 	before := len(f.records(t, operator.PoolEventsTopic(testPool)))
-	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckAccept {
+	if admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckAccept {
 		t.Fatalf("admitted=%v ack=%v, want accept", admitted != nil, ack)
 	}
 	if after := len(f.records(t, operator.PoolEventsTopic(testPool))); after != before || len(f.records(t, operator.TenantTopic(testTenant))) != 0 {
@@ -68,7 +68,7 @@ func TestCommittedTerminalAcknowledgedWithoutWrites(t *testing.T) {
 	})
 	_, foreign, _ := ed25519.GenerateKey(rand.Reader)
 	f.publishStatus(t, other, testReceiver, foreign, "terminal", wire.TaskStateCompleted, nil)
-	if admitted, _ := f.receiver.admit(f.ctx, other); admitted == nil {
+	if admitted, _ := f.receiver.admit(f.ctx, other, f.receiver.profiles[0]); admitted == nil {
 		t.Fatal("an unauthorised terminal stopped the task")
 	}
 }
@@ -76,7 +76,7 @@ func TestCommittedTerminalAcknowledgedWithoutWrites(t *testing.T) {
 func TestUnsignedTaskRejectedSilently(t *testing.T) {
 	f := newFixture(t, resultStream)
 	record := f.produce(t, f.tasksTopic(), testRun("run-a"), []byte("acl-probe"))
-	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckReject || len(f.records(t, operator.PoolEventsTopic(testPool))) != 0 {
+	if admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckReject || len(f.records(t, operator.PoolEventsTopic(testPool))) != 0 {
 		t.Fatalf("admitted=%v ack=%v", admitted != nil, ack)
 	}
 }
@@ -84,13 +84,13 @@ func TestUnsignedTaskRejectedSilently(t *testing.T) {
 func TestForeignSignedTaskRejectedSilently(t *testing.T) {
 	f := newFixture(t, resultStream)
 	_, other, _ := ed25519.GenerateKey(rand.Reader)
-	if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, other, nil)); admitted != nil || ack != kgo.AckReject || len(f.records(t, operator.PoolEventsTopic(testPool))) != 0 {
+	if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, other, nil), f.receiver.profiles[0]); admitted != nil || ack != kgo.AckReject || len(f.records(t, operator.PoolEventsTopic(testPool))) != 0 {
 		t.Fatalf("admitted=%v ack=%v", admitted != nil, ack)
 	}
 	// A record keyed by another run than it names is not admitted either.
 	misfiled := f.submit(t, f.host, nil)
 	misfiled.Key = []byte(testRun("run-other"))
-	if admitted, ack := f.receiver.admit(f.ctx, misfiled); admitted != nil || ack != kgo.AckReject {
+	if admitted, ack := f.receiver.admit(f.ctx, misfiled, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckReject {
 		t.Fatalf("misfiled admitted=%v ack=%v", admitted != nil, ack)
 	}
 }
@@ -101,7 +101,7 @@ func TestHostKeyReReadOnUnknownKeyID(t *testing.T) {
 	owner := signed.HostOwner(testTenant, testHost)
 	f.produce(t, operator.HostTopic(testTenant, testHost), "", must(t)(signed.RotateKey(owner, f.host, next)))
 	// The receiver's last refresh holds the old key; the task is signed with the new one.
-	if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, next, nil)); admitted == nil {
+	if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, next, nil), f.receiver.profiles[0]); admitted == nil {
 		t.Fatalf("task signed by the host's rotated key was not admitted: ack %v", ack)
 	}
 }
@@ -113,7 +113,7 @@ func TestTaskSignedWithARetiredHostKeyIsRefused(t *testing.T) {
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatal(err)
 	}
-	if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, nil)); admitted != nil || ack != kgo.AckReject {
+	if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, nil), f.receiver.profiles[0]); admitted != nil || ack != kgo.AckReject {
 		t.Fatalf("task signed with the host's retired key: admitted=%v ack=%v", admitted != nil, ack)
 	}
 }
@@ -413,7 +413,6 @@ func TestJobFirstReportedPastStartByIsStopped(t *testing.T) {
 // Past task_started_by, a placement no profile offers is rejected when unclaimed; when claimed its job is stopped and
 // the run fails, where a task within its bounds is released.
 func TestPlacementOutsideOffersPastStartBy(t *testing.T) {
-	// codex is inside the terms, but no plugin here launches it.
 	outside := func(startBy int64) func(*wire.Submission) {
 		return func(task *wire.Submission) { task.Wherry.Placement.Agent, task.Wherry.TaskStartedBy = "codex", startBy }
 	}
@@ -423,7 +422,9 @@ func TestPlacementOutsideOffersPastStartBy(t *testing.T) {
 		f.rejected(t, f.submit(t, f.host, outside(startBy)), wire.NotStartedBy(startBy))
 	})
 	t.Run("claimed", func(t *testing.T) {
-		f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, job: pluginsdk.JobRunning, jobAgent: "codex"}})
+		config := testConfig(testReceiver)
+		config.Profiles[0].Agent = "codex"
+		f := newFixtureWith(t, resultStream, testTerms(), config, map[string]*fakePlugin{"nomad": {stream: resultStream, job: pluginsdk.JobRunning, jobAgent: "codex", unready: true}})
 		startBy := time.Now().Add(time.Second).Unix()
 		record := f.submit(t, f.host, outside(startBy))
 		f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
@@ -454,9 +455,9 @@ func TestClaimedRunWithNoOfferAndNoJobEnds(t *testing.T) {
 				endBy = startBy + 1
 				past, want = endBy, wire.NotEndedBy(endBy)
 			}
-			// codex is inside the terms, but no plugin here launches it.
+			f.setReady(t, false)
 			record := f.submit(t, f.host, func(task *wire.Submission) {
-				task.Wherry.Placement.Agent, task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = "codex", startBy, endBy
+				task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = startBy, endBy
 			})
 			f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
 			if started {
@@ -518,7 +519,7 @@ func TestAdmitRejectsEndByPastTheRunCapWithNoOffer(t *testing.T) {
 	}
 	t.Run("no offer", func(t *testing.T) {
 		f := newFixture(t, resultStream)
-		// codex is inside the terms, but no plugin here launches it.
+		f.setReady(t, false)
 		f.rejected(t, f.submit(t, f.host, func(task *wire.Submission) {
 			overCap(task)
 			task.Wherry.Placement.Agent = "codex"
@@ -587,7 +588,7 @@ func TestReceiverRejectsURLParts(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.submit(t, f.host, func(task *wire.Submission) { task.Message.Parts = append(task.Message.Parts, part) })
-			if err := f.receiver.claimOne(f.ctx, f.ctx, func() {}); err != nil {
+			if err := f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], func() {}); err != nil {
 				t.Fatal(err)
 			}
 			if dispatches, _, _, _ := f.plugin.counts(); dispatches != 0 {
@@ -628,7 +629,7 @@ func TestRejectionPublishFailureReleases(t *testing.T) {
 		}
 		return response, nil, true
 	})
-	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckRelease {
+	if admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckRelease {
 		t.Fatalf("admitted=%v ack=%v, want nil and release", admitted != nil, ack)
 	}
 	if n := len(f.eventStatuses(t)); n != 0 {
@@ -735,7 +736,7 @@ func startInFlight(t *testing.T, f fixture, ctx context.Context, name string) <-
 		named(task, name)
 	})
 	done := make(chan error, 1)
-	go func() { done <- f.receiver.claimOne(ctx, ctx, func() {}) }()
+	go func() { done <- f.receiver.claimOne(ctx, ctx, f.receiver.profiles[0], func() {}) }()
 	for {
 		if _, _, follows, _ := f.plugin.counts(); follows == 1 {
 			return done
@@ -870,7 +871,7 @@ func TestRunsUnderRetention(t *testing.T) {
 		}
 	}
 	before := len(f.records(t, operator.PoolEventsTopic(testPool)))
-	if admitted, ack := f.receiver.admit(f.ctx, completed); admitted != nil || ack != kgo.AckAccept {
+	if admitted, ack := f.receiver.admit(f.ctx, completed, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckAccept {
 		t.Fatalf("redelivered completed run admitted=%v ack=%v, want accept; logs:\n%s", admitted != nil, ack, f.logs.String())
 	}
 	if after := len(f.records(t, operator.PoolEventsTopic(testPool))); after != before {
@@ -909,7 +910,7 @@ func TestCommittedRejectionAcknowledged(t *testing.T) {
 	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy = past })
 	f.rejected(t, record, wire.NotStartedBy(past))
 	before := len(f.records(t, operator.PoolEventsTopic(testPool)))
-	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckAccept {
+	if admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckAccept {
 		t.Fatalf("redelivered rejection admitted=%v ack=%v, want accept", admitted != nil, ack)
 	}
 	if after := len(f.records(t, operator.PoolEventsTopic(testPool))); after != before {
@@ -924,7 +925,7 @@ func TestCommittedTerminalUnderRotatedPeerKey(t *testing.T) {
 	f.produce(t, operator.ReceiverTopic("receiver-b"), "receiver-b", must(t)(signed.RotateKey("receiver-b", peerSigning, next)))
 	record := f.submit(t, f.host, nil)
 	f.publishStatus(t, record, "receiver-b", next, "terminal", wire.TaskStateCompleted, nil)
-	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckAccept {
+	if admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckAccept {
 		t.Fatalf("admitted=%v ack=%v: a terminal under the peer's rotated key must be acknowledged, not run again", admitted != nil, ack)
 	}
 }
@@ -953,7 +954,7 @@ func TestRejectionIsAllOrNothing(t *testing.T) {
 	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(operator.TenantTopic(testTenant)).Operations(kadm.OpWrite))
 	halt := f.halts()
 	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy = time.Now().Add(-time.Second).Unix() })
-	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckRelease {
+	if admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckRelease {
 		t.Fatalf("admitted=%v ack=%v, want release", admitted != nil, ack)
 	}
 	if n := len(f.eventStatuses(t)); n != 0 {
@@ -972,13 +973,13 @@ func TestAdmitReleasesAtTheBudgetFail(t *testing.T) {
 		mutate func(*wire.Submission)
 		fault  func(*testing.T, fixture)
 	}{
-		"offer unavailable": {func(task *wire.Submission) { task.Wherry.Placement.Agent = "codex" }, func(*testing.T, fixture) {}},
+		"offer unavailable": {nil, func(t *testing.T, f fixture) { f.setReady(t, false) }},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 			record := f.submit(t, f.host, test.mutate)
 			test.fault(t, f)
-			if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckReject {
+			if admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckReject {
 				t.Fatalf("admitted=%v ack=%v, want reject; logs:\n%s", admitted != nil, ack, f.logs.String())
 			}
 			if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != "delivery budget exhausted" {
@@ -1111,7 +1112,7 @@ func TestRunIDMismatchIsRejectedOnce(t *testing.T) {
 	f := newFixture(t, resultStream)
 	record := f.submit(t, f.tenantB(t), asTenantB)
 	f.rejected(t, record, errMismatch)
-	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckAccept {
+	if admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckAccept {
 		t.Fatalf("redelivery admitted=%v ack=%v, want accept", admitted != nil, ack)
 	}
 	if kinds := f.kinds(t); !slices.Equal(kinds, []string{"rejected"}) {
@@ -1128,7 +1129,7 @@ func TestRunIDRejectionIsTheSameForEveryMember(t *testing.T) {
 	if err := peer.advertise(f.ctx); err != nil {
 		t.Fatal(err)
 	}
-	if admitted, ack := peer.admit(f.ctx, record); admitted != nil || ack != kgo.AckReject {
+	if admitted, ack := peer.admit(f.ctx, record, peer.profiles[0]); admitted != nil || ack != kgo.AckReject {
 		t.Fatalf("second member admitted=%v ack=%v, want reject", admitted != nil, ack)
 	}
 	var reasons []string
@@ -1193,7 +1194,7 @@ func TestUnreadableEventsReleaseACompletedRunWithoutASecondTerminal(t *testing.T
 		t.Fatalf("first delivery status %v, want accept", status)
 	}
 	f.failReadOnce(t, operator.PoolEventsTopic(testPool))
-	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckRelease {
+	if admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckRelease {
 		t.Fatalf("redelivery admitted=%v ack=%v, want release", admitted != nil, ack)
 	}
 	if terminals := f.terminals(t, operator.TenantTopic(testTenant)); terminals != 1 {
@@ -1331,9 +1332,10 @@ func TestAdmissionsShareTheReadersConnections(t *testing.T) {
 // with the context ended, the bound's branch is skipped, and only the no-profile guard keeps it from dispatching.
 func TestClaimedRunWithNoOfferDuringShutdownNeverDispatches(t *testing.T) {
 	f := newFixture(t, resultStream)
+	f.setReady(t, false)
 	startBy := time.Now().Add(time.Second).Unix()
 	record := f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.Placement.Agent, task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = "codex", startBy, time.Now().Add(time.Minute).Unix()
+		task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = startBy, time.Now().Add(time.Minute).Unix()
 	})
 	f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
 	passed(startBy)
@@ -1475,7 +1477,7 @@ func TestACopyOfTheClaimedRecordIsAcknowledged(t *testing.T) {
 				if i == test.live {
 					continue
 				}
-				if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckAccept || len(f.eventStatuses(t)) != written {
+				if admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckAccept || len(f.eventStatuses(t)) != written {
 					t.Fatalf("copy at %d admitted %v with %v; %d statuses written", record.Offset, admitted != nil, ack, len(f.eventStatuses(t))-written)
 				}
 			}
@@ -1503,7 +1505,7 @@ func TestTwoCopiesClaimedTogetherCompleteOnce(t *testing.T) {
 	if err := holder.commit(f.ctx, holder.progress(0)); err == nil {
 		t.Fatal("the fenced holder still writes")
 	}
-	if admitted, ack := f.receiver.admit(f.ctx, fenced); admitted != nil || ack != kgo.AckAccept {
+	if admitted, ack := f.receiver.admit(f.ctx, fenced, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckAccept {
 		t.Fatalf("the fenced copy's redelivery admitted %v with %v, want acknowledged", admitted != nil, ack)
 	}
 	if status := f.execute(t, live, 2); status != kgo.AckAccept {
@@ -1535,7 +1537,7 @@ func TestAFencedHolderServedFirstAdoptsItsJobThroughTheLiveCopy(t *testing.T) {
 	if dispatches, _, _, _ := f.plugin.counts(); dispatches != 0 || f.terminals(t, operator.PoolEventsTopic(testPool)) != 1 {
 		t.Fatalf("dispatches %d, terminals %d; want the fenced holder's job adopted and the run ended once", dispatches, f.terminals(t, operator.PoolEventsTopic(testPool)))
 	}
-	if admitted, ack := f.receiver.admit(f.ctx, fenced); admitted != nil || ack != kgo.AckAccept {
+	if admitted, ack := f.receiver.admit(f.ctx, fenced, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckAccept {
 		t.Fatalf("the fenced copy's redelivery admitted %v with %v, want acknowledged", admitted != nil, ack)
 	}
 }
@@ -1552,7 +1554,7 @@ func TestACopyIsJudgedAgainstTheLatestClaim(t *testing.T) {
 	f.statusAs(t, first, "receiver-b", keyB, "released", 1)
 	f.statusAs(t, reclaimed, "receiver-b", keyB, "claimed", 2)
 	f.statusAs(t, reclaimed, "receiver-b", keyB, "adopting", 2)
-	if admitted, ack := f.receiver.admit(f.ctx, first); admitted != nil || ack != kgo.AckAccept {
+	if admitted, ack := f.receiver.admit(f.ctx, first, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckAccept {
 		t.Fatalf("the first claim's copy admitted %v with %v, want acknowledged", admitted != nil, ack)
 	}
 	f.admitted(t, reclaimed)
@@ -1568,7 +1570,7 @@ func TestCancelBetweenClaimAndRedelivery(t *testing.T) {
 	f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
 	f.publishCancel(t, testRun("run-a"), 1, f.host, nil)
 	written := len(f.eventStatuses(t))
-	if admitted, ack := f.receiver.admit(f.ctx, copied); admitted != nil || ack != kgo.AckAccept || len(f.eventStatuses(t)) != written {
+	if admitted, ack := f.receiver.admit(f.ctx, copied, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckAccept || len(f.eventStatuses(t)) != written {
 		t.Fatalf("the copy admitted %v with %v; %d statuses written", admitted != nil, ack, len(f.eventStatuses(t))-written)
 	}
 	if admitted := f.admitted(t, record); !admitted.cancelled {
@@ -1619,7 +1621,7 @@ func TestEndedEntitlementRejectsUnclaimedAndRedeliveredTasks(t *testing.T) {
 	f := newFixture(t, resultStream)
 	record := f.submit(t, f.host, nil)
 	// Claim before removal; its delivery after removal must still fail admission.
-	if admitted, _ := f.receiver.admit(f.ctx, record); admitted == nil {
+	if admitted, _ := f.receiver.admit(f.ctx, record, f.receiver.profiles[0]); admitted == nil {
 		t.Fatal("initial admission failed")
 	}
 	_, _, cachedHosts := f.receiver.snapshot()
@@ -1635,7 +1637,7 @@ func TestEndedEntitlementRejectsUnclaimedAndRedeliveredTasks(t *testing.T) {
 	beforeEvents := len(f.records(t, operator.PoolEventsTopic(testPool)))
 	beforeFeed := len(f.records(t, operator.TenantTopic(testTenant)))
 	for _, attempt := range []int{1, 2} {
-		if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckReject {
+		if admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckReject {
 			t.Fatalf("delivery %d admitted=%v ack=%v", attempt, admitted != nil, ack)
 		}
 	}

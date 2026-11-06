@@ -38,11 +38,11 @@ func signatureProfile(name, agent string, labels map[string]string) operator.Pro
 	return operator.ProfileSettings{Name: name, Plugin: "fake", Agent: agent, Labels: labels, Config: map[string]any{}}
 }
 
-// signatureFixture is a fixture of capacity whose profiles, in order, are ready fakes; f.plugin is the first profile's.
-func signatureFixture(t *testing.T, capacity int64, profiles ...operator.ProfileSettings) fixture {
+// signatureFixture is a fixture whose profiles, in order, are ready fakes; f.plugin is the first profile's.
+func signatureFixture(t *testing.T, profiles ...operator.ProfileSettings) fixture {
 	t.Helper()
 	config := testConfig(testReceiver)
-	config.Capacity, config.Profiles = capacity, profiles
+	config.Profiles = profiles
 	plugins := map[string]*fakePlugin{}
 	for _, profile := range profiles {
 		plugins[profile.Name] = &fakePlugin{stream: resultStream}
@@ -52,10 +52,10 @@ func signatureFixture(t *testing.T, capacity int64, profiles ...operator.Profile
 	return f
 }
 
-// twoSignatures is a signatureFixture of capacity with profiles a and b, launching claude with sig=a and sig=b.
-func twoSignatures(t *testing.T, capacity int64) fixture {
+// twoSignatures is a signatureFixture with profiles a and b, launching claude with sig=a and sig=b.
+func twoSignatures(t *testing.T) fixture {
 	t.Helper()
-	return signatureFixture(t, capacity,
+	return signatureFixture(t,
 		signatureProfile("a", "claude", map[string]string{"sig": "a"}), signatureProfile("b", "claude", map[string]string{"sig": "b"}))
 }
 
@@ -144,169 +144,83 @@ func (f fixture) claimedRuns(t *testing.T) []string {
 	return runs
 }
 
-// Idle refresh: an idle slot subscribed to {A} closes its poll and reopens with {A, B} when B becomes ready while A
-// stays ready, then with {B} when A goes unready; a task on A's topic then reaches no member until A is ready again.
-func TestIdleSlotReopensWithTheReadyProfilesTopics(t *testing.T) {
-	f := twoSignatures(t, 1)
-	topicA, topicB := f.profileTopic(t, "a"), f.profileTopic(t, "b")
-	f.ready(t, "b", false)
-	f.run(t, f.ctx)
-	first := f.awaitMember(t, 10*time.Second, []string{topicA})
-	changed := time.Now()
-	f.ready(t, "b", true)
-	both := f.awaitReopen(t, first, changed, topics(topicA, topicB))
-	changed = time.Now()
-	f.ready(t, "a", false)
-	f.awaitReopen(t, both, changed, []string{topicB})
-	// Positive control: a task on B's topic is claimed and completes.
-	onB := f.submit(t, f.host, func(task *wire.Submission) {
-		named(task, "run-b")
-		task.Wherry.Placement.Selector = []wire.Requirement{in("sig", "b")}
-	})
-	if onB.Topic != topicB {
-		t.Fatalf("task on %s, want B's topic", onB.Topic)
-	}
-	f.await(t, testRun("run-b"), func(task wire.Task) bool { return task.Status.State == wire.TaskStateCompleted })
-	onA := f.submit(t, f.host, func(task *wire.Submission) { named(task, "run-a") })
-	if onA.Topic != topicA {
-		t.Fatalf("task on %s, want A's topic", onA.Topic)
-	}
-	time.Sleep(3 * time.Second)
-	if slices.Contains(f.claimedRuns(t), testRun("run-a")) {
-		t.Fatalf("a task on A's topic was claimed while A is unready; logs:\n%s", f.logs.String())
-	}
-	if dispatches, _, _, _ := f.plugins["a"].counts(); dispatches != 0 {
-		t.Fatalf("profile a dispatched %d times while unready", dispatches)
-	}
-	f.ready(t, "a", true)
-	f.await(t, testRun("run-a"), func(task wire.Task) bool { return task.Status.State == wire.TaskStateCompleted })
+func TestReadinessLeavesOtherProfilesMembersAlone(t *testing.T) {
+	profileReadiness(t, false, 1)
 }
 
-// Idle refresh, a delayed close: the replacement joins only once the old client's close, held here at its leave, has
-// completed.
+func TestEachDuplicateSignatureProfileHasItsOwnMember(t *testing.T) {
+	profileReadiness(t, true, 1)
+}
+
 func TestIdleSlotReopensOnlyAfterTheOldClientCloses(t *testing.T) {
-	f := twoSignatures(t, 1)
-	topicA, topicB := f.profileTopic(t, "a"), f.profileTopic(t, "b")
+	f := twoSignatures(t)
 	f.ready(t, "b", false)
+	topic := f.profileTopic(t, "a")
 	f.run(t, f.ctx)
-	first := f.awaitMember(t, 10*time.Second, []string{topicA})
-	var mu sync.Mutex
-	var closed time.Time
+	first := f.awaitMember(t, 10*time.Second, []string{topic})
+	closing, release := make(chan struct{}), make(chan struct{})
+	releaseClose := sync.OnceFunc(func() { close(release) })
+	defer releaseClose()
+	var once sync.Once
 	f.cluster.ControlKey(kmsg.ShareGroupHeartbeat.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
 		f.cluster.KeepControl()
-		if heartbeat := request.(*kmsg.ShareGroupHeartbeatRequest); heartbeat.MemberID == first.id && heartbeat.MemberEpoch == -1 {
-			f.cluster.SleepControl(func() { time.Sleep(2 * time.Second) })
-			mu.Lock()
-			closed = time.Now()
-			mu.Unlock()
+		if h := request.(*kmsg.ShareGroupHeartbeatRequest); h.MemberID == first.id && h.MemberEpoch == -1 {
+			once.Do(func() { close(closing) })
+			f.cluster.SleepControl(func() { <-release })
 		}
 		return nil, nil, false
 	})
-	f.ready(t, "b", true)
-	next := f.awaitMember(t, 10*time.Second, topics(topicA, topicB))
-	mu.Lock()
-	defer mu.Unlock()
-	if left := f.shareMember(first.id).left; left.IsZero() || closed.IsZero() {
-		t.Fatalf("the old member's leave was not seen; logs:\n%s", f.logs.String())
-	}
-	if !next.joined.After(closed) {
-		t.Fatalf("the replacement joined %s before the old client's close completed", closed.Sub(next.joined))
-	}
-	if waited := next.joined.Sub(closed); waited > joinBudget {
-		t.Fatalf("the replacement joined %s after the close completed, want within %s", waited, joinBudget)
-	}
-}
-
-// Compaction: two ready profiles of one signature put its topic in the subscription once; one of them going unready
-// leaves the subscription, and the poll, as they are.
-func TestOneSignatureOfTwoProfilesIsSubscribedOnce(t *testing.T) {
-	f := signatureFixture(t, 1,
-		signatureProfile("a", "claude", map[string]string{"sig": "a", "gpu": "a100"}), signatureProfile("a2", "claude", map[string]string{"sig": "a", "gpu": "a100"}))
-	topic := f.profileTopic(t, "a")
-	if other := f.profileTopic(t, "a2"); other != topic {
-		t.Fatalf("profiles a and a2 on %s and %s, want one signature", topic, other)
-	}
-	f.run(t, f.ctx)
-	member := f.awaitMember(t, 10*time.Second, []string{topic})
-	changed := time.Now()
-	f.ready(t, "a2", false)
-	time.Sleep(leaveBudget + joinBudget)
-	if left := f.shareMember(member.id).left; !left.IsZero() {
-		t.Fatalf("the member left %s after a profile of its one signature went unready, want its poll kept", left.Sub(changed))
-	}
-	if joined := f.joinedSince(changed); len(joined) != 0 {
-		t.Fatalf("%d members joined after a profile of the subscribed signature went unready, want none", len(joined))
-	}
-	// Positive control: with no profile of the signature ready, the member leaves.
-	changed = time.Now()
 	f.ready(t, "a", false)
-	for f.shareMember(member.id).left.IsZero() {
-		if time.Since(changed) > leaveBudget {
-			t.Fatalf("the member did not leave within %s once no profile was ready", leaveBudget)
-		}
-		time.Sleep(5 * time.Millisecond)
+	select {
+	case <-closing:
+	case <-f.ctx.Done():
+		t.Fatal("no leave")
 	}
+	f.ready(t, "a", true)
+	time.Sleep(300 * time.Millisecond)
+	if len(f.joinedSince(first.joined)) != 0 {
+		t.Error("replacement joined before close completed")
+	}
+	releaseClose()
+	f.awaitReopen(t, first, time.Now(), []string{topic})
 }
 
-// Renewal during refresh: a held run keeps its share client and renews through a readiness change while the idle slot's
-// client closes and a new one joins with the new subscription.
-func TestHeldRunRenewsWhileTheIdleSlotReopens(t *testing.T) {
-	f := twoSignatures(t, 2)
-	topicA, topicB := f.profileTopic(t, "a"), f.profileTopic(t, "b")
-	f.plugin.endDelay = 6 * time.Second
-	f.ready(t, "b", false)
+func TestHeldProfileWithdrawalKeepsRenewingAndOtherMember(t *testing.T) {
+	f := twoSignatures(t)
+	hold := make(chan struct{})
+	release := sync.OnceFunc(func() { close(hold) })
+	defer release()
+	f.plugin.followHold = hold
+	topicA := f.profileTopic(t, "a")
 	renewals := f.renewals(t)
 	f.submit(t, f.host, nil)
 	f.run(t, f.ctx)
-	for {
-		if _, _, follows, _ := f.plugin.counts(); follows == 1 {
-			break
-		}
-		if f.ctx.Err() != nil {
-			t.Fatalf("run never started; logs:\n%s", f.logs.String())
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	// The held run's client and the idle slot's, both joined subscribed to {A}.
-	var before []shareMember
-	for len(before) != 2 {
-		before = nil
-		for _, member := range f.members.all() {
-			if member.left.IsZero() {
-				before = append(before, member)
-			}
-		}
-		if f.ctx.Err() != nil {
-			t.Fatalf("live members %+v, want the held run's and the idle slot's", before)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitFor(t, f, func() bool { _, _, n, _ := f.plugin.counts(); return n == 1 })
+	a := f.awaitMember(t, 10*time.Second, []string{topicA})
+	b := f.awaitMember(t, 10*time.Second, []string{f.profileTopic(t, "b")})
 	changed := time.Now()
-	f.ready(t, "b", true)
-	next := f.awaitMember(t, leaveBudget+joinBudget, topics(topicA, topicB))
-	var stayed, left []shareMember
-	for _, member := range before {
-		if member = f.shareMember(member.id); member.left.IsZero() {
-			stayed = append(stayed, member)
-		} else {
-			left = append(left, member)
-		}
+	f.ready(t, "a", false)
+	time.Sleep(time.Second)
+	if !f.shareMember(a.id).left.IsZero() {
+		t.Fatal("held A left when its readiness withdrew")
 	}
-	if len(stayed) != 1 || len(left) != 1 || !slices.Equal(stayed[0].topics, []string{topicA}) {
-		t.Fatalf("after the change %d of the two members stayed, want the held run's alone", len(stayed))
+	if !f.shareMember(b.id).left.IsZero() {
+		t.Fatal("B left when held A withdrew readiness")
 	}
-	var renewed int
+	if len(renewals()) == 0 {
+		t.Fatal("no renewals")
+	}
+	found := false
 	for _, at := range renewals() {
-		if at.After(changed) && at.Before(next.joined) {
-			renewed++
-		}
+		found = found || at.After(changed)
 	}
-	if renewed == 0 {
-		t.Fatalf("no renewal between the readiness change and the new member's join %s later", next.joined.Sub(changed))
+	if !found {
+		t.Fatal("held A stopped renewing")
 	}
+	release()
 	f.await(t, testRun("run-a"), func(task wire.Task) bool { return task.Status.State == wire.TaskStateCompleted })
-	if kinds := f.kinds(t); slices.Contains(kinds, "released") {
-		t.Fatalf("statuses %v, want the held run kept to its end", kinds)
+	if slices.Contains(f.kinds(t), "released") {
+		t.Fatal("held A was released")
 	}
 }
 
@@ -314,7 +228,7 @@ func TestHeldRunRenewsWhileTheIdleSlotReopens(t *testing.T) {
 // within 1.5 s of the start failure; nothing waits out a lock duration.
 func TestSlotRejoinsPromptlyAfterAStartFailure(t *testing.T) {
 	config := testConfig(testReceiver)
-	config.Capacity = 2
+	config.Profiles[0].Replicas = 2
 	f := newFixtureWith(t, resultStream, testTerms(), config, map[string]*fakePlugin{"nomad": {stream: resultStream, outcome: pluginsdk.OutcomeNothingCreated}})
 	f.submit(t, f.host, nil)
 	f.run(t, f.ctx)
@@ -375,7 +289,7 @@ func TestTaskOnAnotherAgentsTopicIsRejected(t *testing.T) {
 // as a host that computed the wrong topic would publish it, is rejected with the fixed reason on the pool's events and
 // never released, whatever the operator.
 func TestTaskWhoseSelectorItsTopicsSignatureFailsIsRejected(t *testing.T) {
-	f := signatureFixture(t, 1, signatureProfile("nomad", "claude", map[string]string{"platform": "nomad"}))
+	f := signatureFixture(t, signatureProfile("nomad", "claude", map[string]string{"platform": "nomad"}))
 	topic := f.profileTopic(t, "nomad")
 	// Positive control: a selector the signature satisfies is admitted on its topic.
 	matching := f.submit(t, f.host, func(task *wire.Submission) {
@@ -411,10 +325,11 @@ func TestTaskWhoseSelectorItsTopicsSignatureFailsIsRejected(t *testing.T) {
 	}
 }
 
-// Unready release: a task on a profile's topic fetched after the profile went unready is released, logged, with no
-// record and no metric; the slot's replacement client subscribes to the ready profile's topic alone.
+// Unready release: a non-ending task below the delivery-budget threshold is released without a start-failure
+// record or incrementing wherry_start_failures_total; the authorised claim still increments wherry_claims_total.
+// A's unready loop stays closed; B's own loop subscribes only to B's topic.
 func TestTaskForAnUnreadyProfileIsReleased(t *testing.T) {
-	f := twoSignatures(t, 1)
+	f := twoSignatures(t)
 	topicA, topicB := f.profileTopic(t, "a"), f.profileTopic(t, "b")
 	record := f.submit(t, f.host, nil)
 	if record.Topic != topicA {
@@ -422,7 +337,7 @@ func TestTaskForAnUnreadyProfileIsReleased(t *testing.T) {
 	}
 	f.ready(t, "a", false)
 	before := len(f.records(t, operator.PoolEventsTopic(testPool)))
-	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckRelease {
+	if admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckRelease {
 		t.Fatalf("admitted=%v ack=%v, want release; logs:\n%s", admitted != nil, ack, f.logs.String())
 	}
 	if want := "run " + testRun("run-a") + ": no ready profile for topic " + topicA + "; releasing"; !strings.Contains(f.logs.String(), want) {
@@ -458,7 +373,7 @@ func TestClaimedRunPastItsBoundWithItsProfileUnreadyEnds(t *testing.T) {
 		"pending job": {pluginsdk.JobPending, false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := signatureFixture(t, 1, signatureProfile("nomad", "claude", map[string]string{"zone": "dc1"}))
+			f := signatureFixture(t, signatureProfile("nomad", "claude", map[string]string{"zone": "dc1"}))
 			f.plugin.job = c.job
 			startBy := time.Now().Add(time.Second).Unix()
 			record := f.submit(t, f.host, func(task *wire.Submission) {
@@ -500,7 +415,7 @@ func TestClaimedRunPastItsBoundWithItsProfileUnreadyEnds(t *testing.T) {
 // Copy check: a byte-for-byte copy of the claimed record at the same offset on another signature topic is acknowledged
 // without a claim.
 func TestCopyOnAnotherTopicAtTheSameOffsetIsAcknowledged(t *testing.T) {
-	f := twoSignatures(t, 1)
+	f := twoSignatures(t)
 	topicB := f.profileTopic(t, "b")
 	record := f.submit(t, f.host, nil)
 	f.statusAs(t, record, testReceiver, f.receiver.signing, "claimed", 1)
@@ -511,7 +426,7 @@ func TestCopyOnAnotherTopicAtTheSameOffsetIsAcknowledged(t *testing.T) {
 	// Positive control: the claimed record itself goes on to adoption.
 	f.admitted(t, record)
 	claims := len(f.claimedRuns(t))
-	if admitted, ack := f.receiver.admit(f.ctx, copied); admitted != nil || ack != kgo.AckAccept {
+	if admitted, ack := f.receiver.admit(f.ctx, copied, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckAccept {
 		t.Fatalf("admitted=%v ack=%v, want the copy acknowledged; logs:\n%s", admitted != nil, ack, f.logs.String())
 	}
 	if after := len(f.claimedRuns(t)); after != claims {
@@ -632,7 +547,7 @@ func omitFromListings(f fixture, taskTopics ...string) func() {
 // re-keyed. A re-keyed task on the second topic opens under the successor's key.
 func TestRekeyScanReadsEveryTaskTopic(t *testing.T) {
 	three := func(t *testing.T) (fixture, []*kgo.Record, wire.PoolKey, *ecdsa.PrivateKey) {
-		f := signatureFixture(t, 1,
+		f := signatureFixture(t,
 			signatureProfile("a", "claude", map[string]string{"sig": "a"}), signatureProfile("b", "claude", map[string]string{"sig": "b"}),
 			signatureProfile("c", "claude", map[string]string{"sig": "c"}))
 		f.quiet()
@@ -732,7 +647,10 @@ func TestLabelChangeMovesTheReceiversSignature(t *testing.T) {
 }
 
 func labelChange(t *testing.T, shared bool) {
-	f := signatureFixture(t, 1, signatureProfile("nomad", "claude", map[string]string{"zone": "a"}))
+	f := signatureFixture(t, signatureProfile("nomad", "claude", map[string]string{"zone": "a"}))
+	previous := openWait
+	openWait = 10 * time.Second
+	t.Cleanup(func() { openWait = previous })
 	f.plugin.endDelay = 4 * time.Second
 	topicA := f.profileTopic(t, "nomad")
 	topicB := operator.SignatureTopic(testPool, "claude", map[string]string{"zone": "b"})
@@ -761,6 +679,9 @@ func labelChange(t *testing.T, shared bool) {
 	}
 	defer host.Close()
 	startBy := time.Now().Add(15 * time.Second)
+	if shared {
+		startBy = startBy.Add(30 * time.Second)
+	}
 	queued, err := host.Submit(f.ctx, client.SubmitInput{Agent: "claude", Prompt: "hello", StartBy: startBy, EndBy: startBy.Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)

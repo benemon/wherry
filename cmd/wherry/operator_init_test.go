@@ -615,7 +615,7 @@ func TestReceiverApplyGuidedPath(t *testing.T) {
 	if err := runOperator([]string{"receiver", "apply", "receiver-a"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), receiverFields) {
 		t.Fatalf("receiver apply without a file or a terminal = %v; want it refused naming %s", err, receiverFields)
 	}
-	onTerminal(t, "pool-a\n\n"+fakeSHA256+"\n{address: https://nomad.example:4646, credential: nomad-token}\nclaude\ntier=batch\n2\n\n")
+	onTerminal(t, "pool-a\n\n"+fakeSHA256+"\n{address: https://nomad.example:4646, credential: nomad-token}\nclaude\ntier=batch\n\n")
 	if err := runOperator([]string{"receiver", "apply", "receiver-a"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
@@ -623,12 +623,15 @@ func TestReceiverApplyGuidedPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Pool != "pool-a" || config.Broker != service.Broker || config.Capacity != 2 || config.PluginSHA256["nomad"] != fakeSHA256 ||
+	if config.Pool != "pool-a" || config.Broker != service.Broker || config.PluginSHA256["nomad"] != fakeSHA256 ||
 		len(config.Profiles) != 1 || config.Profiles[0].Labels["tier"] != "batch" || config.Profiles[0].Config["credential"] != "nomad-token" {
 		t.Fatalf("the guided path wrote %+v", config)
 	}
+	if written, err := os.ReadFile(filepath.Join("receivers", "receiver-a.yaml")); err != nil || strings.Contains(string(written), "replicas") {
+		t.Fatalf("the guided path wrote replicas: %v\n%s", err, written)
+	}
 	state, err := service.LoadState(ctx)
-	if err != nil || state.Receivers["receiver-a"].Capacity != 2 {
+	if err != nil || len(state.Receivers["receiver-a"].Profiles) != 1 {
 		t.Fatalf("receivers %v, %v; want receiver-a recorded", state.Receivers, err)
 	}
 	if _, err := operator.ReadBundle(filepath.Join("bundles", "receivers", "receiver-a.bundle")); err != nil {

@@ -143,7 +143,7 @@ func TestInvalidInputNamesAreRejected(t *testing.T) {
 					message["parts"] = append(message["parts"].([]any), part)
 				}
 			})
-			if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckReject {
+			if admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckReject {
 				t.Fatalf("admitted %v with ack %v, want a rejection", admitted, ack)
 			}
 		})
@@ -159,7 +159,7 @@ func TestOver256ExpectedOutputsAreRejected(t *testing.T) {
 		}
 		payload["wherry"].(map[string]any)["outputs"] = outputs
 	})
-	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckReject {
+	if admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckReject {
 		t.Fatalf("admitted %v with ack %v, want a rejection", admitted, ack)
 	}
 }
@@ -169,7 +169,7 @@ func TestLongTaskCredentialNameIsRejected(t *testing.T) {
 	record := f.submitPayload(t, func(payload map[string]any) {
 		payload["wherry"].(map[string]any)["credentials"] = []any{map[string]any{"name": strings.Repeat("c", 33), "file": "token"}}
 	})
-	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckReject {
+	if admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0]); admitted != nil || ack != kgo.AckReject {
 		t.Fatalf("admitted %v with ack %v, want a rejection", admitted, ack)
 	}
 }
@@ -260,7 +260,7 @@ func TestAdmissionRefusesCredentialsOutsideTheAgentsTerms(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixtureWith(t, resultStream, optionalTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
-			if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, mutate)); admitted != nil || ack != kgo.AckReject {
+			if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, mutate), f.receiver.profiles[0]); admitted != nil || ack != kgo.AckReject {
 				t.Fatalf("admitted %v with ack %v, want a rejection", admitted, ack)
 			}
 		})

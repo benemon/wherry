@@ -197,7 +197,6 @@ func withDefaults(terms Terms) Terms {
 type ReceiverConfig struct {
 	Receiver string            `json:"receiver"`
 	Pool     string            `json:"pool"`
-	Capacity int64             `json:"capacity"`
 	Profiles []ProfileSettings `json:"profiles"`
 	// PluginSHA256 maps each plugin type to the lowercase hex SHA-256 its binary must have; the receiver refuses to
 	// start a plugin whose type has none.
@@ -210,11 +209,12 @@ type ReceiverConfig struct {
 // operator declares for it, and its plugin's config merged with its own, which the plugin decodes (runtime, node pool
 // and the like stay there).
 type ProfileSettings struct {
-	Name   string            `json:"name"`
-	Plugin string            `json:"plugin"`
-	Agent  string            `json:"agent"`
-	Labels map[string]string `json:"labels,omitzero"`
-	Config map[string]any    `json:"config"`
+	Name     string            `json:"name"`
+	Plugin   string            `json:"plugin"`
+	Agent    string            `json:"agent"`
+	Replicas int               `json:"replicas,omitzero" yaml:"replicas,omitempty"`
+	Labels   map[string]string `json:"labels,omitzero"`
+	Config   map[string]any    `json:"config"`
 }
 
 type Record struct {
@@ -461,8 +461,8 @@ func ValidateConfig(config ReceiverConfig, terms Terms) error {
 	if err := validateNames(config.Receiver, config.Pool); err != nil {
 		return err
 	}
-	if config.Capacity <= 0 || len(config.Profiles) == 0 {
-		return errors.New("receiver config needs a capacity and profiles")
+	if len(config.Profiles) == 0 {
+		return errors.New("receiver config needs profiles")
 	}
 	for kind, sum := range config.PluginSHA256 {
 		if !wire.ValidName(kind) || !pluginSHA256.MatchString(sum) {
@@ -471,6 +471,9 @@ func ValidateConfig(config ReceiverConfig, terms Terms) error {
 	}
 	names := map[string]bool{}
 	for _, profile := range config.Profiles {
+		if profile.Replicas < 0 {
+			return errors.New("profile replicas must not be negative")
+		}
 		if validateNames(profile.Name) != nil || names[profile.Name] || !wire.ValidName(profile.Plugin) {
 			return errors.New("profiles need unique valid names and a valid plugin")
 		}
