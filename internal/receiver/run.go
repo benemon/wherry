@@ -1095,8 +1095,9 @@ func accepted(state pluginsdk.JobState, completedAt, bound time.Time) bool {
 	return (state == pluginsdk.JobRunning || state == pluginsdk.JobEnded) && completedAt.Before(bound)
 }
 
-// awaitStart cancels outstanding lookups without joining them when the start phase ends, taking first as an
-// existing result and dispatched as the creation time or zero when no job was created.
+// awaitStart observes a job not yet started, one Lookup at a time, until it starts or ends. Ending the start phase
+// cancels the Lookup in flight without joining it and drops its late result. first is a result already in hand;
+// dispatched is this attempt's creation time, or zero for none.
 func (run *activeRun) awaitStart(ctx, startCtx context.Context, handle pluginsdk.Handle, dispatched time.Time, first *lookupResult) (pluginsdk.Job, kgo.AckStatus, bool) {
 	r, runID := run.receiver, run.task.Wherry.Run
 	bound := wire.PastBound(run.task.Wherry.TaskStartedBy)

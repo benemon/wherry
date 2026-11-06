@@ -126,7 +126,7 @@ A tenant is seeded only while entitled to this receiver's pool. Each
 configured profile contributes the distinct models of its agent's first
 entry in the current pool terms, or the empty model when that entry lists
 none. A profile whose agent the terms do not name contributes no run tuples.
-The extra profile values are deduplicated. The run matrix is a seeded
+The empty and `none` profile values are deduplicated against configured profile names. The run matrix is a seeded
 subset: runtime placement and current terms can produce other tuples. Run
 families for the `none` profile, agent and model `other` fallbacks, state
 `other`, and other valid task states stay lazy. A configured profile

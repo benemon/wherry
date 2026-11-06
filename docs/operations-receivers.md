@@ -172,23 +172,28 @@ a restriction prevents a new poll, and its `no_ready_offer` reason is 1
 exactly when every `wherry_profile_ready` of the receiver is 0. Two profiles
 with the same agent and labels name the same topic, with one subscriber per replica of each profile.
 
-When a profile goes unready between a claim's subscription and its fetch:
+When a profile goes unready between a claim's subscription and its fetch, an
+already-claimed run past an unmet start or end bound continues cleanup. For
+other tasks that reach the readiness check:
 
 1. Below `delivery_limit - 1`, the receiver releases the task, logs
    `run <run>: no ready profile for topic <topic>; releasing`, and records no
    start failure. `wherry_claims_total` still counts it.
-2. From `delivery_limit - 1`, the run ends `delivery budget exhausted`.
-3. An ending run continues cleanup.
+2. From `delivery_limit - 1`, the receiver commits a `delivery budget
+   exhausted` terminal and rejects the task. If that commit fails, it releases
+   the task.
 
 The unready profile's other replicas still polling may each acquire it once
-before they close their idle clients: up to the profile's `replicas` minus 1
-more deliveries, which the sizing allows for.
+before they close their idle clients. For that readiness withdrawal, this
+allows up to the profile's effective replica count minus one more deliveries.
+A `replicas` value of 0 or an absent field means one replica.
 
 ### A receiver with no ready offer
 
 A receiver offers a profile only while the profile's plugin reports it ready.
-A receiver with no ready offer has no open claim clients and fetches no tasks
-from its pool. Each loop closes its idle client when it observes the gate closed.
+A receiver with no ready offer opens no new claim polls. Each loop closes its
+idle client when it observes the gate closed. An in-flight poll may still
+return a task, which goes through the admission checks.
 After an advertisement makes a profile ready, that profile's loops rejoin, unless its pool is suspended (`wherry_claim_gated{reason="suspended"}`) or it holds a [pending run](#a-receiver-with-a-pending-run) (`wherry_claim_gated{reason="pending_run"}`); closing waits for the in-flight fetch, and joining takes the broker's round trip.
 Its held runs keep running, renewing and reading cancels.
 `wherry_claim_gated{reason="no_ready_offer"}` is 1 while it has no ready offer; it reports a restriction on opening new polls, not observed polling.

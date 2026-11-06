@@ -166,7 +166,7 @@ func TestReceiverConfigMergesThePluginConfigIntoEachProfile(t *testing.T) {
 	}
 }
 
-// Within a plugin, routing order is profile order: list order in a single file and file name order in a directory.
+// Within a plugin, recorded order is profile order: list order in a single file and file name order in a directory.
 func TestReceiverConfigKeepsProfileOrderWithinAPlugin(t *testing.T) {
 	config, err := readReceiverConfig(labTree(t, map[string]string{
 		"plugins/nomad/profiles/10-nomad-podman.yaml": labExec, "plugins/nomad/profiles/20-nomad-exec.yaml": labPodman,

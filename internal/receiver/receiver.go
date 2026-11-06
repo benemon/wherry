@@ -154,8 +154,9 @@ func (r *Receiver) newClient(extra ...kgo.Opt) (*kgo.Client, error) {
 	return kgo.NewClient(append(slices.Clone(r.base.Opts()), extra...)...)
 }
 
-// Run drains held tasks on cancellation or reconfiguration and leaves them unacknowledged with jobs running on
-// fatal errors, limiting cancellation drain to the drain timeout.
+// Run advertises and claims until ctx ends or the configuration changes, then lets held runs finish: after a change
+// until they end, after ctx ends for at most the drain timeout. A Kafka authorisation error or a plugin process exit
+// returns at once, leaving held runs unacknowledged and their jobs running for adoption on redelivery.
 func (r *Receiver) Run(ctx context.Context) error {
 	defer r.base.Close()
 	defer r.reader.Close()
@@ -550,7 +551,9 @@ func recordType(encoded []byte) string {
 	return typ
 }
 
-// advertise bounds each profile call by advertiseInterval, including when no profile is ready.
+// advertise publishes one offer per ready profile, and with none ready still publishes its liveness and capacity. Each
+// Sweep and Ready call is bounded by advertiseInterval, so a hung plugin delays the next advertisement by at most that
+// much per call.
 func (r *Receiver) advertise(ctx context.Context) error {
 	for _, named := range r.profiles {
 		callCtx, cancel := context.WithTimeout(ctx, advertiseInterval)
