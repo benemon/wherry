@@ -224,13 +224,16 @@ Prerequisites: the working directory and the pool's new terms in
    wherry operator pool suspend build
    ```
 
-   The command waits for the key custodian, not for every receiver. Wait
-   until every receiver in the pool reports
-   `wherry_claim_gated{reason="suspended"}` as `1`. A stopped receiver reads
-   `wherry.operator` when it starts, before it claims. Restart a running
-   receiver whose metrics you cannot read. A receiver that has read
-   the suspension claims nothing until it reads the resume, and that read
-   also carries the new terms.
+   The command waits for the key custodian, not for every receiver. For
+   each running receiver in the pool, read a fresh metrics sample showing
+   `wherry_claim_gated{reason="suspended"}` as `1`. A missing sample does
+   not show that a receiver is stopped or suspended. Restart or stop a
+   running receiver you cannot sample. A receiver reads `wherry.operator`
+   when it starts, before it claims. Once a receiver has read the
+   suspension, its claim gate stays closed until it reads the resume, and
+   that read also carries the new terms. A claim it admitted just before
+   reading the suspension can continue, which is why step 4 drains the
+   agent's work first.
 
 6. Record the terms:
 
@@ -256,6 +259,8 @@ Prerequisites: the working directory and the pool's new terms in
    ```sh
    wherry operator pool resume build
    ```
+
+   Then start submitting the agent's work again.
 
 ### Retention
 
