@@ -199,18 +199,16 @@ Each profile entry:
 | `config` | mapping | none | the plugin's settings for this profile |
 
 Replicas are not part of the signature. Each replica holds one task at a time.
-The receiver advertises the sum of its profiles' replicas, ready or not. On a
-redelivery, a replica can adopt a job another profile started. The sum bounds
-the tasks the receiver holds.
+The receiver advertises the sum of its profiles' replicas, ready or not, and
+holds at most that many tasks. [What a receiver
+subscribes to](operations-receivers.md#what-a-receiver-subscribes-to) describes
+how replicas claim.
 
 A plugin profile's `config` and `labels` are its plugin's merged with its
 own, as [Plugin profile merge](#plugin-profile-merge) describes. A
 `credential` key in the merged `config` names a [platform
 credential](#platform-credentials), and its value is a string.
 
-Each replica admits fresh tasks through its profile. The selector guards against
-a host publishing to the wrong topic. If the loop's profile is unready it releases the task unless
-it is cleaning up an ending run.
 The record on `wherry.operator` holds each profile with its name, plugin,
 agent, optional replicas, labels and merged `config`.
 

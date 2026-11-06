@@ -1088,7 +1088,8 @@ func TestThreeProfilesHoldTogetherOnRealBroker(t *testing.T) {
 		}
 		topic := member.SubscribedTopicNames[0]
 		assigned := member.Assignment
-		if len(assigned) != 1 || len(assigned[topic]) != 1 || !hasPartitionZero(assigned[topic]) {
+		_, partitionZero := assigned[topic][0]
+		if len(assigned) != 1 || len(assigned[topic]) != 1 || !partitionZero {
 			t.Fatalf("member assignment %v; want %s partition 0", assigned, topic)
 		}
 		seen[topic] = true
@@ -1105,5 +1106,3 @@ func TestThreeProfilesHoldTogetherOnRealBroker(t *testing.T) {
 		}
 	}
 }
-
-func hasPartitionZero(partitions map[int32]struct{}) bool { _, ok := partitions[0]; return ok }
