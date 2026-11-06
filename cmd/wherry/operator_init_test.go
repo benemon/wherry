@@ -627,6 +627,9 @@ func TestReceiverApplyGuidedPath(t *testing.T) {
 		len(config.Profiles) != 1 || config.Profiles[0].Labels["tier"] != "batch" || config.Profiles[0].Config["credential"] != "nomad-token" {
 		t.Fatalf("the guided path wrote %+v", config)
 	}
+	if written, err := os.ReadFile(filepath.Join("receivers", "receiver-a.yaml")); err != nil || strings.Contains(string(written), "replicas") {
+		t.Fatalf("the guided path wrote replicas: %v\n%s", err, written)
+	}
 	state, err := service.LoadState(ctx)
 	if err != nil || len(state.Receivers["receiver-a"].Profiles) != 1 {
 		t.Fatalf("receivers %v, %v; want receiver-a recorded", state.Receivers, err)

@@ -476,7 +476,7 @@ type receiverPlugin struct {
 type receiverProfile struct {
 	Name     string             `yaml:"name"`
 	Agent    string             `yaml:"agent"`
-	Replicas int                `yaml:"replicas"`
+	Replicas int                `yaml:"replicas,omitempty"`
 	Labels   map[string]*string `yaml:"labels"`
 	Config   map[string]any     `yaml:"config"`
 }
