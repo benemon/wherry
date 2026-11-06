@@ -294,8 +294,8 @@ against the new terms, as `receiver apply` checks a new receiver, and refuses
 the terms when a plugin profile no longer fits, naming each receiver, plugin
 and profile and the reason. It sets the pool's topics before it records the terms, so a failure leaves the
 old terms in force, and never lowers their `retention.ms`: runs submitted
-under a longer `start_by_limit` keep their records. Receivers apply the new terms at their next read
-of `wherry.operator`, within 15 seconds, without a restart. A lowered
+under a longer `start_by_limit` keep their records. Receivers read the new terms from `wherry.operator`
+every 15 seconds, without a restart; a slow or failed read delays the update. A lowered
 `delivery_limit` applies to a task in flight at its next release.
 
 With a pool of that name and the terms recorded, it completes the pool,

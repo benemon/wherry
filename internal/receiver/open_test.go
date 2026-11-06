@@ -808,7 +808,7 @@ func servesAClaimAfterThePreviousHolderEnded(t *testing.T, unread bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	check := &claimCheck{r: f.receiver, events: events, keys: keys, now: time.Now()}
+	check := &claimCheck{r: f.receiver, events: events, keys: keys, now: time.Now(), terms: testTerms()}
 	request := slices.IndexFunc(events.requests, func(request openRequest) bool { return request.digest == digest })
 	if unread {
 		f.failReadOnce(t, operator.PoolReceiversTopic(testPool))
@@ -871,7 +871,7 @@ func TestClaimCheckRefusesARequestNotFromItsLiveClaimant(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		check := &claimCheck{r: f.receiver, events: events, keys: keys, now: time.Now()}
+		check := &claimCheck{r: f.receiver, events: events, keys: keys, now: time.Now(), terms: testTerms()}
 		request := slices.IndexFunc(events.requests, func(request openRequest) bool { return request.digest == digest })
 		answer := check.decide(f.ctx, events.requests[request])
 		var refusal wire.OpenRefusal
@@ -1041,6 +1041,44 @@ func TestInvalidEnvelopeIsRefusedBeforeAnyWrap(t *testing.T) {
 			}
 			if got := scrapedValue(t, f.receiver, `wherry_runs_key_lost_total{pool="pool-a"}`); got != 0 {
 				t.Fatalf("runs key-lost = %v, want 0", got)
+			}
+		})
+	}
+}
+
+// The custodian checks an envelope's credentials against the terms its pass read, not the receiver's snapshot, which can
+// lag a terms change: an envelope sealed under new terms that drop an optional credential is served, and one that still
+// carries the dropped credential is refused.
+func TestCustodianChecksEnvelopesUnderThePassTerms(t *testing.T) {
+	withOptional := func() operator.Terms {
+		terms := testTerms()
+		terms.Agents[0].Credentials = append(terms.Agents[0].Credentials,
+			operator.AgentCredential{TaskCredential: wire.TaskCredential{Name: "github-token", Env: "GH_TOKEN"}, Required: new(bool)})
+		return terms
+	}
+	for name, test := range map[string]struct {
+		sealedUnder operator.Terms
+		answer      string
+	}{
+		"sealed under the new terms":      {testTerms(), "wrap"},
+		"carrying the dropped credential": {withOptional(), wire.RefusedEnvelopeInvalid},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixtureWith(t, resultStream, withOptional(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
+			f.quiet()
+			keyB := f.addPeer(t, "receiver-b", testPool)
+			if err := f.service.PoolApply(f.ctx, testPool, testTerms(), false); err != nil {
+				t.Fatal(err)
+			}
+			record := f.submit(t, f.host, func(submission *wire.Submission) {
+				sealTask(t, submission, test.sealedUnder, f.poolKey(t), nil)
+			})
+			f.statusAs(t, record, "receiver-b", keyB, "claimed", 1)
+			if answer := f.answered(t, f.openAs(t, record, "receiver-b", keyB, 1)); answer != test.answer {
+				t.Fatalf("answer %q, want %q; logs:\n%s", answer, test.answer, f.logs.String())
+			}
+			if state, _, _ := f.receiver.snapshot(); len(state.Pools[testPool].Agents[0].Credentials) != 2 {
+				t.Fatal("the receiver's snapshot read the new terms; the check no longer covers a stale snapshot")
 			}
 		})
 	}
@@ -1749,7 +1787,7 @@ func TestANonMembersRequestReadsNoTask(t *testing.T) {
 	f.revoke(t, "receiver-b")
 	fetches, _ := f.taskFetches(t, 0)
 	request := slices.IndexFunc(events.requests, func(request openRequest) bool { return request.digest == digest })
-	check := &claimCheck{r: f.receiver, events: events, now: time.Now()}
+	check := &claimCheck{r: f.receiver, events: events, now: time.Now(), terms: testTerms()}
 	var refusal wire.OpenRefusal
 	if answer := check.decide(f.ctx, events.requests[request]); len(answer) != 1 || wire.ParseStrict(answer[0].Value, f.keys(), time.Now(), &refusal) != nil ||
 		refusal.Reason != wire.RefusedNotClaimant || fetches.Load() != 0 {

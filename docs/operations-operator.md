@@ -211,7 +211,31 @@ Prerequisites: the working directory and the pool's new terms in
    runs first: the change rejects its queued and redelivered runs at their
    next claim.
 
-4. Record the terms:
+4. When the change alters an agent's `credentials`, including a
+   credential's target, stop submitting the agent's work, and let its
+   queued and running work finish. Cancel work that must not run, and
+   resubmit it after the change. A task is sealed under the terms its host
+   read. A receiver that opens it under other terms can fail it. Suspending
+   the pool does not drain queued work.
+
+5. When the change alters an agent's `credentials`, suspend the pool:
+
+   ```sh
+   wherry operator pool suspend build
+   ```
+
+   The command waits for the key custodian, not for every receiver. For
+   each running receiver in the pool, read a fresh metrics sample showing
+   `wherry_claim_gated{reason="suspended"}` as `1`. A missing sample does
+   not show that a receiver is stopped or suspended. Restart or stop a
+   running receiver you cannot sample. A receiver reads `wherry.operator`
+   when it starts, before it claims. Once a receiver has read the
+   suspension, its claim gate stays closed until it reads the resume, and
+   that read also carries the new terms. A claim it admitted just before
+   reading the suspension can continue, which is why step 4 drains the
+   agent's work first.
+
+6. Record the terms:
 
    ```sh
    wherry operator pool apply build
@@ -225,9 +249,18 @@ Prerequisites: the working directory and the pool's new terms in
    wherry: pool terms would strand live receivers: receiver nomad-1 plugin nomad profile host: receiver agent is outside pool terms
    ```
 
-   `--dry-run` makes the same checks and writes nothing. Receivers apply
-   the new terms within 15 seconds, without a restart. A lowered
-   `delivery_limit` applies to a task in flight at its next release.
+   `--dry-run` makes the same checks and writes nothing. Receivers read
+   new terms every 15 seconds, without a restart; a slow or failed read
+   delays the update. A lowered `delivery_limit` applies to a task in
+   flight at its next release.
+
+7. If you suspended the pool in step 5, resume it:
+
+   ```sh
+   wherry operator pool resume build
+   ```
+
+   Then start submitting the agent's work again.
 
 ### Retention
 

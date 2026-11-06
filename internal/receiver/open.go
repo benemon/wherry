@@ -328,16 +328,18 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 	if !custodian && keys[current.KeyID] != nil {
 		return nil
 	}
-	// One read of wherry.operator decides the pass's suspension. A pass begins once every attempt wrap of the previous one
-	// committed, so a suspension acknowledged here holds for every first start decided after it.
+	// One read of wherry.operator decides the pass's suspension and the terms its envelopes are checked against. A pass
+	// begins once every attempt wrap of the previous one committed, so a suspension acknowledged here holds for every
+	// first start decided after it.
 	var suspended bool
+	var terms operator.Terms
 	if custodian {
 		state, err := loadState(r.reader, ctx)
 		if err != nil {
 			r.deny(err, capRead)
 			return fmt.Errorf("read wherry.operator: %w", err)
 		}
-		suspended = state.Suspended[r.config.Pool]
+		suspended, terms = state.Suspended[r.config.Pool], state.Pools[r.config.Pool]
 		if err := r.acknowledgeSuspension(ctx, keys, latest, state); err != nil {
 			return err
 		}
@@ -368,7 +370,7 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 	if !custodian {
 		return r.rekey(ctx, pending, events, keys, current)
 	}
-	check := &claimCheck{r: r, events: events, keys: keys, now: time.Now(), suspended: suspended}
+	check := &claimCheck{r: r, events: events, keys: keys, now: time.Now(), suspended: suspended, terms: terms}
 	for _, request := range pending {
 		records := check.decide(ctx, request)
 		if len(records) == 0 {
@@ -474,14 +476,15 @@ func (r *Receiver) contentKey(task *wire.Submission, keys map[string]*poolKey, r
 	return nil
 }
 
-// claimCheck is one custodian pass's view for its claim checks; suspended is the pool's suspension read at the pass's
-// start, and changed the reason of the claimant change the last decision served, empty for none.
+// claimCheck is one custodian pass's view for its claim checks; suspended and terms are the pool's suspension and terms
+// read at the pass's start, and changed the reason of the claimant change the last decision served, empty for none.
 type claimCheck struct {
 	r         *Receiver
 	events    poolEvents
 	keys      map[string]*poolKey
 	now       time.Time
 	suspended bool
+	terms     operator.Terms
 	ads       []*kgo.Record
 	adsRead   bool
 	changed   string
@@ -553,9 +556,10 @@ func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Reco
 	}
 	// A spliced envelope never releases its content key.
 	values, err := signed.OpenEnvelope([]byte(binding.Envelope), contentKey)
+	// The pass's terms, not the receiver's snapshot: a host seals under the terms it reads at submit, and the snapshot can
+	// lag a terms change by a refresh. A change after the pass's read still applies only from the next pass.
 	if err == nil {
-		state, _, _ := r.snapshot()
-		err = checkOpened(state.Pools[r.config.Pool], task.record, values)
+		err = checkOpened(c.terms, task.record, values)
 	}
 	if err != nil {
 		r.logger.Printf("custodian: run %s's envelope does not open for its task: %v", request.Run, err)
