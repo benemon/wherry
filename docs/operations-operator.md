@@ -212,11 +212,11 @@ Prerequisites: the working directory and the pool's new terms in
    next claim.
 
 4. When the change alters an agent's `credentials`, including a
-   credential's target, let the agent's queued and running work finish
-   first. Cancel work that must not run, and resubmit it after the change.
-   A task is sealed under the terms its host read: a receiver that opens it
-   under other terms can fail it, and suspending the pool does not drain
-   queued work.
+   credential's target, stop submitting the agent's work, and let its
+   queued and running work finish. Cancel work that must not run, and
+   resubmit it after the change. A task is sealed under the terms its host
+   read. A receiver that opens it under other terms can fail it. Suspending
+   the pool does not drain queued work.
 
 5. When the change alters an agent's `credentials`, suspend the pool:
 
@@ -226,7 +226,9 @@ Prerequisites: the working directory and the pool's new terms in
 
    The command waits for the key custodian, not for every receiver. Wait
    until every receiver in the pool reports
-   `wherry_claim_gated{reason="suspended"}` as `1`. A receiver that has read
+   `wherry_claim_gated{reason="suspended"}` as `1`. A stopped receiver reads
+   `wherry.operator` when it starts, before it claims. Restart a running
+   receiver whose metrics you cannot read. A receiver that has read
    the suspension claims nothing until it reads the resume, and that read
    also carries the new terms.
 
