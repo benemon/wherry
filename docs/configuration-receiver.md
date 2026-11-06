@@ -183,7 +183,10 @@ entry:
 | --- | --- | --- | --- |
 | `labels` | mapping | none | optional; [labels](commands.md#labels) every plugin profile of the plugin inherits |
 | `config` | mapping | none | optional; settings every plugin profile of the plugin inherits |
-| `profiles` | list | required | one or more plugin profile entries, in routing order |
+| `profiles` | list | required | one or more plugin profile entries, in recorded order |
+
+Order sets the advertisement's offer order and the order a redelivery looks
+up its job.
 
 Each profile entry:
 
@@ -191,19 +194,14 @@ Each profile entry:
 | --- | --- | --- | --- |
 | `name` | string | required | profile name, unique in the receiver |
 | `agent` | string | required | the agent it launches, from the pool's terms |
-| `replicas` | integer | `1` | fresh-dispatch lanes; 0 also means one; negatives are refused |
+| `replicas` | integer | `1` | claim loops for the profile; `0` means 1; negative values are refused |
 | `labels` | mapping | none | optional; [labels](commands.md#labels) for placement |
 | `config` | mapping | none | the plugin's settings for this profile |
 
-A profile may set `replicas: N` for N fresh-dispatch lanes. Omitted, 0 and 1 each mean one
-replica; negative values are refused. Replicas stay separate from plugin `config` and
-labels. Each replica holds at most one record and subscribes only to its profile's
-signature topic. The receiver advertises the sum of effective replicas, including
-unready profiles. Profiles with the same signature still have their own loops.
-
-On redelivery, a loop may adopt an existing job owned by another configured profile.
-The sum of replicas bounds held records, rather than executions per adopted profile.
-A pending observation gates polling across the receiver; held clients keep renewing.
+Replicas are not part of the signature. Each replica holds one task at a time.
+The receiver advertises the sum of its profiles' replicas, ready or not. On a
+redelivery, a replica can adopt a job another profile started. The sum bounds
+the tasks the receiver holds.
 
 A plugin profile's `config` and `labels` are its plugin's merged with its
 own, as [Plugin profile merge](#plugin-profile-merge) describes. A
@@ -299,7 +297,7 @@ plugins/
 | `config.yaml` | optional: receiver local configuration, kept outside the receiver record |
 | `receiver.yaml` | `pool`, `plugin_sha256`, `broker` |
 | `plugins/<type>/plugin.yaml` | optional: the plugin's `labels` and `config` |
-| `plugins/<type>/profiles/*.yaml` | one plugin profile entry; routing order within the plugin is the lexical order of the file names |
+| `plugins/<type>/profiles/*.yaml` | one plugin profile entry; recorded order within the plugin is the lexical order of the file names |
 
 Unknown fields, a repeated profile name, a plugin with no profile files, and
 any other file or directory are errors. Files and directories whose names
@@ -310,7 +308,7 @@ has an error.
 
 Receiver `nomad-1` in pool `build`, against the
 [pool terms example](configuration-operator.md#pool-terms-example): one Nomad plugin and two
-plugin profiles in routing order, `container` running its agent in a container and
+plugin profiles in recorded order, `container` running its agent in a container and
 `host` running its agent as an isolated process on the host. The plugin's
 `config` holds the cluster's address and the name of its token, and each
 plugin profile's `config` holds only what the example needs; the

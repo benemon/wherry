@@ -154,11 +154,8 @@ func (r *Receiver) newClient(extra ...kgo.Opt) (*kgo.Client, error) {
 	return kgo.NewClient(append(slices.Clone(r.base.Opts()), extra...)...)
 }
 
-// Run registers the receiver's keys, rotates them when New was asked to, waits for its configuration, then advertises
-// and claims until ctx ends or the configuration changes. Held runs then go on: after a configuration change until they
-// end, and after ctx ends for at most the drain timeout.
-// A Kafka authorisation error or a plugin process's exit ends Run at once with that error: held runs are left
-// unacknowledged and their jobs running, for an adopter to find once the broker redelivers their tasks.
+// Run drains held tasks on cancellation or reconfiguration and leaves them unacknowledged with jobs running on
+// fatal errors, limiting cancellation drain to the drain timeout.
 func (r *Receiver) Run(ctx context.Context) error {
 	defer r.base.Close()
 	defer r.reader.Close()
@@ -351,8 +348,7 @@ func (r *Receiver) register(ctx context.Context) error {
 	return nil
 }
 
-// configure waits for this receiver's configuration record, validates it against its pool's
-// terms and configures its profiles.
+// configure waits for a valid receiver configuration.
 func (r *Receiver) configure(ctx context.Context) error {
 	waiting := false
 	for {
@@ -379,8 +375,9 @@ func (r *Receiver) configure(ctx context.Context) error {
 			}
 			r.config, r.profiles = config, profiles
 			r.metrics.registerFor(r)
-			r.metrics.capacity.Set(float64(r.replicas()))
-			r.logger.Printf("configured: pool=%s profiles=%d replicas=%d", config.Pool, len(profiles), r.replicas())
+			replicas := r.replicas()
+			r.metrics.capacity.Set(float64(replicas))
+			r.logger.Printf("configured: pool=%s profiles=%d replicas=%d", config.Pool, len(profiles), replicas)
 			return r.refresh(ctx)
 		}
 		if !waiting {
@@ -553,9 +550,7 @@ func recordType(encoded []byte) string {
 	return typ
 }
 
-// advertise sweeps each profile, then publishes one offer per ready profile with its agent; with none ready it
-// publishes no offers and keeps its liveness and capacity visible. Each profile call has one advertise
-// interval, so a hung plugin delays the next advertisement by at most that much per call.
+// advertise bounds each profile call by advertiseInterval, including when no profile is ready.
 func (r *Receiver) advertise(ctx context.Context) error {
 	for _, named := range r.profiles {
 		callCtx, cancel := context.WithTimeout(ctx, advertiseInterval)

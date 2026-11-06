@@ -706,8 +706,7 @@ when its `task_hash` equals the hash of the run's submission.
 ## Advertisement
 
 An advertisement reports a receiver's liveness and capacity: the sum of its
-profiles' effective replicas (0 or absent means one). This bounds held records;
-a redelivery may adopt another profile's existing job.
+profiles' replicas (0 or absent counts as one).
 
 ```json
 {
@@ -719,7 +718,7 @@ a redelivery may adopt another profile's existing job.
 }
 ```
 
-- `offers` lists the receiver's ready plugin profiles in routing order, each as
+- `offers` lists the receiver's ready plugin profiles in recorded order, each as
   `profile`, `agent` and, optionally, `inline_limit`, the bytes of `raw`
   and `data` parts the profile delivers, absent when it declares no limit
   and never negative. It is empty when no profile is ready. Readers take a
@@ -1272,11 +1271,11 @@ from the broker, with `start_by_limit_ms` and `lock_duration_ms` in milliseconds
 `start_by_limit` and `lock_duration`. `config` holds `receiver` and `pool`,
 which equal the record's, the receiver's `plugin_sha256`, the
 lowercase hex SHA-256 pinned for each plugin type, and its `profiles` in
-routing order, the plugins in the order of their names. Each plugin profile is the
+recorded order, the plugins in the order of their names. Each plugin profile is the
 [profile entry](configuration-receiver.md#receiver-configuration) as `name`, `plugin`
-naming its plugin, `agent`, optional `replicas` (omitted when 0; 0 means one),
-`labels` when set, and the merged
-`config`, which keeps a `credential` name and never a credential value. An `end` names
+naming its plugin, `agent`, optional `replicas` (omitted when 0), `labels` when
+set, and the merged `config`, which keeps a `credential` name and never a
+credential value. A value of 0 for `replicas` means one. An `end` names
 exactly one subject: `receiver`, `tenant` and `host`, `tenant` and `pool`, or `tenant` alone. Tenant and entitlement ends use keys `end.tenant.<T>` and `end.entitlement.<T>.<P>` and live outside principal revocation sets. A `revoking` names exactly one of `receiver`, or
 `tenant` and `host`, and no other member.
 Readers fold the records in order. A reader loads no state when:
@@ -1350,8 +1349,7 @@ release. Otherwise a receiver that claims a submission:
 9. rejects it with `agent does not match the task topic` when the topic it
    was read from is not a signature task topic or names another agent than
    its placement; releases it, logged and with no start-failure record, when
-   no ready plugin profile of this receiver has that topic as its signature
-   topic, a profile gone unready since the claim's subscription; and rejects
+   the plugin profile whose claim loop read it is no longer ready; and rejects
    it with `selector does not match the task topic` when that profile's
    labels do not satisfy its selector. A run a member has claimed goes on
    without a profile when its `task_ended_by` has passed, or when its

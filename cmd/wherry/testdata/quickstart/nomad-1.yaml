@@ -20,5 +20,6 @@ plugins:
     profiles:
       - name: container
         agent: claude
+        replicas: 2
         labels:
           isolation: container

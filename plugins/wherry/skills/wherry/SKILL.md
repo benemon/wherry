@@ -42,7 +42,7 @@ Call `receivers` first. For each receiver it returns:
   with no ready plugin profile lists every profile with `ready` false, and no task
   is placed on it.
 - `status` (`live`, `stale`, `silent` or `ended`), `capacity` and
-  `in_flight`: whether it is live and has room.
+  `in_flight`: whether it is live and how much receiver-wide room it has; each profile's replicas bound its own fresh tasks.
 
 Pick an `agent` from the profiles, or omit it to take the pool's default
 agent, or the first other agent in the pool's terms that a ready profile

@@ -38,3 +38,43 @@ Choose a Nomad plugin release that pairs with your wherry release.
   plugin example's answers.
 
 <!--@include: ./plugins/nomad/README.md#install-->
+
+### Receiver configuration
+
+Use this configuration for `receivers/nomad-1.yaml` in the steps above.
+Set `plugin_sha256.nomad` to the SHA-256 of the plugin binary in your receiver
+image, and use your agent image. The profile has two replicas:
+
+```yaml
+pool: build
+plugin_sha256:
+  # The SHA-256 of the plugin binary in the receiver image: the one binary the receiver may run.
+  nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+plugins:
+  nomad:
+    config:
+      namespace: agents
+      runtime:
+        driver: docker
+        config:
+          image: registry.example.com/claude-agent:1.0
+          command: /bin/sh
+          args:
+            - -c
+            - cd "$NOMAD_TASK_DIR" && exec claude -p --output-format stream-json --verbose < prompt.txt
+        resources:
+          cpu: 1000
+          memory_mb: 2048
+    profiles:
+      - name: container
+        agent: claude
+        replicas: 2
+        labels:
+          isolation: container
+```
+
+The profile holds up to two tasks at a time. Its configuration log includes:
+
+```text
+configured: pool=build profiles=1 replicas=2
+```

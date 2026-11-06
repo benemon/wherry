@@ -192,8 +192,7 @@ func withDefaults(terms Terms) Terms {
 	return terms
 }
 
-// ReceiverConfig is a receiver's whole configuration, recorded on
-// wherry.operator and read by the receiver after it authenticates.
+// ReceiverConfig is the receiver configuration recorded on wherry.operator.
 type ReceiverConfig struct {
 	Receiver string            `json:"receiver"`
 	Pool     string            `json:"pool"`
@@ -205,9 +204,7 @@ type ReceiverConfig struct {
 	Broker string `json:"-"`
 }
 
-// ProfileSettings configures one profile: the plugin that runs it, the agent it launches, the labels its
-// operator declares for it, and its plugin's config merged with its own, which the plugin decodes (runtime, node pool
-// and the like stay there).
+// ProfileSettings configures a profile and its replica count.
 type ProfileSettings struct {
 	Name     string            `json:"name"`
 	Plugin   string            `json:"plugin"`

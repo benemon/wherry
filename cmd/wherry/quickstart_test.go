@@ -61,6 +61,7 @@ func TestQuickstartFiles(t *testing.T) {
 	}
 	documented(t, "install-operator.md", "quickstart/build-terms.yaml")
 	documented(t, "install-host.md", "quickstart/host-config.yaml")
+	documented(t, "install-receiver-nomad.md", "quickstart/nomad-1.yaml")
 }
 
 // TestQuickstartMissingSourceError finds in the configuration reference and operations, as a code block of its own or of

@@ -80,8 +80,7 @@ func (run *activeRun) awaitOpen(ctx, bound context.Context, job *pluginsdk.Handl
 	}
 }
 
-// openOnce writes one open request and waits for its answer: the values of an attempt wrap, or a refusal's reason, or
-// done with the run's acknowledgement.
+// openOnce returns envelope values, a refusal, or a final acknowledgement.
 func (run *activeRun) openOnce(ctx, bound context.Context, job *pluginsdk.Handle, waited func(string)) (*signed.EnvelopeValues, string, kgo.AckStatus, bool) {
 	r, task := run.receiver, run.task
 	runID := task.Wherry.Run

@@ -153,7 +153,7 @@ Each profile has one share client per effective replica, subscribing only to tha
 profile's signature topic through the pool's share group. An idle loop keeps its
 client across empty polls. When its profile becomes unready it closes its idle
 client; when ready again it rejoins after that close completes. Other profiles'
-idle clients keep their identity. Held clients keep renewing through readiness
+idle clients keep their share group membership. Held clients keep renewing through readiness
 changes. A label, agent or replica change through `receiver apply` exits the
 receiver after its held runs end, so its platform restarts it on the new record.
 
@@ -172,19 +172,23 @@ a restriction prevents a new poll, and its `no_ready_offer` reason is 1
 exactly when every `wherry_profile_ready` of the receiver is 0. Two profiles
 with the same agent and labels name the same topic, with one subscriber per replica of each profile.
 
-A profile that goes unready between a claim's subscription and its fetch has
-its non-ending task released to the pool below the delivery-budget threshold, logged as
-`run <run>: no ready profile for topic <topic>; releasing`, without a start-failure record or incrementing `wherry_start_failures_total`;
-the authorised claim still increments `wherry_claims_total`. At attempt `delivery_limit - 1`
-and above, give-back publishes the existing budget terminal and rejects, subject to
-commit failure handling. Ending redeliveries may continue cleanup. Sibling loops subscribing to the same signature may acquire the task once each
-before their idle clients close; each acquisition spends a delivery.
+When a profile goes unready between a claim's subscription and its fetch:
+
+1. Below `delivery_limit - 1`, the receiver releases the task, logs
+   `run <run>: no ready profile for topic <topic>; releasing`, and records no
+   start failure. `wherry_claims_total` still counts it.
+2. From `delivery_limit - 1`, the run ends `delivery budget exhausted`.
+3. An ending run continues cleanup.
+
+The unready profile's other replicas still polling may each acquire it once
+before they close their idle clients: up to the profile's `replicas` minus 1
+more deliveries, which the sizing allows for.
 
 ### A receiver with no ready offer
 
 A receiver offers a profile only while the profile's plugin reports it ready.
-A receiver with no ready offer has an empty subscription and fetches no tasks from its pool.
-It closes its idle polls when it observes the empty subscription.
+A receiver with no ready offer has no open claim clients and fetches no tasks
+from its pool. Each loop closes its idle client when it observes the gate closed.
 After an advertisement makes a profile ready, that profile's loops rejoin, unless its pool is suspended (`wherry_claim_gated{reason="suspended"}`) or it holds a [pending run](#a-receiver-with-a-pending-run) (`wherry_claim_gated{reason="pending_run"}`); closing waits for the in-flight fetch, and joining takes the broker's round trip.
 Its held runs keep running, renewing and reading cancels.
 `wherry_claim_gated{reason="no_ready_offer"}` is 1 while it has no ready offer; it reports a restriction on opening new polls, not observed polling.
@@ -225,7 +229,7 @@ A receiver that observes any held run pending stops claiming:
 
 A receiver holds at most the sum of its profiles' effective replicas in records,
 with each profile's fresh tasks bounded by its replicas. Redelivery can adopt a
-job in another profile. One pending observation gates every idle loop; records
+job in another profile. A run waiting for placement gates every idle loop. Records
 already fetched remain admissible under the admission checks.
 A pending run past its `task_started_by` is stopped and fails with `not started by task_started_by (<RFC 3339 time>)`.
 
