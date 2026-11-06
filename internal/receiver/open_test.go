@@ -808,7 +808,7 @@ func servesAClaimAfterThePreviousHolderEnded(t *testing.T, unread bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	check := &claimCheck{r: f.receiver, events: events, keys: keys, now: time.Now()}
+	check := &claimCheck{r: f.receiver, events: events, keys: keys, now: time.Now(), terms: testTerms()}
 	request := slices.IndexFunc(events.requests, func(request openRequest) bool { return request.digest == digest })
 	if unread {
 		f.failReadOnce(t, operator.PoolReceiversTopic(testPool))

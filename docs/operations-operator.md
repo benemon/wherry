@@ -211,16 +211,19 @@ Prerequisites: the working directory and the pool's new terms in
    runs first: the change rejects its queued and redelivered runs at their
    next claim.
 
-4. When the change adds or removes an agent's `credentials`, suspend the
-   pool first:
+4. When the change adds or removes an agent's `credentials`, drain the
+   agent's runs as in step 3, then suspend the pool:
 
    ```sh
    wherry operator pool suspend build
    ```
 
-   A receiver that has not yet read the new terms fails a task sealed under
-   them when it opens the task. While the pool is suspended, receivers claim
-   no tasks; they claim again only after reading the terms that resume it.
+   A task sealed under the old terms fails when a receiver opens it under
+   the new ones, if it carries a credential the change removes or lacks one
+   the change adds. A receiver that has not yet read the new terms fails a
+   task sealed under them when it opens the task. While the pool is
+   suspended, hosts submit no tasks to it and receivers claim none; receivers
+   claim again only after reading the terms that resume it.
 
 5. Record the terms:
 
