@@ -211,21 +211,26 @@ Prerequisites: the working directory and the pool's new terms in
    runs first: the change rejects its queued and redelivered runs at their
    next claim.
 
-4. When the change adds or removes an agent's `credentials`, drain the
-   agent's runs as in step 3, then suspend the pool:
+4. When the change alters an agent's `credentials`, including a
+   credential's target, let the agent's queued and running work finish
+   first. Cancel work that must not run, and resubmit it after the change.
+   A task is sealed under the terms its host read: a receiver that opens it
+   under other terms can fail it, and suspending the pool does not drain
+   queued work.
+
+5. When the change alters an agent's `credentials`, suspend the pool:
 
    ```sh
    wherry operator pool suspend build
    ```
 
-   A task sealed under the old terms fails when a receiver opens it under
-   the new ones, if it carries a credential the change removes or lacks one
-   the change adds. A receiver that has not yet read the new terms fails a
-   task sealed under them when it opens the task. While the pool is
-   suspended, hosts submit no tasks to it and receivers claim none; receivers
-   claim again only after reading the terms that resume it.
+   The command waits for the key custodian, not for every receiver. Wait
+   until every receiver in the pool reports
+   `wherry_claim_gated{reason="suspended"}` as `1`. A receiver that has read
+   the suspension claims nothing until it reads the resume, and that read
+   also carries the new terms.
 
-5. Record the terms:
+6. Record the terms:
 
    ```sh
    wherry operator pool apply build
@@ -239,11 +244,12 @@ Prerequisites: the working directory and the pool's new terms in
    wherry: pool terms would strand live receivers: receiver nomad-1 plugin nomad profile host: receiver agent is outside pool terms
    ```
 
-   `--dry-run` makes the same checks and writes nothing. Receivers apply
-   the new terms within 15 seconds, without a restart. A lowered
-   `delivery_limit` applies to a task in flight at its next release.
+   `--dry-run` makes the same checks and writes nothing. Receivers read
+   new terms every 15 seconds, without a restart; a slow or failed read
+   delays the update. A lowered `delivery_limit` applies to a task in
+   flight at its next release.
 
-6. If you suspended the pool in step 4, resume it:
+7. If you suspended the pool in step 5, resume it:
 
    ```sh
    wherry operator pool resume build

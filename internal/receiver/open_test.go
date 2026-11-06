@@ -871,7 +871,7 @@ func TestClaimCheckRefusesARequestNotFromItsLiveClaimant(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		check := &claimCheck{r: f.receiver, events: events, keys: keys, now: time.Now()}
+		check := &claimCheck{r: f.receiver, events: events, keys: keys, now: time.Now(), terms: testTerms()}
 		request := slices.IndexFunc(events.requests, func(request openRequest) bool { return request.digest == digest })
 		answer := check.decide(f.ctx, events.requests[request])
 		var refusal wire.OpenRefusal
@@ -1787,7 +1787,7 @@ func TestANonMembersRequestReadsNoTask(t *testing.T) {
 	f.revoke(t, "receiver-b")
 	fetches, _ := f.taskFetches(t, 0)
 	request := slices.IndexFunc(events.requests, func(request openRequest) bool { return request.digest == digest })
-	check := &claimCheck{r: f.receiver, events: events, now: time.Now()}
+	check := &claimCheck{r: f.receiver, events: events, now: time.Now(), terms: testTerms()}
 	var refusal wire.OpenRefusal
 	if answer := check.decide(f.ctx, events.requests[request]); len(answer) != 1 || wire.ParseStrict(answer[0].Value, f.keys(), time.Now(), &refusal) != nil ||
 		refusal.Reason != wire.RefusedNotClaimant || fetches.Load() != 0 {
