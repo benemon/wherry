@@ -353,8 +353,7 @@ func writeRotateReport(out io.Writer, pool string, report operator.RotateReport,
 	fmt.Fprintf(out, "tasks=%d\n", len(report.Tasks))
 }
 
-// showReceiver writes config's plugin pins and resolved profiles, in routing order, to out as YAML, each profile
-// with its signature, double-quoted so its line feeds show as \n, and its signature's task topic.
+// showReceiver writes resolved profiles and plugin pins as YAML.
 func showReceiver(out io.Writer, config operator.ReceiverConfig) error {
 	type shown struct {
 		operator.ProfileSettings `yaml:",inline"`
@@ -481,9 +480,7 @@ type receiverProfile struct {
 	Config   map[string]any     `yaml:"config"`
 }
 
-// readReceiverConfig reads a receiver config from a single file holding its head and plugins, or from a
-// directory holding receiver.yaml, with its head, and, for each plugin, plugins/<type>/plugin.yaml with plugins/<type>/profiles/*.yaml,
-// where profile file order is routing order within the plugin.
+// readReceiverConfig decodes a receiver file or directory in profile recorded order.
 func readReceiverConfig(path string, directory bool) (operator.ReceiverConfig, error) {
 	if !directory {
 		var file struct {
@@ -600,8 +597,7 @@ type receiverHead struct {
 	Broker       string            `yaml:"broker"`
 }
 
-// receiverConfig is head's receiver with the profiles of plugins sorted by type, each plugin's in their order, every
-// profile's labels and config merged onto its plugin's.
+// receiverConfig merges plugin defaults into profiles in recorded order.
 func receiverConfig(head receiverHead, plugins []plugin) (operator.ReceiverConfig, error) {
 	config := operator.ReceiverConfig{Pool: head.Pool, PluginSHA256: head.PluginSHA256, Broker: head.Broker}
 	if config.PluginSHA256 == nil {

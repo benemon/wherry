@@ -52,8 +52,8 @@ jobs:
           against=$(git describe --tags --abbrev=0 --match 'pluginsdk/v*')
           "$RUNNER_TEMP/buf" breaking pluginsdk --against ".git#tag=$against,subdir=pluginsdk"
 
-  # promtool checks the shipped alert rules and runs contrib/observability/routing.test.yml, the dashboard's Routing
-  # queries on fixed series; make check needs no promtool.
+  # promtool checks the shipped alert rules and runs routing.test.yml and counter-zero.test.yml in
+  # contrib/observability against fixed series; make check needs no promtool.
   observability:
     runs-on: ubuntu-latest
     env:

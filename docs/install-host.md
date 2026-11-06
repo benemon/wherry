@@ -68,7 +68,7 @@ wherry host receivers
 ```
 
 ```
-receiver=nomad-1 pool=build capacity=2 in_flight=0 advertisement_age=4s status=live
+receiver=nomad-1 pool=build capacity=1 in_flight=0 advertisement_age=4s status=live
   profile=container plugin=nomad agent=claude ready=true labels=isolation=container inline_limit=45056 credentials=claude-oauth-token:env=CLAUDE_CODE_OAUTH_TOKEN
 ```
 

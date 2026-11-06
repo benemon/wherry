@@ -125,9 +125,10 @@ attempts, not hops between members, and is sized by the attempts one task may
 burn, never by the number of members. A member that failed to start a task
 may be handed it again, even when a peer with the same signature could have
 started it. A profile that goes unready between a claim's subscription and
-its fetch has its task released. Sibling loops subscribing to the same signature
-may acquire it once each before their idle clients close; sizing allows for
-those extra deliveries. From attempt
+its fetch has its task released. The unready profile's other replicas still polling may each acquire it once
+before they close their idle clients. For that readiness withdrawal, this
+allows up to the profile's effective replica count minus one more deliveries.
+A `replicas` value of 0 or an absent field means one replica. From attempt
 `delivery_limit` minus 1, a receiver ends a run `TASK_STATE_FAILED` with
 `delivery budget exhausted` where it would release it, except in the cases
 the [extension](a2a-extension-v1.md#delivery-budget) lists.

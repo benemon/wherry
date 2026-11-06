@@ -7,6 +7,7 @@ import (
 	"maps"
 	"math"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"slices"
 	"sort"
@@ -543,8 +544,9 @@ func zeroSamples(t *testing.T, r *Receiver) map[string]float64 {
 		t.Fatal(err)
 	}
 	out := map[string]float64{}
+	familiesToCheck := strings.Fields("claims_total admissions_total rejections_total runs_total adoptions_total redeliveries_total run_duration_seconds queue_wait_seconds open_wait_seconds plugin_placement_seconds start_failures_total dispatch_outcomes_total stop_failures_total purge_failures_total sweep_failures_total collection_failures_total open_waits_total redactions_total bus_errors_total denials_total metrics_dropped_total delivery_budget_exhausted_total claimant_changes_total")
 	for name, family := range families {
-		if !slices.Contains(strings.Fields("claims_total admissions_total rejections_total runs_total adoptions_total redeliveries_total run_duration_seconds queue_wait_seconds open_wait_seconds plugin_placement_seconds start_failures_total dispatch_outcomes_total stop_failures_total purge_failures_total sweep_failures_total collection_failures_total open_waits_total redactions_total bus_errors_total denials_total metrics_dropped_total delivery_budget_exhausted_total claimant_changes_total"), strings.TrimPrefix(name, "wherry_")) {
+		if !slices.Contains(familiesToCheck, strings.TrimPrefix(name, "wherry_")) {
 			continue
 		}
 		for _, metric := range family.Metric {
@@ -691,6 +693,18 @@ func TestKnownSeriesAtZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, want := zeroSamples(t, f.receiver), zeroExpected([]string{testTenant, "tenant-b"})
+	doc, err := os.ReadFile("../../docs/metrics.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(doc), "`11 + 34P + T(39 + 18A + P + 2B + 51M)`") {
+		t.Fatal("documented seeded-series formula changed; update its fixed-configuration pin")
+	}
+	// T=2 tenants, P=2 profiles, A=3 with empty, B=3 with none, M=3 agent/model pairs.
+	const seededSeries = 11 + 34*2 + 2*(39+18*3+2+2*3+51*3)
+	if len(got) != seededSeries {
+		t.Fatalf("seeded series = %d; documented formula gives %d", len(got), seededSeries)
+	}
 	if !reflect.DeepEqual(got, want) {
 		for key, value := range want {
 			if v, ok := got[key]; !ok || v != value {

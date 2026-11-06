@@ -246,7 +246,6 @@ func (b brokerPool) groupMembers(t *testing.T, ctx context.Context, clientID str
 	return n
 }
 
-// configure records the receiver's profiles.
 func (b brokerPool) configure(t *testing.T, ctx context.Context, profiles ...operator.ProfileSettings) {
 	t.Helper()
 	config := testConfig(b.receiver)

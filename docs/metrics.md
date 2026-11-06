@@ -96,11 +96,11 @@ minutes.
 
 ## Series created at zero
 
-At construction, the receiver creates `bus_errors_total` for `read`, `write`,
-`transactional ID` and `share group`; `denials_total` for those operations plus
-`membership`; and `claimant_changes_total` for `released` and `lease`.
-`custodian_takeovers_total` also starts at zero for `takeover` and `contested`,
-as do the unlabelled core counters.
+At construction, the receiver creates `bus_errors_total` for `read`,
+`write`, `transactional ID` and `share group`. It creates `denials_total`
+for those operations plus `membership`, and `claimant_changes_total` for
+`released` and `lease`. `custodian_takeovers_total` also starts at zero for
+`takeover` and `contested`, as do the unlabelled core counters.
 
 After successful startup and subsequent state refreshes, before publishing the
 new state, the receiver creates these core children (all names have the
@@ -122,15 +122,16 @@ new state, the receiver creates these core children (all names have the
 | `metrics_dropped_total` | profile × `timeout`, `error`, `duplicate`, `unknown_family`, `unknown_label`, `kind`, `label_value`, `value` |
 | `stop_failures_total`, `purge_failures_total`, `sweep_failures_total`, `plugin_placement_seconds` | profile |
 
-A tenant is seeded only while entitled to this receiver's pool. Each configured
-profile contributes the distinct models of its agent's first entry in the current
-pool terms, or the empty model when that entry lists none; a profile whose agent
-the terms do not name contributes no run tuples. Sentinel unions are deduplicated.
-The run matrix is a partial contract: runtime placement and current terms can
-produce other tuples. Run families for the `none` profile, agent and model
-`other` fallbacks, state `other`, and other valid task states stay lazy. A
-configured profile literally named `none`, or agent or model named `other`,
-is seeded normally. Plugin-emitted families stay lazy and belong to the plugin;
+A tenant is seeded only while entitled to this receiver's pool. Each
+configured profile contributes the distinct models of its agent's first
+entry in the current pool terms, or the empty model when that entry lists
+none. A profile whose agent the terms do not name contributes no run tuples.
+The empty and `none` profile values are deduplicated against configured profile names. The run matrix is a seeded
+subset: runtime placement and current terms can produce other tuples. Run
+families for the `none` profile, agent and model `other` fallbacks, state
+`other`, and other valid task states stay lazy. A configured profile
+literally named `none`, or agent or model named `other`, is seeded normally.
+Plugin-emitted families stay lazy and belong to the plugin.
 `plugin_placement_seconds` belongs to the core. Gauges read current state.
 
 The rejection reasons are `run ID does not match its signer`, `duplicate

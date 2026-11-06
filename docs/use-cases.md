@@ -40,9 +40,8 @@ isolation.
 Your work splits into pieces that don't depend on each other.
 Submit each piece as its own run.
 The pool's receivers take them as they have room.
-They run side by side within each profile's effective replicas (default one),
-subject to the receiver-wide pending gate. Redelivery may adopt an existing job
-in another profile.
+They run side by side, up to the replicas the pool's receivers configure for
+each profile.
 You, or your coding agent, split the work and combine the results.
 A coding agent uses the same tools for many runs as for one.
 

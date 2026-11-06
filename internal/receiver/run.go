@@ -77,10 +77,8 @@ var newClaimClient = func(r *Receiver, _ Named, opts ...kgo.Opt) (*kgo.Client, e
 	return r.newClient(opts...)
 }
 
-// claimLoop holds one slot: a dedicated share client per claimed record,
-// because renews do not survive a poll and held records are tied to the connection.
-// It claims until claiming ends and runs a held task until running ends. idle is called once the slot's
-// idle share client has closed, or once claiming ends while the slot holds a task.
+// claimLoop retains a dedicated connection per held record because renewal cannot survive another poll, calling
+// idle once the idle client closes or claiming ends with a held task.
 func (r *Receiver) claimLoop(claiming, running context.Context, profile Named, idle func()) {
 	defer idle()
 	for claiming.Err() == nil {
@@ -92,8 +90,7 @@ func (r *Receiver) claimLoop(claiming, running context.Context, profile Named, i
 	}
 }
 
-// claimGated reports that no new poll may open: a suspended pool, no ready offer or a held run observed pending.
-// r.mu must be held, and never across a poll, a client close, a sleep or a plugin call.
+// claimGated requires r.mu, which must not span a poll, close, sleep, or plugin call.
 func (r *Receiver) claimGated() bool {
 	return r.state.Suspended[r.config.Pool] || len(r.offers) == 0 || len(r.pending) > 0
 }
@@ -1098,10 +1095,9 @@ func accepted(state pluginsdk.JobState, completedAt, bound time.Time) bool {
 	return (state == pluginsdk.JobRunning || state == pluginsdk.JobEnded) && completedAt.Before(bound)
 }
 
-// awaitStart observes a job not yet started, one Lookup at a time under a child of startCtx, until it starts or ends,
-// and returns it running or ended, or done with the run's acknowledgement. first is a result already in hand, and
-// dispatched when this attempt's Dispatch returned created, zero for none. A Lookup is never joined: ending the phase
-// cancels it and drops its late result.
+// awaitStart observes a job not yet started, one Lookup at a time, until it starts or ends. Ending the start phase
+// cancels the Lookup in flight without joining it and drops its late result. first is a result already in hand;
+// dispatched is when this attempt's Dispatch returned created, or zero otherwise.
 func (run *activeRun) awaitStart(ctx, startCtx context.Context, handle pluginsdk.Handle, dispatched time.Time, first *lookupResult) (pluginsdk.Job, kgo.AckStatus, bool) {
 	r, runID := run.receiver, run.task.Wherry.Run
 	bound := wire.PastBound(run.task.Wherry.TaskStartedBy)
@@ -1818,9 +1814,8 @@ func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pen
 	return run.end(ctx, status, result, pending, ack)
 }
 
-// collect reads the outputs of a stopped job, redacts them and keeps their chunks and the result's lists of what the
-// run returned and did not. S3 outputs are uploaded as Collect streams them, unredacted, since they go to the host's own
-// bucket and never to the feed. Every expected output is listed as one or the other.
+// collect redacts feed outputs and uploads S3 outputs unredacted to the host's bucket, listing every expected
+// output as returned or missing.
 func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stopped bool, terms operator.Terms) {
 	limit := terms.OutputLimit
 	stored := map[string]storedOutput{}

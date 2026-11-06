@@ -38,7 +38,7 @@ func signatureProfile(name, agent string, labels map[string]string) operator.Pro
 	return operator.ProfileSettings{Name: name, Plugin: "fake", Agent: agent, Labels: labels, Config: map[string]any{}}
 }
 
-// signatureFixture is a fixture whose profiles, in order, are ready fakes; f.plugin is the first profile's.
+// signatureFixture creates ready profiles in the given order, with f.plugin referring to the first profile.
 func signatureFixture(t *testing.T, profiles ...operator.ProfileSettings) fixture {
 	t.Helper()
 	config := testConfig(testReceiver)
@@ -52,7 +52,7 @@ func signatureFixture(t *testing.T, profiles ...operator.ProfileSettings) fixtur
 	return f
 }
 
-// twoSignatures is a signatureFixture with profiles a and b, launching claude with sig=a and sig=b.
+// twoSignatures creates profiles with sig=a and sig=b.
 func twoSignatures(t *testing.T) fixture {
 	t.Helper()
 	return signatureFixture(t,

@@ -144,18 +144,17 @@ configuration. A restart through its platform applies a change at once: the
 receiver stops within its `drain_timeout` and releases the tasks it holds,
 and runs in flight are then adopted on redelivery.
 
-
 ### Claim topology
 
-Each configured profile has its own single-topic claim loop for each effective
-replica (default one). Idle clients persist across empty polls. A loop holds one
-record at a time and admits fresh tasks through its own profile, including when
-another profile has the same signature. Readiness withdrawal closes only that
-profile's idle clients; held clients keep renewing. Suspension and an observed
-pending job gate polling receiver-wide. A redelivery may adopt another profile's
-existing job; advertised capacity is the sum of effective replicas and bounds
-held records. Configuration, readiness checks and job lookup stay per profile.
-
+Each configured profile has its own single-topic claim loop for each
+effective replica (default one). Idle clients persist across empty polls. A
+loop holds one record at a time and admits fresh tasks through its own
+profile, including when another profile has the same signature. Readiness
+withdrawal closes only that profile's idle clients. Held clients keep
+renewing. Suspension and a run waiting for placement gate polling
+receiver-wide. A redelivery may adopt another profile's existing job.
+Advertised capacity is the sum of effective replicas and bounds held
+records. Configuration, readiness checks and job lookup stay per profile.
 
 ## Key custody
 

@@ -278,8 +278,7 @@ func (m *metrics) registerFor(r *Receiver) {
 	})
 }
 
-// routingCollector collects each profile's signature topic and readiness, and the claim gate's operands, at scrape
-// time from the state claimGated and ready read.
+// routingCollector samples routing and claim gates under the receiver lock.
 type routingCollector struct{ receiver *Receiver }
 
 func (c routingCollector) Describe(descs chan<- *prometheus.Desc) {
@@ -287,8 +286,7 @@ func (c routingCollector) Describe(descs chan<- *prometheus.Desc) {
 	descs <- c.receiver.metrics.claimGated
 }
 
-// Collect copies the state under r.mu and sends after releasing it, so a slow scrape never holds the lock the claim
-// loop and runs take. It makes no plugin call, Kafka call or sleep.
+// Collect snapshots routing under r.mu and emits metrics after unlocking, without plugin calls, Kafka calls, or sleeps.
 func (c routingCollector) Collect(out chan<- prometheus.Metric) {
 	r, m := c.receiver, c.receiver.metrics
 	type profileSample struct {
@@ -336,8 +334,8 @@ func (c pluginCollector) Describe(descs chan<- *prometheus.Desc) {
 	}
 }
 
-// Collect calls every profile's Metrics at once, each within metricsDeadline. A profile whose call fails gives the
-// samples of its last call that answered.
+// Collect retains the last successful samples when a profile fails its bounded scrape, running profile calls
+// concurrently within metricsDeadline.
 func (c pluginCollector) Collect(out chan<- prometheus.Metric) {
 	m := c.receiver.metrics
 	var wg sync.WaitGroup
@@ -427,9 +425,8 @@ func (m *metrics) pluginMetric(sample pluginsdk.Sample, labels []string) (promet
 	return prometheus.MustNewConstMetric(desc, kind, sample.Value, labels...), ""
 }
 
-// placementLabels are placement's agent and model as the pool's terms bound them, so a host's placement cannot add a
-// label value: the agent, or other when the terms do not name it; the model, other when the agent's models do not
-// hold it, or empty when the agent has none.
+// placementLabels bounds placement labels to the current pool terms, using other for unknown agents or models
+// and empty for an agent with no models.
 func (r *Receiver) placementLabels(placement wire.Placement) (string, string) {
 	state, _, _ := r.snapshot()
 	return termsPlacementLabels(state.Pools[r.config.Pool].Agents, placement)

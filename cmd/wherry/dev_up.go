@@ -894,8 +894,7 @@ func devOperator(ctx context.Context, instance devInstance, broker string) (*ope
 	return operatorService(dir)
 }
 
-// devBootstrap makes the operator's calls for the instance, its bundles in the operator working directory, and gives
-// the receiver its config.yaml.
+// devBootstrap writes the development instance configuration and bundles.
 func devBootstrap(ctx context.Context, env devEnv, agents []string, service operator.Service) error {
 	instance, dir := env.instance, env.instance.env("operator")
 	if err := service.PoolApply(ctx, devPool, devTerms(agents, env.manifest.DefaultAgent, env.storage()), false); err != nil {
