@@ -53,16 +53,6 @@ func (l profileLogger) Log(_ kgo.LogLevel, msg string, values ...any) {
 		}
 	}
 }
-func identifyProfiles(t *testing.T) *profileMembers {
-	t.Helper()
-	m := &profileMembers{names: map[string]string{}}
-	old := newClaimClient
-	newClaimClient = func(r *Receiver, p Named, opts ...kgo.Opt) (*kgo.Client, error) {
-		return r.newClient(append(opts, kgo.WithLogger(profileLogger{m, p.Name}))...)
-	}
-	t.Cleanup(func() { newClaimClient = old })
-	return m
-}
 func (m *profileMembers) name(id string) string { m.mu.Lock(); defer m.mu.Unlock(); return m.names[id] }
 func liveProfile(f fixture, m *profileMembers, name string) []shareMember {
 	var out []shareMember
@@ -75,7 +65,12 @@ func liveProfile(f fixture, m *profileMembers, name string) []shareMember {
 }
 
 func profileReadiness(t *testing.T, duplicate bool, replicas int) {
-	m := identifyProfiles(t)
+	m := &profileMembers{names: map[string]string{}}
+	old := newClaimClient
+	newClaimClient = func(r *Receiver, p Named, opts ...kgo.Opt) (*kgo.Client, error) {
+		return r.newClient(append(opts, kgo.WithLogger(profileLogger{m, p.Name}))...)
+	}
+	t.Cleanup(func() { newClaimClient = old })
 	a := signatureProfile("a", "claude", map[string]string{"sig": "a"})
 	a.Replicas = replicas
 	b := signatureProfile("b", "claude", map[string]string{"sig": "b"})

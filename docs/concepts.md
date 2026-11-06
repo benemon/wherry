@@ -122,14 +122,10 @@ refused. The client signs the agent, the selector and the chosen pool into
 the task and writes it to the signature's task topic.
 
 **Each profile replica subscribes** only to that profile's signature topic
-while ready. A fresh task goes through the profile of the loop that claimed
-it, including when profiles share a signature. The selector guards against a
-host publishing to the wrong topic; it does not choose between profiles. If
-the loop's profile becomes unready, it releases the task without an
-offer-unavailable start failure. An ending run can still clean up its job
-without a ready profile. A redelivery may adopt another profile's existing
-job. A suspended pool, or a held run observed pending, stops every loop
-opening a new poll.
+while ready. It admits a fresh task through that profile.
+[Claim topology](design.md#claim-topology) gives the model.
+[What a receiver subscribes to](operations-receivers.md#what-a-receiver-subscribes-to)
+describes what you observe.
 
 **A label change moves a signature.** `receiver apply` creating a profile's
 new signature creates its topic before the record; the receiver restarts on
