@@ -5,6 +5,12 @@
   </picture>
 </h1>
 
+[![CI](https://github.com/benemon/wherry/actions/workflows/ci.yml/badge.svg)](https://github.com/benemon/wherry/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/benemon/wherry/actions/workflows/codeql.yml/badge.svg)](https://github.com/benemon/wherry/actions/workflows/codeql.yml)
+[![Scorecard](https://github.com/benemon/wherry/actions/workflows/scorecard.yml/badge.svg)](https://github.com/benemon/wherry/actions/workflows/scorecard.yml)
+[![govulncheck](https://github.com/benemon/wherry/actions/workflows/govulncheck.yml/badge.svg)](https://github.com/benemon/wherry/actions/workflows/govulncheck.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/benemon/wherry/badge)](https://securityscorecards.dev/viewer/?uri=github.com/benemon/wherry)
+
 An execution fabric for delegated agent work. The
 [Introduction](https://benemon.github.io/wherry/introduction) describes the
 model and [how it works](https://benemon.github.io/wherry/introduction#how-does-wherry-work).
