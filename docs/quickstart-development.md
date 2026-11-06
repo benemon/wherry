@@ -65,7 +65,7 @@ wherry dev up
 once, and prints:
 
 ```
-ready: instance default (nomad 2.1.1, kafka 1a2b3c4d5e6f, plugin nomad/v0.1.0-rc.18, wherry v0.1.0-rc.27)
+ready: instance default (nomad 2.1.1, kafka 1a2b3c4d5e6f, plugin nomad/v0.1.0, wherry v0.1.0)
 config: /home/me/.config/wherry/config.yaml
 submit: wherry submit --prompt "..."
 claude: claude mcp add wherry-default -- wherry host mcp

@@ -23,7 +23,7 @@ a signature over the checksums. Verify the signature with
 [cosign](https://docs.sigstore.dev/cosign/system_config/installation/), then the archive against the checksums:
 
 ```sh
-version=v0.1.0-rc.28 os=linux arch=amd64
+version=v0.1.0 os=linux arch=amd64
 base=https://github.com/benemon/wherry/releases/download/$version
 archive=wherry_${version}_${os}_${arch}.tar.gz
 curl -fsSL --remote-name-all "$base/$archive" "$base/checksums.txt" "$base/checksums.txt.sigstore.json"
