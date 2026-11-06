@@ -211,7 +211,18 @@ Prerequisites: the working directory and the pool's new terms in
    runs first: the change rejects its queued and redelivered runs at their
    next claim.
 
-4. Record the terms:
+4. When the change adds or removes an agent's `credentials`, suspend the
+   pool first:
+
+   ```sh
+   wherry operator pool suspend build
+   ```
+
+   A receiver that has not yet read the new terms fails a task sealed under
+   them when it opens the task. While the pool is suspended, receivers claim
+   no tasks; they claim again only after reading the terms that resume it.
+
+5. Record the terms:
 
    ```sh
    wherry operator pool apply build
@@ -228,6 +239,12 @@ Prerequisites: the working directory and the pool's new terms in
    `--dry-run` makes the same checks and writes nothing. Receivers apply
    the new terms within 15 seconds, without a restart. A lowered
    `delivery_limit` applies to a task in flight at its next release.
+
+6. If you suspended the pool in step 4, resume it:
+
+   ```sh
+   wherry operator pool resume build
+   ```
 
 ### Retention
 

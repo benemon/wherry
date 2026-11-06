@@ -1046,6 +1046,44 @@ func TestInvalidEnvelopeIsRefusedBeforeAnyWrap(t *testing.T) {
 	}
 }
 
+// The custodian checks an envelope's credentials against the terms its pass read, not the receiver's snapshot, which can
+// lag a terms change: an envelope sealed under new terms that drop an optional credential is served, and one that still
+// carries the dropped credential is refused.
+func TestCustodianChecksEnvelopesUnderThePassTerms(t *testing.T) {
+	withOptional := func() operator.Terms {
+		terms := testTerms()
+		terms.Agents[0].Credentials = append(terms.Agents[0].Credentials,
+			operator.AgentCredential{TaskCredential: wire.TaskCredential{Name: "github-token", Env: "GH_TOKEN"}, Required: new(bool)})
+		return terms
+	}
+	for name, test := range map[string]struct {
+		sealedUnder operator.Terms
+		answer      string
+	}{
+		"sealed under the new terms":      {testTerms(), "wrap"},
+		"carrying the dropped credential": {withOptional(), wire.RefusedEnvelopeInvalid},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixtureWith(t, resultStream, withOptional(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
+			f.quiet()
+			keyB := f.addPeer(t, "receiver-b", testPool)
+			if err := f.service.PoolApply(f.ctx, testPool, testTerms(), false); err != nil {
+				t.Fatal(err)
+			}
+			record := f.submit(t, f.host, func(submission *wire.Submission) {
+				sealTask(t, submission, test.sealedUnder, f.poolKey(t), nil)
+			})
+			f.statusAs(t, record, "receiver-b", keyB, "claimed", 1)
+			if answer := f.answered(t, f.openAs(t, record, "receiver-b", keyB, 1)); answer != test.answer {
+				t.Fatalf("answer %q, want %q; logs:\n%s", answer, test.answer, f.logs.String())
+			}
+			if state, _, _ := f.receiver.snapshot(); len(state.Pools[testPool].Agents[0].Credentials) != 2 {
+				t.Fatal("the receiver's snapshot read the new terms; the check no longer covers a stale snapshot")
+			}
+		})
+	}
+}
+
 // peer is another configured member of the pool, its key known to the fixture's receiver.
 func (f fixture) peer(t *testing.T, id string) *Receiver {
 	t.Helper()
