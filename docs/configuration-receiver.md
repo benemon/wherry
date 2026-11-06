@@ -199,8 +199,8 @@ Each profile entry:
 | `config` | mapping | none | the plugin's settings for this profile |
 
 Replicas are not part of the signature. Each replica holds one task at a time.
-The receiver advertises the sum of its profiles' replicas, ready or not, and
-holds at most that many tasks. [What a receiver
+The receiver advertises the sum of its profiles' replicas, ready or not.
+It holds at most that many tasks. [What a receiver
 subscribes to](operations-receivers.md#what-a-receiver-subscribes-to) describes
 how replicas claim.
 

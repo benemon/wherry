@@ -97,8 +97,8 @@ minutes.
 ## Why does a first event count?
 
 Prometheus must scrape a series at zero before an event for the first
-increase to count, so the receiver creates the series it can name before any
-event. All metric names below have the `wherry_` prefix.
+increase to count. The receiver therefore creates the series it can name
+before any event. All metric names below have the `wherry_` prefix.
 
 At construction, the receiver creates `bus_errors_total` for `read`,
 `write`, `transactional ID` and `share group`. It creates `denials_total`
@@ -149,8 +149,8 @@ one of the agent's credentials`, `git remote host outside the pool's vcs hosts`,
 `task_started_by is before its append time`, `task_ended_by is before
 task_started_by`, and `task_ended_by is past task_started_by plus the 6h run cap`.
 
-An event before the first scrape after startup, a new entitlement or a terms
-change can still be missed. The receiver does not wait for a scrape. Children
+An event that comes before the first scrape after startup, a new entitlement
+or a terms change is missed. The receiver does not wait for a scrape. Children
 are never reset or deleted: tenants first seen ended get no children, while
 children created during entitlement remain until the process ends.
 

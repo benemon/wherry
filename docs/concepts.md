@@ -122,10 +122,10 @@ refused. The client signs the agent, the selector and the chosen pool into
 the task and writes it to the signature's task topic.
 
 **Each profile replica subscribes** only to that profile's signature topic
-while ready, and admits a fresh task through that profile. [Claim
-topology](design.md#claim-topology) gives the model, and [What a receiver
-subscribes to](operations-receivers.md#what-a-receiver-subscribes-to) what you
-observe.
+while ready. It admits a fresh task through that profile.
+[Claim topology](design.md#claim-topology) gives the model.
+[What a receiver subscribes to](operations-receivers.md#what-a-receiver-subscribes-to)
+describes what you observe.
 
 **A label change moves a signature.** `receiver apply` creating a profile's
 new signature creates its topic before the record; the receiver restarts on
