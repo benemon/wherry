@@ -208,10 +208,20 @@ func TestBoundsTakeATimeOrADurationAndDefault(t *testing.T) {
 			continue
 		}
 		encoded, _ := json.Marshal(tool.InputSchema)
-		for field, want := range map[string]time.Duration{"task_started_by": busclient.DefaultStartBy, "task_ended_by": busclient.DefaultEndBy} {
-			_, rest, _ := strings.Cut(string(encoded), `"`+field+", ")
-			_, rest, _ = strings.Cut(rest, "; default ")
-			stated, _, _ := strings.Cut(rest, `"`)
+		var schema struct {
+			Properties map[string]struct {
+				Description string `json:"description"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(encoded, &schema); err != nil {
+			t.Fatal(err)
+		}
+		for field, want := range map[string]time.Duration{"start_by": 10 * time.Minute, "end_by": 2 * time.Hour} {
+			_, rest, ok := strings.Cut(schema.Properties[field].Description, "; default ")
+			if !ok {
+				t.Fatalf("%s has no default: %s", field, encoded)
+			}
+			stated := strings.TrimSuffix(rest, ".")
 			if got, err := time.ParseDuration(stated); err != nil || got != want {
 				t.Errorf("%s input schema states %s default %q, want %s: %s", tool.Name, field, stated, want, encoded)
 			}
@@ -226,28 +236,36 @@ func TestBoundsTakeATimeOrADurationAndDefault(t *testing.T) {
 	}
 	// Each bound takes either form: a duration from now, or an RFC 3339 time that arrives as whole seconds.
 	at := time.Now().Add(time.Hour).Truncate(time.Second)
-	near := func(lane, field string, got int64, want time.Time) {
-		if got < want.Add(-5*time.Second).Unix() || got > want.Unix() {
-			t.Errorf("%s %s is %s, want %s", lane, field, time.Unix(got, 0), want)
+	near := func(lane, field string, got int64, before, after time.Time, duration time.Duration) {
+		if got < before.Add(duration).Unix() || got > after.Add(duration).Unix() {
+			t.Errorf("%s %s is %s, want between %s and %s", lane, field, time.Unix(got, 0), before.Add(duration), after.Add(duration))
 		}
 	}
 	for _, forms := range []struct{ startBy, endBy string }{{"5m", at.Format(time.RFC3339)}, {at.Format(time.RFC3339), "90m"}} {
 		var custom submitOutput
+		mcpBefore := time.Now()
 		callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "work", "start_by": forms.startBy, "end_by": forms.endBy}, &custom)
+		mcpAfter := time.Now()
 		var stdout, stderr bytes.Buffer
+		cliBefore := time.Now()
 		if err := runSubmit(b.ctx, b.client, []string{"--prompt", "work", "--start-by", forms.startBy, "--end-by", forms.endBy}, &stdout, &stderr); err != nil {
 			t.Fatal(err)
 		}
+		cliAfter := time.Now()
 		cli, _, _ := strings.Cut(strings.TrimPrefix(stdout.String(), "run_id="), " ")
 		for lane, runID := range map[string]string{"MCP": custom.ID, "CLI": cli} {
 			task := b.tasks(t, runID)[0].submission.Wherry
+			before, after := mcpBefore, mcpAfter
+			if lane == "CLI" {
+				before, after = cliBefore, cliAfter
+			}
 			if forms.startBy == "5m" {
-				near(lane, "task_started_by", task.TaskStartedBy, time.Now().Add(5*time.Minute))
+				near(lane, "task_started_by", task.TaskStartedBy, before, after, 5*time.Minute)
 				if task.TaskEndedBy != at.Unix() {
 					t.Errorf("%s end_by %s gave task_ended_by %d, want %d", lane, forms.endBy, task.TaskEndedBy, at.Unix())
 				}
 			} else {
-				near(lane, "task_ended_by", task.TaskEndedBy, time.Now().Add(90*time.Minute))
+				near(lane, "task_ended_by", task.TaskEndedBy, before, after, 90*time.Minute)
 				if task.TaskStartedBy != at.Unix() {
 					t.Errorf("%s start_by %s gave task_started_by %d, want %d", lane, forms.startBy, task.TaskStartedBy, at.Unix())
 				}
@@ -263,20 +281,22 @@ func TestBoundsTakeATimeOrADurationAndDefault(t *testing.T) {
 	before := time.Now()
 	var submitted submitOutput
 	callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "work"}, &submitted)
+	mcpAfter := time.Now()
 	var stdout, stderr bytes.Buffer
+	cliBefore := time.Now()
 	if err := runSubmit(b.ctx, b.client, []string{"--prompt", "work"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	after := time.Now()
 	cli, _, _ := strings.Cut(strings.TrimPrefix(stdout.String(), "run_id="), " ")
 	for lane, runID := range map[string]string{"MCP": submitted.ID, "CLI": cli} {
+		lo, hi := before, mcpAfter
+		if lane == "CLI" {
+			lo, hi = cliBefore, after
+		}
 		task := b.tasks(t, runID)[0].submission.Wherry
-		if task.TaskEndedBy < before.Add(2*time.Hour).Unix() || task.TaskEndedBy > after.Add(2*time.Hour).Unix() {
-			t.Errorf("%s submit task_ended_by %v, want two hours out", lane, time.Unix(task.TaskEndedBy, 0))
-		}
-		if task.TaskStartedBy < before.Add(10*time.Minute).Unix() || task.TaskStartedBy > after.Add(10*time.Minute).Unix() {
-			t.Errorf("%s submit task_started_by %v, want ten minutes out", lane, time.Unix(task.TaskStartedBy, 0))
-		}
+		near(lane, "task_ended_by", task.TaskEndedBy, lo, hi, 2*time.Hour)
+		near(lane, "task_started_by", task.TaskStartedBy, lo, hi, 10*time.Minute)
 	}
 }
 

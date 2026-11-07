@@ -75,7 +75,15 @@ their command sets. wherry does not interpret model names.
 
 ### Agent credentials
 
-Each entry of an agent's `credentials` is `{name, env, file, required}`: a
+Set `description: Claude account token` to label a credential in `host init`.
+Use at most 80 Unicode code points of valid UTF-8.
+Do not include control characters, U+2028 or U+2029.
+Without a description, `host init` shows the credential name.
+An older wherry release refuses `description` in a pool file.
+It may drop the description when it rewrites terms it read.
+Older hosts and receivers reading records ignore it.
+
+Each entry of an agent's `credentials` is `{name, env, file, required, description}`: a
 credential name, exactly one target, and whether a run needs it. `env` names
 the environment variable the agent gets the value in, matching
 `[A-Za-z_][A-Za-z0-9_]*` and none a plugin sets for the agent: `HOME`,

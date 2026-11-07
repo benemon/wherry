@@ -365,24 +365,18 @@ a `file` source names, including the storage keys' files.
 [`wherry host init`](commands.md#wherry-host-init) asks for each credential's
 source and writes the configuration with the reference it is given, `file`,
 `env` or `command`: a path, a variable's name or an argv, never a value. When
-an agent's target variable is set where `init` runs, it offers that variable,
-defaulting to No:
+an agent's target variable is set and non-empty where init runs, choose
+Environment variable, then the variable's name: two Enter selections take
+it. The scope warning appears under the question.
 
-```
-pool build delivers credential git-token to its agents as GITHUB_TOKEN.
-found GITHUB_TOKEN in your environment. Use it for git-token? It will be sent to agents in every pool, now or later, that names git-token. [y/N]
-an environment source is read where submits run, including the MCP server your harness starts.
-```
+A source belongs to the credential name across pools: whatever the variable
+holds goes to the agents of every pool that names the credential, now or
+later. It is read where submits run, including the MCP server your harness
+starts. A shell variable may have more reach than an agent needs; check its
+scope before choosing it. Init displays variable names, never their values,
+and does not resolve sources. Ctrl-V clipboard commands are disabled in
+these forms; ordinary terminal paste is deliberate input.
 
-A source belongs to the credential name across pools: whatever the
-variable holds goes to the agents of every pool that names the credential,
-including pools the tenant is entitled to later. A variable set in a shell is
-often set for another purpose, such as the user's own `GITHUB_TOKEN`, with
-more reach than an agent needs, so only an explicit `y` takes it, and a blank
-answer asks for a source instead. An `env` source is read in each process that
-submits, so the MCP server a harness starts must have the variable too. A
-file target suggests nothing, and a configuration written in advance or
-without a terminal is used as written.
 
 ## Platform credentials
 

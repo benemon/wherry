@@ -13,6 +13,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
@@ -28,11 +30,11 @@ type AgentTerms struct {
 	DefaultModel string   `json:"default_model,omitzero" yaml:"default_model"`
 }
 
-// AgentCredential is a credential an agent takes, at the target its TaskCredential names. A required credential the
-// submitting host has no source for refuses the submission; Required defaults to true.
+// AgentCredential names an agent target and display description; Required defaults to true and refuses submission without a source.
 type AgentCredential struct {
 	wire.TaskCredential `yaml:",inline"`
-	Required            *bool `json:"required,omitzero" yaml:"required"`
+	Description         string `json:"description,omitzero" yaml:"description,omitempty"`
+	Required            *bool  `json:"required,omitzero" yaml:"required"`
 }
 
 // Optional reports whether a run goes without the credential when its host has no source for it.
@@ -712,8 +714,11 @@ func validateRecord(record Record) error {
 			return errors.New("invalid tenant record")
 		}
 	case "pool":
-		if validateNames(record.Pool) != nil || record.Terms == nil || validateTerms(withDefaults(*record.Terms)) != nil {
+		if validateNames(record.Pool) != nil || record.Terms == nil {
 			return errors.New("invalid pool record")
+		}
+		if err := validateTerms(withDefaults(*record.Terms)); err != nil {
+			return fmt.Errorf("invalid pool record: %w", err)
 		}
 	case "receiver":
 		if validateNames(record.Pool, record.Receiver) != nil || record.Config == nil || record.Config.Receiver != record.Receiver || record.Config.Pool != record.Pool {
@@ -826,6 +831,16 @@ func validateTerms(terms Terms) error {
 		}
 		if err := wire.ValidateCredentials(agent.Targets()); err != nil {
 			return fmt.Errorf("agent %s: %w", agent.Name, err)
+		}
+		for _, credential := range agent.Credentials {
+			description := credential.Description
+			invalid := !utf8.ValidString(description) || utf8.RuneCountInString(description) > 80
+			for _, r := range description {
+				invalid = invalid || unicode.IsControl(r) || r == '\u2028' || r == '\u2029'
+			}
+			if invalid {
+				return fmt.Errorf("agent %s credential %s: invalid description", agent.Name, credential.Name)
+			}
 		}
 	}
 	return nil
