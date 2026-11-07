@@ -955,46 +955,65 @@ is entitled to:
    `BUNDLE`, it uses the bundle the configuration names, and refuses when it
    names none.
 2. On a terminal, when the configuration names no `ca_file` and the
-   configuration directory holds no `ca.pem`, it asks for a CA file. A blank
-   answer keeps the system's trusted roots, and a path is recorded as
-   `ca_file` when the file holds at least one PEM certificate, and asked
-   again when it holds none. Without a terminal it asks nothing, so a host
-   whose broker has a private CA needs `ca.pem` in place, or `ca_file` in
-   the configuration, before `host init`. When the file is new or step 1 or 2
-   changed it, it writes the configuration now, before it connects.
+   configuration directory holds no `ca.pem`, Broker offers up to eight
+   eligible local CA files, System roots and Other file. Other file asks
+   for a path; blank returns to the options. A file holding at least one
+   PEM certificate is recorded as `ca_file`, after revalidation. Without a
+   terminal it asks nothing, so a host whose broker has a private CA needs
+   `ca.pem` in place, or `ca_file` in the configuration, before `host init`.
+   When the file is new or step 1 or 2 changed it, init writes the
+   configuration now, before it connects.
 3. It creates the host key at `host_key`, a private JWK (RFC 7517) with mode
    0600, unless the file exists, creating its directory with mode 0700. It
    registers the key on the host's key topic when the topic holds none, and
    prints the key ID. It fails when the key topic holds another key.
-4. It reads the terms of every pool the tenant is entitled to, and asks for a
-   source, `file:PATH`, `env:VAR` or `command:ARGV`, for each credential their
-   agents take that `credentials` lacks. It names each pool that delivers the
-   credential and its target there; a name several pools share is asked
-   once. When the agent's target variable is set in the environment, it
-   first offers that variable as the source, defaulting to No
-   ([suggested sources](security.md#suggested-sources)).
-5. For each VCS host of those pools with no `git` entry for it, it asks for a
-   URL prefix on that host, `y` taking `https://<host>/`, and the credential the
-   prefix takes, blank for anonymous, then that credential's source when it is
-   new. A prefix that does not start with `https://` or `ssh://`, names another
-   host or is in `git` already is asked again.
-6. For each of those pools with storage and no `storage` entry, it asks for
-   the names of the credentials holding the access key and the secret key,
-   then their sources when they are new.
-7. When steps 4 to 6 changed the configuration, it writes it again.
+4. It reads every entitled pool's terms. On a terminal it asks by topic:
+   Credentials, Git, Storage, then Summary. Missing credentials use the first
+   description in sorted pool order, then the terms' agent order, else their
+   name, with
+   `(optional)` when every use is optional. Choose Environment variable,
+   File or Command. Environment variable lists detected non-empty targets,
+   then New variable; taking a detected target needs two Enter selections.
+   The description under the question explains its scope across pools.
+5. For each missing Git host, choose Anonymous over https, Credential over
+   https or SSH. HTTPS uses the root prefix; set custom HTTPS path prefixes
+   by editing the config. SSH requires an `ssh://` prefix for that host and
+   a readable known_hosts file, stored as an absolute `host_key` path.
+   Init lowercases the host, maps punctuation to hyphens and allocates
+   `git-<host>` or `git-<host>-ssh`, truncating and adding `-2`, `-3` and up
+   to avoid another pair's name. An unassociated existing source with the
+   generated name is presumed to belong to that pair and reused. Existing
+   sources are kept; Configured credential allows deliberate sharing.
+6. For all missing entitled S3 pool mappings together, Key sources asks for
+   the access and secret key sources. Both sources and all missing mappings
+   are committed together; cancelling either source discards the pending
+   pair. New names are `s3-access-key` and `s3-secret-key`, with numeric
+   suffixes on collisions. Configured credential reuses a named source.
+   Set per-pool keys by editing the config; existing mappings are kept.
+7. When answers changed the configuration, it writes it again. Summary
+   shows registration, successful writes and anything still missing.
 
-It writes the configuration at the path `--config-file` or `WHERRY_CONFIG`
-names, else `config.yaml` in the configuration directory, mode 0600 even
-when the file existed with another mode, with references to sources and
-never a value.
+Choose Skip to leave a request for later, or Back in a nested list to return.
+Blank Variable, File, Command or known_hosts returns; blank SSH prefix uses
+`ssh://git@<host>/`. Whitespace-only input is not blank: File treats it as a path, Variable
+keeps it as a name, and Command rejects it because it names no program. Tab accepts completion for paths, command words and variable names;
+Up/Down and ctrl+n/p cycle suggestions. Hidden paths can be typed explicitly.
+CA symlinks to regular files are accepted; certificates are limited to 1 MiB.
 
-A blank answer skips the credential, git host or pool; a credential whose
-source was asked once in a run is not asked again in that run. A re-run keeps
-every entry and asks only for what is missing. Without a terminal it asks nothing:
-it writes the configuration with the bundle, and lists each credential, git
-host and pool storage that still has no source. A tenant entitled to no pool
-gets its bundle placed and key registered, and `host init` says to run it
-again once the operator entitles the tenant to a pool.
+Each question owns its input. Type after it appears: bytes typed before the
+next form starts may be lost. Ctrl-C ends init with `interrupted`, losing
+answers not yet written. Bubble Tea attempts raw-mode restoration on its
+shutdown paths and does not report restoration errors; after an abnormal
+exit, use `stty sane` if the terminal needs recovery.
+
+The configuration path is `--config-file` or `WHERRY_CONFIG`, else
+`config.yaml` in the configuration directory. Writes use mode 0600 even
+for existing files, with references to sources, never values. A re-run
+keeps existing entries and asks only for missing settings. Without terminal
+stdin and prompts, or with `TERM=dumb`, init asks nothing and lists missing
+credentials, Git hosts and entitled S3 storage. Stdout carries only the key
+ID. Summary appears even with no entitlement, with the instruction to run
+init again once the operator entitles the tenant to a pool.
 
 ### `wherry host key rotate`
 
