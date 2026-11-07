@@ -117,7 +117,7 @@ func (q *hostQuestions) source(name, label string, uses []credentialUse, configu
 				return sourceResult{}, err
 			}
 			if value == "skip" {
-				return sourceResult{}, nil
+				return finish(sourceResult{}, "Skipped")
 			}
 			if value == "back" {
 				continue
@@ -174,12 +174,16 @@ func (q *hostQuestions) source(name, label string, uses []credentialUse, configu
 	}
 }
 
-var openCAFile = unix.Open
+var openFile = unix.Open
 var readCAData = func(file io.Reader) ([]byte, error) { return io.ReadAll(io.LimitReader(file, (1<<20)+1)) }
 
 // readCA accepts symlinks to regular files and bounds reads even if the file changes after listing.
 func readCA(path string) error {
-	fd, err := openCAFile(path, unix.O_RDONLY|unix.O_NONBLOCK, 0)
+	// Refuse a special file before opening it, since opening some devices acts; Fstat below decides acceptance.
+	if info, err := os.Stat(path); err == nil && !info.Mode().IsRegular() {
+		return fmt.Errorf("%s holds no PEM certificate", path)
+	}
+	fd, err := openFile(path, unix.O_RDONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return err
 	}
@@ -340,7 +344,10 @@ func readablePath(s string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	fd, err := unix.Open(p, unix.O_RDONLY|unix.O_NONBLOCK, 0)
+	if info, err := os.Stat(p); err == nil && !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s is not a regular file", p)
+	}
+	fd, err := openFile(p, unix.O_RDONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return "", err
 	}

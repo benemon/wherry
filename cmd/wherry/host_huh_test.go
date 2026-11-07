@@ -192,13 +192,15 @@ func TestHostSourceCollapsedLines(t *testing.T) {
 		{"command", false, nil, [][]string{keys(down + down + "\r"), keys("printf token\r")}, "? label  Command printf token"},
 		{"configured", true, map[string]credential.Source{"shared": {Env: "SHARED"}}, [][]string{keys("\r"), keys("\r")}, "? label  Configured credential shared"},
 		{"skipped", false, nil, [][]string{keys(down + down + down + "\r")}, "? label  Skipped"},
+		{"env-skipped", false, nil, [][]string{keys("\r"), keys(down + down + down + "\r")}, "? label  Skipped"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			scriptForms(t, test.answers...)
 			var out bytes.Buffer
 			q := &hostQuestions{context.Background(), nil, &promptLatch{out: &out}}
 			result, err := q.source("key", "label", []credentialUse{{target: wire.TaskCredential{Env: "TOKEN"}}}, test.configured, test.nested)
-			if err != nil || test.name != "skipped" && !result.ok || test.name == "skipped" && result.ok {
+			skipped := strings.HasSuffix(test.want, "Skipped")
+			if err != nil || !skipped && !result.ok || skipped && result.ok {
 				t.Fatal(result, err)
 			}
 			if got := collapsedLines(out.String()); !reflect.DeepEqual(got, []string{test.want}) {
@@ -739,10 +741,10 @@ func TestHostCADoesNotTrustPreOpenMetadata(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ca")
 	os.WriteFile(path, []byte(ca), 0600)
-	old := openCAFile
-	t.Cleanup(func() { openCAFile = old })
+	old := openFile
+	t.Cleanup(func() { openFile = old })
 	called := false
-	openCAFile = func(p string, flags int, mode uint32) (int, error) {
+	openFile = func(p string, flags int, mode uint32) (int, error) {
 		called = true
 		if flags&unix.O_NONBLOCK == 0 {
 			t.Error("CA open can block")
@@ -1226,5 +1228,32 @@ func TestHostSSHDoesNotSuggestFilesystemPaths(t *testing.T) {
 	q := &hostQuestions{context.Background(), nil, &promptLatch{out: io.Discard}}
 	if got, err := q.input("SSH URL prefix", "", "", func(string) error { return nil }); err != nil || got != "" {
 		t.Fatal(got, err)
+	}
+}
+
+// A special file is refused before it is opened, since opening some devices acts.
+func TestHostSpecialFilesAreNotOpened(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "fifo")
+	if err := unix.Mkfifo(fifo, 0600); err != nil {
+		t.Fatal(err)
+	}
+	old := openFile
+	t.Cleanup(func() { openFile = old })
+	var opened []string
+	openFile = func(p string, flags int, mode uint32) (int, error) {
+		opened = append(opened, p)
+		return old(p, flags, mode)
+	}
+	for _, p := range []string{dir, fifo, "/dev/null"} {
+		if readCA(p) == nil {
+			t.Fatalf("CA %s accepted", p)
+		}
+		if _, err := readablePath(p); err == nil {
+			t.Fatalf("known_hosts %s accepted", p)
+		}
+	}
+	if len(opened) != 0 {
+		t.Fatalf("opened %q", opened)
 	}
 }
