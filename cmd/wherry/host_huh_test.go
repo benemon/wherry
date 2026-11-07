@@ -21,6 +21,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
 )
 
@@ -348,11 +349,12 @@ func TestHostPromptFailuresAndEOF(t *testing.T) {
 	}
 }
 func TestHostPagesEligibility(t *testing.T) {
-	fd, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY, 0)
+	// The slave side: Linux also reports a pty master as a terminal, macOS does not.
+	master, tty, err := pty.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
-	tty := os.NewFile(uintptr(fd), "ptmx")
+	defer master.Close()
 	defer tty.Close()
 	old := stdin
 	t.Cleanup(func() { stdin = old })

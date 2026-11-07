@@ -9,6 +9,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.6
 	github.com/charmbracelet/huh v1.0.0
 	github.com/charmbracelet/x/ansi v0.11.8
+	github.com/creack/pty v1.1.24
 	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/hashicorp/nomad/api v0.0.0-20261029144823-d0f210429976
 	github.com/minio/minio-go/v7 v7.4.1
