@@ -362,27 +362,22 @@ a `file` source names, including the storage keys' files.
 
 ### Suggested sources
 
-[`wherry host init`](commands.md#wherry-host-init) asks for each credential's
-source and writes the configuration with the reference it is given, `file`,
-`env` or `command`: a path, a variable's name or an argv, never a value. When
-an agent's target variable is set where `init` runs, it offers that variable,
-defaulting to No:
+Use [`wherry host init`](commands.md#wherry-host-init) to choose a source reference.
+Choose Environment variable, File or Command.
+Choose Environment variable and then a detected name to use a set variable.
+Two Enter selections replace the former default-No confirmation.
+The variable's value is never shown or stored by init.
 
-```
-pool build delivers credential git-token to its agents as GITHUB_TOKEN.
-found GITHUB_TOKEN in your environment. Use it for git-token? It will be sent to agents in every pool, now or later, that names git-token. [y/N]
-an environment source is read where submits run, including the MCP server your harness starts.
-```
-
-A source belongs to the credential name across pools: whatever the
-variable holds goes to the agents of every pool that names the credential,
-including pools the tenant is entitled to later. A variable set in a shell is
-often set for another purpose, such as the user's own `GITHUB_TOKEN`, with
-more reach than an agent needs, so only an explicit `y` takes it, and a blank
-answer asks for a source instead. An `env` source is read in each process that
-submits, so the MCP server a harness starts must have the variable too. A
-file target suggests nothing, and a configuration written in advance or
-without a terminal is used as written.
+Press ? to read the scope warning in each question's optional help.
+Only operators who open help see this warning.
+An environment source sends what the variable holds to every pool naming that
+credential, now or later.
+It is read where submits run, including the MCP server your harness starts.
+Make the variable available to that process.
+A variable in your shell may have more reach than an agent needs.
+Use a source suited to the agent's scope.
+A file target suggests no variable.
+A configuration supplied without pages is used as written.
 
 ## Platform credentials
 

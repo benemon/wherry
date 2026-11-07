@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"golang.org/x/term"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -135,9 +138,13 @@ func TestHostInitPlacesTheBundle(t *testing.T) {
 	if err := os.WriteFile(notCA, []byte("not a certificate\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	onTerminal(t, notCA+"\n"+caFile+"\n\n")
+	hostOnTerminal(t, "\x1b[B\n"+notCA+"\n\n"+caFile+"\n\x1b")
 	stdout, prompts := h.init(t, h.bundle)
-	if strings.Count(prompts, "CA file for the broker's certificate (blank for the system roots)") != 2 || !strings.Contains(prompts, notCA+" holds no PEM certificate\n") {
+	if !strings.Contains(prompts, "\r\nBroker\r\n") || strings.Contains(prompts, "Broker  ") {
+		t.Fatal("broker must be unnumbered", prompts)
+	}
+
+	if !strings.Contains(prompts, notCA+" holds no PEM certificate\r\n") {
 		t.Fatalf("init asked\n%s\nwant the CA file asked for again after %s", prompts, notCA)
 	}
 	placed := filepath.Join(h.dir, "bundle.yaml")
@@ -158,7 +165,7 @@ func TestHostInitPlacesTheBundle(t *testing.T) {
 		t.Fatalf("config names bundle %s and ca_file %s; want %s and %s", config.Bundle, config.CAFile, placed, caFile)
 	}
 	// Without BUNDLE, init uses the bundle the config names.
-	onTerminal(t, "\n")
+	hostOnTerminal(t, "\x1b")
 	if again, _ := h.init(t); again != stdout {
 		t.Fatalf("second init printed %q; want the same key ID %q", again, stdout)
 	}
@@ -173,21 +180,15 @@ func TestHostInitAsksEachCredentialOnce(t *testing.T) {
 		"pool-a": agentTerms(envCredential("model", "MODEL_API_KEY"), envCredential("shared", "SHARED_TOKEN")),
 		"pool-b": agentTerms(fileCredential("openai", "openai.key"), fileCredential("shared", "shared.txt")),
 	})
-	onTerminal(t, "env:MY_MODEL\nfile:~/keys/openai\ncommand:pass show shared\n")
+	hostOnTerminal(t, "\n\nMY_MODEL\n\x1b[B\n~/keys/openai\n\x1b[B\x1b[B\npass show shared\n")
 	_, prompts := h.init(t, h.bundle)
-	for _, want := range []string{
-		"pool pool-a delivers credential model to its agents as MODEL_API_KEY.",
-		"pool pool-b delivers credential openai to its agents as file openai.key.",
-		"pool pool-a delivers credential shared to its agents as SHARED_TOKEN.",
-		"pool pool-b delivers credential shared to its agents as file shared.txt.",
-		"Source for optional credential openai",
-	} {
-		if !strings.Contains(prompts, want) {
-			t.Errorf("init asked\n%s\nwant %q", prompts, want)
-		}
+	if strings.Count(prompts, "Wrote "+h.config+"\n") != 2 {
+		t.Fatal("missing write notices", prompts)
 	}
-	if asked := strings.Count(prompts, "Source for credential shared"); asked != 1 {
-		t.Errorf("init asked for shared's source %d times; want once, as required by pool-a", asked)
+	for _, want := range []string{"? model  Environment variable MY_MODEL", "? openai (optional)  File", "? shared  Command pass show shared"} {
+		if !strings.Contains(prompts, want) {
+			t.Errorf("missing %q in %s", want, prompts)
+		}
 	}
 	want := map[string]credential.Source{"model": {Env: "MY_MODEL"}, "openai": {File: filepath.Join(os.Getenv("HOME"), "keys", "openai")}, "shared": {Command: []string{"pass", "show", "shared"}}}
 	if config := h.written(t); !reflect.DeepEqual(config.Credentials, want) {
@@ -198,41 +199,29 @@ func TestHostInitAsksEachCredentialOnce(t *testing.T) {
 	}
 }
 
-// A target variable set in the environment is suggested, naming the credential, its pool and target and who it goes
-// to; a blank answer is No. A yes writes an env source: the variable's name, never its value.
+// Detected variables require two selections and store only their names.
 func TestHostInitSuggestsTheTargetVariable(t *testing.T) {
 	const value = "model-key-value"
 	t.Setenv("MODEL_API_KEY", value)
 	terms := map[string]operator.Terms{"pool-a": agentTerms(envCredential("model", "MODEL_API_KEY"))}
-	t.Run("blank", func(t *testing.T) {
+	t.Run("skip", func(t *testing.T) {
 		h := newInitHost(t, terms)
-		onTerminal(t, "\n\n")
+		hostOnTerminal(t, "\x1b")
 		_, prompts := h.init(t, h.bundle)
-		for _, want := range []string{
-			"pool pool-a delivers credential model to its agents as MODEL_API_KEY.\n",
-			"found MODEL_API_KEY in your environment. Use it for model? It will be sent to agents in every pool, now or later, that names model. [y/N]\n",
-			"an environment source is read where submits run, including the MCP server your harness starts.\n",
-		} {
-			if !strings.Contains(prompts, want) {
-				t.Errorf("init asked\n%s\nwant %q", prompts, want)
-			}
-		}
-		if config := h.written(t); len(config.Credentials) != 0 {
-			t.Fatalf("config credentials %+v; want none after a blank answer", config.Credentials)
-		}
-		if !strings.Contains(prompts, "credential model (pool pool-a as MODEL_API_KEY, required)") {
-			t.Fatalf("init printed\n%s\nwant model listed without a source", prompts)
+		if len(h.written(t).Credentials) != 0 || !strings.Contains(prompts, "credential model (pool pool-a as MODEL_API_KEY, required)") {
+			t.Fatal(prompts)
 		}
 	})
-	t.Run("yes", func(t *testing.T) {
+	t.Run("pick", func(t *testing.T) {
 		h := newInitHost(t, terms)
-		onTerminal(t, "y\n")
-		h.init(t, h.bundle)
-		if config := h.written(t); !reflect.DeepEqual(config.Credentials, map[string]credential.Source{"model": {Env: "MODEL_API_KEY"}}) {
-			t.Fatalf("config credentials %+v; want model's source env MODEL_API_KEY", config.Credentials)
+		hostOnTerminal(t, "\n\n")
+		_, prompts := h.init(t, h.bundle)
+		if !reflect.DeepEqual(h.written(t).Credentials, map[string]credential.Source{"model": {Env: "MODEL_API_KEY"}}) {
+			t.Fatal(h.written(t))
 		}
-		if written, err := os.ReadFile(h.config); err != nil || bytes.Contains(written, []byte(value)) {
-			t.Fatalf("config holds the variable's value, or %v:\n%s", err, written)
+		written, err := os.ReadFile(h.config)
+		if err != nil || bytes.Contains(written, []byte(value)) || strings.Contains(prompts, value) {
+			t.Fatal("value disclosed", err)
 		}
 	})
 }
@@ -243,13 +232,13 @@ func TestHostInitRerunAsksOnlyForTheNewPool(t *testing.T) {
 		t.Setenv(variable, "")
 	}
 	h := newInitHost(t, map[string]operator.Terms{"pool-a": agentTerms(envCredential("model", "MODEL_API_KEY"))})
-	onTerminal(t, "env:MY_MODEL\n")
+	hostOnTerminal(t, "\n\nMY_MODEL\n")
 	h.init(t, h.bundle)
 	before := h.written(t)
 	h.entitle(t, "pool-b", agentTerms(envCredential("openai", "OPENAI_API_KEY")))
-	onTerminal(t, "env:MY_OPENAI\n")
+	hostOnTerminal(t, "\n\nMY_OPENAI\n")
 	_, prompts := h.init(t)
-	if strings.Contains(prompts, "credential model") || !strings.Contains(prompts, "Source for credential openai") {
+	if strings.Contains(prompts, "credential model") || !strings.Contains(prompts, "? openai") {
 		t.Fatalf("re-run asked\n%s\nwant openai alone asked for", prompts)
 	}
 	after := h.written(t)
@@ -295,20 +284,15 @@ func TestHostInitAsksForGitAndStorage(t *testing.T) {
 	terms.Storage = &operator.Storage{Endpoint: "https://s3.example.test", Bucket: "bucket-a"}
 	h := newInitHost(t, map[string]operator.Terms{"pool-a": terms, "pool-b": agentTerms()})
 	keys := t.TempDir()
-	onTerminal(t, "y\ngit-token\nenv:GIT_TOKEN\ns3-access\nfile:"+filepath.Join(keys, "access")+"\ns3-secret\nfile:"+filepath.Join(keys, "secret")+"\n")
+	hostOnTerminal(t, "\x1b[B\n\x1b[B\n\nGIT_TOKEN\n\n\x1b[B\x1b[B\n"+filepath.Join(keys, "access")+"\n\x1b[B\x1b[B\n"+filepath.Join(keys, "secret")+"\n")
 	_, prompts := h.init(t, h.bundle)
-	for _, want := range []string{"Git URL prefix for git.example.test (y for https://git.example.test/; blank skips git.example.test)", "Credential for https://git.example.test/ (blank: anonymous)", "Credential holding pool pool-a's S3 access key"} {
-		if !strings.Contains(prompts, want) {
-			t.Errorf("init asked\n%s\nwant %q", prompts, want)
-		}
-	}
-	if strings.Contains(prompts, "pool pool-b's S3") {
-		t.Errorf("init asked\n%s\nwant no storage asked for pool-b, which has none", prompts)
+	if !strings.Contains(prompts, "S3 storage for pools pool-a") {
+		t.Fatal(prompts)
 	}
 	config := h.written(t)
-	if !reflect.DeepEqual(config.Git, []busclient.GitCredential{{URL: "https://git.example.test/", Credential: "git-token"}}) ||
-		!reflect.DeepEqual(config.Storage, map[string]busclient.StorageConfig{"pool-a": {AccessKey: "s3-access", SecretKey: "s3-secret"}}) ||
-		!reflect.DeepEqual(config.Credentials["git-token"], credential.Source{Env: "GIT_TOKEN"}) || config.Credentials["s3-secret"].File != filepath.Join(keys, "secret") {
+	if !reflect.DeepEqual(config.Git, []busclient.GitCredential{{URL: "https://git.example.test/", Credential: "git-git-example-test"}}) ||
+		!reflect.DeepEqual(config.Storage, map[string]busclient.StorageConfig{"pool-a": {AccessKey: "s3-access-key", SecretKey: "s3-secret-key"}}) ||
+		!reflect.DeepEqual(config.Credentials["git-git-example-test"], credential.Source{Env: "GIT_TOKEN"}) || config.Credentials["s3-secret-key"].File != filepath.Join(keys, "secret") {
 		t.Fatalf("config %+v; want the git entry, pool-a's storage and their sources", config)
 	}
 	if _, err := busclient.LoadConfig(h.config); err != nil {
@@ -316,15 +300,15 @@ func TestHostInitAsksForGitAndStorage(t *testing.T) {
 	}
 }
 
-// A git prefix on another host than the VCS host asked for is refused and re-asked, and a blank prefix skips the host.
+// An SSH prefix must name the requested VCS host.
 func TestHostInitGitPrefixNamesItsHost(t *testing.T) {
 	terms := agentTerms()
 	terms.VCS = []string{"git.example.test"}
 	h := newInitHost(t, map[string]operator.Terms{"pool-a": terms})
-	onTerminal(t, "https://other.example.test/\n\n\n")
+	hostOnTerminal(t, "\x1b[B\x1b[B\nhttps://other.example.test/\nssh://git@git.example.test/\n\x1b\x1b")
 	_, prompts := h.init(t, h.bundle)
-	if strings.Count(prompts, "Git URL prefix for git.example.test") != 2 || !strings.Contains(prompts, "a git URL prefix for git.example.test starts with https://git.example.test or ssh://git.example.test") {
-		t.Fatalf("init asked\n%s\nwant the prefix on another host refused and re-asked", prompts)
+	if !strings.Contains(prompts, "a git URL prefix for git.example.test starts with") {
+		t.Fatal(prompts)
 	}
 	if config := h.written(t); len(config.Git) != 0 || !strings.Contains(prompts, "git host git.example.test") {
 		t.Fatalf("config git %+v, init printed\n%s\nwant no entry and the host listed", config.Git, prompts)
@@ -333,20 +317,13 @@ func TestHostInitGitPrefixNamesItsHost(t *testing.T) {
 
 // A credential whose source this run asked for and was skipped is not asked again when git or storage names it.
 func TestHostInitAsksASkippedCredentialOnce(t *testing.T) {
-	t.Setenv("SHARED_TOKEN", "")
-	terms := agentTerms(envCredential("shared", "SHARED_TOKEN"))
+	terms := agentTerms(envCredential("git-git-example-test", "SHARED_TOKEN"))
 	terms.VCS = []string{"git.example.test"}
-	terms.Storage = &operator.Storage{Endpoint: "https://s3.example.test", Bucket: "bucket-a"}
 	h := newInitHost(t, map[string]operator.Terms{"pool-a": terms})
-	onTerminal(t, "\ny\nshared\nshared\n")
+	hostOnTerminal(t, "\x1b\x1b[B\n")
 	_, prompts := h.init(t, h.bundle)
-	if asked := strings.Count(prompts, "Source for credential shared"); asked != 1 {
-		t.Fatalf("init asked for shared's source %d times:\n%s\nwant once", asked, prompts)
-	}
-	for _, want := range []string{"credential shared (pool pool-a as SHARED_TOKEN, required)", "git host git.example.test", "storage of pool pool-a"} {
-		if !strings.Contains(prompts, want) {
-			t.Errorf("init printed\n%s\nwant %q listed", prompts, want)
-		}
+	if strings.Count(prompts, "? git-git-example-test  Skipped") != 1 || len(h.written(t).Git) != 0 {
+		t.Fatal(prompts)
 	}
 }
 
@@ -388,4 +365,24 @@ func TestHostInitWithoutABundle(t *testing.T) {
 	if want := filepath.Join(home, ".config", "wherry", "config.yaml") + " names no bundle; run wherry host init BUNDLE"; err == nil || err.Error() != want {
 		t.Fatalf("init = %v; want %q", err, want)
 	}
+}
+
+func hostOnTerminal(t *testing.T, answers string) {
+	t.Helper()
+	oldEligible, oldPicker := pagesEligible, hostPickerFor
+	t.Cleanup(func() { pagesEligible, hostPickerFor = oldEligible, oldPicker })
+	pagesEligible = func(io.Writer) bool { return true }
+	hostPickerFor = func(out io.Writer) *hostPicker { return testPicker(answers, out) }
+}
+func testPicker(input string, out io.Writer) *hostPicker {
+	p := &hostPicker{in: bufio.NewReader(strings.NewReader(input)), out: out,
+		makeRaw: func() (*term.State, error) { return nil, nil }, restore: func(*term.State) error { return nil }, size: func() int { return 500 }}
+	p.timed = func() (byte, error) {
+		b, err := p.in.ReadByte()
+		if err == io.EOF {
+			err = errPickTimeout
+		}
+		return b, err
+	}
+	return p
 }

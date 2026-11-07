@@ -40,15 +40,25 @@ rm laptop.bundle
 
 `host init` copies the bundle into `~/.config/wherry/`, so you can delete the hand-off copy.
 It creates your laptop's signing key and prints its key ID.
-Then it asks for a source for each credential the pool needs:
+Then use the pages to configure the pools you can use.
 
-```
-wrote /home/me/.config/wherry/config.yaml
-<key ID>
-pool build delivers credential claude-oauth-token to its agents as CLAUDE_CODE_OAUTH_TOKEN.
-Source for credential claude-oauth-token (file:PATH, env:VAR or command:ARGV; blank skips): file:~/claude-oauth-token
-wrote /home/me/.config/wherry/config.yaml
-```
+Use the Credentials page to select a source for each missing credential.
+Choose Environment variable, File or Command.
+Press Enter twice to choose a detected environment variable.
+These two selections replace the former default-No confirmation.
+Press ? to read the source scope warning in optional help.
+Only operators who open help see that warning.
+Press Esc to skip a credential or topic.
+Use Esc in a nested list to return to its parent.
+Leave a text answer blank to return.
+A blank SSH prefix accepts the default.
+
+The Broker page precedes registration when you need a CA choice.
+Git and Storage pages follow Credentials when their settings are missing.
+The Summary page lists writes and settings still missing.
+Pages print inline and keep your session in scrollback.
+Run `stty sane` if external termination or another abnormal failure leaves your terminal raw.
+Press Ctrl-C to restore the terminal and return.
 
 It writes `~/.config/wherry/config.yaml`, which names the source and never the token:
 

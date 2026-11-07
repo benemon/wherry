@@ -954,47 +954,67 @@ is entitled to:
    configuration, even when the configuration named another bundle. Without
    `BUNDLE`, it uses the bundle the configuration names, and refuses when it
    names none.
-2. On a terminal, when the configuration names no `ca_file` and the
-   configuration directory holds no `ca.pem`, it asks for a CA file. A blank
-   answer keeps the system's trusted roots, and a path is recorded as
-   `ca_file` when the file holds at least one PEM certificate, and asked
-   again when it holds none. Without a terminal it asks nothing, so a host
-   whose broker has a private CA needs `ca.pem` in place, or `ca_file` in
-   the configuration, before `host init`. When the file is new or step 1 or 2
-   changed it, it writes the configuration now, before it connects.
+2. Use the Broker page when the configuration names no `ca_file` and the
+   configuration directory holds no `ca.pem`.
+   Choose one of the first eight valid certificate files in the current
+   directory, System roots or Other file.
+   A chosen file is checked again before its absolute path is recorded.
+   Place `ca.pem` or configure `ca_file` before init when you cannot use pages
+   and your broker needs a private CA.
+   Init writes a new or changed configuration before connecting.
 3. It creates the host key at `host_key`, a private JWK (RFC 7517) with mode
    0600, unless the file exists, creating its directory with mode 0700. It
    registers the key on the host's key topic when the topic holds none, and
    prints the key ID. It fails when the key topic holds another key.
-4. It reads the terms of every pool the tenant is entitled to, and asks for a
-   source, `file:PATH`, `env:VAR` or `command:ARGV`, for each credential their
-   agents take that `credentials` lacks. It names each pool that delivers the
-   credential and its target there; a name several pools share is asked
-   once. When the agent's target variable is set in the environment, it
-   first offers that variable as the source, defaulting to No
-   ([suggested sources](security.md#suggested-sources)).
-5. For each VCS host of those pools with no `git` entry for it, it asks for a
-   URL prefix on that host, `y` taking `https://<host>/`, and the credential the
-   prefix takes, blank for anonymous, then that credential's source when it is
-   new. A prefix that does not start with `https://` or `ssh://`, names another
-   host or is in `git` already is asked again.
-6. For each of those pools with storage and no `storage` entry, it asks for
-   the names of the credentials holding the access key and the secret key,
-   then their sources when they are new.
-7. When steps 4 to 6 changed the configuration, it writes it again.
+4. Use the Credentials page to choose Environment variable, File or Command
+   for each missing credential.
+   Press Enter twice to choose a detected variable.
+   These two selections replace the former default-No confirmation.
+   Press ? to read the delivery details and environment-source scope warning.
+   Only operators who open this optional help see the warning.
+5. Use the Git page to choose anonymous HTTPS, credential HTTPS or SSH.
+   HTTPS choices use root prefixes.
+   Set custom HTTPS prefixes by editing the config.
+   SSH asks for a prefix, a source and a readable known_hosts file.
+   Leave the SSH prefix blank to use `ssh://git@<host>/`.
+   Generated names use `git-<mapped-host>` or `git-<mapped-host>-ssh`.
+   Lowercase the host.
+   Replace each character outside `a-z`, `0-9` and `-` with `-`.
+   Init truncates only the host component to leave room for suffixes.
+   Collisions add `-2` and higher suffixes after `-ssh` when present.
+   The complete name stays within 32 characters.
+   An existing unassociated source at that name is presumed to belong to the
+   first host and transport allocated that name and is reused without asking.
+   Use Configured credential to share a source deliberately.
+6. Use the Storage page to choose both S3 key sources for all missing pools.
+   Use Configured credential to reuse an existing source.
+   New S3 sources use `s3-access-key` and `s3-secret-key`.
+   A different source at a taken name adds `-2` or the next free suffix.
+   A matching source keeps the existing name.
+   Set per-pool keys by editing the config.
+   Cancelling either source discards the pending pair.
+7. Init writes the configuration again when you add settings in steps 4 to 6.
 
 It writes the configuration at the path `--config-file` or `WHERRY_CONFIG`
 names, else `config.yaml` in the configuration directory, mode 0600 even
 when the file existed with another mode, with references to sources and
 never a value.
 
-A blank answer skips the credential, git host or pool; a credential whose
-source was asked once in a run is not asked again in that run. A re-run keeps
-every entry and asks only for what is missing. Without a terminal it asks nothing:
-it writes the configuration with the bundle, and lists each credential, git
-host and pool storage that still has no source. A tenant entitled to no pool
-gets its bundle placed and key registered, and `host init` says to run it
-again once the operator entitles the tenant to a pool.
+Press Esc to skip a credential or topic.
+Press Esc in a nested list to return to its parent and keep its selection.
+Leave File, Command, Variable or known_hosts blank to return.
+A credential asked once in a run is not asked again in that run.
+Run init again to add missing settings.
+The Summary page lists writes and remaining settings.
+Pages print inline and retain scrollback.
+Run `stty sane` after external termination or another failure leaves your terminal raw.
+Press Ctrl-C to restore the terminal and return.
+
+You need terminal stdin and terminal prompts, with `TERM` other than `dumb`, to use pages.
+You can redirect stdout to capture only the key ID.
+Otherwise init asks nothing and lists missing settings without terminal escapes.
+A tenant entitled to no pool gets its bundle placed and key registered.
+Run init again after the operator entitles the tenant to a pool.
 
 ### `wherry host key rotate`
 
