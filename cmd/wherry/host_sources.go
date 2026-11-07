@@ -61,6 +61,9 @@ type sourceResult struct {
 }
 
 func (q *hostQuestions) source(name, label string, uses []credentialUse, configured map[string]credential.Source, nested bool) (sourceResult, error) {
+	finish := func(result sourceResult, answer string) (sourceResult, error) {
+		return result, q.answer(label, answer)
+	}
 	prev := "env"
 	if nested {
 		prev = "configured"
@@ -77,7 +80,7 @@ func (q *hostQuestions) source(name, label string, uses []credentialUse, configu
 			return sourceResult{}, err
 		}
 		if choice == "skip" {
-			return sourceResult{}, nil
+			return finish(sourceResult{}, "Skipped")
 		}
 		if choice == "configured" {
 			options := []huh.Option[string]{}
@@ -93,13 +96,13 @@ func (q *hostQuestions) source(name, label string, uses []credentialUse, configu
 				return sourceResult{}, err
 			}
 			if value == "skip" {
-				return sourceResult{}, nil
+				return finish(sourceResult{}, "Skipped")
 			}
 			if value == "back" || value == "none" {
 				continue
 			}
 			value = strings.TrimPrefix(value, "credential:")
-			return sourceResult{name: value, source: configured[value], ok: true}, nil
+			return finish(sourceResult{name: value, source: configured[value], ok: true}, "Configured credential "+value)
 		}
 		value := ""
 	environment:
@@ -120,7 +123,8 @@ func (q *hostQuestions) source(name, label string, uses []credentialUse, configu
 				continue
 			}
 			if value != "new" {
-				return sourceResult{name, credential.Source{Env: strings.TrimPrefix(value, "variable:")}, true}, nil
+				value = strings.TrimPrefix(value, "variable:")
+				return finish(sourceResult{name, credential.Source{Env: value}, true}, "Environment variable "+value)
 			}
 		}
 		kind, title := "path", "File (blank returns)"
@@ -159,7 +163,14 @@ func (q *hostQuestions) source(name, label string, uses []credentialUse, configu
 			}
 			continue
 		}
-		return sourceResult{name, source, true}, nil
+		answer := "File " + value
+		if choice == "env" {
+			answer = "Environment variable " + value
+		}
+		if choice == "command" {
+			answer = "Command " + value
+		}
+		return finish(sourceResult{name, source, true}, answer)
 	}
 }
 
@@ -198,7 +209,7 @@ func caOptions() []huh.Option[string] {
 	}
 	entries, _ := os.ReadDir(".")
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".") {
+		if strings.HasPrefix(e.Name(), ".") || (!e.Type().IsRegular() && e.Type()&os.ModeSymlink == 0) {
 			continue
 		}
 		path, err := localPath(e.Name())
@@ -219,7 +230,7 @@ func (q *hostQuestions) ca() (string, error) {
 			return "", err
 		}
 		if value == "system" {
-			return "", nil
+			return "", q.answer("CA certificate", "System roots")
 		}
 		if value == "other" {
 			value, err = q.input("CA file (blank returns)", "", "path", func(s string) error {
@@ -249,7 +260,7 @@ func (q *hostQuestions) ca() (string, error) {
 			}
 			continue
 		}
-		return value, nil
+		return value, q.answer("CA certificate", value)
 	}
 }
 
@@ -303,8 +314,8 @@ func (n *gitNames) allocate(host, transport string) string {
 			suffix += "-" + strconv.Itoa(i)
 		}
 		part := component
-		if max := 32 - len("git-") - len(suffix); len(part) > max {
-			part = part[:max]
+		if maxComponent := 32 - len("git-") - len(suffix); len(part) > maxComponent {
+			part = part[:maxComponent]
 		}
 		part = strings.TrimRight(part, "-")
 		name := "git-" + part + suffix
@@ -329,9 +340,19 @@ func readablePath(s string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	f, err := os.Open(p)
+	fd, err := unix.Open(p, unix.O_RDONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return "", err
+	}
+	f := os.NewFile(uintptr(fd), p)
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
+		return "", fmt.Errorf("%s is not a regular file", p)
 	}
 	return p, f.Close()
 }

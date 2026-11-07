@@ -48,6 +48,17 @@ var pagesEligible = func(out io.Writer) bool {
 	return ok && term.IsTerminal(int(f.Fd())) && os.Getenv("TERM") != "dumb"
 }
 
+func sameTerminal(a, b io.Writer) bool {
+	aFile, aOK := a.(*os.File)
+	bFile, bOK := b.(*os.File)
+	if !aOK || !bOK || !term.IsTerminal(int(aFile.Fd())) || !term.IsTerminal(int(bFile.Fd())) {
+		return false
+	}
+	aInfo, aErr := aFile.Stat()
+	bInfo, bErr := bFile.Stat()
+	return aErr == nil && bErr == nil && os.SameFile(aInfo, bInfo)
+}
+
 var errHostInterrupted = errors.New("interrupted")
 
 type hostPresentationError struct{ cause error }
@@ -88,20 +99,13 @@ func (r eofInput) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func noClipboard(_ tea.Model, msg tea.Msg) tea.Msg {
-	if k, ok := msg.(tea.KeyMsg); ok && k.Type == tea.KeyCtrlV {
-		return nil
-	}
-	return msg
-}
-
 type hostQuestions struct {
 	ctx context.Context
 	in  io.Reader
 	out *promptLatch
 }
 
-// run gives one form ownership of input; typeahead consumed before the next form starts is discarded.
+// runHostQuestion gives one form ownership of input; typeahead consumed before the next form starts is discarded.
 var runHostQuestion = (*hostQuestions).runForm
 
 func (q *hostQuestions) run(field huh.Field) error { return runHostQuestion(q, field) }
@@ -111,13 +115,19 @@ func (q *hostQuestions) runForm(field huh.Field) error {
 	defer cancel()
 	km := huh.NewDefaultKeyMap()
 	km.Input.AcceptSuggestion = key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "accept suggestion"))
+	km.Select.Filter = key.NewBinding()
 	submitted := false
-	filter := func(model tea.Model, msg tea.Msg) tea.Msg {
-		msg = noClipboard(model, msg)
+	filter := func(_ tea.Model, msg tea.Msg) tea.Msg {
+		if k, ok := msg.(tea.KeyMsg); ok && k.Type == tea.KeyCtrlC {
+			return tea.Quit()
+		}
 		if _, ok := msg.(tea.InterruptMsg); ok {
 			return tea.Quit()
 		}
 		if k, ok := msg.(tea.KeyMsg); ok {
+			if k.Type == tea.KeyCtrlV {
+				return nil
+			}
 			if submitted {
 				if field.Error() == nil {
 					return nil
@@ -148,30 +158,23 @@ func (q *hostQuestions) runForm(field huh.Field) error {
 	if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, huh.ErrTimeout) || (err == nil && form.State != huh.StateCompleted) {
 		return errHostInterrupted
 	}
-	if err != nil {
-		return err
-	}
-	return nil
+	return err
 }
 func (q *hostQuestions) line(format string, args ...any) error {
 	_, err := fmt.Fprintf(q.out, format, args...)
 	return err
 }
 func (q *hostQuestions) pick(label, description string, options []huh.Option[string], prev *string) (string, error) {
-	field := huh.NewSelect[string]().Title(display(label)).Description(description).Options(options...).Value(prev).Height(10)
+	field := huh.NewSelect[string]().Title(display(label)).Description(description).Options(options...).Value(prev)
 	if err := q.run(field); err != nil {
 		return "", err
 	}
-	answer := *prev
-	for _, o := range options {
-		if o.Value == *prev {
-			answer = o.Key
-			break
-		}
-	}
-	return *prev, q.line("? %s  %s\n", display(label), display(answer))
+	return *prev, nil
 }
 func option(label, value string) huh.Option[string] { return huh.NewOption(display(label), value) }
+func (q *hostQuestions) answer(label, answer string) error {
+	return q.line("? %s  %s\n", display(label), display(answer))
+}
 func (q *hostQuestions) input(label, initial, kind string, validate func(string) error) (string, error) {
 	text := initial
 	value := &lockedText{text: &text}
@@ -185,7 +188,7 @@ func (q *hostQuestions) input(label, initial, kind string, validate func(string)
 	if err := q.run(field); err != nil {
 		return "", err
 	}
-	return text, q.line("? %s  %s\n", display(label), display(text))
+	return text, nil
 }
 func safeCandidates(list []string) []string {
 	list = slices.DeleteFunc(list, func(s string) bool { return display(s) != s })

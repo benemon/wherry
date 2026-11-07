@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/operator"
+	"github.com/benemon/wherry/internal/wire"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/x/ansi"
@@ -29,6 +31,35 @@ type signalledOutput struct {
 	io.Writer
 	once  sync.Once
 	ready chan struct{}
+}
+
+type initialFrameOutput struct {
+	io.Writer
+	mu        sync.Mutex
+	buffer    bytes.Buffer
+	frame     string
+	ready     chan struct{}
+	readyOnce sync.Once
+}
+
+func (w *initialFrameOutput) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	w.mu.Lock()
+	w.buffer.Write(p[:n])
+	if strings.Contains(w.buffer.String(), "↑ up") {
+		w.readyOnce.Do(func() {
+			w.frame = w.buffer.String()
+			close(w.ready)
+		})
+	}
+	w.mu.Unlock()
+	return n, err
+}
+
+func (w *initialFrameOutput) initial() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.frame
 }
 
 func (w *signalledOutput) Write(p []byte) (int, error) {
@@ -97,6 +128,23 @@ func keys(s string) []string { return []string{s} }
 
 const down = "\x1b[B"
 
+func collapsedLines(output string) []string {
+	var lines []string
+	for {
+		start := strings.Index(output, "? ")
+		if start < 0 {
+			return lines
+		}
+		output = output[start:]
+		end := strings.IndexByte(output, '\n')
+		if end < 0 {
+			end = len(output)
+		}
+		lines = append(lines, strings.TrimSuffix(output[:end], "\r"))
+		output = output[end:]
+	}
+}
+
 func TestHostHuhSourcesAndSummary(t *testing.T) {
 	t.Setenv("TARGET_A", "secret-a")
 	t.Setenv("TARGET_B", "")
@@ -109,13 +157,95 @@ func TestHostHuhSourcesAndSummary(t *testing.T) {
 	if !reflect.DeepEqual(h.written(t).Credentials, map[string]credential.Source{"token": {Env: "TARGET_A"}}) {
 		t.Fatal(h.written(t))
 	}
-	for _, s := range []string{"? API token  Environment variable", "? Environment variable  TARGET_A", "Credentials  1 of 2", "Summary  2 of 2", "Host key ", "Wrote "} {
+	for _, s := range []string{"? API token  Environment variable TARGET_A", "Credentials  1 of 2", "Summary  2 of 2", "Host key ", "Wrote "} {
 		if !strings.Contains(out, s) {
 			t.Errorf("missing %q in %s", s, out)
 		}
 	}
 	if strings.Contains(out, "secret-a") {
 		t.Fatal("value rendered")
+	}
+	if strings.Count(stdout, "\n") != 1 || strings.Contains(out, stdout) {
+		t.Fatalf("stdout %q prompts %q", stdout, out)
+	}
+	if strings.Count(out, "Wrote "+h.config) != 1 {
+		t.Fatalf("write notices in %q", out)
+	}
+}
+
+func TestHostSourceCollapsedLines(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile("source", nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TOKEN", "value")
+	for _, test := range []struct {
+		name       string
+		nested     bool
+		configured map[string]credential.Source
+		answers    [][]string
+		want       string
+	}{
+		{"environment", false, nil, [][]string{keys("\r"), keys("\r")}, "? label  Environment variable TOKEN"},
+		{"file", false, nil, [][]string{keys(down + "\r"), keys("./source\r")}, "? label  File ./source"},
+		{"command", false, nil, [][]string{keys(down + down + "\r"), keys("printf token\r")}, "? label  Command printf token"},
+		{"configured", true, map[string]credential.Source{"shared": {Env: "SHARED"}}, [][]string{keys("\r"), keys("\r")}, "? label  Configured credential shared"},
+		{"skipped", false, nil, [][]string{keys(down + down + down + "\r")}, "? label  Skipped"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			scriptForms(t, test.answers...)
+			var out bytes.Buffer
+			q := &hostQuestions{context.Background(), nil, &promptLatch{out: &out}}
+			result, err := q.source("key", "label", []credentialUse{{target: wire.TaskCredential{Env: "TOKEN"}}}, test.configured, test.nested)
+			if err != nil || test.name != "skipped" && !result.ok || test.name == "skipped" && result.ok {
+				t.Fatal(result, err)
+			}
+			if got := collapsedLines(out.String()); !reflect.DeepEqual(got, []string{test.want}) {
+				t.Fatalf("collapsed lines %q, want %q\n%s", got, test.want, out.String())
+			}
+		})
+	}
+}
+
+func TestHostSourceShowsEveryOption(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
+	old := runHostQuestion
+	t.Cleanup(func() { runHostQuestion = old })
+	initial := make(chan string, 1)
+	runHostQuestion = func(q *hostQuestions, field huh.Field) error {
+		r, w, err := os.Pipe()
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		defer w.Close()
+		frame := &initialFrameOutput{Writer: q.out, ready: make(chan struct{})}
+		next := *q
+		next.in = r
+		next.out = &promptLatch{out: frame}
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			select {
+			case <-frame.ready:
+				initial <- frame.initial()
+				io.WriteString(w, down+down+down+"\r")
+			case <-done:
+			}
+		}()
+		return next.runForm(field.WithWidth(40))
+	}
+	uses := []credentialUse{{pool: "one"}, {pool: "two"}, {pool: "three"}}
+	q := &hostQuestions{context.Background(), nil, &promptLatch{out: io.Discard}}
+	if _, err := q.source("key", "label", uses, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	text := ansi.Strip(<-initial)
+	for _, want := range []string{"pool one", "pool two", "pool three", "Environment variable", "File", "Command", "Skip"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q in initial frame %q", want, text)
+		}
 	}
 }
 func TestHostHuhStorageAtomicAndAllPools(t *testing.T) {
@@ -135,6 +265,11 @@ func TestHostHuhStorageAtomicAndAllPools(t *testing.T) {
 	if !strings.Contains(out, "Storage  1 of 2") {
 		t.Fatal(out)
 	}
+	for _, want := range []string{"? S3 access key  Environment variable NEW_ACCESS", "? S3 secret key  Environment variable SECRET"} {
+		if !slices.Contains(collapsedLines(out), want) {
+			t.Fatalf("missing %q in %q", want, collapsedLines(out))
+		}
+	}
 }
 func TestHostHuhSSHAndValidation(t *testing.T) {
 	terms := agentTerms()
@@ -143,10 +278,13 @@ func TestHostHuhSSHAndValidation(t *testing.T) {
 	known := filepath.Join(t.TempDir(), "known_hosts")
 	os.WriteFile(known, []byte("host key"), 0600)
 	scriptForms(t, keys(down+down+"\r"), []string{"https://other.test/\r", "\x15", "ssh://git@git.test/\r"}, keys(down+"\r"), keys("\r"), keys("SSH_KEY\r"), []string{"/no-such-wherry-known-hosts\r", "\x15" + known + "\r"})
-	h.init(t, h.bundle)
+	_, out := h.init(t, h.bundle)
 	f := h.written(t)
 	if len(f.Git) != 1 || f.Git[0].HostKey != known || f.Git[0].Credential != "git-git-test-ssh" {
 		t.Fatal(f.Git)
+	}
+	if !slices.Contains(collapsedLines(out), "? git.test  SSH ssh://git@git.test/") {
+		t.Fatal(collapsedLines(out))
 	}
 }
 func TestHostHuhAskedOnce(t *testing.T) {
@@ -155,7 +293,7 @@ func TestHostHuhAskedOnce(t *testing.T) {
 	h := newInitHost(t, map[string]operator.Terms{"a": terms})
 	scriptForms(t, keys(down+down+down+"\r"), keys(down+"\r"), keys(down+down+"\r"))
 	_, out := h.init(t, h.bundle)
-	if len(h.written(t).Git) != 0 || strings.Count(out, "? git-git-example-test  Skip") != 1 {
+	if len(h.written(t).Git) != 0 || strings.Count(out, "? git-git-example-test  Skipped") != 1 || !strings.Contains(out, "was skipped earlier") || !slices.Contains(collapsedLines(out), "? git.example.test  Skipped") {
 		t.Fatal(out)
 	}
 }
@@ -177,6 +315,43 @@ func TestHostHuhNoEntitlementSummary(t *testing.T) {
 	_, out := h.init(t, h.bundle)
 	if !strings.Contains(out, "Summary  1 of 1") {
 		t.Fatal(out)
+	}
+}
+
+func TestHostKeyIDStaysInTerminalSummary(t *testing.T) {
+	h := newInitHost(t, nil)
+	scriptForms(t)
+	master, tty, err := pty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		io.Copy(&output, master)
+		close(done)
+	}()
+	if err := hostInit(h.ctx, h.config, h.bundle, tty, tty); err != nil {
+		t.Fatal(err)
+	}
+	tty.Close()
+	<-done
+	master.Close()
+	var keyID string
+	for _, line := range strings.Split(strings.ReplaceAll(output.String(), "\r", ""), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 4 && fields[0] == "Host" && fields[1] == "key" && fields[3] == "registered" {
+			keyID = fields[2]
+		}
+	}
+	if keyID == "" {
+		t.Fatal(output.String())
+	}
+	h.registered(t, keyID)
+	for _, line := range strings.Split(strings.ReplaceAll(output.String(), "\r", ""), "\n") {
+		if line == keyID {
+			t.Fatalf("bare key ID printed in %q", output.String())
+		}
 	}
 }
 
@@ -343,9 +518,35 @@ func TestHostPromptFailuresAndEOF(t *testing.T) {
 	if _, err := q.input("File", "", "path", func(string) error { return nil }); !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatal(err)
 	}
-	q.out = &promptLatch{out: io.Discard}
+	eofCtx, eofCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer eofCancel()
+	q = &hostQuestions{eofCtx, strings.NewReader(""), &promptLatch{out: io.Discard}}
+	started := time.Now()
 	if _, err := q.input("File", "", "path", func(string) error { return nil }); err == nil {
 		t.Fatal("EOF succeeded")
+	}
+	if elapsed := time.Since(started); elapsed >= 500*time.Millisecond {
+		t.Fatalf("EOF took %v", elapsed)
+	}
+}
+
+func TestHostSelectFilterCannotWedgeInterrupt(t *testing.T) {
+	scriptForms(t, []string{"/", "zzz", "\r\x03"})
+	started := time.Now()
+	q := &hostQuestions{context.Background(), nil, &promptLatch{out: io.Discard}}
+	prev := "a"
+	_, err := q.pick("Choice", "", []huh.Option[string]{option("a", "a")}, &prev)
+	if !errors.Is(err, errHostInterrupted) || time.Since(started) >= time.Second {
+		t.Fatal(err, time.Since(started))
+	}
+}
+
+func TestHostSelectSlashDoesNotFilter(t *testing.T) {
+	scriptForms(t, []string{"/", "zzz", "\r"})
+	q := &hostQuestions{context.Background(), nil, &promptLatch{out: io.Discard}}
+	prev := "a"
+	if got, err := q.pick("Choice", "", []huh.Option[string]{option("a", "a")}, &prev); err != nil || got != "a" {
+		t.Fatal(got, err)
 	}
 }
 func TestHostPagesEligibility(t *testing.T) {
@@ -475,7 +676,7 @@ func TestHostIncompleteFormIsInterrupted(t *testing.T) {
 }
 func TestHostClipboardIsDisabled(t *testing.T) {
 	if os.Getenv("HOST_CLIPBOARD_CHILD") == "1" {
-		scriptForms(t, []string{"\x16", "\r"}, []string{"/", "\x16", "\x1b", "\r"})
+		scriptForms(t, []string{"\x16", "\r"}, []string{"\x16", "\r"})
 		q := &hostQuestions{context.Background(), nil, &promptLatch{out: io.Discard}}
 		if got, err := q.input("File", "", "path", func(string) error { return nil }); got != "" || err != nil {
 			t.Fatal(got, err)
@@ -503,6 +704,33 @@ func TestHostClipboardIsDisabled(t *testing.T) {
 	command.Env = append(os.Environ(), "HOST_CLIPBOARD_CHILD=1", "HOST_CLIPBOARD_MARKER="+filepath.Join(dir, "invoked"), "PATH="+dir+":"+filepath.Dir(goPath)+":/usr/bin:/bin", "WAYLAND_DISPLAY=")
 	if out, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("%v\n%s", err, out)
+	}
+}
+
+func TestHostReadablePathRejectsNonRegularFiles(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "fifo")
+	if err := unix.Mkfifo(fifo, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{fifo, dir} {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			scriptForms(t, []string{path + "\r", "\x03"})
+			var out bytes.Buffer
+			q := &hostQuestions{context.Background(), nil, &promptLatch{out: &out}}
+			started := time.Now()
+			_, err := q.input("known_hosts file", "", "path", func(s string) error {
+				_, err := readablePath(s)
+				return err
+			})
+			if !errors.Is(err, errHostInterrupted) || time.Since(started) >= time.Second {
+				t.Fatal(err, time.Since(started))
+			}
+			text := strings.Join(strings.Fields(ansi.Strip(out.String())), " ")
+			if !strings.Contains(text, "is not a regular file") {
+				t.Fatal(out.String())
+			}
+		})
 	}
 }
 
@@ -655,7 +883,7 @@ func TestHostBrokerAndBundleModes(t *testing.T) {
 	t.Chdir(dir)
 	scriptForms(t, keys("\r"))
 	_, out := h.init(t, h.bundle)
-	if !strings.Contains(out, "\nBroker\n") || strings.Contains(out, "Broker  1") || !strings.Contains(out, "Summary  1 of 1") || !strings.Contains(out, "Wrote "+h.config) {
+	if !strings.Contains(out, "\nBroker\n") || strings.Contains(out, "Broker  1") || !strings.Contains(out, "Summary  1 of 1") || strings.Count(out, "Wrote "+h.config) != 1 {
 		t.Fatal(out)
 	}
 	if f := h.written(t); f.CAFile != caPath {
@@ -754,10 +982,13 @@ func TestHostGitExistingSourceReuse(t *testing.T) {
 	original := busclient.Config{Bundle: h.bundle, Credentials: map[string]credential.Source{"git-git-test": {Env: "EXISTING"}}}
 	writeYAML(h.config, original)
 	scriptForms(t, keys(down+"\r"))
-	h.init(t)
+	_, out := h.init(t)
 	f := h.written(t)
 	if !reflect.DeepEqual(f.Credentials, original.Credentials) || len(f.Git) != 1 || f.Git[0].Credential != "git-git-test" {
 		t.Fatal(f)
+	}
+	if !slices.Contains(collapsedLines(out), "? git.test  HTTPS https://git.test/") {
+		t.Fatal(collapsedLines(out))
 	}
 }
 
@@ -771,15 +1002,6 @@ func TestHostInterruptBeforeBootstrap(t *testing.T) {
 	}
 	if _, err := os.Stat(h.config); !os.IsNotExist(err) {
 		t.Fatal("bootstrap written before broker answer", err)
-	}
-}
-func TestHostConfigWriteNoticeFailure(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := writeHostConfig(path, busclient.Config{}, failingPrompt{}); !errors.Is(err, io.ErrClosedPipe) {
-		t.Fatal(err)
-	}
-	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0600 {
-		t.Fatal(info, err)
 	}
 }
 func TestHostRerunKeepsEntries(t *testing.T) {
@@ -892,9 +1114,12 @@ func TestHostGitAnonymous(t *testing.T) {
 	terms.VCS = []string{"git.test"}
 	h := newInitHost(t, map[string]operator.Terms{"a": terms})
 	scriptForms(t, keys("\r"))
-	h.init(t, h.bundle)
+	_, out := h.init(t, h.bundle)
 	if f := h.written(t); !reflect.DeepEqual(f.Git, []busclient.GitCredential{{URL: "https://git.test/"}}) || len(f.Credentials) != 0 {
 		t.Fatal(f)
+	}
+	if !slices.Contains(collapsedLines(out), "? git.test  Anonymous over https") {
+		t.Fatal(collapsedLines(out))
 	}
 }
 func TestHostConfiguredNoneCannotYieldCredential(t *testing.T) {
@@ -951,6 +1176,10 @@ func TestHostCAHiddenPathAndHostileName(t *testing.T) {
 	name := "evil\x1b]52;c;x\a.pem"
 	os.WriteFile(name, []byte(ca), 0600)
 	os.WriteFile(".hidden", []byte(ca), 0600)
+	os.Mkdir("directory", 0700)
+	if err := unix.Mkfifo("fifo", 0600); err != nil {
+		t.Fatal(err)
+	}
 	options := caOptions()
 	if len(options) != 3 || strings.Contains(options[0].Key, "\x1b") {
 		t.Fatal(options)

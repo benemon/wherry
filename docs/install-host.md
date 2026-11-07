@@ -39,15 +39,15 @@ rm laptop.bundle
 ```
 
 `host init` copies the bundle into `~/.config/wherry/`, so you can delete the hand-off copy.
-It creates your laptop's signing key and prints its key ID.
+It creates your laptop's signing key. Summary shows its key ID; when stdout is
+not the prompt terminal, init also prints the key ID alone there for scripts.
 On a terminal, it asks by topic: Credentials, Git, Storage, then Summary.
 Only topics with missing settings get questions. Summary always appears.
 Each answer stays in the session as a collapsed line:
 
 ```
 Credentials  1 of 2
-? claude-oauth-token  File
-? File (blank returns)  ~/claude-oauth-token
+? claude-oauth-token  File ~/claude-oauth-token
 Summary  2 of 2
 Host key <key ID> registered
 Wrote /home/me/.config/wherry/config.yaml

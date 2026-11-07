@@ -966,15 +966,16 @@ is entitled to:
 3. It creates the host key at `host_key`, a private JWK (RFC 7517) with mode
    0600, unless the file exists, creating its directory with mode 0700. It
    registers the key on the host's key topic when the topic holds none, and
-   prints the key ID. It fails when the key topic holds another key.
+   prints the key ID alone when stdout is not the prompt terminal. On the
+   prompt terminal, Summary shows the registered key ID instead. It fails when
+   the key topic holds another key.
 4. It reads every entitled pool's terms. On a terminal it asks by topic:
    Credentials, Git, Storage, then Summary. Missing credentials use the first
-   description in sorted pool order, then the terms' agent order, else their
-   name, with
-   `(optional)` when every use is optional. Choose Environment variable,
-   File or Command. Environment variable lists detected non-empty targets,
-   then New variable; taking a detected target needs two Enter selections.
-   The description under the question explains its scope across pools.
+   description in sorted pool order, then the terms' agent order, else their name,
+   with `(optional)` when every use is optional. Choose Environment variable, File
+   or Command. Environment variable lists detected non-empty targets, then New
+   variable; taking a detected target needs two Enter selections. The description
+   under the question explains its scope across pools.
 5. For each missing Git host, choose Anonymous over https, Credential over
    https or SSH. HTTPS uses the root prefix; set custom HTTPS path prefixes
    by editing the config. SSH requires an `ssh://` prefix for that host and
@@ -995,8 +996,9 @@ is entitled to:
 
 Choose Skip to leave a request for later, or Back in a nested list to return.
 Blank Variable, File, Command or known_hosts returns; blank SSH prefix uses
-`ssh://git@<host>/`. Whitespace-only input is not blank: File treats it as a path, Variable
-keeps it as a name, and Command rejects it because it names no program. Tab accepts completion for paths, command words and variable names;
+`ssh://git@<host>/`. Whitespace-only input is not blank: File treats it as a
+path, Variable keeps it as a name, and Command rejects it because it names no
+program. Tab accepts completion for paths, command words and variable names;
 Up/Down and ctrl+n/p cycle suggestions. Hidden paths can be typed explicitly.
 CA symlinks to regular files are accepted; certificates are limited to 1 MiB.
 

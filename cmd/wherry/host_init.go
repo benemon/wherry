@@ -78,10 +78,12 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 	interactive := pagesEligible(prompts)
 	var notices []string
 	write := func() error {
-		if err := writeHostConfig(path, file, io.Discard); err != nil {
+		if err := writeHostConfig(path, file); err != nil {
 			return err
 		}
-		notices = append(notices, path)
+		if !slices.Contains(notices, path) {
+			notices = append(notices, path)
+		}
 		return nil
 	}
 	if _, err := os.Stat(filepath.Join(dir, "ca.pem")); file.CAFile == "" && errors.Is(err, os.ErrNotExist) && interactive {
@@ -109,8 +111,10 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 	if err != nil {
 		return err
 	}
-	if _, err = fmt.Fprintln(stdout, keyID); err != nil {
-		return err
+	if !interactive || !sameTerminal(stdout, prompts) {
+		if _, err = fmt.Fprintln(stdout, keyID); err != nil {
+			return err
+		}
 	}
 	changed = false
 	if file.Credentials == nil {
@@ -219,12 +223,12 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 			}
 			switch topic {
 			case "Credentials":
-				any := false
+				askedAny := false
 				for _, name := range slices.Sorted(maps.Keys(uses)) {
 					if _, ok := file.Credentials[name]; ok || asked[name] {
 						continue
 					}
-					any = true
+					askedAny = true
 					asked[name] = true
 					s, err := q.source(name, sourceLabel(name, descriptions[name], uses[name]), uses[name], file.Credentials, false)
 					if err != nil {
@@ -234,30 +238,40 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 						commit(s)
 					}
 				}
-				if !any {
+				if !askedAny {
 					if err = q.line("Already configured.\n"); err != nil {
 						return err
 					}
 				}
 			case "Git":
-				any := false
+				askedAny := false
 				for _, host := range hosts {
 					if hasGit(host) {
 						continue
 					}
-					any = true
+					askedAny = true
 					prev := "anonymous"
 				route:
 					for {
-						choice, err := q.pick(host, "Generated names reuse an unassociated existing source; Configured credential allows deliberate sharing.", []huh.Option[string]{option("Anonymous over https", "anonymous"), option("Credential over https...", "https"), option("SSH...", "ssh"), option("Skip", "skip")}, &prev)
+						description := "Generated names reuse an unassociated existing source; Configured credential allows deliberate sharing."
+						if name := names.allocate(host, "https"); asked[name] {
+							description += "\nCredential " + display(name) + " was skipped earlier; HTTPS is unavailable."
+						}
+						choice, err := q.pick(host, description, []huh.Option[string]{option("Anonymous over https", "anonymous"), option("Credential over https...", "https"), option("SSH...", "ssh"), option("Skip", "skip")}, &prev)
 						if err != nil {
 							return err
 						}
 						if choice == "skip" {
+							if err = q.answer(host, "Skipped"); err != nil {
+								return err
+							}
 							break
 						}
 						entry := busclient.GitCredential{URL: "https://" + host + "/"}
 						if choice == "anonymous" {
+							if err = q.answer(host, "Anonymous over https"); err != nil {
+								return err
+							}
 							file.Git = append(file.Git, entry)
 							changed = true
 							break
@@ -305,13 +319,20 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 								return err
 							}
 						}
+						answer := "HTTPS " + entry.URL
+						if choice == "ssh" {
+							answer = "SSH " + entry.URL
+						}
+						if err = q.answer(host, answer); err != nil {
+							return err
+						}
 						commit(s)
 						file.Git = append(file.Git, entry)
 						changed = true
 						break
 					}
 				}
-				if !any {
+				if !askedAny {
 					if err = q.line("Already configured.\n"); err != nil {
 						return err
 					}
@@ -324,6 +345,9 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 						return err
 					}
 					if choice == "skip" {
+						if err = q.answer("S3 storage for pools "+strings.Join(storage, ", "), "Skipped"); err != nil {
+							return err
+						}
 						break
 					}
 					a, err := source(freeName("s3-access-key", file.Credentials), "S3 access key", nil, true)
@@ -409,7 +433,7 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 	return nil
 }
 
-func writeHostConfig(path string, file busclient.Config, prompts io.Writer) error {
+func writeHostConfig(path string, file busclient.Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
@@ -419,6 +443,5 @@ func writeHostConfig(path string, file busclient.Config, prompts io.Writer) erro
 	if err := os.Chmod(path, 0600); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintf(prompts, "wrote %s\n", display(path))
-	return err
+	return nil
 }
