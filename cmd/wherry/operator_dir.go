@@ -77,8 +77,7 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 				if question[0] == "super-user-password-file" {
 					kind = "path"
 				}
-				value, err = q.input(question[1], "", kind, func(s string) error {
-					s = strings.TrimSpace(s)
+				value, err = q.ask(question[1], "", "", kind, func(s string) error {
 					if s == "" {
 						return fmt.Errorf("%s is required", question[1])
 					}
@@ -92,10 +91,6 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 					}
 					return nil
 				})
-				value = strings.TrimSpace(value)
-				if err == nil {
-					err = q.answer(question[1], value)
-				}
 			}
 			if err != nil {
 				return err
@@ -358,12 +353,7 @@ type poolAgent struct {
 func promptPool(q *questions) (any, error) {
 	var file poolFile
 	input := func(label, initial string, validate func(string) error) (string, error) {
-		value, err := q.input(label, initial, "", validate)
-		value = strings.TrimSpace(value)
-		if err == nil {
-			err = q.answer(label, value)
-		}
-		return value, err
+		return q.ask(label, "", initial, "", validate)
 	}
 	validName := func(s string) error {
 		if !wire.ValidName(strings.TrimSpace(s)) {
@@ -382,11 +372,10 @@ func promptPool(q *questions) (any, error) {
 		agent := poolAgent{Name: name, Credentials: []map[string]any{}}
 		for {
 			model := ""
-			field := huh.NewInput().Title("Model (blank ends the list)").Description("Leave blank for the profiles' choice").Value(&model)
-			if err := q.run(field); err != nil {
+			model, err := q.input("Model (blank ends the list)", "Leave blank for the profiles' choice", "", "", func(string) error { return nil })
+			if err != nil {
 				return nil, err
 			}
-			model = strings.TrimSpace(model)
 			if model == "" {
 				break
 			}
@@ -408,7 +397,7 @@ func promptPool(q *questions) (any, error) {
 			if choice == "done" {
 				break
 			}
-			credentialName, err := q.input("Credential name", "", "", func(s string) error {
+			credentialName, err := q.input("Credential name", "", "", "", func(s string) error {
 				if err := validName(s); err != nil {
 					return err
 				}
@@ -422,7 +411,6 @@ func promptPool(q *questions) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			credentialName = strings.TrimSpace(credentialName)
 			kind := "env"
 			if _, err := q.pick("Delivered as", "", []huh.Option[string]{option("Environment variable", "env"), option("File", "file")}, &kind); err != nil {
 				return nil, err
@@ -432,7 +420,7 @@ func promptPool(q *questions) (any, error) {
 				label, delivery = "File name", "File"
 			}
 			candidate := wire.TaskCredential{Name: credentialName}
-			target, err := q.input(label, "", "", func(s string) error {
+			target, err := q.input(label, "", "", "", func(s string) error {
 				if kind == "env" {
 					candidate.Env = strings.TrimSpace(s)
 				} else {
@@ -443,7 +431,6 @@ func promptPool(q *questions) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			target = strings.TrimSpace(target)
 			required := "required"
 			if _, err := q.pick("Required", "", []huh.Option[string]{option("Required", "required"), option("Optional", "optional")}, &required); err != nil {
 				return nil, err
@@ -608,11 +595,11 @@ func promptReceiver(q *questions, receiver string, state operator.State, broker 
 			return "", err
 		}
 		if value == otherValue {
-			typed, err := q.input(otherLabel, "", "", validate)
+			typed, err := q.input(otherLabel, "", "", "", validate)
 			if err != nil {
 				return "", err
 			}
-			value = strings.TrimSpace(typed)
+			value = typed
 		}
 		return value, q.answer(label, value)
 	}
@@ -629,23 +616,19 @@ func promptReceiver(q *questions, receiver string, state operator.State, broker 
 		return nil, err
 	}
 	shaLabel := fmt.Sprintf("SHA-256 of the %s plugin binary", kind)
-	sum := ""
-	field := huh.NewInput().Title(display(shaLabel)).Description("The line for the binary in the release's signed checksums.txt").Value(&sum).Validate(func(s string) error {
-		if !operator.ValidPluginSHA256(strings.TrimSpace(s)) {
+	sum, err := q.ask(shaLabel, "The line for the binary in the release's signed checksums.txt", "", "", func(s string) error {
+		if !operator.ValidPluginSHA256(s) {
 			return errors.New("SHA-256 must be 64 lowercase hex digits")
 		}
 		return nil
 	})
-	if err := q.run(field); err != nil {
+	if err != nil {
 		return nil, err
 	}
-	file.PluginSHA256[kind] = strings.TrimSpace(sum)
-	if err := q.answer(shaLabel, file.PluginSHA256[kind]); err != nil {
-		return nil, err
-	}
+	file.PluginSHA256[kind] = sum
 	var plugin receiverPlugin
 	configLabel := fmt.Sprintf("%s plugin config, as a YAML flow mapping", kind)
-	answer, err := q.input(configLabel, "{}", "", func(s string) error {
+	answer, err := q.input(configLabel, "", "{}", "", func(s string) error {
 		var err error
 		plugin.Config, err = receiverConfigAnswer(kind, strings.TrimSpace(s))
 		return err
@@ -653,7 +636,6 @@ func promptReceiver(q *questions, receiver string, state operator.State, broker 
 	if err != nil {
 		return nil, err
 	}
-	answer = strings.TrimSpace(answer)
 	if err := q.answer(configLabel, cmp.Or(answer, "{}")); err != nil {
 		return nil, err
 	}
@@ -677,7 +659,7 @@ func promptReceiver(q *questions, receiver string, state operator.State, broker 
 		profile := receiverProfile{Name: agent, Agent: agent, Labels: map[string]*string{}}
 		var entered []string
 		for {
-			label, err := q.input("Label KEY=VALUE (blank ends the list)", "", "", func(s string) error {
+			label, err := q.input("Label KEY=VALUE (blank ends the list)", "", "", "", func(s string) error {
 				s = strings.TrimSpace(s)
 				if s == "" {
 					return nil
@@ -718,12 +700,7 @@ func promptReceiver(q *questions, receiver string, state operator.State, broker 
 		return nil, err
 	}
 	brokerLabel := "Broker address the receiver connects to"
-	answer, err = q.input(brokerLabel, broker, "", func(s string) error { return checkOperatorBroker(strings.TrimSpace(s)) })
-	if err != nil {
-		return nil, err
-	}
-	file.Broker = strings.TrimSpace(answer)
-	if err := q.answer(brokerLabel, file.Broker); err != nil {
+	if file.Broker, err = q.ask(brokerLabel, "", broker, "", checkOperatorBroker); err != nil {
 		return nil, err
 	}
 	return file, nil

@@ -214,13 +214,13 @@ func TestOperatorSafePassword(t *testing.T) {
 					old := openFile
 					t.Cleanup(func() { openFile = old })
 					answered := false
-					openFile = func(p string, flags int, mode uint32) (int, error) {
+					openFile = func(p string, flags int, mode os.FileMode) (*os.File, error) {
 						if flags&unix.O_NONBLOCK == 0 {
 							t.Error("password open can block")
 						}
 						final := flag || answered
 						if final && kind == "unreadable" {
-							return -1, unix.EACCES
+							return nil, unix.EACCES
 						}
 						if final && kind == "replacement" {
 							os.WriteFile(path+".replacement", []byte("replaced\n"), 0600)

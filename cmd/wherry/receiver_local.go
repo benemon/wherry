@@ -109,8 +109,7 @@ func promptReceiverLocal(q *questions, config operator.ReceiverConfig, needsCA b
 	margin := max(10*time.Second, 6*time.Second+2*time.Second*time.Duration(len(kinds)))
 	// Receiver-host values get no completion and no local checks.
 	input := func(label, initial string, validate func(string) error) (string, error) {
-		value, err := q.input(label, initial, "", func(s string) error { return validate(strings.TrimSpace(s)) })
-		return strings.TrimSpace(value), err
+		return q.input(label, "", initial, "", validate)
 	}
 	notBlank := func(what string) func(string) error {
 		return func(s string) error {
@@ -121,11 +120,7 @@ func promptReceiverLocal(q *questions, config operator.ReceiverConfig, needsCA b
 		}
 	}
 	asked := func(label, initial string, validate func(string) error) (string, error) {
-		value, err := input(label, initial, validate)
-		if err == nil {
-			err = q.answer(label, value)
-		}
-		return value, err
+		return q.ask(label, "", initial, "", validate)
 	}
 	if err := q.line("\nReceiver host\n"); err != nil {
 		return local, err
