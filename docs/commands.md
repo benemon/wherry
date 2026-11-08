@@ -163,9 +163,9 @@ shown, writes the file, then applies it; a refused apply leaves the
 file to correct and apply again. With neither and no terminal it refuses,
 naming the fields the file must give. `--dry-run` writes nothing to the
 working directory: with neither file it refuses rather than prompt, and it
-creates no bundle directory. Pool apply shows one question per page under
-headings, with each answer collapsing to one line. Ctrl-C during pool apply
-writes nothing.
+creates no bundle directory. The pool and receiver object questions show one
+question per page under headings, with each answer collapsing to one line.
+Ctrl-C during those questions writes nothing.
 
 `tenant host add` and `receiver apply` write bundles under the working directory's
 `bundles/`: `bundles/hosts/<tenant>/<host>.bundle` and
@@ -527,13 +527,31 @@ its `plugin_sha256` pins, for each plugin type, the SHA-256 of that type's
 binary as lowercase hex: the line for the binary in the plugin release's
 signed `checksums.txt` ([Install plugins](operations-receivers.md#install-plugins)).
 Every plugin type in the configuration needs a pin, and a pin that is not 64
-lowercase hex digits is an error; either refusal writes nothing. Its
-`broker` is the address the receiver's bundle names, the broker in
-`operator.yaml` when it is empty. The [guided path](#operator-commands) asks
-for the pool, the plugin type (default `nomad`), its pin and its `config` as
-a YAML flow mapping, the agents (one plugin profile each, named after its
-agent) with their labels and the broker address
-(default the operator's).
+lowercase hex digits is an error; apply refuses such a file and records
+nothing. Its `broker` is the address the receiver's bundle
+names, the broker in `operator.yaml` when it is empty.
+
+The [guided path](#operator-commands) asks, in order:
+
+1. The pool, picked from the pools the operator has recorded, or another
+   name. An existing receiver's pool is listed first and selected.
+2. The plugin type, picked from `nomad` (selected), `kubernetes` and
+   `systemd`, or another name.
+3. The plugin's pin, 64 lowercase hex digits.
+4. The plugin's `config` as a YAML flow mapping (default `{}`). A blank
+   answer, `null` or `~` writes `config: {}`. A null at any depth, and a
+   `credential` that is not a valid name, are refused.
+5. One plugin profile at a time, at least one. Each asks for its agent,
+   picked from the pool's recorded agents, or another name; the profile is
+   named after its agent, and an agent that already has a profile is refused.
+   It then asks for labels one at a time as `KEY=VALUE`, a blank answer
+   ending the list; a key the profile already has is refused.
+6. The broker address the receiver connects to (default the operator's),
+   checked as `operator init` checks its broker.
+
+The guided path shows why it refuses a value on the same page, before it
+writes the file; you correct the value and continue. Apply still checks the
+written file, and a refused apply leaves it to correct.
 
 Before recording, you provide the receiver's [local configuration](configuration-receiver.md#generate-or-provide-the-local-configuration).
 Wherry uses `PATH/config.yaml` with `-f DIR` when present.
@@ -545,6 +563,9 @@ A provided local configuration is never rewritten.
 With `--dry-run`, standard error names the local file or says apply will ask.
 An absent local file does not prevent a dry run.
 With `--force`, it reissues the identity without reading local configuration.
+The local configuration questions are line prompts, asked after the receiver's
+file is written, until a later release moves them to the same pages; Ctrl-C
+there leaves the receiver's file in place.
 
 With no receiver of that name, it records the configuration, creates the
 receiver's principal, key topic and progress topic,

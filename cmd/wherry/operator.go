@@ -98,7 +98,13 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		var directory bool
 		var config operator.ReceiverConfig
 		if !force {
-			path, directory, err = objectFile(ctx, dir, "receivers", pos[2], options, dryRun, stderr, receiverFields, func(q *questions) (any, error) { return promptReceiver(newPrompter(q.out), service.Broker) })
+			path, directory, err = objectFile(ctx, dir, "receivers", pos[2], options, dryRun, stderr, receiverFields, func(q *questions) (any, error) {
+				state, err := service.LoadState(q.ctx)
+				if err != nil {
+					return nil, err
+				}
+				return promptReceiver(q, pos[2], state, service.Broker)
+			})
 			if err != nil {
 				return err
 			}

@@ -456,6 +456,9 @@ func (state State) CheckNames() error {
 // pluginSHA256 is a pinned plugin binary's SHA-256 as the release's checksums.txt writes it.
 var pluginSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// ValidPluginSHA256 reports whether sum is a plugin pin as the release's checksums.txt writes it.
+func ValidPluginSHA256(sum string) bool { return pluginSHA256.MatchString(sum) }
+
 func ValidateConfig(config ReceiverConfig, terms Terms) error {
 	if err := validateNames(config.Receiver, config.Pool); err != nil {
 		return err
@@ -464,7 +467,7 @@ func ValidateConfig(config ReceiverConfig, terms Terms) error {
 		return errors.New("receiver config needs profiles")
 	}
 	for kind, sum := range config.PluginSHA256 {
-		if !wire.ValidName(kind) || !pluginSHA256.MatchString(sum) {
+		if !wire.ValidName(kind) || !ValidPluginSHA256(sum) {
 			return fmt.Errorf("plugin SHA-256 %q=%q needs a valid plugin type and 64 lowercase hex digits", kind, sum)
 		}
 	}

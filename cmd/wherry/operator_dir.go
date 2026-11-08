@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -374,21 +375,6 @@ func (p *prompter) yes(question string) (bool, error) {
 	return answer == "y" || answer == "yes", nil
 }
 
-// list is ask's answer split at commas, without blanks.
-func (p *prompter) list(question, value string) ([]string, error) {
-	answer, err := p.ask(question, value)
-	if err != nil {
-		return nil, err
-	}
-	var items []string
-	for item := range strings.SplitSeq(answer, ",") {
-		if item = strings.TrimSpace(item); item != "" {
-			items = append(items, item)
-		}
-	}
-	return items, nil
-}
-
 // poolFields are what a pool file gives without a terminal, as pool apply's prompts ask for them.
 const poolFields = "agents (each with its name, models and credentials), default_agent, producer_byte_rate, request_percentage and start_by_limit"
 
@@ -588,48 +574,193 @@ type receiverFile struct {
 	Plugins      map[string]receiverPlugin `yaml:"plugins"`
 }
 
-func promptReceiver(p *prompter, broker string) (any, error) {
+// receiverPools are the recorded pools, sorted, with receiver's own first when it exists.
+func receiverPools(state operator.State, receiver string) []string {
+	pools := slices.Sorted(maps.Keys(state.Pools))
+	if current, ok := state.Receivers[receiver]; ok {
+		pools = append([]string{current.Pool}, slices.DeleteFunc(pools, func(pool string) bool { return pool == current.Pool })...)
+	}
+	return pools
+}
+
+// receiverAgents are terms' valid agent names in terms order, each once.
+func receiverAgents(terms operator.Terms) []string {
+	var agents []string
+	for _, agent := range terms.Agents {
+		if wire.ValidName(agent.Name) && !slices.Contains(agents, agent.Name) {
+			agents = append(agents, agent.Name)
+		}
+	}
+	return agents
+}
+
+// receiverConfigAnswer is a plugin config as the field takes it, refusing what reading the written file would refuse.
+func receiverConfigAnswer(kind, answer string) (map[string]any, error) {
+	var config map[string]any
+	if err := yaml.Unmarshal([]byte(answer), &config); err != nil {
+		return nil, fmt.Errorf("plugin config is not a YAML mapping: %w", err)
+	}
+	if path := nullAt(config, ""); path != "" {
+		return nil, fmt.Errorf("plugin %s sets config key %s to null", kind, path)
+	}
+	if name, ok := config["credential"]; ok {
+		if value, ok := name.(string); !ok {
+			return nil, errors.New("credential is not a string")
+		} else if !wire.ValidName(value) {
+			return nil, fmt.Errorf("credential %q is not a valid name", value)
+		}
+	}
+	return config, nil
+}
+
+func promptReceiver(q *questions, receiver string, state operator.State, broker string) (any, error) {
 	file := receiverFile{PluginSHA256: map[string]string{}, Plugins: map[string]receiverPlugin{}}
+	validName := func(s string) error {
+		if !wire.ValidName(strings.TrimSpace(s)) {
+			return errors.New("invalid name")
+		}
+		return nil
+	}
+	// Other's value is no valid name, and not empty: huh draws a pick holding an empty value without its options.
+	const otherValue = "Other..."
+	choose := func(label, other, otherLabel string, names []string, validate func(string) error) (string, error) {
+		options := make([]huh.Option[string], 0, len(names)+1)
+		for _, name := range names {
+			options = append(options, option(name, name))
+		}
+		value := otherValue
+		if len(names) > 0 {
+			value = names[0]
+		}
+		field := huh.NewSelect[string]().Title(display(label)).Options(append(options, option(other, otherValue))...).Value(&value).Validate(func(s string) error {
+			if s == otherValue {
+				return nil
+			}
+			if err := validate(s); err != nil {
+				return errors.New(display(err.Error()))
+			}
+			return nil
+		})
+		if err := q.run(field); err != nil {
+			return "", err
+		}
+		if value == otherValue {
+			typed, err := q.input(otherLabel, "", "", validate)
+			if err != nil {
+				return "", err
+			}
+			value = strings.TrimSpace(typed)
+		}
+		return value, q.answer(label, value)
+	}
+	if err := q.line("\nReceiver\n"); err != nil {
+		return nil, err
+	}
 	var err error
-	if file.Pool, err = p.ask("Pool", ""); err != nil {
+	if file.Pool, err = choose("Pool", "Other pool...", "Pool name", receiverPools(state, receiver), validName); err != nil {
 		return nil, err
 	}
-	kind, err := p.ask("Plugin type", "nomad")
+	// nomad, kubernetes and systemd are the plugin types wherry-plugins ships.
+	kind, err := choose("Plugin type", "Other type...", "Plugin type name", []string{"nomad", "kubernetes", "systemd"}, validName)
 	if err != nil {
 		return nil, err
 	}
-	if file.PluginSHA256[kind], err = p.ask(fmt.Sprintf("SHA-256 of the %s plugin binary", kind), ""); err != nil {
+	shaLabel := fmt.Sprintf("SHA-256 of the %s plugin binary", kind)
+	sum := ""
+	field := huh.NewInput().Title(display(shaLabel)).Description("The line for the binary in the release's signed checksums.txt").Value(&sum).Validate(func(s string) error {
+		if !operator.ValidPluginSHA256(strings.TrimSpace(s)) {
+			return errors.New("SHA-256 must be 64 lowercase hex digits")
+		}
+		return nil
+	})
+	if err := q.run(field); err != nil {
 		return nil, err
 	}
-	answer, err := p.ask(fmt.Sprintf("%s plugin config, as a YAML flow mapping", kind), "{}")
-	if err != nil {
+	file.PluginSHA256[kind] = strings.TrimSpace(sum)
+	if err := q.answer(shaLabel, file.PluginSHA256[kind]); err != nil {
 		return nil, err
 	}
 	var plugin receiverPlugin
-	if err := yaml.Unmarshal([]byte(answer), &plugin.Config); err != nil {
-		return nil, fmt.Errorf("plugin config is not a YAML mapping: %w", err)
-	}
-	agents, err := p.list("Agents to run, comma-separated (one profile each, named after its agent)", "")
+	configLabel := fmt.Sprintf("%s plugin config, as a YAML flow mapping", kind)
+	answer, err := q.input(configLabel, "{}", "", func(s string) error {
+		var err error
+		plugin.Config, err = receiverConfigAnswer(kind, strings.TrimSpace(s))
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
-	for _, agent := range agents {
-		profile := receiverProfile{Name: agent, Agent: agent, Labels: map[string]*string{}}
-		labels, err := p.list(fmt.Sprintf("Labels of profile %s, as KEY=VALUE, comma-separated", agent), "")
+	answer = strings.TrimSpace(answer)
+	if err := q.answer(configLabel, cmp.Or(answer, "{}")); err != nil {
+		return nil, err
+	}
+	if err := q.line("\nProfiles\n"); err != nil {
+		return nil, err
+	}
+	agents := receiverAgents(state.Pools[file.Pool])
+	for {
+		agent, err := choose("Agent", "Other agent...", "Agent name", agents, func(s string) error {
+			if err := validName(s); err != nil {
+				return err
+			}
+			if slices.ContainsFunc(plugin.Profiles, func(p receiverProfile) bool { return p.Name == strings.TrimSpace(s) }) {
+				return fmt.Errorf("agent %s already has a profile", strings.TrimSpace(s))
+			}
+			return nil
+		})
 		if err != nil {
 			return nil, err
 		}
-		for _, label := range labels {
-			key, value, ok := strings.Cut(label, "=")
-			if !ok {
-				return nil, fmt.Errorf("label %q needs the form KEY=VALUE", label)
+		profile := receiverProfile{Name: agent, Agent: agent, Labels: map[string]*string{}}
+		var entered []string
+		for {
+			label, err := q.input("Label KEY=VALUE (blank ends the list)", "", "", func(s string) error {
+				s = strings.TrimSpace(s)
+				if s == "" {
+					return nil
+				}
+				key, value, ok := strings.Cut(s, "=")
+				if !ok {
+					return fmt.Errorf("label %q needs the form KEY=VALUE", s)
+				}
+				if _, ok := profile.Labels[key]; ok {
+					return errors.New("duplicate label key")
+				}
+				return wire.ValidateLabels(map[string]string{key: value})
+			})
+			if err != nil {
+				return nil, err
 			}
+			if label = strings.TrimSpace(label); label == "" {
+				break
+			}
+			key, value, _ := strings.Cut(label, "=")
 			profile.Labels[key] = &value
+			entered = append(entered, label)
+		}
+		if err := q.answer("Labels of "+agent, cmp.Or(strings.Join(entered, ", "), "none")); err != nil {
+			return nil, err
 		}
 		plugin.Profiles = append(plugin.Profiles, profile)
+		another := "add"
+		if _, err := q.pick("Another profile", "", []huh.Option[string]{option("Add profile...", "add"), option("Done", "done")}, &another); err != nil {
+			return nil, err
+		}
+		if another == "done" {
+			break
+		}
 	}
 	file.Plugins[kind] = plugin
-	if file.Broker, err = p.ask("Broker address the receiver connects to", broker); err != nil {
+	if err := q.line("\nBroker\n"); err != nil {
+		return nil, err
+	}
+	brokerLabel := "Broker address the receiver connects to"
+	answer, err = q.input(brokerLabel, broker, "", func(s string) error { return checkOperatorBroker(strings.TrimSpace(s)) })
+	if err != nil {
+		return nil, err
+	}
+	file.Broker = strings.TrimSpace(answer)
+	if err := q.answer(brokerLabel, file.Broker); err != nil {
 		return nil, err
 	}
 	return file, nil
