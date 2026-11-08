@@ -60,7 +60,7 @@ type sourceResult struct {
 	ok     bool
 }
 
-func (q *hostQuestions) source(name, label string, uses []credentialUse, configured map[string]credential.Source, nested bool) (sourceResult, error) {
+func (q *questions) source(name, label string, uses []credentialUse, configured map[string]credential.Source, nested bool) (sourceResult, error) {
 	finish := func(result sourceResult, answer string) (sourceResult, error) {
 		return result, q.answer(label, answer)
 	}
@@ -226,7 +226,7 @@ func caOptions() []huh.Option[string] {
 	}
 	return append(result, option("System roots", "system"), option("Other file...", "other"))
 }
-func (q *hostQuestions) ca() (string, error) {
+func (q *questions) ca() (string, error) {
 	prev := ""
 	for {
 		value, err := q.pick("CA certificate", "", caOptions(), &prev)
