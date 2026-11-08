@@ -414,15 +414,18 @@ func TestReceiverConfigEscape(t *testing.T) {
 }
 
 func TestReceiverInterruptBeforeWrite(t *testing.T) {
-	for _, eof := range []bool{false, true} {
-		t.Run(map[bool]string{false: "ctrl-c at label", true: "eof at broker"}[eof], func(t *testing.T) {
+	for _, mode := range []string{"ctrl-c at first agent", "ctrl-c at label", "eof at broker"} {
+		eof := mode == "eof at broker"
+		t.Run(mode, func(t *testing.T) {
 			service := operatorEnv(t)
 			terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 			if err := service.PoolApply(context.Background(), "pool-a", terms, false); err != nil {
 				t.Fatal(err)
 			}
 			forms := []receiverForm{pickForm("pool-a", "\r"), pickForm("nomad", "\r"), inputForm("", receiverSHA+"\r"), inputForm("{}", "\r"), pickForm("claude", "\r")}
-			if eof {
+			if mode == "ctrl-c at first agent" {
+				forms[4] = pickForm("claude", "\x03")
+			} else if eof {
 				forms = append(forms, inputForm("", "\r"), pickForm("add", down+"\r"))
 			} else {
 				forms = append(forms, inputForm("", "\x03"))

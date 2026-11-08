@@ -527,8 +527,8 @@ its `plugin_sha256` pins, for each plugin type, the SHA-256 of that type's
 binary as lowercase hex: the line for the binary in the plugin release's
 signed `checksums.txt` ([Install plugins](operations-receivers.md#install-plugins)).
 Every plugin type in the configuration needs a pin, and a pin that is not 64
-lowercase hex digits is an error; apply refuses such a file, already written
-or not, and records nothing. Its `broker` is the address the receiver's bundle
+lowercase hex digits is an error; apply refuses such a file and records
+nothing. Its `broker` is the address the receiver's bundle
 names, the broker in `operator.yaml` when it is empty.
 
 The [guided path](#operator-commands) asks, in order:
@@ -550,8 +550,8 @@ The [guided path](#operator-commands) asks, in order:
    checked as `operator init` checks its broker.
 
 The guided path shows why it refuses a value on the same page, before it
-writes the file; you correct the value and continue. Apply still checks the written file, and a
-refused apply leaves it to correct.
+writes the file; you correct the value and continue. Apply still checks the
+written file, and a refused apply leaves it to correct.
 
 Before recording, you provide the receiver's [local configuration](configuration-receiver.md#generate-or-provide-the-local-configuration).
 Wherry uses `PATH/config.yaml` with `-f DIR` when present.

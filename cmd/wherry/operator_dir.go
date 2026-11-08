@@ -375,21 +375,6 @@ func (p *prompter) yes(question string) (bool, error) {
 	return answer == "y" || answer == "yes", nil
 }
 
-// list is ask's answer split at commas, without blanks.
-func (p *prompter) list(question, value string) ([]string, error) {
-	answer, err := p.ask(question, value)
-	if err != nil {
-		return nil, err
-	}
-	var items []string
-	for item := range strings.SplitSeq(answer, ",") {
-		if item = strings.TrimSpace(item); item != "" {
-			items = append(items, item)
-		}
-	}
-	return items, nil
-}
-
 // poolFields are what a pool file gives without a terminal, as pool apply's prompts ask for them.
 const poolFields = "agents (each with its name, models and credentials), default_agent, producer_byte_rate, request_percentage and start_by_limit"
 
@@ -698,16 +683,14 @@ func promptReceiver(q *questions, receiver string, state operator.State, broker 
 	var plugin receiverPlugin
 	configLabel := fmt.Sprintf("%s plugin config, as a YAML flow mapping", kind)
 	answer, err := q.input(configLabel, "{}", "", func(s string) error {
-		_, err := receiverConfigAnswer(kind, strings.TrimSpace(s))
+		var err error
+		plugin.Config, err = receiverConfigAnswer(kind, strings.TrimSpace(s))
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	answer = strings.TrimSpace(answer)
-	if plugin.Config, err = receiverConfigAnswer(kind, answer); err != nil {
-		return nil, err
-	}
 	if err := q.answer(configLabel, cmp.Or(answer, "{}")); err != nil {
 		return nil, err
 	}
