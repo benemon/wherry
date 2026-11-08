@@ -563,9 +563,9 @@ A provided local configuration is never rewritten.
 With `--dry-run`, standard error names the local file or says apply will ask.
 An absent local file does not prevent a dry run.
 With `--force`, it reissues the identity without reading local configuration.
-The local configuration questions are line prompts, asked after the receiver's
-file is written, until a later release moves them to the same pages; Ctrl-C
-there leaves the receiver's file in place.
+The local configuration questions come after the receiver's file is written.
+Ctrl-C or end of input there writes no local configuration and records no
+receiver, but keeps the receiver's file.
 
 With no receiver of that name, it records the configuration, creates the
 receiver's principal, key topic and progress topic,

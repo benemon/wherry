@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"cmp"
 	"context"
@@ -30,9 +29,6 @@ type operatorConfig struct {
 	CAFile       string `yaml:"ca_file,omitempty"`
 	PasswordFile string `yaml:"password_file"`
 }
-
-// terminal reports whether the prompts, which read stdin, have a terminal.
-var terminal = func() bool { return isTerminal(os.Stdin) }
 
 // operatorInit, connected as the Kafka super user the flags or prompts name, delegates provisioning to wherry.operator
 // with a new password and writes dir's operator.yaml. The super user is written nowhere.
@@ -341,38 +337,6 @@ func objectFile(ctx context.Context, dir, kind, name string, options map[string]
 		return "", false, err
 	}
 	return path, info.IsDir(), nil
-}
-
-type prompter struct {
-	in  *bufio.Reader
-	out io.Writer
-}
-
-func newPrompter(out io.Writer) *prompter { return &prompter{bufio.NewReader(stdin), out} }
-
-// ask writes question with its default, value, and returns the answer, or value for a blank one.
-func (p *prompter) ask(question, value string) (string, error) {
-	if value != "" {
-		fmt.Fprintf(p.out, "%s [%s]: ", question, value)
-	} else {
-		fmt.Fprintf(p.out, "%s: ", question)
-	}
-	line, err := p.in.ReadString('\n')
-	if err != nil && line == "" {
-		return "", fmt.Errorf("%s: %w", question, err)
-	}
-	return cmp.Or(strings.TrimSpace(line), value), nil
-}
-
-// yes writes question and reports whether the answer is y or yes; anything else is No.
-func (p *prompter) yes(question string) (bool, error) {
-	fmt.Fprint(p.out, question)
-	line, err := p.in.ReadString('\n')
-	if err != nil && line == "" {
-		return false, err
-	}
-	answer := strings.ToLower(strings.TrimSpace(line))
-	return answer == "y" || answer == "yes", nil
 }
 
 // poolFields are what a pool file gives without a terminal, as pool apply's prompts ask for them.

@@ -211,9 +211,8 @@ func TestPoolEligibility(t *testing.T) {
 	}
 	defer master.Close()
 	defer tty.Close()
-	oldIn, oldTerminal := stdin, terminal
-	t.Cleanup(func() { stdin = oldIn; terminal = oldTerminal })
-	terminal = func() bool { return true }
+	oldIn := stdin
+	t.Cleanup(func() { stdin = oldIn })
 	for _, mode := range []string{"stdin", "dumb", "writer"} {
 		t.Run(mode, func(t *testing.T) {
 			stdin = tty

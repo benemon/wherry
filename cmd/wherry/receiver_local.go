@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/operator"
+	"github.com/charmbracelet/huh"
 	"gopkg.in/yaml.v3"
 )
 
@@ -35,7 +37,7 @@ const receiverLocalFields = "bundle, ca_file, state_dir, plugin_dir, metrics_add
 
 // receiverLocalFile finds, or asks for and writes, the receiver's local configuration and checks it against config.
 // broker and ca are the operator's broker and whether the operator trusts it through a CA file.
-func receiverLocalFile(dir, name, receiverPath string, directory, dryRun bool, out io.Writer, config operator.ReceiverConfig, broker string, ca bool) error {
+func receiverLocalFile(ctx context.Context, dir, name, receiverPath string, directory, dryRun bool, out io.Writer, config operator.ReceiverConfig, broker string, ca bool) error {
 	needsCA := config.Broker == broker && ca
 	path := filepath.Join(dir, "receivers", name+".config.yaml")
 	if directory {
@@ -61,12 +63,12 @@ func receiverLocalFile(dir, name, receiverPath string, directory, dryRun bool, o
 			fmt.Fprintf(out, "%s is absent; apply will ask for local configuration\n", path)
 			return nil
 		}
-		if !terminal() {
+		if !promptsEligible(out) {
 			return fmt.Errorf("%s does not exist and there is no terminal to prompt on; write it with %s", path, receiverLocalFields)
 		}
-		local, err = promptReceiverLocal(newPrompter(out), config, needsCA)
+		local, err = promptReceiverLocal(&questions{ctx, stdin, &promptLatch{out: out}}, config, needsCA)
 		if err != nil {
-			return err
+			return presentationError{err}
 		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
@@ -98,76 +100,125 @@ func receiverLocalFile(dir, name, receiverPath string, directory, dryRun bool, o
 var receiverEnv = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var receiverEnvOther = regexp.MustCompile(`[^A-Z0-9_]`)
 
-func promptReceiverLocal(p *prompter, config operator.ReceiverConfig, needsCA bool) (receiverLocalConfig, error) {
+func promptReceiverLocal(q *questions, config operator.ReceiverConfig, needsCA bool) (receiverLocalConfig, error) {
 	local := receiverLocalConfig{Credentials: map[string]credential.Source{}}
-	var err error
-	if local.Bundle, err = p.ask("Where will the receiver read its bundle?", "/etc/wherry/receiver.bundle"); err != nil {
-		return local, err
-	}
-	ca := "none"
-	if needsCA {
-		ca = "/etc/wherry/kafka-ca.pem"
-	}
-	if local.CAFile, err = p.ask("Where will it read its broker's CA? none for the system's trusted roots.", ca); err != nil {
-		return local, err
-	}
-	if local.CAFile == "none" {
-		local.CAFile = ""
-	}
-	if local.StateDir, err = p.ask("Where does it keep its state? It must survive restarts.", "/var/lib/wherry/state"); err != nil {
-		return local, err
-	}
-	if local.PluginDir, err = p.ask("Where are its plugins?", defaultPluginDir); err != nil {
-		return local, err
-	}
-	answer, err := p.ask("How long does its platform wait for it to stop before killing it?", "30s")
-	if err != nil {
-		return local, err
-	}
-	window, err := time.ParseDuration(answer)
-	if err != nil {
-		return local, fmt.Errorf("stop window: %w", err)
-	}
 	kinds := map[string]bool{}
 	for _, profile := range config.Profiles {
 		kinds[profile.Plugin] = true
 	}
 	margin := max(10*time.Second, 6*time.Second+2*time.Second*time.Duration(len(kinds)))
-	if window < margin+5*time.Second {
-		return local, errors.New("stop window leaves less than 5s to drain; raise kill_timeout, terminationGracePeriodSeconds or TimeoutStopSec")
+	// These paths are on the receiver's host, so they get no completion and no local checks.
+	input := func(label, initial string, validate func(string) error) (string, error) {
+		value, err := q.input(label, initial, "", func(s string) error { return validate(strings.TrimSpace(s)) })
+		return strings.TrimSpace(value), err
 	}
-	local.DrainTimeout = window - margin
-	if local.MetricsAddr, err = p.ask("Where should it serve metrics? none for no listener.", ":9464"); err != nil {
+	notBlank := func(what string) func(string) error {
+		return func(s string) error {
+			if s == "" {
+				return errors.New(what + " must not be blank")
+			}
+			return nil
+		}
+	}
+	asked := func(label, initial string, validate func(string) error) (string, error) {
+		value, err := input(label, initial, validate)
+		if err == nil {
+			err = q.answer(label, value)
+		}
+		return value, err
+	}
+	if err := q.line("\nReceiver host\n"); err != nil {
 		return local, err
 	}
-	if local.MetricsAddr == "none" {
-		local.MetricsAddr = ""
+	var err error
+	if local.Bundle, err = asked("Bundle path", "/etc/wherry/receiver.bundle", notBlank("bundle path")); err != nil {
+		return local, err
 	}
-	for _, name := range receiverCredentials(config) {
-		kind, err := p.ask(fmt.Sprintf("Credential %s: read from an environment variable (env) or a file (file)?", name), "env")
-		if err != nil {
+	ca := "roots"
+	if needsCA {
+		ca = "file"
+	}
+	if _, err := q.pick("Broker CA", "", []huh.Option[string]{option("CA file", "file"), option("System roots", "roots")}, &ca); err != nil {
+		return local, err
+	}
+	answer := "System roots"
+	if ca == "file" {
+		if local.CAFile, err = input("CA file path", "/etc/wherry/kafka-ca.pem", notBlank("CA file path")); err != nil {
+			return local, err
+		}
+		answer = local.CAFile
+	}
+	if err := q.answer("Broker CA", answer); err != nil {
+		return local, err
+	}
+	if local.StateDir, err = asked("State directory (must survive restarts)", "/var/lib/wherry/state", notBlank("state directory")); err != nil {
+		return local, err
+	}
+	if local.PluginDir, err = asked("Plugin directory", defaultPluginDir, notBlank("plugin directory")); err != nil {
+		return local, err
+	}
+	var window time.Duration
+	if _, err := asked("Stop window (how long its platform waits before killing it)", "30s", func(s string) error {
+		var err error
+		if window, err = time.ParseDuration(s); err != nil {
+			return fmt.Errorf("stop window: %w", err)
+		}
+		if window < margin+5*time.Second {
+			return errors.New("stop window leaves less than 5s to drain; raise kill_timeout, terminationGracePeriodSeconds or TimeoutStopSec")
+		}
+		return nil
+	}); err != nil {
+		return local, err
+	}
+	local.DrainTimeout = window - margin
+	metrics := "listen"
+	if _, err := q.pick("Metrics", "", []huh.Option[string]{option("Listen on an address", "listen"), option("No listener", "none")}, &metrics); err != nil {
+		return local, err
+	}
+	answer = "No listener"
+	if metrics == "listen" {
+		if local.MetricsAddr, err = input("Metrics address", ":9464", notBlank("metrics address")); err != nil {
+			return local, err
+		}
+		answer = local.MetricsAddr
+	}
+	if err := q.answer("Metrics", answer); err != nil {
+		return local, err
+	}
+	names := receiverCredentials(config)
+	if len(names) > 0 {
+		if err := q.line("\nCredentials\n"); err != nil {
+			return local, err
+		}
+	}
+	for _, name := range names {
+		label := "Credential " + name
+		kind := "env"
+		if _, err := q.pick(label, "", []huh.Option[string]{option("Environment variable", "env"), option("File", "file")}, &kind); err != nil {
 			return local, err
 		}
 		var source credential.Source
-		switch kind {
-		case "env":
+		if kind == "env" {
 			variable := receiverEnvOther.ReplaceAllString(strings.ToUpper(name), "_")
 			if variable[0] >= '0' && variable[0] <= '9' {
 				variable = "_" + variable
 			}
-			source.Env, err = p.ask("Environment variable", variable)
-			if err == nil && !receiverEnv.MatchString(source.Env) {
-				err = errors.New("invalid environment variable name")
+			if source.Env, err = input("Variable", variable, func(s string) error {
+				if !receiverEnv.MatchString(s) {
+					return errors.New("invalid environment variable name")
+				}
+				return nil
+			}); err != nil {
+				return local, err
 			}
-		case "file":
-			source.File, err = p.ask("Credential file path", "")
-			if err == nil && source.File == "" {
-				err = errors.New("credential file path must not be blank")
+			answer = "Environment variable " + display(source.Env)
+		} else {
+			if source.File, err = input("File path", "", notBlank("credential file path")); err != nil {
+				return local, err
 			}
-		default:
-			err = errors.New("credential source must be env or file")
+			answer = "File " + display(source.File)
 		}
-		if err != nil {
+		if err := q.line("? %s  %s\n", display(label), answer); err != nil {
 			return local, err
 		}
 		local.Credentials[name] = source
