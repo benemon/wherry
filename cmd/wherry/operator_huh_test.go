@@ -642,10 +642,9 @@ func TestOperatorPromptEligibility(t *testing.T) {
 	}
 	defer master.Close()
 	defer tty.Close()
-	old, stderr := stdin, os.Stderr
-	t.Cleanup(func() { stdin, os.Stderr = old, stderr })
+	old := stdin
+	t.Cleanup(func() { stdin = old })
 	stdin = tty
-	os.Stderr = tty
 	for _, mode := range []string{"dumb", "redirected prompts"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv("TERM", "xterm-256color")

@@ -559,9 +559,8 @@ func TestHostPagesEligibility(t *testing.T) {
 	}
 	defer master.Close()
 	defer tty.Close()
-	old, stderr := stdin, os.Stderr
-	t.Cleanup(func() { stdin, os.Stderr = old, stderr })
-	os.Stderr = tty
+	old := stdin
+	t.Cleanup(func() { stdin = old })
 	stdin = tty
 	t.Setenv("TERM", "xterm-256color")
 	if !promptsEligible(tty) {
