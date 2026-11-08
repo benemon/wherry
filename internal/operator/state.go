@@ -833,15 +833,22 @@ func validateTerms(terms Terms) error {
 			return fmt.Errorf("agent %s: %w", agent.Name, err)
 		}
 		for _, credential := range agent.Credentials {
-			description := credential.Description
-			invalid := !utf8.ValidString(description) || utf8.RuneCountInString(description) > 80
-			for _, r := range description {
-				invalid = invalid || unicode.IsControl(r) || r == '\u2028' || r == '\u2029'
-			}
-			if invalid {
-				return fmt.Errorf("agent %s credential %s: invalid description", agent.Name, credential.Name)
+			if err := ValidateDescription(credential.Description); err != nil {
+				return fmt.Errorf("agent %s credential %s: %w", agent.Name, credential.Name, err)
 			}
 		}
+	}
+	return nil
+}
+
+// ValidateDescription checks the display description of an agent credential.
+func ValidateDescription(description string) error {
+	invalid := !utf8.ValidString(description) || utf8.RuneCountInString(description) > 80
+	for _, r := range description {
+		invalid = invalid || unicode.IsControl(r) || r == '\u2028' || r == '\u2029'
+	}
+	if invalid {
+		return errors.New("invalid description")
 	}
 	return nil
 }

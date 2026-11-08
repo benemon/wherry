@@ -15,9 +15,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/huh"
 	"gopkg.in/yaml.v3"
 )
 
@@ -307,7 +310,7 @@ func rebroker(path string, bundle operator.Bundle, broker string) error {
 // objectFile is the file apply reads for name and whether it is a directory: -f's, else dir's kind/name.yaml, else
 // that file written from prompt's answers. Without a terminal to prompt on, it refuses, naming fields; so does a dry run,
 // which writes nothing.
-func objectFile(dir, kind, name string, options map[string]string, dryRun bool, prompts io.Writer, fields string, prompt func(*prompter) (any, error)) (string, bool, error) {
+func objectFile(ctx context.Context, dir, kind, name string, options map[string]string, dryRun bool, prompts io.Writer, fields string, prompt func(*questions) (any, error)) (string, bool, error) {
 	path := options["f"]
 	if path == "" {
 		if !wire.ValidName(name) {
@@ -318,12 +321,12 @@ func objectFile(dir, kind, name string, options map[string]string, dryRun bool, 
 			if dryRun {
 				return "", false, fmt.Errorf("%s does not exist and --dry-run writes nothing; write it, or give -f FILE, with %s", path, fields)
 			}
-			if !terminal() {
+			if !promptsEligible(prompts) {
 				return "", false, fmt.Errorf("%s does not exist and there is no terminal to prompt on; write it, or give -f FILE, with %s", path, fields)
 			}
-			value, err := prompt(newPrompter(prompts))
+			value, err := prompt(&questions{ctx, stdin, &promptLatch{out: prompts}})
 			if err != nil {
-				return "", false, err
+				return "", false, presentationError{err}
 			}
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				return "", false, err
@@ -400,65 +403,199 @@ type poolFile struct {
 }
 
 type poolAgent struct {
-	Name        string              `yaml:"name"`
-	Models      []string            `yaml:"models,omitempty"`
-	Credentials []map[string]string `yaml:"credentials"`
+	Name        string           `yaml:"name"`
+	Models      []string         `yaml:"models,omitempty"`
+	Credentials []map[string]any `yaml:"credentials"`
 }
 
-func promptPool(p *prompter) (any, error) {
+func promptPool(q *questions) (any, error) {
 	var file poolFile
-	agents, err := p.list("Agents, comma-separated", "")
-	if err != nil {
+	input := func(label, initial string, validate func(string) error) (string, error) {
+		value, err := q.input(label, initial, "", validate)
+		value = strings.TrimSpace(value)
+		if err == nil {
+			err = q.answer(label, value)
+		}
+		return value, err
+	}
+	validName := func(s string) error {
+		if !wire.ValidName(strings.TrimSpace(s)) {
+			return errors.New("invalid name")
+		}
+		return nil
+	}
+	if err := q.line("\nAgents\n"); err != nil {
 		return nil, err
 	}
-	if len(agents) == 0 {
-		return nil, errors.New("a pool needs an agent")
-	}
-	for _, name := range agents {
-		agent := poolAgent{Name: name, Credentials: []map[string]string{}}
-		if agent.Models, err = p.list(fmt.Sprintf("Models agent %s may run, comma-separated (blank for its profiles' choice)", name), ""); err != nil {
-			return nil, err
-		}
-		credentials, err := p.list(fmt.Sprintf("Credentials agent %s takes, as NAME=ENV_VAR or NAME=file:FILE_NAME, comma-separated", name), "")
+	for {
+		name, err := input("Agent name", "", validName)
 		if err != nil {
 			return nil, err
 		}
-		for _, credential := range credentials {
-			credentialName, target, ok := strings.Cut(credential, "=")
-			if !ok || credentialName == "" || target == "" {
-				return nil, fmt.Errorf("credential %q needs the form NAME=ENV_VAR or NAME=file:FILE_NAME", credential)
+		agent := poolAgent{Name: name, Credentials: []map[string]any{}}
+		for {
+			model := ""
+			field := huh.NewInput().Title("Model (blank ends the list)").Description("Leave blank for the profiles' choice").Value(&model)
+			if err := q.run(field); err != nil {
+				return nil, err
 			}
+			model = strings.TrimSpace(model)
+			if model == "" {
+				break
+			}
+			agent.Models = append(agent.Models, model)
+		}
+		models := strings.Join(agent.Models, ", ")
+		if models == "" {
+			models = "none"
+		}
+		if err := q.answer("Models of "+name, models); err != nil {
+			return nil, err
+		}
+		var targets []wire.TaskCredential
+		for {
+			choice := "add"
+			if _, err := q.pick("Credentials of "+name, "", []huh.Option[string]{option("Add credential...", "add"), option("Done", "done")}, &choice); err != nil {
+				return nil, err
+			}
+			if choice == "done" {
+				break
+			}
+			credentialName, err := q.input("Credential name", "", "", func(s string) error {
+				if err := validName(s); err != nil {
+					return err
+				}
+				for _, c := range targets {
+					if c.Name == strings.TrimSpace(s) {
+						return errors.New("duplicate credential name")
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				return nil, err
+			}
+			credentialName = strings.TrimSpace(credentialName)
 			kind := "env"
-			if file, ok := strings.CutPrefix(target, "file:"); ok {
-				kind, target = "file", file
+			if _, err := q.pick("Delivered as", "", []huh.Option[string]{option("Environment variable", "env"), option("File", "file")}, &kind); err != nil {
+				return nil, err
 			}
-			agent.Credentials = append(agent.Credentials, map[string]string{"name": credentialName, kind: target})
+			label, delivery := "Variable", "Environment variable"
+			if kind == "file" {
+				label, delivery = "File name", "File"
+			}
+			candidate := wire.TaskCredential{Name: credentialName}
+			target, err := q.input(label, "", "", func(s string) error {
+				if kind == "env" {
+					candidate.Env = strings.TrimSpace(s)
+				} else {
+					candidate.File = strings.TrimSpace(s)
+				}
+				return wire.ValidateCredentials(append(slices.Clone(targets), candidate))
+			})
+			if err != nil {
+				return nil, err
+			}
+			target = strings.TrimSpace(target)
+			required := "required"
+			if _, err := q.pick("Required", "", []huh.Option[string]{option("Required", "required"), option("Optional", "optional")}, &required); err != nil {
+				return nil, err
+			}
+			description := ""
+			descriptionInput := huh.NewInput().Title("Description (blank for none)").Value(&description).Validate(operator.ValidateDescription)
+			if err := q.run(poolDescriptionInput{descriptionInput}); err != nil {
+				return nil, err
+			}
+			credential := map[string]any{"name": credentialName, kind: target}
+			if required == "optional" {
+				credential["required"] = false
+			}
+			answer := delivery + " " + display(target) + ", " + required
+			if description != "" {
+				credential["description"] = description
+				answer += ", \"" + display(description) + "\""
+			}
+			if err := q.line("? Credential %s  %s\n", display(credentialName), answer); err != nil {
+				return nil, err
+			}
+			targets = append(targets, candidate)
+			agent.Credentials = append(agent.Credentials, credential)
 		}
 		file.Agents = append(file.Agents, agent)
+		another := "add"
+		if _, err := q.pick("Another agent", "", []huh.Option[string]{option("Add agent...", "add"), option("Done", "done")}, &another); err != nil {
+			return nil, err
+		}
+		if another == "done" {
+			break
+		}
 	}
-	if file.DefaultAgent, err = p.ask("Default agent, for a task that names none", agents[0]); err != nil {
+	if err := q.line("\nPool\n"); err != nil {
 		return nil, err
 	}
-	answer, err := p.ask("Producer byte rate quota per host, bytes a second", "1048576")
+	options := make([]huh.Option[string], 0, len(file.Agents))
+	for _, agent := range file.Agents {
+		options = append(options, option(agent.Name, agent.Name))
+	}
+	file.DefaultAgent = file.Agents[0].Name
+	if _, err := q.pick("Default agent", "", options, &file.DefaultAgent); err != nil {
+		return nil, err
+	}
+	if err := q.answer("Default agent", file.DefaultAgent); err != nil {
+		return nil, err
+	}
+	_, err := input("Producer byte rate per host, bytes a second", "1048576", func(s string) error {
+		value, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+		if err != nil || value <= 0 {
+			return errors.New("producer byte rate must be greater than 0")
+		}
+		file.ProducerByteRate = value
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if file.ProducerByteRate, err = strconv.ParseInt(answer, 10, 64); err != nil {
-		return nil, fmt.Errorf("producer byte rate: %w", err)
-	}
-	if answer, err = p.ask("Request percentage quota per host", "10"); err != nil {
+	_, err = input("Request percentage per host", "10", func(s string) error {
+		value, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+		if err != nil || !(value > 0) {
+			return errors.New("request percentage must be greater than 0")
+		}
+		file.RequestPercentage = value
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
-	if file.RequestPercentage, err = strconv.ParseFloat(answer, 64); err != nil {
-		return nil, fmt.Errorf("request percentage: %w", err)
-	}
-	if file.StartByLimit, err = p.ask("Start-by limit, the longest a task may wait to start", (time.Duration(operator.DefaultStartByLimitMS) * time.Millisecond).String()); err != nil {
+	file.StartByLimit, err = input("Start-by limit", (time.Duration(operator.DefaultStartByLimitMS) * time.Millisecond).String(), func(s string) error {
+		value, err := time.ParseDuration(strings.TrimSpace(s))
+		if err != nil || value < 0 {
+			return errors.New("start-by limit must be a non-negative duration")
+		}
+		return nil
+	})
+	if err != nil {
 		return nil, err
-	}
-	if _, err := time.ParseDuration(file.StartByLimit); err != nil {
-		return nil, fmt.Errorf("start-by limit: %w", err)
 	}
 	return file, nil
+}
+
+type poolDescriptionInput struct{ *huh.Input }
+
+func (f poolDescriptionInput) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	_, cmd := f.Input.Update(msg)
+	return f, cmd
+}
+
+func (f poolDescriptionInput) View() string {
+	var out strings.Builder
+	for _, r := range f.Input.View() {
+		if unicode.Is(unicode.Cf, r) {
+			out.WriteString(display(string(r)))
+		} else {
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
 }
 
 // receiverFields are what a receiver file gives without a terminal, as receiver apply's prompts ask for them.

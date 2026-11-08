@@ -591,7 +591,7 @@ func TestPoolApplyGuidedPath(t *testing.T) {
 		t.Fatalf("pool apply without a file or a terminal = %v; want it refused naming %s", err, poolFields)
 	}
 	// A start-by limit the tenant feeds' retention cannot hold is refused by apply, after the prompts.
-	onTerminal(t, "claude, codex\nhaiku,sonnet\nclaude-token=CLAUDE_CODE_OAUTH_TOKEN\n\nopenai=OPENAI_API_KEY, deploy=file:deploy-key\n\n2097152\n\n9999h\n")
+	scriptForms(t, keys("claude\r"), keys("haiku\r"), keys("sonnet\r"), keys("\r"), keys("\r"), keys("claude-token\r"), keys("\r"), keys("CLAUDE_CODE_OAUTH_TOKEN\r"), keys("\r"), keys("\r"), keys(down+"\r"), keys("\r"), keys("codex\r"), keys("\r"), keys("\r"), keys("openai\r"), keys("\r"), keys("OPENAI_API_KEY\r"), keys("\r"), keys("\r"), keys("\r"), keys("deploy\r"), keys(down+"\r"), keys("deploy-key\r"), keys("\r"), keys("\r"), keys(down+"\r"), keys(down+"\r"), keys("\r"), keys("\x152097152\r"), keys("\r"), keys("\x159999h\r"))
 	if err := runOperator([]string{"pool", "apply", "guided"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "start_by_limit") {
 		t.Fatalf("guided pool apply = %v; want apply to refuse the start-by limit", err)
 	}
@@ -622,6 +622,10 @@ func TestReceiverApplyGuidedPath(t *testing.T) {
 		t.Fatalf("receiver apply without a file or a terminal = %v; want it refused naming %s", err, receiverFields)
 	}
 	onTerminal(t, "pool-a\n\n"+fakeSHA256+"\n{address: https://nomad.example:4646, credential: nomad-token}\nclaude\ntier=batch\n\n")
+	oldEligible := promptsEligible
+	t.Cleanup(func() { promptsEligible = oldEligible })
+	promptsEligible = func(io.Writer) bool { return true }
+
 	if err := runOperator([]string{"receiver", "apply", "receiver-a"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}

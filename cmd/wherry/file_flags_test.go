@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -24,7 +25,7 @@ func TestObjectFileTakesAFileOrADirectory(t *testing.T) {
 	}
 	dir := t.TempDir()
 	for path, want := range map[string]bool{file: false, dir: true} {
-		if got, directory, err := objectFile(t.TempDir(), "pools", "pool-a", map[string]string{"f": path}, false, io.Discard, poolFields, nil); err != nil || got != path || directory != want {
+		if got, directory, err := objectFile(context.Background(), t.TempDir(), "pools", "pool-a", map[string]string{"f": path}, false, io.Discard, poolFields, nil); err != nil || got != path || directory != want {
 			t.Errorf("objectFile(-f %s) = %s, %t, %v; want the path and directory %t", path, got, directory, err, want)
 		}
 	}
