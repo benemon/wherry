@@ -177,11 +177,12 @@ func (q *questions) source(name, label string, uses []credentialUse, configured 
 var openFile = unix.Open
 var readCAData = func(file io.Reader) ([]byte, error) { return io.ReadAll(io.LimitReader(file, (1<<20)+1)) }
 
-// readCA accepts symlinks to regular files and bounds reads even if the file changes after listing.
 func readCA(path string) error {
 	_, err := loadCA(path)
 	return err
 }
+
+// loadCA accepts symlinks to regular files and bounds reads even if the file changes after listing.
 func loadCA(path string) ([]byte, error) {
 	// Refuse a special file before opening it, since opening some devices acts; Fstat below decides acceptance.
 	if info, err := os.Stat(path); err == nil && !info.Mode().IsRegular() {

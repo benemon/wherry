@@ -195,11 +195,12 @@ wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] \
   [--super-user NAME --super-user-password-file FILE]
 ```
 
-Delegate provisioning from the Kafka super user to `wherry.operator`.
+`operator init` delegates provisioning from the Kafka super user to `wherry.operator`.
 When standard input and standard error are terminals and `TERM` is not
 `dumb`, you answer each question the flags do not give under a Broker heading.
 You see one question per page.
 Enter the broker address.
+An address without a port uses port 9092.
 Choose a CA certificate from the PEM files in the current directory,
 System roots or Other file...
 Enter the super user's name.

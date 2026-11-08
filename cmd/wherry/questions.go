@@ -45,7 +45,7 @@ var promptsEligible = func(out io.Writer) bool {
 		return false
 	}
 	f, ok := out.(*os.File)
-	return ok && term.IsTerminal(int(f.Fd())) && term.IsTerminal(int(os.Stderr.Fd())) && os.Getenv("TERM") != "dumb"
+	return ok && term.IsTerminal(int(f.Fd())) && os.Getenv("TERM") != "dumb"
 }
 
 func sameTerminal(a, b io.Writer) bool {

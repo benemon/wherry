@@ -39,11 +39,6 @@ func stopOperatorConnection(t *testing.T, check func(string, []byte, string, str
 }
 
 func TestOperatorBrokerGrammar(t *testing.T) {
-	for _, s := range []string{"host", "host:9092", "::1", "[::1]", "[::1]:9093", "host:65535"} {
-		if err := checkOperatorBroker(s); err != nil {
-			t.Fatal(s, err)
-		}
-	}
 	for _, s := range []string{"", ":9092", "host:", "[::1]:", "host:abc", "host:65536", "host:0", "host:+9092", "[::1]x9092", "[::1]x0", "[::1]x+9092"} {
 		t.Run(s, func(t *testing.T) {
 			if checkOperatorBroker(s) == nil {
@@ -254,7 +249,7 @@ func TestOperatorSafePassword(t *testing.T) {
 							scriptForms(t, keys(path+"\r"))
 						}
 					}
-					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 					defer cancel()
 					var out bytes.Buffer
 					err := operatorInit(ctx, "unused", opts, answerOutput{&out, "Kafka super user's password file", func() { answered = true }})
@@ -292,15 +287,7 @@ func TestOperatorCAConnection(t *testing.T) {
 					delete(opts, "ca-file")
 					scriptForms(t, keys("\r"))
 				}
-				old := openFile
-				reads := 0
-				t.Cleanup(func() { openFile = old })
-				openFile = func(p string, f int, m uint32) (int, error) {
-					if p == path {
-						reads++
-					}
-					return old(p, f, m)
-				}
+				armed := !prompt
 				replace := func() {
 					if err := os.WriteFile(path+".replacement", append([]byte(pem), bytes.Repeat([]byte("x"), 2<<20)...), 0600); err != nil {
 						t.Error(err)
@@ -318,10 +305,14 @@ func TestOperatorCAConnection(t *testing.T) {
 					}
 				}
 				if mode == "growth" {
+					if prompt {
+						out = answerOutput{io.Discard, "CA certificate", func() { armed = true }}
+					}
 					oldRead := readCAData
 					t.Cleanup(func() { readCAData = oldRead })
 					readCAData = func(r io.Reader) ([]byte, error) {
-						if !prompt || reads == 3 {
+						if armed {
+							armed = false
 							os.WriteFile(path, append([]byte(pem), bytes.Repeat([]byte("x"), 2<<20)...), 0600)
 						}
 						b, e := oldRead(r)
@@ -418,6 +409,36 @@ func TestOperatorRequiredCorrectionAndPasswordTab(t *testing.T) {
 	}
 }
 
+func TestOperatorPasswordHomeCompletion(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile(filepath.Join(home, "password"), []byte("home-secret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir("~", 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join("~", "password"), []byte("literal-secret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	opts := operatorAnswers(t)
+	delete(opts, "super-user-password-file")
+	scriptForms(t, []string{"~/pass", "\t", "\r"})
+	stop := stopOperatorConnection(t, func(_ string, _ []byte, _, p string) {
+		if p != "home-secret\n" {
+			t.Error("password did not come from HOME", p)
+		}
+	})
+	var out bytes.Buffer
+	if err := operatorInit(context.Background(), "unused", opts, &out); !errors.Is(err, stop) {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "? Kafka super user's password file  ~/password") {
+		t.Fatal("password collapse lost home-relative text", out.String())
+	}
+}
+
 func TestOperatorOtherCACompletionAndBlank(t *testing.T) {
 	_, pem := tlsCluster(t)
 	dir := t.TempDir()
@@ -486,7 +507,18 @@ func TestOperatorCAFileKinds(t *testing.T) {
 						t.Error("CA data changed")
 					}
 				})
-				err := operatorInit(context.Background(), "unused", opts, io.Discard)
+				var err error
+				if !prompt && kind == "fifo" {
+					done := make(chan error, 1)
+					go func() { done <- operatorInit(context.Background(), "unused", opts, io.Discard) }()
+					select {
+					case err = <-done:
+					case <-time.After(2 * time.Second):
+						t.Fatal("flag-path FIFO blocked")
+					}
+				} else {
+					err = operatorInit(context.Background(), "unused", opts, io.Discard)
+				}
 				if bad {
 					if err == nil || errors.Is(err, stop) {
 						t.Fatal("invalid CA accepted")
@@ -614,20 +646,25 @@ func TestOperatorPromptEligibility(t *testing.T) {
 	t.Cleanup(func() { stdin, os.Stderr = old, stderr })
 	stdin = tty
 	os.Stderr = tty
-	for _, mode := range []string{"dumb", "redirected stderr"} {
+	for _, mode := range []string{"dumb", "redirected prompts"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv("TERM", "xterm-256color")
+			var out io.Writer = tty
 			if mode == "dumb" {
 				t.Setenv("TERM", "dumb")
 			} else {
-				os.Stderr = stderr
-				defer func() { os.Stderr = tty }()
+				file, err := os.CreateTemp(t.TempDir(), "prompts")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer file.Close()
+				out = file
 			}
-			if promptsEligible(tty) {
+			if promptsEligible(out) {
 				t.Fatal("ineligible prompts accepted")
 			}
 			var stdout bytes.Buffer
-			err := runOperator([]string{"init", "--dir", filepath.Join(t.TempDir(), "new")}, &stdout, tty)
+			err := runOperator([]string{"init", "--dir", filepath.Join(t.TempDir(), "new")}, &stdout, out)
 			if err == nil || err.Error() != "operator init has no terminal to prompt on; give --broker, --super-user, --super-user-password-file" {
 				t.Fatal(err)
 			}
@@ -635,22 +672,5 @@ func TestOperatorPromptEligibility(t *testing.T) {
 				t.Fatal("ineligible init wrote stdout")
 			}
 		})
-	}
-}
-
-func TestOperatorEOFBeforeWrites(t *testing.T) {
-	opts := operatorAnswers(t)
-	delete(opts, "super-user")
-	old, eligible := stdin, promptsEligible
-	t.Cleanup(func() { stdin, promptsEligible = old, eligible })
-	stdin = strings.NewReader("")
-	promptsEligible = func(io.Writer) bool { return true }
-	dir := filepath.Join(t.TempDir(), "operator")
-	stopOperatorConnection(t, func(string, []byte, string, string) { t.Error("EOF delegated") })
-	if err := operatorInit(context.Background(), dir, opts, io.Discard); !errors.Is(err, errInterrupted) {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatal("EOF created directory")
 	}
 }

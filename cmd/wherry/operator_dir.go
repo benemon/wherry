@@ -100,6 +100,12 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 			if err != nil {
 				return err
 			}
+			if question[0] == "super-user-password-file" {
+				value, err = localPath(value)
+				if err != nil {
+					return err
+				}
+			}
 		}
 		answers[question[0]] = value
 	}
