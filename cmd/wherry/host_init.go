@@ -251,7 +251,7 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 					prev := "anonymous"
 				route:
 					for {
-						description := "Generated names reuse an unassociated existing source; Configured credential uses an existing credential instead."
+						description := "Generated names reuse an unassociated existing source; Configured credential reuses a source under another name."
 						if name := names.allocate(host, "https"); asked[name] {
 							description += "\nCredential " + display(name) + " was skipped earlier; HTTPS is unavailable."
 						}
