@@ -51,17 +51,11 @@ func TestKafkaClientRejectsPlaintextListener(t *testing.T) {
 	}
 }
 
-// noTerminal makes the prompts find no terminal for the rest of t, so a command that would prompt refuses.
+// noTerminal gives the prompts a stdin that is no terminal for the rest of t, so a command that would prompt refuses.
 func noTerminal(t *testing.T) {
-	onTerminal(t, "")
-	terminal = func() bool { return false }
-}
-
-// onTerminal makes the prompts find a terminal for the rest of t, reading answers.
-func onTerminal(t *testing.T, answers string) {
-	saved, savedStdin := terminal, stdin
-	t.Cleanup(func() { terminal, stdin = saved, savedStdin })
-	terminal, stdin = func() bool { return true }, strings.NewReader(answers)
+	saved := stdin
+	t.Cleanup(func() { stdin = saved })
+	stdin = strings.NewReader("")
 }
 
 // operatorEnv makes a working directory on a TLS fake broker, where wherry.operator is a super user, changes into it,

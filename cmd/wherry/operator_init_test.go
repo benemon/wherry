@@ -581,11 +581,13 @@ func TestPoolApplyGuidedPath(t *testing.T) {
 	if err := os.WriteFile(filepath.Join("pools", "kept.yaml"), []byte("agents:\n  - name: claude\nproducer_byte_rate: 1048576\nrequest_percentage: 10\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	onTerminal(t, "")
-	var prompts bytes.Buffer
-	if err := runOperator([]string{"pool", "apply", "kept"}, io.Discard, &prompts); err != nil || prompts.Len() != 0 {
-		t.Fatalf("pool apply with its kept file = %v, asking %q; want it applied without a prompt", err, prompts.String())
-	}
+	t.Run("kept", func(t *testing.T) {
+		scriptForms(t)
+		var prompts bytes.Buffer
+		if err := runOperator([]string{"pool", "apply", "kept"}, io.Discard, &prompts); err != nil || prompts.Len() != 0 {
+			t.Fatalf("pool apply with its kept file = %v, asking %q; want it applied without a prompt", err, prompts.String())
+		}
+	})
 	noTerminal(t)
 	if err := runOperator([]string{"pool", "apply", "absent"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "no terminal") || !strings.Contains(err.Error(), poolFields) {
 		t.Fatalf("pool apply without a file or a terminal = %v; want it refused naming %s", err, poolFields)
@@ -811,7 +813,7 @@ func TestDryRunWritesNothingToTheWorkingDirectory(t *testing.T) {
 	if info, err := os.Stat(filepath.Join("bundles", "receivers")); err != nil || info.Mode().Perm() != 0o755 {
 		t.Fatalf("bundles/receivers after a dry run: %v, %v; want its mode left 0755", info, err)
 	}
-	onTerminal(t, "claude\n\n\n\n\n\n\n\n")
+	scriptForms(t)
 	if err := runOperator([]string{"pool", "apply", "prompted", "--dry-run"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "--dry-run writes nothing") {
 		t.Fatalf("pool apply --dry-run without a kept file = %v; want it refused", err)
 	}

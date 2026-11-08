@@ -119,7 +119,6 @@ func TestReceiverForms(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// main's line prompter wrote this for the same answers.
 	want := "pool: pool-a\nbroker: broker.example:9093\nplugin_sha256:\n    nomad: " + receiverSHA + "\nplugins:\n    nomad:\n        labels: {}\n        config:\n            address: https://nomad.example:4646\n            credential: nomad-token\n            tls:\n                ca_file: /etc/nomad/ca.pem\n                verify: true\n        profiles:\n            - name: claude\n              agent: claude\n              labels:\n                gpu: a100\n                tier: batch\n              config: {}\n            - name: codex\n              agent: codex\n              labels: {}\n              config: {}\n"
 	if string(data) != want {
 		t.Fatalf("YAML shape: got\n%s\nwant\n%s", data, want)

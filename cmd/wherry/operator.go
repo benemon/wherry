@@ -154,7 +154,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := receiverLocalFile(dir, pos[2], path, directory, dryRun, stderr, config, service.Broker, service.CA != nil); err != nil {
+		if err := receiverLocalFile(ctx, dir, pos[2], path, directory, dryRun, stderr, config, service.Broker, service.CA != nil); err != nil {
 			return err
 		}
 		if dryRun {

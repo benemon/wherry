@@ -14,6 +14,7 @@ A receiver reads local YAML configuration when it starts.
    With `-f FILE`, the local configuration still lives under `receivers/`.
    Wherry validates a provided file and preserves its bytes, permissions and modification time.
 3. If neither file exists, answer the questions below in a terminal.
+   Wherry asks when standard input and standard error are terminals and `TERM` is not `dumb`.
    Wherry writes `receivers/NAME.config.yaml` with mode `0600`.
    Without a terminal, you must provide the file yourself.
 4. Supply the receiver with its bundle and local configuration at the paths your platform uses.
@@ -21,18 +22,25 @@ A receiver reads local YAML configuration when it starts.
    It is not recorded on `wherry.operator`.
    A provisioning failure keeps the generated file for your next apply.
 
-| Question | Default | Field |
-| --- | --- | --- |
-| Where will the receiver read its bundle? | `/etc/wherry/receiver.bundle` | `bundle` |
-| Where will it read its broker's CA? | `/etc/wherry/kafka-ca.pem` when it uses the operator's broker and `operator.yaml` names a CA; otherwise `none` | `ca_file` |
-| Where does it keep its state? | `/var/lib/wherry/state` | `state_dir` |
-| Where are its plugins? | `/usr/local/libexec/wherry/plugins` | `plugin_dir` |
-| How long does its platform wait for it to stop before killing it? | `30s` | `drain_timeout`, calculated below |
-| Where should it serve metrics? | `:9464` | `metrics_addr` |
-| Read each platform credential from `env` or `file`? | `env` | `credentials` |
-| Which environment variable or file path? | Upper-case credential name with characters outside `[A-Z0-9_]` replaced by `_`, prefixed with `_` if it starts with a digit; no default file path | Credential source |
+The paths you enter are on the receiver's host, so Wherry does not complete or check them.
 
-Answer `none` for the system's trusted roots or for no metrics listener.
+| Question | Choices or default | Field |
+| --- | --- | --- |
+| Bundle path | `/etc/wherry/receiver.bundle` | `bundle` |
+| Broker CA | **CA file**, then **CA file path** (default `/etc/wherry/kafka-ca.pem`), or **System roots**. CA file is selected when the receiver uses the operator's broker and `operator.yaml` names a CA; otherwise System roots is selected. | `ca_file` |
+| State directory (must survive restarts) | `/var/lib/wherry/state` | `state_dir` |
+| Plugin directory | `/usr/local/libexec/wherry/plugins` | `plugin_dir` |
+| Stop window (how long its platform waits before killing it) | `30s` | `drain_timeout`, calculated below |
+| Metrics | **Listen on an address**, then **Metrics address** (default `:9464`), or **No listener** | `metrics_addr` |
+| Credential NAME | **Environment variable**, then **Variable**, or **File**, then **File path** | `credentials` |
+
+Choose System roots to trust the broker through the system's trusted roots; Wherry leaves out `ca_file`.
+Choose No listener to serve no metrics; Wherry writes an empty `metrics_addr`.
+After you choose CA file or an address, `none` is an ordinary value.
+The Variable default is the credential name in upper case, with characters outside `[A-Z0-9_]` replaced by `_`, prefixed with `_` if it starts with a digit.
+File path has no default.
+Wherry shows why it refuses an answer on the same page, and you correct it and continue.
+Ctrl-C or end of input writes no local configuration and records no receiver; a receiver file generated before these questions remains.
 Keep the state directory across restarts.
 Wherry subtracts `max(10s, 6s + 2s × plugin types)` from the stop window.
 The margin covers the receiver's 5-second step-down, up to 2 seconds per plugin process and 1 second spare.
@@ -40,7 +48,7 @@ Your answer must leave at least 5 seconds to drain.
 Raise Nomad's `kill_timeout`, Kubernetes' `terminationGracePeriodSeconds` or systemd's `TimeoutStopSec` if it does not.
 Wherry asks once per credential named by the merged profiles, in sorted order.
 A profile can remove an inherited credential with `credential: null`.
-Edit the file to set `drain_timeout: 0s` or a `command` credential source.
+Only the file can set `drain_timeout: 0s` or a `command` credential source.
 Every credential named by a profile must have a source.
 A missing `ca_file` produces a warning when the receiver uses the operator's broker and the operator names a CA.
 You may still trust that broker through the system roots.
@@ -58,7 +66,7 @@ Replace `<version>` with the version you installed.
 | Answer | Nomad docker | Nomad exec | Kubernetes | systemd |
 | --- | --- | --- | --- | --- |
 | Bundle | `/secrets/receiver.bundle` | `/secrets/receiver.bundle` | `/etc/wherry/bundle/bundle.yaml` | `/run/credentials/wherry-receiver.service/bundle` |
-| Broker CA | `none` | `none` | `none` | `none` |
+| Broker CA | System roots | System roots | System roots | System roots |
 | State | `/var/lib/wherry/state` | `/var/lib/wherry/state` | `/var/lib/wherry/state` | `/var/lib/wherry/state` |
 | Plugins | `/usr/local/libexec/wherry/plugins` | `/usr/local/libexec/wherry/<version>/plugins` | `/usr/local/libexec/wherry/plugins` | `/usr/local/libexec/wherry/plugins` |
 | Stop window | `30s` | `30s` | `30s` | `30s` |
@@ -66,7 +74,7 @@ Replace `<version>` with the version you installed.
 | Credentials | none; workload identity supplies `NOMAD_TOKEN` | none; workload identity supplies `NOMAD_TOKEN` | none; service account | none |
 
 Each example sets `drain_timeout: 20s`.
-For a private broker CA, answer `/secrets/kafka-ca.pem` on Nomad,
+For a private broker CA, choose CA file, then enter `/secrets/kafka-ca.pem` on Nomad,
 `/etc/wherry/kafka-ca/ca.crt` on Kubernetes or `/etc/wherry/kafka-ca.pem` on systemd.
 
 ### Where wherry looks for the file
