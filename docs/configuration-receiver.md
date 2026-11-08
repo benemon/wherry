@@ -27,7 +27,7 @@ The paths you enter are on the receiver's host, so Wherry does not complete or c
 | Question | Choices or default | Field |
 | --- | --- | --- |
 | Bundle path | `/etc/wherry/receiver.bundle` | `bundle` |
-| Broker CA | **CA file**, then **CA file path** (default `/etc/wherry/kafka-ca.pem`), or **System roots**. CA file is selected when the receiver uses the operator's broker and `operator.yaml` names a CA; otherwise System roots is selected | `ca_file` |
+| Broker CA | **CA file**, then **CA file path** (default `/etc/wherry/kafka-ca.pem`), or **System roots**. CA file is selected when the receiver uses the operator's broker and `operator.yaml` names a CA; otherwise System roots is selected. | `ca_file` |
 | State directory (must survive restarts) | `/var/lib/wherry/state` | `state_dir` |
 | Plugin directory | `/usr/local/libexec/wherry/plugins` | `plugin_dir` |
 | Stop window (how long its platform waits before killing it) | `30s` | `drain_timeout`, calculated below |
