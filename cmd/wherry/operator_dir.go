@@ -15,11 +15,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"gopkg.in/yaml.v3"
 )
@@ -503,9 +501,10 @@ func promptPool(q *questions) (any, error) {
 			}
 			description := ""
 			descriptionInput := huh.NewInput().Title("Description (blank for none)").Value(&description).Validate(operator.ValidateDescription)
-			if err := q.run(poolDescriptionInput{descriptionInput}); err != nil {
+			if err := q.run(descriptionInput); err != nil {
 				return nil, err
 			}
+			description = strings.TrimSpace(description)
 			credential := map[string]any{"name": credentialName, kind: target}
 			if required == "optional" {
 				credential["required"] = false
@@ -577,25 +576,6 @@ func promptPool(q *questions) (any, error) {
 		return nil, err
 	}
 	return file, nil
-}
-
-type poolDescriptionInput struct{ *huh.Input }
-
-func (f poolDescriptionInput) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	_, cmd := f.Input.Update(msg)
-	return f, cmd
-}
-
-func (f poolDescriptionInput) View() string {
-	var out strings.Builder
-	for _, r := range f.Input.View() {
-		if unicode.Is(unicode.Cf, r) {
-			out.WriteString(display(string(r)))
-		} else {
-			out.WriteRune(r)
-		}
-	}
-	return out.String()
 }
 
 // receiverFields are what a receiver file gives without a terminal, as receiver apply's prompts ask for them.

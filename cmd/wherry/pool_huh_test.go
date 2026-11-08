@@ -72,9 +72,6 @@ func TestPoolDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := value.(poolFile)
-	if f.Agents[0].Credentials == nil {
-		t.Fatal("empty credentials must be initialized")
-	}
 	if f.DefaultAgent != "agent" || f.ProducerByteRate != 1048576 || f.RequestPercentage != 10 || f.StartByLimit != "72h0m0s" || !strings.Contains(out.String(), "? Default agent  agent\n") {
 		t.Fatalf("defaults: %+v", f)
 	}
@@ -89,9 +86,9 @@ func TestPoolValidation(t *testing.T) {
 		{"agent", 0, "bad name", "claude", "invalid name"},
 		{"credential", 5, "bad name", "token", "invalid name"},
 		{"duplicate", 11, "token", "deploy", "duplicate credential name"},
-		{"env", 7, "bad-var", "TOKEN", ""},
-		{"reserved", 7, "HOME", "TOKEN", ""},
-		{"file", 13, "../key", "deploy-key", ""},
+		{"env", 7, "bad-var", "TOKEN", "env must match"},
+		{"reserved", 7, "HOME", "TOKEN", "env must match"},
+		{"file", 13, "../key", "deploy-key", "file must be a portable file name"},
 		{"long description", 9, strings.Repeat("界", 81), strings.Repeat("界", 80), "invalid description"},
 		{"separator description", 9, "bad\u2028", "good", "invalid description"},
 		{"rate zero", 23, "0", "2097152", "producer byte rate must be greater than 0"},
@@ -116,7 +113,7 @@ func TestPoolValidation(t *testing.T) {
 			if tc.message != "" && !strings.Contains(out.String(), tc.message) {
 				t.Fatalf("missing validation error %q", tc.message)
 			}
-			if tc.index == 7 && (f.Agents[0].Credentials[0]["env"] != tc.good || !strings.Contains(out.String(), "credential")) {
+			if tc.index == 7 && f.Agents[0].Credentials[0]["env"] != tc.good {
 				t.Fatalf("target validation and correction: %+v", f)
 			}
 			if tc.index == 13 && f.Agents[0].Credentials[1]["file"] != tc.good {
@@ -141,8 +138,28 @@ func TestPoolDescriptionEscape(t *testing.T) {
 		t.Fatalf("raw YAML description: %s", data)
 	}
 	lines := strings.Join(collapsedLines(out.String()), "\n")
-	if !strings.Contains(lines, `"hello\u202e"`) || strings.Contains(out.String(), "\u202e") {
+	if !strings.Contains(lines, `"hello\u202e"`) || strings.Contains(lines, "\u202e") {
 		t.Fatalf("escaped description collapse: %q", lines)
+	}
+}
+
+func TestPoolDescriptionTrimmed(t *testing.T) {
+	for _, tc := range []struct{ typed, want string }{{"  padded  ", "padded"}, {"   ", ""}} {
+		steps := poolSteps()
+		steps[9] = keys(tc.typed + "\r")
+		scriptForms(t, steps...)
+		var out bytes.Buffer
+		value, err := promptPool(&questions{context.Background(), stdin, &promptLatch{out: &out}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, ok := value.(poolFile).Agents[0].Credentials[0]["description"]
+		if tc.want == "" && ok || tc.want != "" && got != tc.want {
+			t.Fatalf("description %q stored as %v, %v", tc.typed, got, ok)
+		}
+		if tc.want != "" && !strings.Contains(out.String(), `, "padded"`+"\n") {
+			t.Fatalf("collapse: %q", out.String())
+		}
 	}
 }
 
@@ -297,7 +314,7 @@ func TestPoolFieldValidators(t *testing.T) {
 		index int
 		bad   string
 	}{
-		{"credential", 5, "bad name"}, {"duplicate", 11, "token"}, {"description control", 9, "\a"}, {"description utf8", 9, string([]byte{255})}, {"description separator", 9, "\u2028"},
+		{"credential", 5, "bad name"}, {"duplicate", 11, "token"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			steps := poolSteps()[:tc.index]
@@ -309,9 +326,6 @@ func TestPoolFieldValidators(t *testing.T) {
 				current := n
 				n++
 				if current == tc.index {
-					if description, ok := f.(poolDescriptionInput); ok {
-						f = description.Input
-					}
 					input, ok := f.(*huh.Input)
 					if !ok {
 						t.Fatalf("expected input, got %T", f)

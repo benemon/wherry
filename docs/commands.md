@@ -163,8 +163,9 @@ shown, writes the file, then applies it; a refused apply leaves the
 file to correct and apply again. With neither and no terminal it refuses,
 naming the fields the file must give. `--dry-run` writes nothing to the
 working directory: with neither file it refuses rather than prompt, and it
-creates no bundle directory. Pool apply shows one question per page under headings,
-with each answer collapsing to one line. Ctrl-C during pool apply writes nothing.
+creates no bundle directory. Pool apply shows one question per page under
+headings, with each answer collapsing to one line. Ctrl-C during pool apply
+writes nothing.
 
 `tenant host add` and `receiver apply` write bundles under the working directory's
 `bundles/`: `bundles/hosts/<tenant>/<host>.bundle` and
@@ -253,7 +254,7 @@ from the entered names. Each credential asks for its name, delivery as an
 environment variable or file, target, whether it is required, and an optional
 description. The remaining questions are `producer_byte_rate` (default
 1048576), `request_percentage` (default 10) and `start_by_limit` (default
-`72h0m0s`). Values can be corrected inline. Quotas must be positive and the
+`72h0m0s`). You correct a refused value in place. Quotas must be positive and the
 start-by limit must be non-negative; apply enforces the tenant-feed retention
 and storage bounds.
 
