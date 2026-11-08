@@ -107,7 +107,7 @@ func promptReceiverLocal(q *questions, config operator.ReceiverConfig, needsCA b
 		kinds[profile.Plugin] = true
 	}
 	margin := max(10*time.Second, 6*time.Second+2*time.Second*time.Duration(len(kinds)))
-	// These paths are on the receiver's host, so they get no completion and no local checks.
+	// Receiver-host values get no completion and no local checks.
 	input := func(label, initial string, validate func(string) error) (string, error) {
 		value, err := q.input(label, initial, "", func(s string) error { return validate(strings.TrimSpace(s)) })
 		return strings.TrimSpace(value), err
@@ -211,14 +211,14 @@ func promptReceiverLocal(q *questions, config operator.ReceiverConfig, needsCA b
 			}); err != nil {
 				return local, err
 			}
-			answer = "Environment variable " + display(source.Env)
+			answer = "Environment variable " + source.Env
 		} else {
 			if source.File, err = input("File path", "", notBlank("credential file path")); err != nil {
 				return local, err
 			}
-			answer = "File " + display(source.File)
+			answer = "File " + source.File
 		}
-		if err := q.line("? %s  %s\n", display(label), answer); err != nil {
+		if err := q.answer(label, answer); err != nil {
 			return local, err
 		}
 		local.Credentials[name] = source

@@ -282,6 +282,30 @@ func TestReceiverLocalRefusesSymlink(t *testing.T) {
 }
 
 // An invalid answer shows its error inline, and the corrected value is stored.
+func TestReceiverLocalLiteralNone(t *testing.T) {
+	forms := localForms(true, "NOMAD_TOKEN")
+	forms[2] = inputForm("/etc/wherry/kafka-ca.pem", "\x15none\r")
+	forms[7] = inputForm(":9464", "\x15none\r")
+	var out bytes.Buffer
+	scriptReceiver(t, &out, forms...)
+	dir := t.TempDir()
+	if err := receiverLocalFile(context.Background(), dir, "r", "outside.yaml", false, false, &out, localReceiver(), "broker", true); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "receivers", "r.config.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(data), "ca_file: none\n") || !strings.Contains(string(data), "metrics_addr: none\n") {
+		t.Fatalf("YAML: %s, %v", data, err)
+	}
+	if local, err := loadReceiverLocalConfig(path); err != nil || local.CAFile != "none" || local.MetricsAddr != "none" {
+		t.Fatalf("read back: %+v, %v", local, err)
+	}
+	lines := strings.Join(collapsedLines(out.String()), "\n")
+	if !strings.Contains(lines, "? Broker CA  none") || !strings.Contains(lines, "? Metrics  none") {
+		t.Fatalf("collapse: %q", lines)
+	}
+}
+
 func TestReceiverLocalCorrections(t *testing.T) {
 	margin := "stop window leaves less than 5s to drain; raise kill_timeout, terminationGracePeriodSeconds or TimeoutStopSec"
 	for _, test := range []struct {
@@ -310,7 +334,7 @@ func TestReceiverLocalCorrections(t *testing.T) {
 			return reflect.DeepEqual(l.Credentials["nomad-token"], credential.Source{Env: "GOOD"})
 		}},
 		{"dashed variable", 8, func(forms []receiverForm) []receiverForm {
-			forms[8] = inputForm("NOMAD_TOKEN", retypeLocal("A-B", "A_B")...)
+			forms[8] = inputForm("NOMAD_TOKEN", retypeLocal("A-B", " A_B ")...)
 			return forms
 		}, "invalid environment variable name", func(l receiverLocalConfig) bool {
 			return reflect.DeepEqual(l.Credentials["nomad-token"], credential.Source{Env: "A_B"})

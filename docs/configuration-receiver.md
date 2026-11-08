@@ -27,7 +27,7 @@ The paths you enter are on the receiver's host, so Wherry does not complete or c
 | Question | Choices or default | Field |
 | --- | --- | --- |
 | Bundle path | `/etc/wherry/receiver.bundle` | `bundle` |
-| Broker CA | **CA file**, then **CA file path** (default `/etc/wherry/kafka-ca.pem`), or **System roots**. CA file is selected when the receiver uses the operator's broker and `operator.yaml` names a CA; otherwise System roots is | `ca_file` |
+| Broker CA | **CA file**, then **CA file path** (default `/etc/wherry/kafka-ca.pem`), or **System roots**. CA file is selected when the receiver uses the operator's broker and `operator.yaml` names a CA; otherwise System roots is selected | `ca_file` |
 | State directory (must survive restarts) | `/var/lib/wherry/state` | `state_dir` |
 | Plugin directory | `/usr/local/libexec/wherry/plugins` | `plugin_dir` |
 | Stop window (how long its platform waits before killing it) | `30s` | `drain_timeout`, calculated below |
@@ -40,7 +40,7 @@ After you choose CA file or an address, `none` is an ordinary value.
 The Variable default is the credential name in upper case, with characters outside `[A-Z0-9_]` replaced by `_`, prefixed with `_` if it starts with a digit.
 File path has no default.
 Wherry shows why it refuses an answer on the same page, and you correct it and continue.
-Ctrl-C or end of input writes nothing.
+Ctrl-C or end of input writes no local configuration and records no receiver; a receiver file generated before these questions remains.
 Keep the state directory across restarts.
 Wherry subtracts `max(10s, 6s + 2s × plugin types)` from the stop window.
 The margin covers the receiver's 5-second step-down, up to 2 seconds per plugin process and 1 second spare.
