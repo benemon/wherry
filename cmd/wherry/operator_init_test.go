@@ -519,13 +519,19 @@ func TestOperatorInitWithoutATerminalNamesTheFlags(t *testing.T) {
 		t.Fatalf("a refused init wrote %v, %v", entries, err)
 	}
 	b, _ := kfakeInitBroker(t)
-	onTerminal(t, b.address+"\n"+b.caFile+"\n"+b.superUser+"\n")
-	var prompts bytes.Buffer
-	if err := runOperator([]string{"init", "--dir", dir, "--super-user-password-file", b.superPasswordFile}, io.Discard, &prompts); err != nil {
+	scriptForms(t, keys(b.address+"\r"), keys(down+"\r"), keys(b.caFile+"\r"), keys(b.superUser+"\r"))
+	var stdout, prompts bytes.Buffer
+	if err := runOperator([]string{"init", "--dir", dir, "--super-user-password-file", b.superPasswordFile}, &stdout, &prompts); err != nil {
 		t.Fatal(err)
 	}
+	if stdout.Len() != 0 {
+		t.Fatal("init wrote stdout", stdout.String())
+	}
+	if strings.Contains(prompts.String(), "root-secret-value") {
+		t.Fatal("super user password leaked")
+	}
 	b.login(t, dir)
-	for _, question := range []string{"Kafka broker address", "CA file", "Kafka super user: "} {
+	for _, question := range []string{"Kafka broker address", "CA certificate", "Kafka super user"} {
 		if !strings.Contains(prompts.String(), question) {
 			t.Errorf("init asked\n%s\nwant %q", prompts.String(), question)
 		}

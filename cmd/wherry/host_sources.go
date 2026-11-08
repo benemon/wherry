@@ -179,31 +179,35 @@ var readCAData = func(file io.Reader) ([]byte, error) { return io.ReadAll(io.Lim
 
 // readCA accepts symlinks to regular files and bounds reads even if the file changes after listing.
 func readCA(path string) error {
+	_, err := loadCA(path)
+	return err
+}
+func loadCA(path string) ([]byte, error) {
 	// Refuse a special file before opening it, since opening some devices acts; Fstat below decides acceptance.
 	if info, err := os.Stat(path); err == nil && !info.Mode().IsRegular() {
-		return fmt.Errorf("%s holds no PEM certificate", path)
+		return nil, fmt.Errorf("%s holds no PEM certificate", path)
 	}
 	fd, err := openFile(path, unix.O_RDONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	file := os.NewFile(uintptr(fd), path)
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !info.Mode().IsRegular() || info.Size() > 1<<20 {
-		return fmt.Errorf("%s holds no PEM certificate", path)
+		return nil, fmt.Errorf("%s holds no PEM certificate", path)
 	}
 	pem, err := readCAData(file)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(pem) > 1<<20 || !x509.NewCertPool().AppendCertsFromPEM(pem) {
-		return fmt.Errorf("%s holds no PEM certificate", path)
+		return nil, fmt.Errorf("%s holds no PEM certificate", path)
 	}
-	return nil
+	return pem, nil
 }
 func caOptions() []huh.Option[string] {
 	var result []huh.Option[string]
@@ -380,4 +384,24 @@ func localPath(path string) (string, error) {
 		return "", err
 	}
 	return filepath.Abs(path)
+}
+
+func loadPassword(path string) ([]byte, error) {
+	if info, err := os.Stat(path); err == nil && !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	fd, err := openFile(path, unix.O_RDONLY|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), path)
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	return io.ReadAll(file)
 }

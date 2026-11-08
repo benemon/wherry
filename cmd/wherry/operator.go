@@ -784,7 +784,7 @@ func yamlFiles(dir string) ([]string, error) {
 }
 
 // operatorKafka connects to broker as user with password, trusting ca or, when ca is nil, the system roots.
-func operatorKafka(broker string, ca []byte, user, password string) (*kgo.Client, error) {
+var operatorKafka = func(broker string, ca []byte, user, password string) (*kgo.Client, error) {
 	opts, err := operator.KafkaOpts(broker, ca, user, password)
 	if err != nil {
 		return nil, fmt.Errorf("broker %w", err)

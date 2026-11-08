@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -33,9 +34,14 @@ var terminal = func() bool { return isTerminal(os.Stdin) }
 
 // operatorInit, connected as the Kafka super user the flags or prompts name, delegates provisioning to wherry.operator
 // with a new password and writes dir's operator.yaml. The super user is written nowhere.
-func operatorInit(ctx context.Context, dir string, options map[string]string, prompts io.Writer) error {
+func operatorInit(ctx context.Context, dir string, options map[string]string, prompts io.Writer) (result error) {
+	defer func() {
+		if result != nil {
+			result = presentationError{result}
+		}
+	}()
 	required := []string{"broker", "super-user", "super-user-password-file"}
-	onTerminal := terminal()
+	onTerminal := promptsEligible(prompts)
 	if !onTerminal {
 		var missing []string
 		for _, name := range required {
@@ -48,17 +54,50 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 		}
 	}
 	answers := map[string]string{}
-	p := newPrompter(prompts)
+	q := &questions{ctx, stdin, &promptLatch{out: prompts}}
+	heading := false
 	for _, question := range [][2]string{
-		{"broker", "Kafka broker address (host:port)"},
-		{"ca-file", "CA file for the broker's certificate (blank for the system roots)"},
+		{"broker", "Kafka broker address"},
+		{"ca-file", "CA certificate"},
 		{"super-user", "Kafka super user"},
 		{"super-user-password-file", "Kafka super user's password file"},
 	} {
 		value, given := options[question[0]]
 		if !given && onTerminal {
+			if !heading {
+				if err := q.line("\nBroker\n"); err != nil {
+					return err
+				}
+				heading = true
+			}
 			var err error
-			if value, err = p.ask(question[1], ""); err != nil {
+			if question[0] == "ca-file" {
+				value, err = q.ca()
+			} else {
+				kind := ""
+				if question[0] == "super-user-password-file" {
+					kind = "path"
+				}
+				value, err = q.input(question[1], "", kind, func(s string) error {
+					s = strings.TrimSpace(s)
+					if s == "" {
+						return fmt.Errorf("%s is required", question[1])
+					}
+					if question[0] == "broker" {
+						return checkOperatorBroker(s)
+					}
+					if question[0] == "super-user-password-file" {
+						_, err := readablePath(s)
+						return err
+					}
+					return nil
+				})
+				value = strings.TrimSpace(value)
+				if err == nil {
+					err = q.answer(question[1], value)
+				}
+			}
+			if err != nil {
 				return err
 			}
 		}
@@ -69,6 +108,9 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 			return fmt.Errorf("operator init needs --%s", name)
 		}
 	}
+	if err := checkOperatorBroker(answers["broker"]); err != nil {
+		return err
+	}
 	var ca []byte
 	caFile := answers["ca-file"]
 	if caFile != "" {
@@ -76,11 +118,11 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 		if caFile, err = filepath.Abs(caFile); err != nil {
 			return err
 		}
-		if ca, err = os.ReadFile(caFile); err != nil {
+		if ca, err = loadCA(caFile); err != nil {
 			return err
 		}
 	}
-	superPassword, err := os.ReadFile(answers["super-user-password-file"])
+	superPassword, err := loadPassword(answers["super-user-password-file"])
 	if err != nil {
 		return err
 	}
@@ -128,6 +170,27 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 		return err
 	}
 	fmt.Fprintf(prompts, "%s can provision; its password is in %s\n", operator.OperatorPrincipal, filepath.Join(dir, "operator.password"))
+	return nil
+}
+
+func checkOperatorBroker(s string) error {
+	invalid := func() error { return fmt.Errorf("%s is not a valid Kafka broker address", s) }
+	if s == "" {
+		return invalid()
+	}
+	host, port, err := net.SplitHostPort(s)
+	if err == nil {
+		n, err := strconv.ParseUint(port, 10, 16)
+		if host == "" || err != nil || n == 0 {
+			return invalid()
+		}
+		return nil
+	}
+	if strings.HasPrefix(s, "[") {
+		if i := strings.Index(s, "]"); i >= 0 && i+1 < len(s) {
+			return invalid()
+		}
+	}
 	return nil
 }
 

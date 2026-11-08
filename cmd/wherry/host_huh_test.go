@@ -559,8 +559,9 @@ func TestHostPagesEligibility(t *testing.T) {
 	}
 	defer master.Close()
 	defer tty.Close()
-	old := stdin
-	t.Cleanup(func() { stdin = old })
+	old, stderr := stdin, os.Stderr
+	t.Cleanup(func() { stdin, os.Stderr = old, stderr })
+	os.Stderr = tty
 	stdin = tty
 	t.Setenv("TERM", "xterm-256color")
 	if !promptsEligible(tty) {
@@ -569,6 +570,11 @@ func TestHostPagesEligibility(t *testing.T) {
 	if promptsEligible(io.Discard) {
 		t.Fatal("redirected prompts accepted")
 	}
+	os.Stderr = stderr
+	if promptsEligible(tty) {
+		t.Fatal("redirected stderr accepted")
+	}
+	os.Stderr = tty
 	stdin = strings.NewReader("")
 	if promptsEligible(tty) {
 		t.Fatal("redirected stdin accepted")
