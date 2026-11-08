@@ -224,7 +224,7 @@ Prerequisites: the working directory and the pool's new terms in
    wherry operator pool suspend build
    ```
 
-   The command waits for the key custodian, not for every receiver. For
+   The command waits only for the key custodian. For
    each running receiver in the pool, read a fresh metrics sample showing
    `wherry_claim_gated{reason="suspended"}` as `1`. A missing sample does
    not show that a receiver is stopped or suspended. Restart or stop a

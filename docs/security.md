@@ -360,7 +360,7 @@ resolve credential <name>: its file is writable by its group or open to others; 
 The `submit` of the [MCP server](mcp.md) refuses as an input every file
 a `file` source names, including the storage keys' files.
 
-### Suggested sources
+### How init records credential sources
 
 [`wherry host init`](commands.md#wherry-host-init) asks for each credential's
 source and writes the configuration with the reference it is given, `file`,
@@ -375,7 +375,7 @@ later. It is read where submits run, including the MCP server your harness
 starts. A shell variable may have more reach than an agent needs; check its
 scope before choosing it. Init displays variable names, never their values,
 and does not resolve sources. Ctrl-V clipboard commands are disabled in
-these forms; ordinary terminal paste is deliberate input.
+these forms; your terminal's own paste still works.
 
 
 ## Platform credentials

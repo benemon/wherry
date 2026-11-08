@@ -1,7 +1,7 @@
 agents:
   - name: claude
     credentials:
-      - {name: claude-oauth-token, env: CLAUDE_CODE_OAUTH_TOKEN}
+      - {name: claude-oauth-token, env: CLAUDE_CODE_OAUTH_TOKEN, description: Claude account token}
     models:
       - haiku
       - sonnet

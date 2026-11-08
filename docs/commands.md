@@ -203,7 +203,8 @@ When standard input and standard error are terminals and `TERM` is not
 `dumb`, you answer each question the flags do not give under a Broker heading.
 You see one question per page.
 Enter the broker address.
-An address without a port uses port 9092.
+An address without a port uses the Kafka client's default port, 9092
+([`kgo.SeedBrokers`](https://pkg.go.dev/github.com/twmb/franz-go/pkg/kgo#SeedBrokers)).
 Choose a CA certificate from the PEM files in the current directory,
 System roots or Other file...
 Enter the super user's name.
@@ -1004,13 +1005,13 @@ is entitled to:
 3. It creates the host key at `host_key`, a private JWK (RFC 7517) with mode
    0600, unless the file exists, creating its directory with mode 0700. It
    registers the key on the host's key topic when the topic holds none, and
-   prints the key ID alone when stdout is not the prompt terminal. On the
-   prompt terminal, Summary shows the registered key ID instead. It fails when
+   prints the key ID alone when stdout is not the terminal the questions use.
+   When stdout is that terminal, Summary shows the registered key ID instead. It fails when
    the key topic holds another key.
 4. It reads every entitled pool's terms. On a terminal it asks by topic:
-   Credentials, Git, Storage, then Summary. Missing credentials use the first
-   description in sorted pool order, then the terms' agent order, else their name,
-   with `(optional)` when every use is optional. Choose Environment variable, File
+   Credentials, Git, Storage, then Summary. A missing credential's question is
+   labelled with its first description in sorted pool order, then the terms'
+   agent order, else its name, with `(optional)` when every use is optional. Choose Environment variable, File
    or Command. Environment variable lists detected non-empty targets, then New
    variable; taking a detected target needs two Enter selections. The description
    under the question explains its scope across pools.
@@ -1022,7 +1023,7 @@ is entitled to:
    `git-<host>` or `git-<host>-ssh`, truncating and adding `-2`, `-3` and up
    to avoid another pair's name. An unassociated existing source with the
    generated name is presumed to belong to that pair and reused. Existing
-   sources are kept; Configured credential allows deliberate sharing.
+   sources are kept; Configured credential reuses a source under another name.
 6. For all missing entitled S3 pool mappings together, Key sources asks for
    the access and secret key sources. Both sources and all missing mappings
    are committed together; cancelling either source discards the pending
@@ -1033,24 +1034,25 @@ is entitled to:
    shows registration, successful writes and anything still missing.
 
 Choose Skip to leave a request for later, or Back in a nested list to return.
+In Git and Storage, Skip on a source returns to the host or Key sources list;
+choose Skip there too to leave the setting for later.
 Blank Variable, File, Command or known_hosts returns; blank SSH prefix uses
 `ssh://git@<host>/`. Whitespace-only input is not blank: File treats it as a
-path, Variable keeps it as a name, and Command rejects it because it names no
-program. Tab accepts completion for paths, command words and variable names;
+path, Variable keeps it as a name, and Command rejects it because a source
+needs exactly one of file, env and command. Tab accepts completion for paths, command words and variable names;
 Up/Down and ctrl+n/p cycle suggestions. Hidden paths can be typed explicitly.
 CA symlinks to regular files are accepted; certificates are limited to 1 MiB.
 
 Each question owns its input. Type after it appears: bytes typed before the
 next form starts may be lost. Ctrl-C ends init with `interrupted`, losing
-answers not yet written. Bubble Tea attempts raw-mode restoration on its
-shutdown paths and does not report restoration errors; after an abnormal
-exit, use `stty sane` if the terminal needs recovery.
+answers not yet written. If the terminal misbehaves after an abnormal exit,
+run `stty sane`.
 
 The configuration path is `--config-file` or `WHERRY_CONFIG`, else
 `config.yaml` in the configuration directory. Writes use mode 0600 even
 for existing files, with references to sources, never values. A re-run
-keeps existing entries and asks only for missing settings. Without terminal
-stdin and prompts, or with `TERM=dumb`, init asks nothing and lists missing
+keeps existing entries and asks only for missing settings. When standard
+input or standard error is not a terminal, or with `TERM=dumb`, init asks nothing and lists missing
 credentials, Git hosts and entitled S3 storage. Stdout carries only the key
 ID. Summary appears even with no entitlement, with the instruction to run
 init again once the operator entitles the tenant to a pool.

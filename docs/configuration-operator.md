@@ -75,24 +75,28 @@ their command sets. wherry does not interpret model names.
 
 ### Agent credentials
 
-Set `description: Claude account token` to label a credential in `host init`.
-Use at most 80 Unicode code points of valid UTF-8.
-Do not include control characters, U+2028 or U+2029.
-Without a description, `host init` shows the credential name.
-An older wherry release refuses `description` in a pool file.
-It may drop the description when it rewrites terms it read.
+Each entry of an agent's `credentials` has these fields:
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `name` | string | none | The credential name. |
+| `env` | string | none | The environment variable the agent gets the value in. Give exactly one of `env` and `file`. |
+| `file` | string | none | The file the agent gets the value in, under `WHERRY_CREDENTIALS_DIR`. |
+| `required` | bool | `true` | Whether a run needs it. |
+| `description` | string | none | The label `host init` shows in place of the name. |
+
+A `description` is at most 80 Unicode code points of valid UTF-8, with no
+control characters, U+2028 or U+2029. An older wherry release refuses
+`description` in a pool file, and may drop it when it rewrites terms it read.
 Older hosts and receivers reading records ignore it.
 
-Each entry of an agent's `credentials` is `{name, env, file, required, description}`: a
-credential name, exactly one target, and whether a run needs it. `env` names
-the environment variable the agent gets the value in, matching
-`[A-Za-z_][A-Za-z0-9_]*` and none a plugin sets for the agent: `HOME`,
-`WHERRY_INPUT_DIR`, `WHERRY_OUTPUT_DIR`, `WHERRY_CREDENTIALS_DIR`,
-`WHERRY_MODEL` and the variables of `pluginsdk.AgentEnvironment`. `file` names
-the file it gets in `WHERRY_CREDENTIALS_DIR`, a [file
-name](a2a-extension-v1.md#submission). `required` defaults to `true`. An
-agent's credentials have unique names, and no two share a target; `pool
-apply` refuses terms that break a rule, naming the agent and credential.
+`env` matches `[A-Za-z_][A-Za-z0-9_]*` and is none a plugin sets for the
+agent: `HOME`, `WHERRY_INPUT_DIR`, `WHERRY_OUTPUT_DIR`,
+`WHERRY_CREDENTIALS_DIR`, `WHERRY_MODEL` and the variables of
+`pluginsdk.AgentEnvironment`. `file` is a [file
+name](a2a-extension-v1.md#submission). An agent's credentials have unique
+names, and no two share a target. `pool apply` refuses terms that break a
+rule, naming the agent and credential.
 
 `submit` refuses a task when its host has no source for a required
 credential of the placed agent. A run goes without an optional credential
@@ -169,7 +173,7 @@ Terms for pool `build` that set every field, as one file for
 agents:
   - name: claude
     credentials:
-      - {name: claude-oauth-token, env: CLAUDE_CODE_OAUTH_TOKEN}
+      - {name: claude-oauth-token, env: CLAUDE_CODE_OAUTH_TOKEN, description: Claude account token}
     models:
       - haiku
       - sonnet
@@ -240,7 +244,7 @@ storage:
 ```yaml
 name: claude
 credentials:
-  - {name: claude-oauth-token, env: CLAUDE_CODE_OAUTH_TOKEN}
+  - {name: claude-oauth-token, env: CLAUDE_CODE_OAUTH_TOKEN, description: Claude account token}
 models:
   - haiku
   - sonnet
