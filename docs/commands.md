@@ -1011,8 +1011,8 @@ is entitled to:
 4. It reads every entitled pool's terms. On a terminal it asks by topic:
    Credentials, Git, Storage, then Summary. A missing credential's question is
    labelled with its first description in sorted pool order, then the terms'
-   agent order, else its name, with `(optional)` when every use is optional. Choose Environment variable, File
-   or Command. Environment variable lists detected non-empty targets, then New
+   agent order, else its name, with `(optional)` when every use is optional.
+   Choose Environment variable, File or Command. Environment variable lists detected non-empty targets, then New
    variable; taking a detected target needs two Enter selections. The description
    under the question explains its scope across pools.
 5. For each missing Git host, choose Anonymous over https, Credential over
