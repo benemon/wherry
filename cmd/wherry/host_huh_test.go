@@ -72,11 +72,11 @@ func (w *signalledOutput) Write(p []byte) (int, error) {
 func scriptForms(t *testing.T, answers ...[]string) {
 	t.Helper()
 	t.Setenv("TERM", "xterm-256color")
-	old, eligible := runHostQuestion, pagesEligible
-	t.Cleanup(func() { runHostQuestion, pagesEligible = old, eligible })
-	pagesEligible = func(io.Writer) bool { return true }
+	old, eligible := runQuestion, promptsEligible
+	t.Cleanup(func() { runQuestion, promptsEligible = old, eligible })
+	promptsEligible = func(io.Writer) bool { return true }
 	i := 0
-	runHostQuestion = func(q *hostQuestions, field huh.Field) error {
+	runQuestion = func(q *questions, field huh.Field) error {
 		if i >= len(answers) {
 			t.Errorf("unexpected question %T", field)
 			return errors.New("script exhausted")
@@ -197,7 +197,7 @@ func TestHostSourceCollapsedLines(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			scriptForms(t, test.answers...)
 			var out bytes.Buffer
-			q := &hostQuestions{context.Background(), nil, &promptLatch{out: &out}}
+			q := &questions{context.Background(), nil, &promptLatch{out: &out}}
 			result, err := q.source("key", "label", []credentialUse{{target: wire.TaskCredential{Env: "TOKEN"}}}, test.configured, test.nested)
 			skipped := strings.HasSuffix(test.want, "Skipped")
 			if err != nil || !skipped && !result.ok || skipped && result.ok {
@@ -212,10 +212,10 @@ func TestHostSourceCollapsedLines(t *testing.T) {
 
 func TestHostSourceShowsEveryOption(t *testing.T) {
 	t.Setenv("TERM", "xterm-256color")
-	old := runHostQuestion
-	t.Cleanup(func() { runHostQuestion = old })
+	old := runQuestion
+	t.Cleanup(func() { runQuestion = old })
 	initial := make(chan string, 1)
-	runHostQuestion = func(q *hostQuestions, field huh.Field) error {
+	runQuestion = func(q *questions, field huh.Field) error {
 		r, w, err := os.Pipe()
 		if err != nil {
 			return err
@@ -239,7 +239,7 @@ func TestHostSourceShowsEveryOption(t *testing.T) {
 		return next.runForm(field.WithWidth(40))
 	}
 	uses := []credentialUse{{pool: "one"}, {pool: "two"}, {pool: "three"}}
-	q := &hostQuestions{context.Background(), nil, &promptLatch{out: io.Discard}}
+	q := &questions{context.Background(), nil, &promptLatch{out: io.Discard}}
 	if _, err := q.source("key", "label", uses, nil, false); err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +304,7 @@ func TestHostHuhInterruptAfterBootstrap(t *testing.T) {
 	scriptForms(t, keys("\x03"))
 	var out bytes.Buffer
 	err := hostInit(h.ctx, h.config, h.bundle, &out, &out)
-	if !errors.Is(err, errHostInterrupted) {
+	if !errors.Is(err, errInterrupted) {
 		t.Fatal(err)
 	}
 	if h.written(t).Bundle == "" || len(h.written(t).Credentials) != 0 {
@@ -403,7 +403,7 @@ func TestHostLabelsTargetsAndEscapes(t *testing.T) {
 			t.Fatal(s)
 		}
 	}
-	err := hostPresentationError{errors.New("\x1b[2J")}
+	err := presentationError{errors.New("\x1b[2J")}
 	if strings.Contains(err.Error(), "\x1b") || errors.Unwrap(err) == nil {
 		t.Fatal(err)
 	}
@@ -475,7 +475,7 @@ func TestHostHuhTabRefreshAndNoMatch(t *testing.T) {
 	t.Setenv("HOME", dir)
 	os.MkdirAll(filepath.Join(dir, "one", "two"), 0700)
 	scriptForms(t, []string{"~/o", "\t", "t", "\t", "\r"}, []string{"no-match", "\t", "\r"})
-	q := &hostQuestions{context.Background(), nil, &promptLatch{out: io.Discard}}
+	q := &questions{context.Background(), nil, &promptLatch{out: io.Discard}}
 	for _, want := range []string{"~/one/two/", "no-match"} {
 		got, err := q.input("File", "", "path", func(string) error { return nil })
 		if err != nil || got != want {
@@ -486,7 +486,7 @@ func TestHostHuhTabRefreshAndNoMatch(t *testing.T) {
 func TestHostHuhBlankAndEscapedValidation(t *testing.T) {
 	scriptForms(t, keys("\r"), []string{"bad\r", "\x15good\r"})
 	var out bytes.Buffer
-	q := &hostQuestions{context.Background(), nil, &promptLatch{out: &out}}
+	q := &questions{context.Background(), nil, &promptLatch{out: &out}}
 	if value, err := q.input("File", "", "path", func(s string) error {
 		if s == "" {
 			return nil
@@ -516,13 +516,13 @@ func TestHostPromptFailuresAndEOF(t *testing.T) {
 	t.Setenv("TERM", "xterm-256color")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	q := &hostQuestions{ctx, strings.NewReader(""), &promptLatch{out: failingPrompt{}}}
+	q := &questions{ctx, strings.NewReader(""), &promptLatch{out: failingPrompt{}}}
 	if _, err := q.input("File", "", "path", func(string) error { return nil }); !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatal(err)
 	}
 	eofCtx, eofCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer eofCancel()
-	q = &hostQuestions{eofCtx, strings.NewReader(""), &promptLatch{out: io.Discard}}
+	q = &questions{eofCtx, strings.NewReader(""), &promptLatch{out: io.Discard}}
 	started := time.Now()
 	if _, err := q.input("File", "", "path", func(string) error { return nil }); err == nil {
 		t.Fatal("EOF succeeded")
@@ -535,17 +535,17 @@ func TestHostPromptFailuresAndEOF(t *testing.T) {
 func TestHostSelectFilterCannotWedgeInterrupt(t *testing.T) {
 	scriptForms(t, []string{"/", "zzz", "\r\x03"})
 	started := time.Now()
-	q := &hostQuestions{context.Background(), nil, &promptLatch{out: io.Discard}}
+	q := &questions{context.Background(), nil, &promptLatch{out: io.Discard}}
 	prev := "a"
 	_, err := q.pick("Choice", "", []huh.Option[string]{option("a", "a")}, &prev)
-	if !errors.Is(err, errHostInterrupted) || time.Since(started) >= time.Second {
+	if !errors.Is(err, errInterrupted) || time.Since(started) >= time.Second {
 		t.Fatal(err, time.Since(started))
 	}
 }
 
 func TestHostSelectSlashDoesNotFilter(t *testing.T) {
 	scriptForms(t, []string{"/", "zzz", "\r"})
-	q := &hostQuestions{context.Background(), nil, &promptLatch{out: io.Discard}}
+	q := &questions{context.Background(), nil, &promptLatch{out: io.Discard}}
 	prev := "a"
 	if got, err := q.pick("Choice", "", []huh.Option[string]{option("a", "a")}, &prev); err != nil || got != "a" {
 		t.Fatal(got, err)
@@ -563,26 +563,26 @@ func TestHostPagesEligibility(t *testing.T) {
 	t.Cleanup(func() { stdin = old })
 	stdin = tty
 	t.Setenv("TERM", "xterm-256color")
-	if !pagesEligible(tty) {
+	if !promptsEligible(tty) {
 		t.Fatal("terminal stdin and prompts rejected")
 	}
-	if pagesEligible(io.Discard) {
+	if promptsEligible(io.Discard) {
 		t.Fatal("redirected prompts accepted")
 	}
 	stdin = strings.NewReader("")
-	if pagesEligible(tty) {
+	if promptsEligible(tty) {
 		t.Fatal("redirected stdin accepted")
 	}
 	stdin = tty
 	t.Setenv("TERM", "dumb")
-	if pagesEligible(tty) {
+	if promptsEligible(tty) {
 		t.Fatal("dumb accepted")
 	}
 }
 func TestHostRenderedDescriptionEscapes(t *testing.T) {
 	scriptForms(t, keys(down+down+down+"\r"))
 	var out bytes.Buffer
-	q := &hostQuestions{context.Background(), nil, &promptLatch{out: &out}}
+	q := &questions{context.Background(), nil, &promptLatch{out: &out}}
 	_, err := q.source("evil\x1b]52;c;x\a", "label\x1b[2J", []credentialUse{{pool: "pool\x1b]8;;evil\a"}}, nil, false)
 	if err != nil {
 		t.Fatal(err)
@@ -625,7 +625,7 @@ func TestHostSharedInputTypeahead(t *testing.T) {
 			}
 			defer r.Close()
 			defer w.Close()
-			q := &hostQuestions{ctx, r, nil}
+			q := &questions{ctx, r, nil}
 			for i, want := range []string{"one", "two"} {
 				ready := make(chan struct{})
 				q.out = &promptLatch{out: &signalledOutput{Writer: io.Discard, ready: ready}}
@@ -646,7 +646,7 @@ func TestHostSharedInputTypeahead(t *testing.T) {
 				}(i)
 				got, err := q.input("File", "", "path", func(string) error { return nil })
 				<-sent
-				if i == 0 && errors.Is(err, errHostInterrupted) {
+				if i == 0 && errors.Is(err, errInterrupted) {
 					continue
 				}
 				if err != nil || got != want {
@@ -671,15 +671,15 @@ func (f quitField) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 func TestHostIncompleteFormIsInterrupted(t *testing.T) {
 	scriptForms(t, keys("x"))
-	q := &hostQuestions{context.Background(), nil, &promptLatch{out: io.Discard}}
-	if err := q.run(quitField{huh.NewInput().Title("File")}); !errors.Is(err, errHostInterrupted) {
+	q := &questions{context.Background(), nil, &promptLatch{out: io.Discard}}
+	if err := q.run(quitField{huh.NewInput().Title("File")}); !errors.Is(err, errInterrupted) {
 		t.Fatal(err)
 	}
 }
 func TestHostClipboardIsDisabled(t *testing.T) {
 	if os.Getenv("HOST_CLIPBOARD_CHILD") == "1" {
 		scriptForms(t, []string{"\x16", "\r"}, []string{"\x16", "\r"})
-		q := &hostQuestions{context.Background(), nil, &promptLatch{out: io.Discard}}
+		q := &questions{context.Background(), nil, &promptLatch{out: io.Discard}}
 		if got, err := q.input("File", "", "path", func(string) error { return nil }); got != "" || err != nil {
 			t.Fatal(got, err)
 		}
@@ -719,13 +719,13 @@ func TestHostReadablePathRejectsNonRegularFiles(t *testing.T) {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			scriptForms(t, []string{path + "\r", "\x03"})
 			var out bytes.Buffer
-			q := &hostQuestions{context.Background(), nil, &promptLatch{out: &out}}
+			q := &questions{context.Background(), nil, &promptLatch{out: &out}}
 			started := time.Now()
 			_, err := q.input("known_hosts file", "", "path", func(s string) error {
 				_, err := readablePath(s)
 				return err
 			})
-			if !errors.Is(err, errHostInterrupted) || time.Since(started) >= time.Second {
+			if !errors.Is(err, errInterrupted) || time.Since(started) >= time.Second {
 				t.Fatal(err, time.Since(started))
 			}
 			text := strings.Join(strings.Fields(ansi.Strip(out.String())), " ")
@@ -772,9 +772,9 @@ func TestHostCADoesNotTrustPreOpenMetadata(t *testing.T) {
 func TestHostCompletionDoesNotReadNonDirectories(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "file")
 	os.WriteFile(path, nil, 0600)
-	old := readHostDirectory
-	t.Cleanup(func() { readHostDirectory = old })
-	readHostDirectory = func(path string) ([]os.DirEntry, error) {
+	old := readDirectory
+	t.Cleanup(func() { readDirectory = old })
+	readDirectory = func(path string) ([]os.DirEntry, error) {
 		t.Error("ReadDir called before directory check")
 		return old(path)
 	}
@@ -789,7 +789,7 @@ func TestHostCompletionDoesNotReadNonDirectories(t *testing.T) {
 
 func TestHostBlankNavigationKeepsParent(t *testing.T) {
 	scriptForms(t, keys("\r"), keys("\r"), keys("\r"), keys(down+"\r"), keys(down+"\r"), keys("\r"), keys(down+"\r"), keys("\r"), keys(down+"\r"))
-	q := &hostQuestions{context.Background(), nil, &promptLatch{out: io.Discard}}
+	q := &questions{context.Background(), nil, &promptLatch{out: io.Discard}}
 	if s, err := q.source("key", "key", nil, nil, false); err != nil || s.ok {
 		t.Fatal(s, err)
 	}
@@ -928,9 +928,9 @@ func TestHostCAOptionsAndRevalidation(t *testing.T) {
 		os.Remove(fmt.Sprintf("%02d.pem", i))
 	}
 	scriptForms(t, keys("\r"), keys("\r"))
-	script := runHostQuestion
+	script := runQuestion
 	once := true
-	runHostQuestion = func(q *hostQuestions, field huh.Field) error {
+	runQuestion = func(q *questions, field huh.Field) error {
 		err := script(q, field)
 		if once {
 			once = false
@@ -939,7 +939,7 @@ func TestHostCAOptionsAndRevalidation(t *testing.T) {
 		return err
 	}
 	var out bytes.Buffer
-	q := &hostQuestions{context.Background(), nil, &promptLatch{out: &out}}
+	q := &questions{context.Background(), nil, &promptLatch{out: &out}}
 	if p, err := q.ca(); err != nil || p != "" {
 		t.Fatal(p, err)
 	}
@@ -970,7 +970,7 @@ func TestHostCommandAndVariableTab(t *testing.T) {
 	t.Setenv("PATH", dir)
 	t.Setenv("UNIQUE_COMPLETION_VARIABLE", "secret")
 	scriptForms(t, []string{"test-ex", "\t", "\r"}, []string{"UNIQUE_COMPLETION_V", "\t", "\r"})
-	q := &hostQuestions{context.Background(), nil, &promptLatch{out: io.Discard}}
+	q := &questions{context.Background(), nil, &promptLatch{out: io.Discard}}
 	for _, item := range []struct{ kind, want string }{{"command", "test-executable"}, {"variable", "UNIQUE_COMPLETION_VARIABLE"}} {
 		if got, err := q.input("Input", "", item.kind, func(string) error { return nil }); err != nil || got != item.want {
 			t.Fatal(got, err)
@@ -999,7 +999,7 @@ func TestHostInterruptBeforeBootstrap(t *testing.T) {
 	os.Remove(filepath.Join(h.dir, "ca.pem"))
 	scriptForms(t, keys("\x03"))
 	var out bytes.Buffer
-	if err := hostInit(h.ctx, h.config, h.bundle, &out, &out); !errors.Is(err, errHostInterrupted) {
+	if err := hostInit(h.ctx, h.config, h.bundle, &out, &out); !errors.Is(err, errInterrupted) {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(h.config); !os.IsNotExist(err) {
@@ -1055,7 +1055,7 @@ func TestHostNoMatchTabKeepsInputOpen(t *testing.T) {
 	defer r.Close()
 	defer w.Close()
 	ready := make(chan struct{})
-	q := &hostQuestions{ctx, r, &promptLatch{out: &signalledOutput{Writer: io.Discard, ready: ready}}}
+	q := &questions{ctx, r, &promptLatch{out: &signalledOutput{Writer: io.Discard, ready: ready}}}
 	done := make(chan error, 1)
 	go func() { _, err := q.input("File", "", "path", func(string) error { return nil }); done <- err }()
 	<-ready
@@ -1075,10 +1075,10 @@ func TestHostNoMatchTabKeepsInputOpen(t *testing.T) {
 
 func TestHostNarrowDescriptionKeepsScopeWarning(t *testing.T) {
 	scriptForms(t, keys(down+down+down+"\r"))
-	script := runHostQuestion
-	runHostQuestion = func(q *hostQuestions, field huh.Field) error { return script(q, field.WithWidth(32).WithHeight(5)) }
+	script := runQuestion
+	runQuestion = func(q *questions, field huh.Field) error { return script(q, field.WithWidth(32).WithHeight(5)) }
 	var out bytes.Buffer
-	q := &hostQuestions{context.Background(), nil, &promptLatch{out: &out}}
+	q := &questions{context.Background(), nil, &promptLatch{out: &out}}
 	if _, err := q.source("token", "token", nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
@@ -1126,7 +1126,7 @@ func TestHostGitAnonymous(t *testing.T) {
 }
 func TestHostConfiguredNoneCannotYieldCredential(t *testing.T) {
 	scriptForms(t, keys("\r"), keys("\r"), keys(down+down+down+down+"\r"))
-	q := &hostQuestions{context.Background(), nil, &promptLatch{out: io.Discard}}
+	q := &questions{context.Background(), nil, &promptLatch{out: io.Discard}}
 	if s, err := q.source("key", "key", nil, nil, true); err != nil || s.ok {
 		t.Fatal(s, err)
 	}
@@ -1138,8 +1138,8 @@ func TestHostNestedInterrupts(t *testing.T) {
 	}{{false, [][]string{keys("\r"), keys("\x03")}}, {false, [][]string{keys(down + "\r"), keys("\x03")}}, {true, [][]string{keys("\r"), keys("\x03")}}} {
 		t.Run(fmt.Sprint(item), func(t *testing.T) {
 			scriptForms(t, item.steps...)
-			q := &hostQuestions{context.Background(), nil, &promptLatch{out: io.Discard}}
-			if _, err := q.source("key", "key", nil, nil, item.nested); !errors.Is(err, errHostInterrupted) {
+			q := &questions{context.Background(), nil, &promptLatch{out: io.Discard}}
+			if _, err := q.source("key", "key", nil, nil, item.nested); !errors.Is(err, errInterrupted) {
 				t.Fatal(err)
 			}
 		})
@@ -1155,7 +1155,7 @@ func TestHostContextCancellation(t *testing.T) {
 	}
 	defer r.Close()
 	defer w.Close()
-	q := &hostQuestions{ctx, r, &promptLatch{out: io.Discard}}
+	q := &questions{ctx, r, &promptLatch{out: io.Discard}}
 	if _, err := q.input("File", "", "path", func(string) error { return nil }); err == nil {
 		t.Fatal("cancelled context accepted")
 	}
@@ -1188,7 +1188,7 @@ func TestHostCAHiddenPathAndHostileName(t *testing.T) {
 	}
 	scriptForms(t, keys("\r"), keys(down+down+"\r"), keys(filepath.Join(dir, ".hidden")+"\r"))
 	var out bytes.Buffer
-	q := &hostQuestions{context.Background(), nil, &promptLatch{out: &out}}
+	q := &questions{context.Background(), nil, &promptLatch{out: &out}}
 	if got, err := q.ca(); err != nil || got != filepath.Join(dir, name) {
 		t.Fatal(got, err)
 	}
@@ -1210,7 +1210,7 @@ func TestHostNestedListSkipEndsSourceRequest(t *testing.T) {
 	for _, nested := range []bool{false, true} {
 		t.Run(fmt.Sprint(nested), func(t *testing.T) {
 			scriptForms(t, keys("\r"), keys(down+down+"\r"))
-			q := &hostQuestions{context.Background(), nil, &promptLatch{out: io.Discard}}
+			q := &questions{context.Background(), nil, &promptLatch{out: io.Discard}}
 			if s, err := q.source("key", "key", nil, nil, nested); err != nil || s.ok {
 				t.Fatal(s, err)
 			}
@@ -1225,7 +1225,7 @@ func TestHostSSHDoesNotSuggestFilesystemPaths(t *testing.T) {
 		t.Fatal(got)
 	}
 	scriptForms(t, []string{"\t", "\r"})
-	q := &hostQuestions{context.Background(), nil, &promptLatch{out: io.Discard}}
+	q := &questions{context.Background(), nil, &promptLatch{out: io.Discard}}
 	if got, err := q.input("SSH URL prefix", "", "", func(string) error { return nil }); err != nil || got != "" {
 		t.Fatal(got, err)
 	}

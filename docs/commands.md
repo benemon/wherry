@@ -195,11 +195,21 @@ wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] \
   [--super-user NAME --super-user-password-file FILE]
 ```
 
-Delegates provisioning from the Kafka super user to `wherry.operator`. On a
-terminal it asks for each value the flags do not give: the broker address,
-the CA file the broker's certificate chains to (blank for the system roots),
-and the Kafka super user's name and password file. Without a terminal it
-refuses any missing flag but `--ca-file`, naming them:
+`operator init` delegates provisioning from the Kafka super user to `wherry.operator`.
+When standard input and standard error are terminals and `TERM` is not
+`dumb`, you answer each question the flags do not give under a Broker heading.
+You see one question per page.
+Enter the broker address.
+An address without a port uses port 9092.
+Choose a CA certificate from the PEM files in the current directory,
+System roots or Other file...
+Enter the super user's name.
+Enter the password file path.
+Press Tab to complete either file path.
+Press Ctrl-C to stop before any files are written.
+If stderr is redirected, or prompts are otherwise unavailable, give every
+required flag. An omitted `--ca-file` uses the system roots.
+Missing flags are named in the error:
 `operator init has no terminal to prompt on; give --broker, --super-user, --super-user-password-file`.
 
 It creates the working directory with mode 0755 when it is missing.

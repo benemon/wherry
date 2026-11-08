@@ -35,7 +35,7 @@ func (use credentialUse) as() string {
 func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Writer) (result error) {
 	defer func() {
 		if result != nil {
-			result = hostPresentationError{result}
+			result = presentationError{result}
 		}
 	}()
 	dir, err := busclient.ConfigDir()
@@ -74,8 +74,8 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 		return fmt.Errorf("%s names no bundle; run wherry host init BUNDLE", path)
 	}
 
-	q := &hostQuestions{ctx, stdin, &promptLatch{out: prompts}}
-	interactive := pagesEligible(prompts)
+	q := &questions{ctx, stdin, &promptLatch{out: prompts}}
+	interactive := promptsEligible(prompts)
 	var notices []string
 	write := func() error {
 		if err := writeHostConfig(path, file); err != nil {

@@ -39,7 +39,7 @@ func display(s string) string {
 	return out.String()
 }
 
-var pagesEligible = func(out io.Writer) bool {
+var promptsEligible = func(out io.Writer) bool {
 	in, ok := stdin.(*os.File)
 	if !ok || !term.IsTerminal(int(in.Fd())) {
 		return false
@@ -59,12 +59,12 @@ func sameTerminal(a, b io.Writer) bool {
 	return aErr == nil && bErr == nil && os.SameFile(aInfo, bInfo)
 }
 
-var errHostInterrupted = errors.New("interrupted")
+var errInterrupted = errors.New("interrupted")
 
-type hostPresentationError struct{ cause error }
+type presentationError struct{ cause error }
 
-func (e hostPresentationError) Error() string { return display(e.cause.Error()) }
-func (e hostPresentationError) Unwrap() error { return e.cause }
+func (e presentationError) Error() string { return display(e.cause.Error()) }
+func (e presentationError) Unwrap() error { return e.cause }
 
 type promptLatch struct {
 	out io.Writer
@@ -99,18 +99,18 @@ func (r eofInput) Read(p []byte) (int, error) {
 	return n, err
 }
 
-type hostQuestions struct {
+type questions struct {
 	ctx context.Context
 	in  io.Reader
 	out *promptLatch
 }
 
-// runHostQuestion gives one form ownership of input; typeahead consumed before the next form starts is discarded.
-var runHostQuestion = (*hostQuestions).runForm
+// runQuestion gives one form ownership of input; typeahead consumed before the next form starts is discarded.
+var runQuestion = (*questions).runForm
 
-func (q *hostQuestions) run(field huh.Field) error { return runHostQuestion(q, field) }
+func (q *questions) run(field huh.Field) error { return runQuestion(q, field) }
 
-func (q *hostQuestions) runForm(field huh.Field) error {
+func (q *questions) runForm(field huh.Field) error {
 	ctx, cancel := context.WithCancel(q.ctx)
 	defer cancel()
 	km := huh.NewDefaultKeyMap()
@@ -153,18 +153,18 @@ func (q *hostQuestions) runForm(field huh.Field) error {
 		return writeErr
 	}
 	if ctx.Err() != nil {
-		return errHostInterrupted
+		return errInterrupted
 	}
 	if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, huh.ErrTimeout) || (err == nil && form.State != huh.StateCompleted) {
-		return errHostInterrupted
+		return errInterrupted
 	}
 	return err
 }
-func (q *hostQuestions) line(format string, args ...any) error {
+func (q *questions) line(format string, args ...any) error {
 	_, err := fmt.Fprintf(q.out, format, args...)
 	return err
 }
-func (q *hostQuestions) pick(label, description string, options []huh.Option[string], prev *string) (string, error) {
+func (q *questions) pick(label, description string, options []huh.Option[string], prev *string) (string, error) {
 	field := huh.NewSelect[string]().Title(display(label)).Description(description).Options(options...).Value(prev)
 	if err := q.run(field); err != nil {
 		return "", err
@@ -172,10 +172,10 @@ func (q *hostQuestions) pick(label, description string, options []huh.Option[str
 	return *prev, nil
 }
 func option(label, value string) huh.Option[string] { return huh.NewOption(display(label), value) }
-func (q *hostQuestions) answer(label, answer string) error {
+func (q *questions) answer(label, answer string) error {
 	return q.line("? %s  %s\n", display(label), display(answer))
 }
-func (q *hostQuestions) input(label, initial, kind string, validate func(string) error) (string, error) {
+func (q *questions) input(label, initial, kind string, validate func(string) error) (string, error) {
 	text := initial
 	value := &lockedText{text: &text}
 	field := huh.NewInput().Title(display(label)).Value(&text).Accessor(value).Validate(func(s string) error {
@@ -200,7 +200,7 @@ func safeCandidates(list []string) []string {
 	return list
 }
 
-var readHostDirectory = os.ReadDir
+var readDirectory = os.ReadDir
 
 func completions(text, kind string) []string {
 	if kind == "" {
@@ -229,7 +229,7 @@ func completions(text, kind string) []string {
 				if err != nil || !info.IsDir() {
 					continue
 				}
-				entries, _ := readHostDirectory(dir)
+				entries, _ := readDirectory(dir)
 				for _, e := range entries {
 					if !strings.HasPrefix(e.Name(), text) {
 						continue
@@ -256,7 +256,7 @@ func completions(text, kind string) []string {
 	if err != nil || !info.IsDir() {
 		return nil
 	}
-	entries, err := readHostDirectory(expanded)
+	entries, err := readDirectory(expanded)
 	if err != nil {
 		return nil
 	}
