@@ -281,7 +281,7 @@ func TestReceiverLocalRefusesSymlink(t *testing.T) {
 	}
 }
 
-// An invalid answer shows its error inline, and the corrected value is stored.
+// A typed none after choosing CA file or an address is written literally.
 func TestReceiverLocalLiteralNone(t *testing.T) {
 	forms := localForms(true, "NOMAD_TOKEN")
 	forms[2] = inputForm("/etc/wherry/kafka-ca.pem", "\x15none\r")
@@ -306,6 +306,7 @@ func TestReceiverLocalLiteralNone(t *testing.T) {
 	}
 }
 
+// An invalid answer shows its error inline, and the corrected value is stored.
 func TestReceiverLocalCorrections(t *testing.T) {
 	margin := "stop window leaves less than 5s to drain; raise kill_timeout, terminationGracePeriodSeconds or TimeoutStopSec"
 	for _, test := range []struct {
