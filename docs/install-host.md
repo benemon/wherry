@@ -39,9 +39,10 @@ rm laptop.bundle
 ```
 
 `host init` copies the bundle into `~/.config/wherry/`, so you can delete the hand-off copy.
-It creates your laptop's signing key. Summary shows its key ID; when stdout is
-not the same terminal as standard error, init also prints the key ID alone
-there for scripts.
+It creates your laptop's signing key. When standard input or standard error is
+not a terminal, with `TERM=dumb`, or when stdout is not the same terminal as
+standard error, init prints the key ID alone to stdout. Otherwise, Summary
+shows its key ID.
 On a terminal, it asks by topic: Credentials, Git, Storage, then Summary.
 Only topics with missing settings get questions. Summary always appears.
 Each answer stays in the session as a collapsed line:

@@ -1005,8 +1005,9 @@ is entitled to:
 3. It creates the host key at `host_key`, a private JWK (RFC 7517) with mode
    0600, unless the file exists, creating its directory with mode 0700. It
    registers the key on the host's key topic when the topic holds none, and
-   prints the key ID alone when stdout is not the same terminal as standard
-   error. When it is, Summary shows the registered key ID instead. It fails when
+   prints the key ID alone when standard input or standard error is not a
+   terminal, with `TERM=dumb`, or when stdout is not the same terminal as
+   standard error. Otherwise, Summary shows the registered key ID. It fails when
    the key topic holds another key.
 4. It reads every entitled pool's terms. On a terminal it asks by topic:
    Credentials, Git, Storage, then Summary. A missing credential's question is
