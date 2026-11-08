@@ -544,7 +544,7 @@ func TestReceiverLocalFailedWriter(t *testing.T) {
 	old := promptsEligible
 	t.Cleanup(func() { promptsEligible = old })
 	promptsEligible = func(io.Writer) bool { return true }
-	if err := runOperator([]string{"receiver", "apply", "r", "-f", file}, io.Discard, poolFailedWriter{}); !errors.Is(err, io.ErrClosedPipe) {
+	if err := runOperator([]string{"receiver", "apply", "r", "-f", file}, io.Discard, failingPrompt{}); !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("writer error: %v", err)
 	}
 	receiverUnapplied(t, service)

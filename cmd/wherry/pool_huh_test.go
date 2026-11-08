@@ -252,16 +252,12 @@ func TestPoolSharedTarget(t *testing.T) {
 	}
 }
 
-type poolFailedWriter struct{}
-
-func (poolFailedWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
-
 func TestPoolFailedWriter(t *testing.T) {
 	old := promptsEligible
 	t.Cleanup(func() { promptsEligible = old })
 	promptsEligible = func(io.Writer) bool { return true }
 	dir := t.TempDir()
-	_, _, err := objectFile(context.Background(), dir, "pools", "a", nil, false, poolFailedWriter{}, poolFields, promptPool)
+	_, _, err := objectFile(context.Background(), dir, "pools", "a", nil, false, failingPrompt{}, poolFields, promptPool)
 	if !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("writer error: %v", err)
 	}
