@@ -128,7 +128,7 @@ models and credentials, the default agent, the quotas and the start-by
 limit, writes `pools/build.yaml`, then applies it. `-f PATH` applies a file
 or directory elsewhere.
 
-The [pool terms example](configuration-operator.md#pool-terms-example) sets every field,
+The [pool terms example](configuration-operator.md#pool-terms-example) sets every field except a credential's `file`,
 as one file and as a directory. Each profile signature, an agent and all its
 labels, gets its own task topic; a label change moves a profile to a new one,
 as [Signatures](configuration-operator.md#pool-terms) describes.

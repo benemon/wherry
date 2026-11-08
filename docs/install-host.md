@@ -40,8 +40,8 @@ rm laptop.bundle
 
 `host init` copies the bundle into `~/.config/wherry/`, so you can delete the hand-off copy.
 It creates your laptop's signing key. Summary shows its key ID; when stdout is
-not the terminal the questions use, init also prints the key ID alone there
-for scripts.
+not the same terminal as standard error, init also prints the key ID alone
+there for scripts.
 On a terminal, it asks by topic: Credentials, Git, Storage, then Summary.
 Only topics with missing settings get questions. Summary always appears.
 Each answer stays in the session as a collapsed line:
@@ -55,8 +55,8 @@ Wrote /home/me/.config/wherry/config.yaml
 ```
 
 Use the arrows and Enter to choose, or choose Skip to leave a setting for
-later. In Git and Storage, Skip on a source returns to the host or Key sources
-list, where Skip again leaves the setting. Blank text returns to the parent list; blank SSH prefix accepts its
+later. In Git and Storage, Skip on a source returns to the host or S3 storage
+question, where Skip again leaves the setting. Blank text returns to the parent list; blank SSH prefix accepts its
 default. Tab accepts a suggestion; Up/Down and ctrl+n/p cycle suggestions.
 Type after the question appears: bytes typed before a form starts may be
 lost. Ctrl-C ends init with `interrupted`; answers not yet written are lost.

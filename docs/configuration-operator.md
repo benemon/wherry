@@ -79,7 +79,7 @@ Each entry of an agent's `credentials` has these fields:
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `name` | string | none | The credential name. |
+| `name` | string | required | The credential name. |
 | `env` | string | none | The environment variable the agent gets the value in. Give exactly one of `env` and `file`. |
 | `file` | string | none | The file the agent gets the value in, under `WHERRY_CREDENTIALS_DIR`. |
 | `required` | bool | `true` | Whether a run needs it. |
@@ -166,7 +166,7 @@ affected signature first.
 
 ### Pool terms example
 
-Terms for pool `build` that set every field, as one file for
+Terms for pool `build` that set every field except a credential's `file`, as one file for
 `pool apply build -f build.yaml`:
 
 ```yaml

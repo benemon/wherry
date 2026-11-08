@@ -1005,8 +1005,8 @@ is entitled to:
 3. It creates the host key at `host_key`, a private JWK (RFC 7517) with mode
    0600, unless the file exists, creating its directory with mode 0700. It
    registers the key on the host's key topic when the topic holds none, and
-   prints the key ID alone when stdout is not the terminal the questions use.
-   When stdout is that terminal, Summary shows the registered key ID instead. It fails when
+   prints the key ID alone when stdout is not the same terminal as standard
+   error. When it is, Summary shows the registered key ID instead. It fails when
    the key topic holds another key.
 4. It reads every entitled pool's terms. On a terminal it asks by topic:
    Credentials, Git, Storage, then Summary. A missing credential's question is
@@ -1023,7 +1023,7 @@ is entitled to:
    `git-<host>` or `git-<host>-ssh`, truncating and adding `-2`, `-3` and up
    to avoid another pair's name. An unassociated existing source with the
    generated name is presumed to belong to that pair and reused. Existing
-   sources are kept; Configured credential reuses a source under another name.
+   sources are kept; Configured credential uses an existing credential instead.
 6. For all missing entitled S3 pool mappings together, Key sources asks for
    the access and secret key sources. Both sources and all missing mappings
    are committed together; cancelling either source discards the pending
@@ -1034,8 +1034,8 @@ is entitled to:
    shows registration, successful writes and anything still missing.
 
 Choose Skip to leave a request for later, or Back in a nested list to return.
-In Git and Storage, Skip on a source returns to the host or Key sources list;
-choose Skip there too to leave the setting for later.
+In Git and Storage, Skip on a source returns to the host or S3 storage
+question; choose Skip there too to leave the setting for later.
 Blank Variable, File, Command or known_hosts returns; blank SSH prefix uses
 `ssh://git@<host>/`. Whitespace-only input is not blank: File treats it as a
 path, Variable keeps it as a name, and Command rejects it because a source
