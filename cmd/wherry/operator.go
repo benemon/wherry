@@ -79,7 +79,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			return errors.New(operatorUsage[command])
 		}
 		_, dryRun := options["dry-run"]
-		path, directory, err := objectFile(dir, "pools", pos[2], options, dryRun, stderr, poolFields, promptPool)
+		path, directory, err := objectFile(ctx, dir, "pools", pos[2], options, dryRun, stderr, poolFields, promptPool)
 		if err != nil {
 			return err
 		}
@@ -98,7 +98,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		var directory bool
 		var config operator.ReceiverConfig
 		if !force {
-			path, directory, err = objectFile(dir, "receivers", pos[2], options, dryRun, stderr, receiverFields, func(p *prompter) (any, error) { return promptReceiver(p, service.Broker) })
+			path, directory, err = objectFile(ctx, dir, "receivers", pos[2], options, dryRun, stderr, receiverFields, func(q *questions) (any, error) { return promptReceiver(newPrompter(q.out), service.Broker) })
 			if err != nil {
 				return err
 			}

@@ -157,12 +157,15 @@ Either applies without a prompt. `-f PATH` names a file, or a directory,
 which selects the directory form of the
 [pool terms](configuration-operator.md#pool-terms) or
 [receiver configuration](configuration-receiver.md#receiver-configuration). With
-neither, on a terminal, the command asks for the object's real choices, with
-defaults shown, writes the file, then applies it; a refused apply leaves the
+neither, when standard input and standard error are terminals and `TERM` is
+not `dumb`, the command asks for the object's real choices, with defaults
+shown, writes the file, then applies it; a refused apply leaves the
 file to correct and apply again. With neither and no terminal it refuses,
 naming the fields the file must give. `--dry-run` writes nothing to the
 working directory: with neither file it refuses rather than prompt, and it
-creates no bundle directory.
+creates no bundle directory. Pool apply shows one question per page under
+headings, with each answer collapsing to one line. Ctrl-C during pool apply
+writes nothing.
 
 `tenant host add` and `receiver apply` write bundles under the working directory's
 `bundles/`: `bundles/hosts/<tenant>/<host>.bundle` and
@@ -246,10 +249,14 @@ wherry operator pool apply POOL [-f PATH] [--dry-run]
 Creates the pool, or records new terms for it, from the
 [pool terms](configuration-operator.md#pool-terms) at `PATH` or in
 `pools/<pool>.yaml`. The [guided path](#operator-commands) asks for the
-agents, each one's models and credentials (`NAME=ENV_VAR` or
-`NAME=file:FILE_NAME`), the default agent, `producer_byte_rate` (default
+agents one at a time, each one's models and credentials, then the default agent
+from the entered names. Each credential asks for its name, delivery as an
+environment variable or file, target, whether it is required, and an optional
+description. The remaining questions are `producer_byte_rate` (default
 1048576), `request_percentage` (default 10) and `start_by_limit` (default
-`72h0m0s`).
+`72h0m0s`). You correct a refused value in place. Quotas must be positive and the
+start-by limit must be non-negative; apply enforces the tenant-feed retention
+and storage bounds.
 
 With no pool of that name, it records the terms, creates the pool's events,
 snapshot and receivers topics, and sets the configuration of its share group
