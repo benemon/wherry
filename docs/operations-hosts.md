@@ -119,8 +119,11 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
 
    The host keeps the access key and secret key as two credentials, each with
    its own source, and names them under the pool's entry in `storage` in its
-   [configuration](configuration-host.md#client-configuration); `wherry host init`
-   asks for both names and their sources for each entitled pool with storage:
+   [configuration](configuration-host.md#client-configuration). `wherry host init`
+   asks once for an access key source and a secret key source, and maps every
+   entitled pool with storage and no mapping yet to that pair. New names are
+   `s3-access-key` and `s3-secret-key`, numbered when taken. Edit the
+   configuration to give a pool its own keys:
 
    ```yaml
    credentials:
