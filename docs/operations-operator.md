@@ -128,7 +128,7 @@ models and credentials, the default agent, the quotas and the start-by
 limit, writes `pools/build.yaml`, then applies it. `-f PATH` applies a file
 or directory elsewhere.
 
-The [pool terms example](configuration-operator.md#pool-terms-example) sets every field,
+The [pool terms example](configuration-operator.md#pool-terms-example) sets every field except a credential's `file`,
 as one file and as a directory. Each profile signature, an agent and all its
 labels, gets its own task topic; a label change moves a profile to a new one,
 as [Signatures](configuration-operator.md#pool-terms) describes.
@@ -224,7 +224,7 @@ Prerequisites: the working directory and the pool's new terms in
    wherry operator pool suspend build
    ```
 
-   The command waits for the key custodian, not for every receiver. For
+   The command waits only for the key custodian. For
    each running receiver in the pool, read a fresh metrics sample showing
    `wherry_claim_gated{reason="suspended"}` as `1`. A missing sample does
    not show that a receiver is stopped or suspended. Restart or stop a
