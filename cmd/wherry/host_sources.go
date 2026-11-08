@@ -69,13 +69,14 @@ func (q *questions) source(name, label string, uses []credentialUse, configured 
 		prev = "configured"
 	}
 	envPrev, configuredPrev := "", ""
+	description := sourceDescription(name, uses)
 	for {
 		opts := []huh.Option[string]{}
 		if nested {
 			opts = append(opts, option("Configured credential...", "configured"))
 		}
 		opts = append(opts, option("Environment variable", "env"), option("File", "file"), option("Command", "command"), option("Skip", "skip"))
-		choice, err := q.pick(label, sourceDescription(name, uses), opts, &prev)
+		choice, err := q.pick(label, description, opts, &prev)
 		if err != nil {
 			return sourceResult{}, err
 		}
@@ -112,7 +113,7 @@ func (q *questions) source(name, label string, uses []credentialUse, configured 
 				options = append(options, option(v, "variable:"+v))
 			}
 			options = append(options, option("New variable...", "new"), option("Back", "back"), option("Skip", "skip"))
-			value, err = q.pick("Environment variable", sourceDescription(name, uses), options, &envPrev)
+			value, err = q.pick("Environment variable", description, options, &envPrev)
 			if err != nil {
 				return sourceResult{}, err
 			}
@@ -175,7 +176,10 @@ func (q *questions) source(name, label string, uses []credentialUse, configured 
 }
 
 var openFile = unix.Open
-var readCAData = func(file io.Reader) ([]byte, error) { return io.ReadAll(io.LimitReader(file, (1<<20)+1)) }
+
+const caLimit = 1 << 20
+
+var readCAData = func(file io.Reader) ([]byte, error) { return io.ReadAll(io.LimitReader(file, caLimit+1)) }
 
 func readCA(path string) error {
 	_, err := loadCA(path)
@@ -198,14 +202,14 @@ func loadCA(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > 1<<20 {
+	if !info.Mode().IsRegular() || info.Size() > caLimit {
 		return nil, fmt.Errorf("%s holds no PEM certificate", path)
 	}
 	pem, err := readCAData(file)
 	if err != nil {
 		return nil, err
 	}
-	if len(pem) > 1<<20 || !x509.NewCertPool().AppendCertsFromPEM(pem) {
+	if len(pem) > caLimit || !x509.NewCertPool().AppendCertsFromPEM(pem) {
 		return nil, fmt.Errorf("%s holds no PEM certificate", path)
 	}
 	return pem, nil

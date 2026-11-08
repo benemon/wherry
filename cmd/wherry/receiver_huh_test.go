@@ -521,7 +521,7 @@ func TestReceiverFailedWriter(t *testing.T) {
 	t.Cleanup(func() { promptsEligible = old })
 	promptsEligible = func(io.Writer) bool { return true }
 	dir := t.TempDir()
-	_, _, err := objectFile(context.Background(), dir, "receivers", "receiver-a", nil, false, poolFailedWriter{}, receiverFields, func(q *questions) (any, error) {
+	_, _, err := objectFile(context.Background(), dir, "receivers", "receiver-a", nil, false, failingPrompt{}, receiverFields, func(q *questions) (any, error) {
 		return promptReceiver(q, "receiver-a", receiverState(), receiverBroker)
 	})
 	if !errors.Is(err, io.ErrClosedPipe) {

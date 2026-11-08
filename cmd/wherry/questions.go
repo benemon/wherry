@@ -235,7 +235,7 @@ func completions(text, kind string) []string {
 						continue
 					}
 					info, err := os.Stat(filepath.Join(dir, e.Name()))
-					if err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0 {
+					if err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
 						result = append(result, e.Name())
 					}
 				}

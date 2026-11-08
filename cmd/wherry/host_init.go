@@ -76,14 +76,12 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 
 	q := &questions{ctx, stdin, &promptLatch{out: prompts}}
 	interactive := promptsEligible(prompts)
-	var notices []string
+	wrote := false
 	write := func() error {
 		if err := writeHostConfig(path, file); err != nil {
 			return err
 		}
-		if !slices.Contains(notices, path) {
-			notices = append(notices, path)
-		}
+		wrote = true
 		return nil
 	}
 	if _, err := os.Stat(filepath.Join(dir, "ca.pem")); file.CAFile == "" && errors.Is(err, os.ErrNotExist) && interactive {
@@ -277,9 +275,10 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 							break
 						}
 						if choice == "ssh" {
-							prefix, err := q.input("SSH URL prefix (blank: ssh://git@"+host+"/)", "", "", func(s string) error {
+							defaultPrefix := "ssh://git@" + host + "/"
+							prefix, err := q.input("SSH URL prefix (blank: "+defaultPrefix+")", "", "", func(s string) error {
 								if s == "" {
-									s = "ssh://git@" + host + "/"
+									s = defaultPrefix
 								}
 								return sshPrefix(s, host, file.Git)
 							})
@@ -287,7 +286,7 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 								return err
 							}
 							if prefix == "" {
-								prefix = "ssh://git@" + host + "/"
+								prefix = defaultPrefix
 							}
 							entry.URL = prefix
 						}
@@ -339,13 +338,14 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 				}
 			case "Storage":
 				prev := "keys"
+				storageLabel := "S3 storage for pools " + strings.Join(storage, ", ")
 				for {
-					choice, err := q.pick("S3 storage for pools "+strings.Join(storage, ", "), "Set per-pool keys by editing the config.", []huh.Option[string]{option("Key sources...", "keys"), option("Skip", "skip")}, &prev)
+					choice, err := q.pick(storageLabel, "Set per-pool keys by editing the config.", []huh.Option[string]{option("Key sources...", "keys"), option("Skip", "skip")}, &prev)
 					if err != nil {
 						return err
 					}
 					if choice == "skip" {
-						if err = q.answer("S3 storage for pools "+strings.Join(storage, ", "), "Skipped"); err != nil {
+						if err = q.answer(storageLabel, "Skipped"); err != nil {
 							return err
 						}
 						break
@@ -387,8 +387,8 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 				if err = q.line("Host key %s registered\n", display(keyID)); err != nil {
 					return err
 				}
-				for _, notice := range notices {
-					if err = q.line("Wrote %s\n", display(notice)); err != nil {
+				if wrote {
+					if err = q.line("Wrote %s\n", display(path)); err != nil {
 						return err
 					}
 				}
@@ -401,8 +401,8 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 		}
 	}
 	if !interactive {
-		for _, notice := range notices {
-			if err = q.line("wrote %s\n", display(notice)); err != nil {
+		if wrote {
+			if err = q.line("wrote %s\n", display(path)); err != nil {
 				return err
 			}
 		}
@@ -434,13 +434,14 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 }
 
 func writeHostConfig(path string, file busclient.Config) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	if err := writeYAML(path, file); err != nil {
 		return err
 	}
-	if err := os.Chmod(path, 0600); err != nil {
+	// writeYAML's mode applies only to a new file, and the config names credential sources.
+	if err := os.Chmod(path, 0o600); err != nil {
 		return err
 	}
 	return nil

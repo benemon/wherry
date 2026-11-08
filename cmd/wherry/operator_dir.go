@@ -54,6 +54,7 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 	answers := map[string]string{}
 	q := &questions{ctx, stdin, &promptLatch{out: prompts}}
 	heading := false
+	passwordPath := ""
 	for _, question := range [][2]string{
 		{"broker", "Kafka broker address"},
 		{"ca-file", "CA certificate"},
@@ -85,7 +86,8 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 						return checkOperatorBroker(s)
 					}
 					if question[0] == "super-user-password-file" {
-						_, err := readablePath(s)
+						var err error
+						passwordPath, err = readablePath(s)
 						return err
 					}
 					return nil
@@ -99,10 +101,7 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 				return err
 			}
 			if question[0] == "super-user-password-file" {
-				value, err = localPath(value)
-				if err != nil {
-					return err
-				}
+				value = passwordPath
 			}
 		}
 		answers[question[0]] = value
@@ -464,7 +463,7 @@ func promptPool(q *questions) (any, error) {
 				credential["description"] = description
 				answer += ", \"" + display(description) + "\""
 			}
-			if err := q.line("? Credential %s  %s\n", display(credentialName), answer); err != nil {
+			if err := q.answer("Credential "+credentialName, answer); err != nil {
 				return nil, err
 			}
 			targets = append(targets, candidate)
