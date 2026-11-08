@@ -621,10 +621,7 @@ func TestReceiverApplyGuidedPath(t *testing.T) {
 	if err := runOperator([]string{"receiver", "apply", "receiver-a"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), receiverFields) {
 		t.Fatalf("receiver apply without a file or a terminal = %v; want it refused naming %s", err, receiverFields)
 	}
-	onTerminal(t, "pool-a\n\n"+fakeSHA256+"\n{address: https://nomad.example:4646, credential: nomad-token}\nclaude\ntier=batch\n\n")
-	oldEligible := promptsEligible
-	t.Cleanup(func() { promptsEligible = oldEligible })
-	promptsEligible = func(io.Writer) bool { return true }
+	scriptForms(t, keys("\r"), keys("\r"), keys(fakeSHA256+"\r"), keys("\x15{address: https://nomad.example:4646, credential: nomad-token}\r"), keys("\r"), keys("tier=batch\r"), keys("\r"), keys(down+"\r"), keys("\r"))
 
 	if err := runOperator([]string{"receiver", "apply", "receiver-a"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
