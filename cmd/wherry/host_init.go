@@ -251,7 +251,7 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 					prev := "anonymous"
 				route:
 					for {
-						description := "Generated names reuse an unassociated existing source; Configured credential allows deliberate sharing."
+						description := "Generated names reuse an unassociated existing source; Configured credential uses an existing credential instead."
 						if name := names.allocate(host, "https"); asked[name] {
 							description += "\nCredential " + display(name) + " was skipped earlier; HTTPS is unavailable."
 						}
@@ -276,7 +276,7 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 						}
 						if choice == "ssh" {
 							defaultPrefix := "ssh://git@" + host + "/"
-							prefix, err := q.input("SSH URL prefix (blank: "+defaultPrefix+")", "", "", func(s string) error {
+							prefix, err := q.input("SSH URL prefix (blank: "+defaultPrefix+")", "", "", "", func(s string) error {
 								if s == "" {
 									s = defaultPrefix
 								}
@@ -300,7 +300,7 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 						}
 						entry.Credential = s.name
 						if choice == "ssh" {
-							path, err := q.input("known_hosts file (blank returns)", "", "path", func(s string) error {
+							path, err := q.input("known_hosts file (blank returns)", "", "", "path", func(s string) error {
 								if s == "" {
 									return nil
 								}

@@ -175,11 +175,11 @@ func option(label, value string) huh.Option[string] { return huh.NewOption(displ
 func (q *questions) answer(label, answer string) error {
 	return q.line("? %s  %s\n", display(label), display(answer))
 }
-func (q *questions) input(label, initial, kind string, validate func(string) error) (string, error) {
+func (q *questions) input(label, description, initial, kind string, validate func(string) error) (string, error) {
 	text := initial
 	value := &lockedText{text: &text}
-	field := huh.NewInput().Title(display(label)).Value(&text).Accessor(value).Validate(func(s string) error {
-		if err := validate(s); err != nil {
+	field := huh.NewInput().Title(display(label)).Description(display(description)).Value(&text).Accessor(value).Validate(func(s string) error {
+		if err := validate(strings.TrimSpace(s)); err != nil {
 			return errors.New(display(err.Error()))
 		}
 		return nil
@@ -188,7 +188,16 @@ func (q *questions) input(label, initial, kind string, validate func(string) err
 	if err := q.run(field); err != nil {
 		return "", err
 	}
-	return text, nil
+	return strings.TrimSpace(text), nil
+}
+
+// ask is input followed by the answer's collapse line.
+func (q *questions) ask(label, description, initial, kind string, validate func(string) error) (string, error) {
+	value, err := q.input(label, description, initial, kind, validate)
+	if err != nil {
+		return "", err
+	}
+	return value, q.answer(label, value)
 }
 func safeCandidates(list []string) []string {
 	list = slices.DeleteFunc(list, func(s string) bool { return display(s) != s })

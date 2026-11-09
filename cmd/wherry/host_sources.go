@@ -10,12 +10,12 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/charmbracelet/huh"
-	"golang.org/x/sys/unix"
 )
 
 func sourceLabel(name, description string, uses []credentialUse) string {
@@ -105,77 +105,79 @@ func (q *questions) source(name, label string, uses []credentialUse, configured 
 			value = strings.TrimPrefix(value, "credential:")
 			return finish(sourceResult{name: value, source: configured[value], ok: true}, "Configured credential "+value)
 		}
-		value := ""
-	environment:
-		if choice == "env" {
-			options := []huh.Option[string]{}
-			for _, v := range targetVariables(uses) {
-				options = append(options, option(v, "variable:"+v))
+		// A blank Variable returns to the variable list; Back and other blanks return to the source list.
+		for {
+			value := ""
+			if choice == "env" {
+				options := []huh.Option[string]{}
+				for _, v := range targetVariables(uses) {
+					options = append(options, option(v, "variable:"+v))
+				}
+				options = append(options, option("New variable...", "new"), option("Back", "back"), option("Skip", "skip"))
+				value, err = q.pick("Environment variable", description, options, &envPrev)
+				if err != nil {
+					return sourceResult{}, err
+				}
+				if value == "skip" {
+					return finish(sourceResult{}, "Skipped")
+				}
+				if value == "back" {
+					break
+				}
+				if value != "new" {
+					value = strings.TrimPrefix(value, "variable:")
+					return finish(sourceResult{name, credential.Source{Env: value}, true}, "Environment variable "+value)
+				}
 			}
-			options = append(options, option("New variable...", "new"), option("Back", "back"), option("Skip", "skip"))
-			value, err = q.pick("Environment variable", description, options, &envPrev)
+			kind, title := "path", "File (blank returns)"
+			if choice == "env" {
+				kind, title = "variable", "Variable (blank returns)"
+			}
+			if choice == "command" {
+				kind, title = "command", "Command (blank returns)"
+			}
+			var source credential.Source
+			value, err = q.input(title, "", "", kind, func(s string) error {
+				if s == "" {
+					return nil
+				}
+				var err error
+				source = credential.Source{}
+				switch choice {
+				case "env":
+					source.Env = s
+				case "file":
+					source.File, err = localPath(s)
+				case "command":
+					source.Command = strings.Fields(s)
+				}
+				if err != nil {
+					return err
+				}
+				return source.Validate()
+			})
 			if err != nil {
 				return sourceResult{}, err
 			}
-			if value == "skip" {
-				return finish(sourceResult{}, "Skipped")
+			if value == "" {
+				if choice == "env" {
+					continue
+				}
+				break
 			}
-			if value == "back" {
-				continue
-			}
-			if value != "new" {
-				value = strings.TrimPrefix(value, "variable:")
-				return finish(sourceResult{name, credential.Source{Env: value}, true}, "Environment variable "+value)
-			}
-		}
-		kind, title := "path", "File (blank returns)"
-		if choice == "env" {
-			kind, title = "variable", "Variable (blank returns)"
-		}
-		if choice == "command" {
-			kind, title = "command", "Command (blank returns)"
-		}
-		var source credential.Source
-		value, err = q.input(title, "", kind, func(s string) error {
-			if s == "" {
-				return nil
-			}
-			var err error
-			source = credential.Source{}
-			switch choice {
-			case "env":
-				source.Env = s
-			case "file":
-				source.File, err = localPath(s)
-			case "command":
-				source.Command = strings.Fields(s)
-			}
-			if err != nil {
-				return err
-			}
-			return source.Validate()
-		})
-		if err != nil {
-			return sourceResult{}, err
-		}
-		if value == "" {
+			answer := "File " + value
 			if choice == "env" {
-				goto environment
+				answer = "Environment variable " + value
 			}
-			continue
+			if choice == "command" {
+				answer = "Command " + value
+			}
+			return finish(sourceResult{name, source, true}, answer)
 		}
-		answer := "File " + value
-		if choice == "env" {
-			answer = "Environment variable " + value
-		}
-		if choice == "command" {
-			answer = "Command " + value
-		}
-		return finish(sourceResult{name, source, true}, answer)
 	}
 }
 
-var openFile = unix.Open
+var openFile = os.OpenFile
 
 const caLimit = 1 << 20
 
@@ -192,11 +194,10 @@ func loadCA(path string) ([]byte, error) {
 	if info, err := os.Stat(path); err == nil && !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s holds no PEM certificate", path)
 	}
-	fd, err := openFile(path, unix.O_RDONLY|unix.O_NONBLOCK, 0)
+	file, err := openFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
-	file := os.NewFile(uintptr(fd), path)
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
@@ -246,7 +247,7 @@ func (q *questions) ca() (string, error) {
 			return "", q.answer("CA certificate", "System roots")
 		}
 		if value == "other" {
-			value, err = q.input("CA file (blank returns)", "", "path", func(s string) error {
+			value, err = q.input("CA file (blank returns)", "", "", "path", func(s string) error {
 				if s == "" {
 					return nil
 				}
@@ -356,11 +357,10 @@ func readablePath(s string) (string, error) {
 	if info, err := os.Stat(p); err == nil && !info.Mode().IsRegular() {
 		return "", fmt.Errorf("%s is not a regular file", p)
 	}
-	fd, err := openFile(p, unix.O_RDONLY|unix.O_NONBLOCK, 0)
+	f, err := openFile(p, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return "", err
 	}
-	f := os.NewFile(uintptr(fd), p)
 	info, err := f.Stat()
 	if err != nil {
 		f.Close()
@@ -395,11 +395,10 @@ func loadPassword(path string) ([]byte, error) {
 	if info, err := os.Stat(path); err == nil && !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
-	fd, err := openFile(path, unix.O_RDONLY|unix.O_NONBLOCK, 0)
+	file, err := openFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
-	file := os.NewFile(uintptr(fd), path)
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {

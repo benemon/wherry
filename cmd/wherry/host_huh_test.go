@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -24,7 +25,6 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
-	"golang.org/x/sys/unix"
 )
 
 type signalledOutput struct {
@@ -411,7 +411,7 @@ func TestHostLabelsTargetsAndEscapes(t *testing.T) {
 func TestHostCARejectsUnsafeFiles(t *testing.T) {
 	dir := t.TempDir()
 	fifo := filepath.Join(dir, "fifo")
-	if err := unix.Mkfifo(fifo, 0600); err != nil {
+	if err := syscall.Mkfifo(fifo, 0600); err != nil {
 		t.Fatal(err)
 	}
 	link := filepath.Join(dir, "link")
@@ -477,17 +477,38 @@ func TestHostHuhTabRefreshAndNoMatch(t *testing.T) {
 	scriptForms(t, []string{"~/o", "\t", "t", "\t", "\r"}, []string{"no-match", "\t", "\r"})
 	q := &questions{context.Background(), nil, &promptLatch{out: io.Discard}}
 	for _, want := range []string{"~/one/two/", "no-match"} {
-		got, err := q.input("File", "", "path", func(string) error { return nil })
+		got, err := q.input("File", "", "", "path", func(string) error { return nil })
 		if err != nil || got != want {
 			t.Fatalf("%q, %v; want %s", got, err, want)
 		}
+	}
+}
+func TestQuestionsTrimAndAsk(t *testing.T) {
+	scriptForms(t, keys("   \r"), keys("  value  \r"))
+	var out bytes.Buffer
+	q := &questions{context.Background(), nil, &promptLatch{out: &out}}
+	var seen []string
+	validate := func(s string) error { seen = append(seen, s); return nil }
+	if value, err := q.input("File", "", "", "path", validate); err != nil || value != "" {
+		t.Fatalf("whitespace-only answer: %q, %v", value, err)
+	}
+	if value, err := q.ask("Name", "Shown \x1b under the title", "", "", validate); err != nil || value != "value" {
+		t.Fatalf("trimmed answer: %q, %v", value, err)
+	}
+	for _, s := range seen {
+		if s != strings.TrimSpace(s) {
+			t.Fatalf("validator saw untrimmed %q", s)
+		}
+	}
+	if len(seen) == 0 || !strings.Contains(out.String(), "? Name  value\n") || !strings.Contains(out.String(), `Shown \x1b under`) || strings.Contains(out.String(), "\x1b under") {
+		t.Fatalf("ask output: %q", out.String())
 	}
 }
 func TestHostHuhBlankAndEscapedValidation(t *testing.T) {
 	scriptForms(t, keys("\r"), []string{"bad\r", "\x15good\r"})
 	var out bytes.Buffer
 	q := &questions{context.Background(), nil, &promptLatch{out: &out}}
-	if value, err := q.input("File", "", "path", func(s string) error {
+	if value, err := q.input("File", "", "", "path", func(s string) error {
 		if s == "" {
 			return nil
 		}
@@ -495,7 +516,7 @@ func TestHostHuhBlankAndEscapedValidation(t *testing.T) {
 	}); err != nil || value != "" {
 		t.Fatal(value, err)
 	}
-	value, err := q.input("Variable", "", "variable", func(s string) error {
+	value, err := q.input("Variable", "", "", "variable", func(s string) error {
 		if s == "bad" {
 			return errors.New("bad\x1b]52;c;evil\a")
 		}
@@ -517,14 +538,14 @@ func TestHostPromptFailuresAndEOF(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	q := &questions{ctx, strings.NewReader(""), &promptLatch{out: failingPrompt{}}}
-	if _, err := q.input("File", "", "path", func(string) error { return nil }); !errors.Is(err, io.ErrClosedPipe) {
+	if _, err := q.input("File", "", "", "path", func(string) error { return nil }); !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatal(err)
 	}
 	eofCtx, eofCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer eofCancel()
 	q = &questions{eofCtx, strings.NewReader(""), &promptLatch{out: io.Discard}}
 	started := time.Now()
-	if _, err := q.input("File", "", "path", func(string) error { return nil }); err == nil {
+	if _, err := q.input("File", "", "", "path", func(string) error { return nil }); err == nil {
 		t.Fatal("EOF succeeded")
 	}
 	if elapsed := time.Since(started); elapsed >= 500*time.Millisecond {
@@ -644,7 +665,7 @@ func TestHostSharedInputTypeahead(t *testing.T) {
 					}
 					io.WriteString(w, text)
 				}(i)
-				got, err := q.input("File", "", "path", func(string) error { return nil })
+				got, err := q.input("File", "", "", "path", func(string) error { return nil })
 				<-sent
 				if i == 0 && errors.Is(err, errInterrupted) {
 					continue
@@ -680,7 +701,7 @@ func TestHostClipboardIsDisabled(t *testing.T) {
 	if os.Getenv("HOST_CLIPBOARD_CHILD") == "1" {
 		scriptForms(t, []string{"\x16", "\r"}, []string{"\x16", "\r"})
 		q := &questions{context.Background(), nil, &promptLatch{out: io.Discard}}
-		if got, err := q.input("File", "", "path", func(string) error { return nil }); got != "" || err != nil {
+		if got, err := q.input("File", "", "", "path", func(string) error { return nil }); got != "" || err != nil {
 			t.Fatal(got, err)
 		}
 		prev := "a"
@@ -712,7 +733,7 @@ func TestHostClipboardIsDisabled(t *testing.T) {
 func TestHostReadablePathRejectsNonRegularFiles(t *testing.T) {
 	dir := t.TempDir()
 	fifo := filepath.Join(dir, "fifo")
-	if err := unix.Mkfifo(fifo, 0600); err != nil {
+	if err := syscall.Mkfifo(fifo, 0600); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{fifo, dir} {
@@ -721,7 +742,7 @@ func TestHostReadablePathRejectsNonRegularFiles(t *testing.T) {
 			var out bytes.Buffer
 			q := &questions{context.Background(), nil, &promptLatch{out: &out}}
 			started := time.Now()
-			_, err := q.input("known_hosts file", "", "path", func(s string) error {
+			_, err := q.input("known_hosts file", "", "", "path", func(s string) error {
 				_, err := readablePath(s)
 				return err
 			})
@@ -744,14 +765,14 @@ func TestHostCADoesNotTrustPreOpenMetadata(t *testing.T) {
 	old := openFile
 	t.Cleanup(func() { openFile = old })
 	called := false
-	openFile = func(p string, flags int, mode uint32) (int, error) {
+	openFile = func(p string, flags int, mode os.FileMode) (*os.File, error) {
 		called = true
-		if flags&unix.O_NONBLOCK == 0 {
+		if flags&syscall.O_NONBLOCK == 0 {
 			t.Error("CA open can block")
 		}
 		os.Remove(p)
-		if err := unix.Mkfifo(p, 0600); err != nil {
-			return -1, err
+		if err := syscall.Mkfifo(p, 0600); err != nil {
+			return nil, err
 		}
 		return old(p, flags, mode)
 	}
@@ -972,7 +993,7 @@ func TestHostCommandAndVariableTab(t *testing.T) {
 	scriptForms(t, []string{"test-ex", "\t", "\r"}, []string{"UNIQUE_COMPLETION_V", "\t", "\r"})
 	q := &questions{context.Background(), nil, &promptLatch{out: io.Discard}}
 	for _, item := range []struct{ kind, want string }{{"command", "test-executable"}, {"variable", "UNIQUE_COMPLETION_VARIABLE"}} {
-		if got, err := q.input("Input", "", item.kind, func(string) error { return nil }); err != nil || got != item.want {
+		if got, err := q.input("Input", "", "", item.kind, func(string) error { return nil }); err != nil || got != item.want {
 			t.Fatal(got, err)
 		}
 	}
@@ -1057,7 +1078,7 @@ func TestHostNoMatchTabKeepsInputOpen(t *testing.T) {
 	ready := make(chan struct{})
 	q := &questions{ctx, r, &promptLatch{out: &signalledOutput{Writer: io.Discard, ready: ready}}}
 	done := make(chan error, 1)
-	go func() { _, err := q.input("File", "", "path", func(string) error { return nil }); done <- err }()
+	go func() { _, err := q.input("File", "", "", "path", func(string) error { return nil }); done <- err }()
 	<-ready
 	io.WriteString(w, "/no-such-wherry-directory/zzz")
 	time.Sleep(80 * time.Millisecond)
@@ -1156,7 +1177,7 @@ func TestHostContextCancellation(t *testing.T) {
 	defer r.Close()
 	defer w.Close()
 	q := &questions{ctx, r, &promptLatch{out: io.Discard}}
-	if _, err := q.input("File", "", "path", func(string) error { return nil }); err == nil {
+	if _, err := q.input("File", "", "", "path", func(string) error { return nil }); err == nil {
 		t.Fatal("cancelled context accepted")
 	}
 }
@@ -1179,7 +1200,7 @@ func TestHostCAHiddenPathAndHostileName(t *testing.T) {
 	os.WriteFile(name, []byte(ca), 0600)
 	os.WriteFile(".hidden", []byte(ca), 0600)
 	os.Mkdir("directory", 0700)
-	if err := unix.Mkfifo("fifo", 0600); err != nil {
+	if err := syscall.Mkfifo("fifo", 0600); err != nil {
 		t.Fatal(err)
 	}
 	options := caOptions()
@@ -1226,7 +1247,7 @@ func TestHostSSHDoesNotSuggestFilesystemPaths(t *testing.T) {
 	}
 	scriptForms(t, []string{"\t", "\r"})
 	q := &questions{context.Background(), nil, &promptLatch{out: io.Discard}}
-	if got, err := q.input("SSH URL prefix", "", "", func(string) error { return nil }); err != nil || got != "" {
+	if got, err := q.input("SSH URL prefix", "", "", "", func(string) error { return nil }); err != nil || got != "" {
 		t.Fatal(got, err)
 	}
 }
@@ -1235,13 +1256,13 @@ func TestHostSSHDoesNotSuggestFilesystemPaths(t *testing.T) {
 func TestHostSpecialFilesAreNotOpened(t *testing.T) {
 	dir := t.TempDir()
 	fifo := filepath.Join(dir, "fifo")
-	if err := unix.Mkfifo(fifo, 0600); err != nil {
+	if err := syscall.Mkfifo(fifo, 0600); err != nil {
 		t.Fatal(err)
 	}
 	old := openFile
 	t.Cleanup(func() { openFile = old })
 	var opened []string
-	openFile = func(p string, flags int, mode uint32) (int, error) {
+	openFile = func(p string, flags int, mode os.FileMode) (*os.File, error) {
 		opened = append(opened, p)
 		return old(p, flags, mode)
 	}
