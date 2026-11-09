@@ -153,11 +153,9 @@ func TestPoolApplyCreateSetsDerivedRetentionOnNewAndExistingTopics(t *testing.T)
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
-		t.Fatal(err)
-	}
+	poolWithReceiver(t, service)
 	want := int64(367200000)
-	topics := []string{PoolTasksTopic("pool-a"), PoolEventsTopic("pool-a")}
+	topics := []string{modelTopic("pool-a"), PoolEventsTopic("pool-a")}
 	for _, topic := range topics {
 		if got := topicRetention(t, service, topic); got != want {
 			t.Fatalf("%s retention.ms = %d, want %d, the 72h start_by_limit plus the 6h run cap and 24h margin", topic, got, want)
@@ -193,8 +191,9 @@ func TestPoolApplyUpdateNeverLowersPoolTopicRetention(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
+	addModelReceiver(t, service, "receiver-a")
 	want := int64(terms.StartByLimitMS) + MaxRunDurationMS + retentionMarginMS
-	topics := []string{PoolTasksTopic("pool-a"), PoolEventsTopic("pool-a")}
+	topics := []string{modelTopic("pool-a"), PoolEventsTopic("pool-a")}
 	for _, topic := range topics {
 		setTopicConfig(t, service, topic, "message.timestamp.type", "CreateTime")
 		if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: topic, Value: []byte("run-a"), Timestamp: time.Now().Add(-5 * 24 * time.Hour)}).FirstErr(); err != nil {
@@ -228,9 +227,7 @@ func TestPoolApplyUpdateRaisesRetentionBeforeLongerTerms(t *testing.T) {
 	cluster, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
-		t.Fatal(err)
-	}
+	poolWithReceiver(t, service)
 	terms := modelTerms()
 	terms.StartByLimitMS = Millis((10 * 24 * time.Hour).Milliseconds())
 	want := int64(terms.StartByLimitMS) + MaxRunDurationMS + retentionMarginMS
@@ -252,7 +249,7 @@ func TestPoolApplyUpdateRaisesRetentionBeforeLongerTerms(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", terms, false); err == nil || !strings.Contains(err.Error(), "write operator record") {
 		t.Fatalf("pool apply = %v; want the terms record refused", err)
 	}
-	for _, topic := range []string{PoolTasksTopic("pool-a"), PoolEventsTopic("pool-a")} {
+	for _, topic := range []string{modelTopic("pool-a"), PoolEventsTopic("pool-a")} {
 		if got := topicRetention(t, service, topic); got != want {
 			t.Fatalf("%s retention.ms = %d, want %d raised before the terms", topic, got, want)
 		}
@@ -268,9 +265,7 @@ func TestPoolApplyUpdateFailsOnRetentionNotApplied(t *testing.T) {
 	cluster, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
-		t.Fatal(err)
-	}
+	poolWithReceiver(t, service)
 	terms := modelTerms()
 	terms.StartByLimitMS = Millis((10 * 24 * time.Hour).Milliseconds())
 	cluster.ControlKey(int16(kmsg.IncrementalAlterConfigs), func(request kmsg.Request) (kmsg.Response, error, bool) {
@@ -285,7 +280,7 @@ func TestPoolApplyUpdateFailsOnRetentionNotApplied(t *testing.T) {
 		return response, nil, true
 	})
 	err := service.PoolApply(ctx, "pool-a", terms, false)
-	if err == nil || err.Error() != "configure topics wherry.pool.pool-a.tasks: not applied within 10s" {
+	if err == nil || err.Error() != "configure topics "+modelTopic("pool-a")+": not applied within 10s" {
 		t.Fatalf("pool apply = %v; want the unapplied retention reported", err)
 	}
 	if state, err := service.LoadState(ctx); err != nil || state.Pools["pool-a"].StartByLimitMS != Millis((72*time.Hour).Milliseconds()) {
@@ -300,9 +295,7 @@ func TestPoolApplyUpdateFailsOnRetentionDescribeFailingThenOld(t *testing.T) {
 	cluster, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
-		t.Fatal(err)
-	}
+	poolWithReceiver(t, service)
 	terms := modelTerms()
 	terms.StartByLimitMS = Millis((10 * 24 * time.Hour).Milliseconds())
 	var altered atomic.Bool
@@ -333,7 +326,7 @@ func TestPoolApplyUpdateFailsOnRetentionDescribeFailingThenOld(t *testing.T) {
 		return response, nil, true
 	})
 	err := service.PoolApply(ctx, "pool-a", terms, false)
-	if err == nil || err.Error() != "configure topics wherry.pool.pool-a.tasks: not applied within 10s" {
+	if err == nil || err.Error() != "configure topics "+modelTopic("pool-a")+": not applied within 10s" {
 		t.Fatalf("pool apply = %v; want the old retention after the failed describe reported", err)
 	}
 	if state, err := service.LoadState(ctx); err != nil || state.Pools["pool-a"].StartByLimitMS != Millis((72*time.Hour).Milliseconds()) {
@@ -392,15 +385,13 @@ func TestPoolApplyDryRunCreatesNoTopic(t *testing.T) {
 // pool and an existing one.
 func TestPoolApplyDryRunRefusesAPartitionedTopic(t *testing.T) {
 	for _, existing := range []bool{false, true} {
-		for _, topic := range []string{PoolTasksTopic("pool-a"), PoolEventsTopic("pool-a")} {
+		for _, topic := range []string{modelTopic("pool-a"), PoolEventsTopic("pool-a")} {
 			t.Run(fmt.Sprintf("existing=%t/%s", existing, topic), func(t *testing.T) {
 				_, service, closeFixture := kfakeService(t)
 				defer closeFixture()
 				ctx := context.Background()
 				if existing {
-					if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
-						t.Fatal(err)
-					}
+					poolWithReceiver(t, service)
 					addPartition(t, service, topic)
 				} else {
 					responses, err := kadm.NewClient(service.Operator).CreateTopics(ctx, 2, -1, nil, topic)
@@ -449,7 +440,7 @@ func TestOnePartitionReportsAMetadataError(t *testing.T) {
 		}
 		return response, nil, true
 	})
-	err := service.onePartition(context.Background(), true, PoolTasksTopic("pool-a"), PoolEventsTopic("pool-a"))
+	err := service.onePartition(context.Background(), true, modelTopic("pool-a"), PoolEventsTopic("pool-a"))
 	if err == nil || !strings.HasPrefix(err.Error(), "topic wherry.pool.pool-a.events: TOPIC_AUTHORIZATION_FAILED") {
 		t.Fatalf("onePartition = %v; want the events topic's authorisation error", err)
 	}
@@ -465,7 +456,7 @@ func TestPoolApplyRetryCompletesTheTopics(t *testing.T) {
 	cluster.ControlKey(int16(kmsg.CreateTopics), func(request kmsg.Request) (kmsg.Response, error, bool) {
 		cluster.KeepControl()
 		create := request.(*kmsg.CreateTopicsRequest)
-		if !slices.ContainsFunc(create.Topics, func(topic kmsg.CreateTopicsRequestTopic) bool { return topic.Topic == PoolTasksTopic("pool-a") }) || refused.Swap(true) {
+		if !slices.ContainsFunc(create.Topics, func(topic kmsg.CreateTopicsRequestTopic) bool { return topic.Topic == PoolEventsTopic("pool-a") }) || refused.Swap(true) {
 			return nil, nil, false
 		}
 		response := create.ResponseKind().(*kmsg.CreateTopicsResponse)
@@ -485,6 +476,7 @@ func TestPoolApplyRetryCompletesTheTopics(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatalf("pool apply again = %v; want the topics completed", err)
 	}
+	addModelReceiver(t, service, "receiver-a")
 	assertPoolTopicLayout(t, service, "pool-a")
 	if err := service.Check(ctx); err != nil {
 		t.Fatalf("check after the completed create = %v", err)
@@ -534,15 +526,13 @@ func TestPoolApplyUpdateRaisesEventsRetentionToTasks(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
-		t.Fatal(err)
-	}
+	poolWithReceiver(t, service)
 	tasks := (20 * 24 * time.Hour).Milliseconds()
-	setTopicRetention(t, service, PoolTasksTopic("pool-a"), tasks)
+	setTopicRetention(t, service, modelTopic("pool-a"), tasks)
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	for _, topic := range []string{PoolTasksTopic("pool-a"), PoolEventsTopic("pool-a")} {
+	for _, topic := range []string{modelTopic("pool-a"), PoolEventsTopic("pool-a")} {
 		if got := topicRetention(t, service, topic); got != tasks {
 			t.Fatalf("%s retention.ms = %d, want %d, the tasks topic's", topic, got, tasks)
 		}
@@ -565,10 +555,8 @@ func TestPoolApplyCreateSetsThePoolTopicLayout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
-		t.Fatal(err)
-	}
-	topics := []string{PoolTasksTopic("pool-a"), PoolEventsTopic("pool-a")}
+	poolWithReceiver(t, service)
+	topics := []string{modelTopic("pool-a"), PoolEventsTopic("pool-a")}
 	for _, topic := range topics {
 		if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: topic, Value: []byte("run-a")}).FirstErr(); err != nil {
 			t.Fatal(err)
@@ -593,10 +581,8 @@ func TestPoolApplyUpdateEnforcesThePoolTopicLayout(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
-		t.Fatal(err)
-	}
-	for _, topic := range []string{PoolTasksTopic("pool-a"), PoolEventsTopic("pool-a")} {
+	poolWithReceiver(t, service)
+	for _, topic := range []string{modelTopic("pool-a"), PoolEventsTopic("pool-a")} {
 		setTopicConfig(t, service, topic, "cleanup.policy", "compact")
 		setTopicConfig(t, service, topic, "retention.bytes", "1073741824")
 	}
@@ -623,7 +609,7 @@ func TestPoolApplyUpdateEnforcesThePoolTopicLayout(t *testing.T) {
 // cleanup.policy=delete and retention.bytes=-1.
 func assertPoolTopicLayout(t *testing.T, service *Service, pool string) {
 	t.Helper()
-	topics := []string{PoolTasksTopic(pool), PoolEventsTopic(pool)}
+	topics := []string{modelTopic(pool), PoolEventsTopic(pool)}
 	details, err := kadm.NewClient(service.Operator).ListTopics(context.Background(), topics...)
 	if err != nil {
 		t.Fatal(err)
@@ -689,7 +675,7 @@ func TestPoolApplyUpdateRefusesStartByLimitPastAnEntitledFeed(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
+	if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
 	setTopicRetention(t, service, TenantTopic("tenant-a"), 280799999)
@@ -708,7 +694,7 @@ func TestPoolApplyUpdateRefusesTermsThatStrandALiveReceiver(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
-	config := ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []ProfileSettings{{Name: "profile-codex", Plugin: "fake", Agent: "codex"}},
+	config := ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []ProfileSettings{{Name: "profile-codex", Plugin: "fake", Agent: "codex"}},
 		PluginSHA256: map[string]string{"fake": strings.Repeat("ab", 32)}}
 	if err := service.ReceiverAdd(ctx, config, service.Broker, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
@@ -740,7 +726,7 @@ func TestTenantAddRefusesAFeedBelowThePoolsStartByLimit(t *testing.T) {
 	if err := service.createTopics(ctx, "280799999", TenantTopic("tenant-a")); err != nil {
 		t.Fatal(err)
 	}
-	err := service.TenantAdd(ctx, "tenant-a", "pool-a")
+	err := entitleFixture(t, service, ctx, "tenant-a", "pool-a")
 	if err == nil || err.Error() != "topic wherry.tenant.tenant-a retention.ms 280799999 is below required 280800000" {
 		t.Fatalf("tenant add = %v", err)
 	}
@@ -756,10 +742,10 @@ func TestCheckReportsRetentionDrift(t *testing.T) {
 		want   string
 	}{
 		{"tasks below start_by_limit plus run time and margin", func(t *testing.T, service *Service) {
-			setTopicRetention(t, service, PoolTasksTopic("pool-a"), 367199999)
-		}, "wherry.pool.pool-a.tasks"},
+			setTopicRetention(t, service, modelTopic("pool-a"), 367199999)
+		}, modelTopic("pool-a") + " retention.ms 367199999 is below required 367200000"},
 		{"events below tasks", func(t *testing.T, service *Service) {
-			setTopicRetention(t, service, PoolTasksTopic("pool-a"), 370000000)
+			setTopicRetention(t, service, modelTopic("pool-a"), 370000000)
 		}, "wherry.pool.pool-a.events"},
 		{"feed below start_by_limit plus run time", func(t *testing.T, service *Service) {
 			setTopicRetention(t, service, TenantTopic("tenant-a"), 280799999)
@@ -778,11 +764,12 @@ func TestCheckReportsRetentionDrift(t *testing.T) {
 			_, service, closeFixture := kfakeService(t)
 			defer closeFixture()
 			ctx := context.Background()
-			if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
+			poolWithReceiver(t, service)
+			if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err != nil {
 				t.Fatal(err)
 			}
-			if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
-				t.Fatal(err)
+			if err := service.Check(ctx); err != nil {
+				t.Fatalf("check before drift: %v", err)
 			}
 			test.mutate(t, service)
 			if err := service.Check(ctx); err == nil || !strings.Contains(err.Error(), test.want) {
@@ -838,11 +825,16 @@ func TestPoolApplyCreateRecordsTheRecordLimit(t *testing.T) {
 	if got := recorded(); got != 1000000 {
 		t.Fatalf("record limit %d; want the broker's message.max.bytes", got)
 	}
-	setTopicLimit(t, service, PoolTasksTopic("pool-a"), "600000")
+	// With a task topic that sets no limit of its own, the brokers' still bounds it.
+	addModelReceiver(t, service, "receiver-a")
+	if got := recorded(); got != 1000000 {
+		t.Fatalf("record limit %d with a task topic; want the broker's message.max.bytes", got)
+	}
+	setTopicLimit(t, service, modelTopic("pool-a"), "600000")
 	if got := recorded(); got != 600000 {
 		t.Fatalf("record limit %d; want the task topic's max.message.bytes", got)
 	}
-	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
+	if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
 	// A tenant feed's own max.message.bytes overrides the brokers', so the largest result fits a feed above them.
@@ -899,18 +891,18 @@ func TestTenantFeedsTakeTheFeedRecordLimit(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
 		t.Fatal(err)
 	}
 	atLimit("host add", feeds("tenant-a")...)
 	if err := service.createTopics(ctx, strconv.Itoa(tenantRetentionMS), feeds("tenant-b")...); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.TenantAdd(ctx, "tenant-b", "pool-a"); err != nil {
+	if err := entitleFixture(t, service, ctx, "tenant-b", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
 	atLimit("pool entitle on existing feeds", feeds("tenant-b")...)
-	if err := service.TenantAdd(ctx, "tenant-c", "pool-a"); err != nil {
+	if err := entitleFixture(t, service, ctx, "tenant-c", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
 	atLimit("pool entitle", feeds("tenant-c")...)
@@ -952,7 +944,7 @@ func TestCheckReportsLimitsTheBrokerNoLongerCarries(t *testing.T) {
 	if err != nil || len(records) != 1 || strings.Contains(string(records[0].Value), "output_limit") {
 		t.Fatalf("pool record %v, %v; want one without an output limit", records, err)
 	}
-	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
+	if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.Check(ctx); err != nil {
@@ -989,7 +981,7 @@ func TestTenantAddRefusesAFeedThePoolDoesNotFit(t *testing.T) {
 		}
 		return response, nil, true
 	})
-	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err == nil || !strings.HasSuffix(err.Error(), "not applied within 10s") {
+	if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err == nil || !strings.HasSuffix(err.Error(), "not applied within 10s") {
 		t.Fatalf("tenant add = %v; want the tenant feed's limit unapplied", err)
 	}
 	if state, err := service.LoadState(ctx); err != nil || len(state.Entitlements) != 0 {
@@ -1004,7 +996,7 @@ func TestCheckFailsOnAMissingTenantFeed(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
+	if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := kadm.NewClient(service.Operator).DeleteTopics(ctx, TenantTopic("tenant-a")); err != nil {
@@ -1080,6 +1072,17 @@ func TestPoolVCS(t *testing.T) {
 		if _, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}); err == nil {
 			t.Errorf("vcs hosts %q encoded", hosts)
 		}
+	}
+}
+
+func TestDuplicateAgentRefused(t *testing.T) {
+	terms := modelTerms()
+	terms.Agents = append(terms.Agents, terms.Agents[0])
+	if err := validateTerms(terms); err == nil || err.Error() != "agent agent-a is listed twice" {
+		t.Fatalf("duplicate agent: %v", err)
+	}
+	if _, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}); err == nil {
+		t.Fatal("duplicate agent encoded")
 	}
 }
 
@@ -1286,7 +1289,7 @@ func TestSingleAnswerTermsDefault(t *testing.T) {
 	}
 }
 
-// wherry.receivers is created compacted, and one created before converges on the next operator write.
+// A progress topic is created compacted, and one created before converges on the next pool apply.
 func TestProgressTopicIsCompactedOnNewAndExistingTopics(t *testing.T) {
 	cluster, service, closeFixture := kfakeService(t)
 	defer closeFixture()
@@ -1355,19 +1358,37 @@ func TestProgressTopicIsCompactedOnNewAndExistingTopics(t *testing.T) {
 	}
 }
 
-func TestReceiversTopicIsCompactedOnNewAndExistingTopics(t *testing.T) {
+// A pool's receivers topic is created compacted with one partition by pool apply before the pool's record is appended,
+// on a new pool and on an update; a re-apply with the same terms restores its configs and creates it again when missing.
+func TestPoolReceiversTopicIsCompactedOnNewAndExistingPools(t *testing.T) {
 	cluster, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
+	topic := PoolReceiversTopic("pool-a")
+	// kfake still lists a deleted topic; describing its configs does not.
+	exists := func() bool {
+		resources, err := kadm.NewClient(service.Operator).DescribeTopicConfigs(ctx, topic)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(resources) == 1 && resources[0].Err == nil
+	}
+	var appends []bool
+	appended = func(record Record) {
+		if record.Kind == "pool" {
+			appends = append(appends, exists())
+		}
+	}
+	t.Cleanup(func() { appended = func(Record) {} })
 	var mu sync.Mutex
 	created := map[string]string{}
 	cluster.ControlKey(int16(kmsg.CreateTopics), func(request kmsg.Request) (kmsg.Response, error, bool) {
 		cluster.KeepControl()
 		mu.Lock()
 		defer mu.Unlock()
-		for _, topic := range request.(*kmsg.CreateTopicsRequest).Topics {
-			if topic.Topic == ReceiversTopic {
-				for _, config := range topic.Configs {
+		for _, requested := range request.(*kmsg.CreateTopicsRequest).Topics {
+			if requested.Topic == topic {
+				for _, config := range requested.Configs {
 					created[config.Name] = *config.Value
 				}
 			}
@@ -1377,34 +1398,78 @@ func TestReceiversTopicIsCompactedOnNewAndExistingTopics(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
+	if !reflect.DeepEqual(appends, []bool{true}) {
+		t.Fatalf("%s existed at the new pool's record: %v, want [true]", topic, appends)
+	}
 	want := map[string]string{"cleanup.policy": "compact,delete", "message.timestamp.type": "LogAppendTime", "retention.ms": "604800000", "segment.ms": "3600000", "max.compaction.lag.ms": "3600000"}
 	mu.Lock()
 	if !reflect.DeepEqual(created, want) {
-		t.Errorf("created %s with %v, want %v", ReceiversTopic, created, want)
+		t.Errorf("created %s with %v, want %v", topic, created, want)
 	}
 	mu.Unlock()
 	configs := func() map[string]string {
 		t.Helper()
 		got := map[string]string{}
 		for name := range want {
-			values, err := service.topicConfigs(ctx, name, ReceiversTopic)
+			values, err := service.topicConfigs(ctx, name, topic)
 			if err != nil {
 				t.Fatal(err)
 			}
-			got[name] = values[ReceiversTopic]
+			got[name] = values[topic]
 		}
 		return got
 	}
 	if got := configs(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("new %s configs %v, want %v", ReceiversTopic, got, want)
+		t.Fatalf("new %s configs %v, want %v", topic, got, want)
 	}
-	setTopicConfig(t, service, ReceiversTopic, "cleanup.policy", "delete")
-	setTopicConfig(t, service, ReceiversTopic, "segment.ms", "604800000")
-	if err := service.PoolApply(ctx, "pool-b", modelTerms(), false); err != nil {
+	if err := service.onePartition(ctx, false, topic); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Check(ctx); err != nil {
+		t.Fatalf("check of a new pool: %v", err)
+	}
+	setTopicConfig(t, service, topic, "cleanup.policy", "delete")
+	setTopicConfig(t, service, topic, "segment.ms", "604800000")
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	if got := configs(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("existing %s configs %v, want %v", ReceiversTopic, got, want)
+		t.Fatalf("existing %s configs %v, want %v", topic, got, want)
+	}
+	deleteTopic := func() {
+		t.Helper()
+		responses, err := kadm.NewClient(service.Operator).DeleteTopics(ctx, topic)
+		if err == nil {
+			err = responses.Error()
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	deleteTopic()
+	raised := modelTerms()
+	raised.StartByLimitMS = Millis((10 * 24 * time.Hour).Milliseconds())
+	if err := service.PoolApply(ctx, "pool-a", raised, false); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(appends, []bool{true, true}) {
+		t.Fatalf("%s existed at the pool's records: %v, want [true true]", topic, appends)
+	}
+	if got := configs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s configs after an update %v, want %v", topic, got, want)
+	}
+	deleteTopic()
+	if err := service.PoolApply(ctx, "pool-a", raised, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(appends) != 2 {
+		t.Fatalf("a same-terms re-apply appended a pool record: %v", appends)
+	}
+	if !exists() {
+		t.Fatalf("%s missing after a same-terms re-apply", topic)
+	}
+	if got := configs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s configs after a same-terms re-apply %v, want %v", topic, got, want)
 	}
 }
 
@@ -1597,7 +1662,7 @@ func TestTenantAddWaitsForItsFeedsToReachEveryBroker(t *testing.T) {
 				return response, nil, true
 			})
 			start := time.Now()
-			err := service.TenantAdd(ctx, "tenant-a", "pool-a")
+			err := entitleFixture(t, service, ctx, "tenant-a", "pool-a")
 			if test.want == "" && err != nil || test.want != "" && (err == nil || !strings.HasPrefix(err.Error(), test.want) || time.Since(start) < topicWait) {
 				t.Fatalf("tenant add = %v after %v; want %q", err, time.Since(start), test.want)
 			}

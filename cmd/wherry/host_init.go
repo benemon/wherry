@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -16,9 +15,9 @@ import (
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/charmbracelet/huh"
 )
 
-// credentialUse is a pool's delivery of a credential to its agents.
 type credentialUse struct {
 	pool     string
 	target   wire.TaskCredential
@@ -32,10 +31,13 @@ func (use credentialUse) as() string {
 	return use.target.Env
 }
 
-// hostInit places bundle, when given, at the default bundle path, creates and registers the host key, and gives the
-// config at path what the tenant's entitled pools need and it lacks: on a terminal by asking, otherwise by listing it.
-// The config holds references to sources, never a value; an entry it has is kept.
-func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Writer) error {
+// hostInit registers a host and configures references to the sources its entitled pools need.
+func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Writer) (result error) {
+	defer func() {
+		if result != nil {
+			result = presentationError{result}
+		}
+	}()
 	dir, err := busclient.ConfigDir()
 	if err != nil {
 		return err
@@ -71,30 +73,31 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 	} else if file.Bundle == "" {
 		return fmt.Errorf("%s names no bundle; run wherry host init BUNDLE", path)
 	}
-	onTerminal := terminal()
-	p := newPrompter(prompts)
-	if _, err := os.Stat(filepath.Join(dir, "ca.pem")); file.CAFile == "" && errors.Is(err, os.ErrNotExist) && onTerminal {
-		for {
-			answer, err := p.ask("CA file for the broker's certificate (blank for the system roots)", "")
-			if err != nil {
-				return err
-			}
-			if answer == "" {
-				break
-			}
-			caFile, err := localPath(answer)
-			if err != nil {
-				return err
-			}
-			if pem, err := os.ReadFile(caFile); err == nil && x509.NewCertPool().AppendCertsFromPEM(pem) {
-				file.CAFile, changed = caFile, true
-				break
-			}
-			fmt.Fprintf(p.out, "%s holds no PEM certificate\n", caFile)
+
+	q := &questions{ctx, stdin, &promptLatch{out: prompts}}
+	interactive := promptsEligible(prompts)
+	wrote := false
+	write := func() error {
+		if err := writeHostConfig(path, file); err != nil {
+			return err
+		}
+		wrote = true
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ca.pem")); file.CAFile == "" && errors.Is(err, os.ErrNotExist) && interactive {
+		if err = q.line("\nBroker\n"); err != nil {
+			return err
+		}
+		ca, err := q.ca()
+		if err != nil {
+			return err
+		}
+		if ca != "" {
+			file.CAFile, changed = ca, true
 		}
 	}
 	if changed {
-		if err := writeHostConfig(path, file, prompts); err != nil {
+		if err := write(); err != nil {
 			return err
 		}
 	}
@@ -106,221 +109,331 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(stdout, keyID)
-	if len(pools) == 0 {
-		fmt.Fprintln(prompts, "this host's tenant is entitled to no pool yet; run wherry host init again once the operator entitles it to one")
-		return nil
-	}
-	changed = false
-	var missing []string
-	setSource := func(name string, source credential.Source) {
-		if file.Credentials == nil {
-			file.Credentials = map[string]credential.Source{}
-		}
-		file.Credentials[name], changed = source, true
-	}
-	// configured asks for name's source unless the config has one or this run asked already, and reports whether it has
-	// one now.
-	asked := map[string]bool{}
-	configured := func(name string, uses []credentialUse) (bool, error) {
-		if _, ok := file.Credentials[name]; ok {
-			return true, nil
-		}
-		if asked[name] {
-			return false, nil
-		}
-		asked[name] = true
-		source, err := askSource(p, name, uses)
-		if err != nil || source.Validate() != nil {
-			return false, err
-		}
-		setSource(name, source)
-		return true, nil
-	}
-	poolNames := slices.Sorted(maps.Keys(pools))
-	uses := map[string][]credentialUse{}
-	var vcsHosts []string
-	for _, pool := range poolNames {
-		for _, agent := range pools[pool].Agents {
-			for _, agentCredential := range agent.Credentials {
-				use := credentialUse{pool, agentCredential.TaskCredential, agentCredential.Optional()}
-				if !slices.Contains(uses[agentCredential.Name], use) {
-					uses[agentCredential.Name] = append(uses[agentCredential.Name], use)
-				}
-			}
-		}
-		vcsHosts = append(vcsHosts, pools[pool].VCS...)
-	}
-	for _, name := range slices.Sorted(maps.Keys(uses)) {
-		if _, ok := file.Credentials[name]; ok {
-			continue
-		}
-		if onTerminal {
-			if ok, err := configured(name, uses[name]); err != nil {
-				return err
-			} else if ok {
-				continue
-			}
-		}
-		var delivered []string
-		for _, use := range uses[name] {
-			required := "required"
-			if use.optional {
-				required = "optional"
-			}
-			delivered = append(delivered, fmt.Sprintf("pool %s as %s, %s", use.pool, use.as(), required))
-		}
-		missing = append(missing, fmt.Sprintf("credential %s (%s)", name, strings.Join(delivered, "; ")))
-	}
-	slices.Sort(vcsHosts)
-	for _, vcsHost := range slices.Compact(vcsHosts) {
-		if slices.ContainsFunc(file.Git, func(entry busclient.GitCredential) bool {
-			return (wire.GitInput{Remote: entry.URL}).VCSHost() == vcsHost
-		}) {
-			continue
-		}
-		if onTerminal {
-			entry, err := askGit(p, vcsHost, file.Git)
-			if err != nil {
-				return err
-			}
-			ok := entry.URL != ""
-			if ok && entry.Credential != "" {
-				if ok, err = configured(entry.Credential, nil); err != nil {
-					return err
-				}
-			}
-			if ok {
-				file.Git, changed = append(file.Git, entry), true
-				continue
-			}
-		}
-		missing = append(missing, "git host "+vcsHost)
-	}
-	for _, pool := range poolNames {
-		if _, ok := file.Storage[pool]; ok || pools[pool].Storage == nil {
-			continue
-		}
-		var names []string
-		for _, key := range []string{"access key", "secret key"} {
-			if !onTerminal {
-				break
-			}
-			name, err := p.ask(fmt.Sprintf("Credential holding pool %s's S3 %s (blank skips the pool's storage)", pool, key), "")
-			if err != nil {
-				return err
-			}
-			ok := name != ""
-			if ok {
-				if ok, err = configured(name, nil); err != nil {
-					return err
-				}
-			}
-			if !ok {
-				break
-			}
-			names = append(names, name)
-		}
-		if len(names) < 2 {
-			missing = append(missing, "storage of pool "+pool)
-			continue
-		}
-		if file.Storage == nil {
-			file.Storage = map[string]busclient.StorageConfig{}
-		}
-		file.Storage[pool], changed = busclient.StorageConfig{AccessKey: names[0], SecretKey: names[1]}, true
-	}
-	if changed {
-		if err := writeHostConfig(path, file, prompts); err != nil {
+	if !interactive || !sameTerminal(stdout, prompts) {
+		if _, err = fmt.Fprintln(stdout, keyID); err != nil {
 			return err
 		}
 	}
-	if len(missing) > 0 {
-		fmt.Fprintf(prompts, "%s has no source for:\n", path)
-		for _, item := range missing {
-			fmt.Fprintf(prompts, "  %s\n", item)
+	changed = false
+	if file.Credentials == nil {
+		file.Credentials = map[string]credential.Source{}
+	}
+	uses := map[string][]credentialUse{}
+	descriptions := map[string]string{}
+	var hosts, storage []string
+	for _, pool := range slices.Sorted(maps.Keys(pools)) {
+		terms := pools[pool]
+		for _, agent := range terms.Agents {
+			for _, c := range agent.Credentials {
+				if descriptions[c.Name] == "" {
+					descriptions[c.Name] = c.Description
+				}
+				use := credentialUse{pool, c.TaskCredential, c.Optional()}
+				if !slices.Contains(uses[c.Name], use) {
+					uses[c.Name] = append(uses[c.Name], use)
+				}
+			}
+		}
+		hosts = append(hosts, terms.VCS...)
+		if _, ok := file.Storage[pool]; !ok && terms.Storage != nil {
+			storage = append(storage, pool)
+		}
+	}
+	slices.Sort(hosts)
+	hosts = slices.Compact(hosts)
+	hasGit := func(host string) bool {
+		return slices.ContainsFunc(file.Git, func(e busclient.GitCredential) bool { return (wire.GitInput{Remote: e.URL}).VCSHost() == host })
+	}
+	missing := func() []string {
+		var lines []string
+		for _, name := range slices.Sorted(maps.Keys(uses)) {
+			if _, ok := file.Credentials[name]; ok {
+				continue
+			}
+			var delivered []string
+			for _, use := range uses[name] {
+				required := "required"
+				if use.optional {
+					required = "optional"
+				}
+				delivered = append(delivered, fmt.Sprintf("pool %s as %s, %s", use.pool, use.as(), required))
+			}
+			line := fmt.Sprintf("credential %s (%s)", name, strings.Join(delivered, "; "))
+			if descriptions[name] != "" {
+				line = descriptions[name] + ", " + line
+			}
+			lines = append(lines, line)
+		}
+		for _, host := range hosts {
+			if !hasGit(host) {
+				lines = append(lines, "git host "+host)
+			}
+		}
+		for _, pool := range storage {
+			if _, ok := file.Storage[pool]; !ok {
+				lines = append(lines, "storage of pool "+pool)
+			}
+		}
+		return lines
+	}
+	topics := []string{}
+	for name := range uses {
+		if _, ok := file.Credentials[name]; !ok {
+			topics = append(topics, "Credentials")
+			break
+		}
+	}
+	for _, host := range hosts {
+		if !hasGit(host) {
+			topics = append(topics, "Git")
+			break
+		}
+	}
+	if len(storage) > 0 {
+		topics = append(topics, "Storage")
+	}
+	topics = append(topics, "Summary")
+	asked := map[string]bool{}
+	names := newGitNames(file.Git)
+	for _, host := range hosts {
+		names.allocate(host, "https")
+		names.allocate(host, "ssh")
+	}
+	source := func(name, label string, u []credentialUse, nested bool) (sourceResult, error) {
+		if s, ok := file.Credentials[name]; ok {
+			return sourceResult{name, s, true}, nil
+		}
+		if asked[name] {
+			return sourceResult{}, nil
+		}
+		return q.source(name, label, u, file.Credentials, nested)
+	}
+	commit := func(s sourceResult) {
+		if _, ok := file.Credentials[s.name]; !ok {
+			file.Credentials[s.name] = s.source
+			changed = true
+		}
+	}
+	if interactive {
+		for i, topic := range topics {
+			if err = q.line("\n%s  %d of %d\n", topic, i+1, len(topics)); err != nil {
+				return err
+			}
+			switch topic {
+			case "Credentials":
+				askedAny := false
+				for _, name := range slices.Sorted(maps.Keys(uses)) {
+					if _, ok := file.Credentials[name]; ok || asked[name] {
+						continue
+					}
+					askedAny = true
+					asked[name] = true
+					s, err := q.source(name, sourceLabel(name, descriptions[name], uses[name]), uses[name], file.Credentials, false)
+					if err != nil {
+						return err
+					}
+					if s.ok {
+						commit(s)
+					}
+				}
+				if !askedAny {
+					if err = q.line("Already configured.\n"); err != nil {
+						return err
+					}
+				}
+			case "Git":
+				askedAny := false
+				for _, host := range hosts {
+					if hasGit(host) {
+						continue
+					}
+					askedAny = true
+					prev := "anonymous"
+				route:
+					for {
+						description := "Generated names reuse an unassociated existing source; Configured credential uses an existing credential instead."
+						if name := names.allocate(host, "https"); asked[name] {
+							description += "\nCredential " + display(name) + " was skipped earlier; HTTPS is unavailable."
+						}
+						choice, err := q.pick(host, description, []huh.Option[string]{option("Anonymous over https", "anonymous"), option("Credential over https...", "https"), option("SSH...", "ssh"), option("Skip", "skip")}, &prev)
+						if err != nil {
+							return err
+						}
+						if choice == "skip" {
+							if err = q.answer(host, "Skipped"); err != nil {
+								return err
+							}
+							break
+						}
+						entry := busclient.GitCredential{URL: "https://" + host + "/"}
+						if choice == "anonymous" {
+							if err = q.answer(host, "Anonymous over https"); err != nil {
+								return err
+							}
+							file.Git = append(file.Git, entry)
+							changed = true
+							break
+						}
+						if choice == "ssh" {
+							defaultPrefix := "ssh://git@" + host + "/"
+							prefix, err := q.input("SSH URL prefix (blank: "+defaultPrefix+")", "", "", "", func(s string) error {
+								if s == "" {
+									s = defaultPrefix
+								}
+								return sshPrefix(s, host, file.Git)
+							})
+							if err != nil {
+								return err
+							}
+							if prefix == "" {
+								prefix = defaultPrefix
+							}
+							entry.URL = prefix
+						}
+						name := names.allocate(host, choice)
+						s, err := source(name, name, nil, true)
+						if err != nil {
+							return err
+						}
+						if !s.ok {
+							continue route
+						}
+						entry.Credential = s.name
+						if choice == "ssh" {
+							path, err := q.input("known_hosts file (blank returns)", "", "", "path", func(s string) error {
+								if s == "" {
+									return nil
+								}
+								_, err := readablePath(s)
+								return err
+							})
+							if err != nil {
+								return err
+							}
+							if path == "" {
+								continue route
+							}
+							entry.HostKey, err = readablePath(path)
+							if err != nil {
+								return err
+							}
+						}
+						answer := "HTTPS " + entry.URL
+						if choice == "ssh" {
+							answer = "SSH " + entry.URL
+						}
+						if err = q.answer(host, answer); err != nil {
+							return err
+						}
+						commit(s)
+						file.Git = append(file.Git, entry)
+						changed = true
+						break
+					}
+				}
+				if !askedAny {
+					if err = q.line("Already configured.\n"); err != nil {
+						return err
+					}
+				}
+			case "Storage":
+				prev := "keys"
+				storageLabel := "S3 storage for pools " + strings.Join(storage, ", ")
+				for {
+					choice, err := q.pick(storageLabel, "Set per-pool keys by editing the config.", []huh.Option[string]{option("Key sources...", "keys"), option("Skip", "skip")}, &prev)
+					if err != nil {
+						return err
+					}
+					if choice == "skip" {
+						if err = q.answer(storageLabel, "Skipped"); err != nil {
+							return err
+						}
+						break
+					}
+					a, err := source(freeName("s3-access-key", file.Credentials), "S3 access key", nil, true)
+					if err != nil {
+						return err
+					}
+					if !a.ok {
+						continue
+					}
+					b, err := source(freeName("s3-secret-key", file.Credentials), "S3 secret key", nil, true)
+					if err != nil {
+						return err
+					}
+					if !b.ok {
+						continue
+					}
+					commit(a)
+					commit(b)
+					if file.Storage == nil {
+						file.Storage = map[string]busclient.StorageConfig{}
+					}
+					for _, pool := range storage {
+						if _, ok := file.Storage[pool]; !ok {
+							file.Storage[pool] = busclient.StorageConfig{AccessKey: a.name, SecretKey: b.name}
+						}
+					}
+					changed = true
+					break
+				}
+			case "Summary":
+				if changed {
+					if err = write(); err != nil {
+						return err
+					}
+					changed = false
+				}
+				if err = q.line("Host key %s registered\n", display(keyID)); err != nil {
+					return err
+				}
+				if wrote {
+					if err = q.line("Wrote %s\n", display(path)); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	if changed {
+		if err = write(); err != nil {
+			return err
+		}
+	}
+	if !interactive {
+		if wrote {
+			if err = q.line("wrote %s\n", display(path)); err != nil {
+				return err
+			}
+		}
+	}
+	if len(pools) == 0 {
+		if err = q.line("this host's tenant is entitled to no pool yet; run wherry host init again once the operator runs tenant pool add\n"); err != nil {
+			return err
+		}
+	}
+	if lines := missing(); len(lines) > 0 {
+		if interactive {
+			err = q.line("Not configured:\n")
+		} else {
+			err = q.line("%s has no source for:\n", display(path))
+		}
+		if err != nil {
+			return err
+		}
+		for _, line := range lines {
+			if err = q.line("  %s\n", display(line)); err != nil {
+				return err
+			}
+		}
+		if interactive {
+			return q.line("run wherry host init again to add them\n")
 		}
 	}
 	return nil
 }
 
-// askSource asks for the source of credential name, which uses deliver. An env target set in this environment is
-// suggested first, defaulting to No: an env source sends whatever the variable holds to every pool naming name.
-func askSource(p *prompter, name string, uses []credentialUse) (credential.Source, error) {
-	optional := len(uses) > 0
-	var suggested []string
-	for _, use := range uses {
-		fmt.Fprintf(p.out, "pool %s delivers credential %s to its agents as %s.\n", use.pool, name, use.as())
-		if use.target.Env != "" && os.Getenv(use.target.Env) != "" && !slices.Contains(suggested, use.target.Env) {
-			suggested = append(suggested, use.target.Env)
-		}
-		optional = optional && use.optional
-	}
-	question := "Source for credential " + name
-	if optional {
-		question = "Source for optional credential " + name
-	}
-	for _, variable := range suggested {
-		yes, err := p.yes(fmt.Sprintf("found %s in your environment. Use it for %s? It will be sent to agents in every pool, now or later, that names %s. [y/N]\n"+
-			"an environment source is read where submits run, including the MCP server your harness starts.\n", variable, name, name))
-		if err != nil || yes {
-			return credential.Source{Env: variable}, err
-		}
-	}
-	for {
-		answer, err := p.ask(question+" (file:PATH, env:VAR or command:ARGV; blank skips)", "")
-		if err != nil || answer == "" {
-			return credential.Source{}, err
-		}
-		var source credential.Source
-		switch kind, value, _ := strings.Cut(answer, ":"); {
-		case kind == "file" && value != "":
-			if source.File, err = localPath(value); err != nil {
-				return credential.Source{}, err
-			}
-		case kind == "env":
-			source.Env = value
-		case kind == "command":
-			source.Command = strings.Fields(value)
-		}
-		if source.Validate() == nil {
-			return source, nil
-		}
-		fmt.Fprintln(p.out, "a source is file:PATH, env:VAR or command:ARGV")
-	}
-}
-
-// askGit asks for the URL prefix and credential name of a git entry for vcsHost that git lacks; a blank prefix skips
-// vcsHost, returning no URL.
-func askGit(p *prompter, vcsHost string, git []busclient.GitCredential) (busclient.GitCredential, error) {
-	byDefault := "https://" + vcsHost + "/"
-	for {
-		prefix, err := p.ask("Git URL prefix for "+vcsHost+" (y for "+byDefault+"; blank skips "+vcsHost+")", "")
-		if err != nil || prefix == "" {
-			return busclient.GitCredential{}, err
-		}
-		if prefix == "y" {
-			prefix = byDefault
-		}
-		if (strings.HasPrefix(prefix, "https://") || strings.HasPrefix(prefix, "ssh://")) && (wire.GitInput{Remote: prefix}).VCSHost() == vcsHost &&
-			!slices.ContainsFunc(git, func(entry busclient.GitCredential) bool { return entry.URL == prefix }) {
-			name, err := p.ask("Credential for "+prefix+" (blank: anonymous)", "")
-			return busclient.GitCredential{URL: prefix, Credential: name}, err
-		}
-		fmt.Fprintf(p.out, "a git URL prefix for %s starts with https://%s or ssh://%s and is not already in the config\n", vcsHost, vcsHost, vcsHost)
-	}
-}
-
-// localPath is path, typed at a prompt, with ~ expanded and made absolute.
-func localPath(path string) (string, error) {
-	path, err := busclient.ExpandHome(path)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Abs(path)
-}
-
-func writeHostConfig(path string, file busclient.Config, prompts io.Writer) error {
+func writeHostConfig(path string, file busclient.Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -331,6 +444,5 @@ func writeHostConfig(path string, file busclient.Config, prompts io.Writer) erro
 	if err := os.Chmod(path, 0o600); err != nil {
 		return err
 	}
-	fmt.Fprintf(prompts, "wrote %s\n", path)
 	return nil
 }

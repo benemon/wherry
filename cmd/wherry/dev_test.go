@@ -31,7 +31,7 @@ import (
 
 // manifestFixture is section 2's manifest with every field set.
 const manifestFixture = `{
-  "version": 1,
+  "version": 2,
   "updated": "2026-10-28T10:00:00Z",
   "os": "linux",
   "arch": "amd64",
@@ -46,13 +46,23 @@ const manifestFixture = `{
   "agents": ["claude", "codex"],
   "default_agent": "claude",
   "storage": {"reference": "quay.io/benjamin_holmes/ceph-aio:v21", "digest": "sha256:11", "id": "sha256:22", "tag": "wherry-dev/ceph-aio:22"},
-  "env_denylist": ["CODEX_API_KEY"]
+  "env_denylist": ["CODEX_API_KEY"],
+  "host_files": {"files": {"/home/u/.config/wherry/config.yaml": {"device": 44, "inode": 55, "size": 66, "mod_time": 77}}}
 }`
 
-// devFixture points the dev root at a temporary directory and returns the default instance.
+// devFixture points HOME, the XDG directories and so the dev root and the standard host paths at temporary
+// directories, and returns the default instance.
 func devFixture(t *testing.T) devInstance {
 	t.Helper()
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	// dev up records host paths with their symlinks resolved, and macOS's temporary directory is under the /tmp link.
+	for _, variable := range []string{"HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"} {
+		dir, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(variable, dir)
+	}
+	t.Setenv("WHERRY_CONFIG", "")
 	instance, err := openInstance("default")
 	if err != nil {
 		t.Fatal(err)
@@ -96,11 +106,11 @@ func TestDevManifestRoundTrip(t *testing.T) {
 	if info, err := os.Stat(instance.cache("manifest.json")); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("manifest mode %v, %v", info.Mode(), err)
 	}
-	if err := os.WriteFile(instance.cache("manifest.json"), []byte(strings.Replace(manifestFixture, `"version": 1,`, `"version": 2,`, 1)), 0o600); err != nil {
+	if err := os.WriteFile(instance.cache("manifest.json"), []byte(strings.Replace(manifestFixture, `"version": 2,`, `"version": 3,`, 1)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readManifest(instance); err == nil || !strings.Contains(err.Error(), instance.cache("manifest.json")) {
-		t.Fatalf("version 2 read with %v; want a refusal naming the path", err)
+		t.Fatalf("version 3 read with %v; want a refusal naming the path", err)
 	}
 }
 
@@ -620,6 +630,10 @@ func TestAcquireNomadTakesThePin(t *testing.T) {
 		}
 		return data
 	}
+	// The fixtures are 2.0.7 and a newer 2.1.0, so the test pins 2.0.7 whatever the current pin is.
+	previous := hashicorpPins["nomad"]
+	t.Cleanup(func() { hashicorpPins["nomad"] = previous })
+	hashicorpPins["nomad"] = struct{ version, linuxAMD64 string }{"2.0.7", "4c9b8a0850d6fd9caadbbab09b3e6fdf8b77aa777729543c70c61b85acca68c1"}
 	base := hashicorpReleases + "/nomad/"
 	bodies := map[string][]byte{
 		base + "index.json": []byte(`{"versions": {
@@ -640,8 +654,6 @@ func TestAcquireNomadTakesThePin(t *testing.T) {
 	}
 
 	// A pin the signed SHA256SUMS does not list is refused before the zip.
-	previous := hashicorpPins["nomad"]
-	t.Cleanup(func() { hashicorpPins["nomad"] = previous })
 	hashicorpPins["nomad"] = struct{ version, linuxAMD64 string }{"2.0.7", strings.Repeat("0", 64)}
 	fake = fakeHTTP(t, bodies)
 	if _, err := acquireHashiCorp(context.Background(), "nomad", t.TempDir(), "nomad", nil, io.Discard); err == nil || !strings.Contains(err.Error(), "pinned SHA-256") {
@@ -890,8 +902,116 @@ func TestAcquirePluginFallsBack(t *testing.T) {
 
 	// A handshake that fails for another reason ends the search.
 	bodies[pluginReleases], _ = json.Marshal([]map[string]any{releases[4], releases[3]})
-	fakeHTTP(t, bodies)
+	fake = fakeHTTP(t, bodies)
 	if _, err := acquirePlugin(context.Background(), t.TempDir(), "wherry-plugin-nomad", nil, io.Discard); err == nil || !strings.HasPrefix(err.Error(), "nomad/v0.1.0 handshake: ") {
 		t.Fatalf("acquire with a broken newest release: %v", err)
+	}
+	for _, url := range fake.requested {
+		if strings.Contains(url, "v0.2.0") {
+			t.Errorf("fetched %s past a broken release", url)
+		}
+	}
+
+	// A wrong core protocol is not a plugin protocol to skip.
+	core := pluginRelease(t, "nomad/v0.1.8", []byte("#!/bin/sh\necho '2|11|tcp|127.0.0.1:1|grpc'\nsleep 10\n"), bodies)
+	bodies[pluginReleases], _ = json.Marshal([]map[string]any{core, releases[3]})
+	fake = fakeHTTP(t, bodies)
+	if _, err := acquirePlugin(context.Background(), t.TempDir(), "wherry-plugin-nomad", nil, io.Discard); err == nil || !strings.HasPrefix(err.Error(), "nomad/v0.1.8 handshake: ") || !strings.Contains(err.Error(), "incompatible core API version with plugin. Plugin version: 2") {
+		t.Fatalf("acquire with a wrong core protocol: %v; want the tagged core protocol error", err)
+	}
+	for _, url := range fake.requested {
+		if strings.Contains(url, "v0.2.0") {
+			t.Errorf("fetched %s past a wrong core protocol", url)
+		}
+	}
+
+	// The first release older than every accepted protocol ends the search, leaving the installed plugin.
+	older := pluginRelease(t, "nomad/v0.1.5", []byte("#!/bin/sh\necho '1|1|tcp|127.0.0.1:1|grpc'\nsleep 10\n"), bodies)
+	bodies[pluginReleases], _ = json.Marshal([]map[string]any{releases[1], older, releases[4]})
+	fake = fakeHTTP(t, bodies)
+	progress.Reset()
+	installed := filepath.Join(cache, "plugins", "wherry-plugin-nomad")
+	if err := os.WriteFile(installed, []byte("installed"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err = acquirePlugin(context.Background(), cache, filepath.Join("plugins", "wherry-plugin-nomad"), nil, &progress)
+	if want := "no nomad plugin release speaks plugin protocols [11]; nomad/v0.1.5 and older speak 1 or lower; a plugin release must follow the protocol change"; err == nil || err.Error() != want {
+		t.Fatalf("acquire past an older protocol: %v; want %q", err, want)
+	}
+	if !strings.Contains(progress.String(), "plugin: nomad/v0.3.0 speaks another protocol; trying the next older release\n") {
+		t.Errorf("progress lacks the skip of the newer protocol:\n%s", progress.String())
+	}
+	for _, release := range []map[string]any{releases[1], older} {
+		for _, asset := range release["assets"].([]map[string]string) {
+			if !slices.Contains(fake.requested, asset["browser_download_url"]) {
+				t.Errorf("did not fetch %s", asset["browser_download_url"])
+			}
+		}
+	}
+	for _, url := range fake.requested {
+		if strings.Contains(url, "v0.1.0") {
+			t.Errorf("fetched %s past the older protocol", url)
+		}
+	}
+	if _, err := os.Stat(installed + ".candidate"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("candidate left: %v", err)
+	}
+	if content, err := os.ReadFile(installed); err != nil || string(content) != "installed" {
+		t.Fatalf("installed plugin %q, %v; want it untouched", content, err)
+	}
+}
+
+func TestRefusedProtocol(t *testing.T) {
+	for _, tc := range []struct {
+		message string
+		want    int
+		ok      bool
+	}{
+		{"incompatible API version with plugin. Plugin version: 10, Client versions: [11]", 10, true},
+		{"plugin type nomad: /cache/wherry-plugin-nomad.candidate: incompatible API version with plugin. Plugin version: 10, Client versions: [11]", 10, true},
+		{"incompatible API version with plugin. Plugin version: 10, Client versions: [12 11]", 10, true},
+		{"incompatible API version with plugin. Plugin version: , Client versions: [11]", 0, false},
+		{"incompatible API version with plugin. Plugin version: 10x, Client versions: [11]", 0, false},
+		{"incompatible API version with plugin. Plugin version: -1, Client versions: [11]", 0, false},
+		{"incompatible API version with plugin. Plugin version: 99999999999999999999, Client versions: [11]", 0, false},
+		{"plugin exited before handshake; last output said Plugin version: 10, Client versions: [11]", 0, false},
+		{"plugin type nomad: /p: incompatible core API version with plugin. Plugin version: 2, Core version: 1", 0, false},
+		{"incompatible API version with plugin. Plugin version: 10, Client versions: [11] and more", 0, false},
+		{"notincompatible API version with plugin. Plugin version: 10, Client versions: [11]", 0, false},
+	} {
+		if got, ok := refusedProtocol(tc.message); got != tc.want || ok != tc.ok {
+			t.Errorf("refusedProtocol(%q) = %d, %t; want %d, %t", tc.message, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+// dev runs the Kafka image the real-broker tests pin, so a bump of one is a bump of both.
+func TestDevKafkaIsTheTestedImage(t *testing.T) {
+	script, err := os.ReadFile("../../test/kafka/up.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, digest, _ := strings.Cut(kafkaReference, "@")
+	if !strings.Contains(string(script), "image=docker.io/apache/kafka:4.3.1@"+digest+"\n") {
+		t.Fatalf("test/kafka/up.sh pins no docker.io/apache/kafka image with dev's digest %s", digest)
+	}
+}
+
+// The Nomad pin is the linux_amd64 zip its release's signed SHA256SUMS lists, kept in testdata with the bump.
+func TestNomadPinIsInItsSignedSums(t *testing.T) {
+	pin := hashicorpPins["nomad"]
+	sums, err := os.ReadFile("testdata/dev/nomad_" + pin.version + "_SHA256SUMS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature, err := os.ReadFile("testdata/dev/nomad_" + pin.version + "_SHA256SUMS.sig")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyHashiCorp(sums, signature); err != nil {
+		t.Fatal(err)
+	}
+	if sum, err := listedSHA256(sums, "nomad_"+pin.version+"_linux_amd64.zip"); err != nil || sum != pin.linuxAMD64 {
+		t.Fatalf("SHA256SUMS lists %q, %v for the linux_amd64 zip; the pin is %s", sum, err, pin.linuxAMD64)
 	}
 }

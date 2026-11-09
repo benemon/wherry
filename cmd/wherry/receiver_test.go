@@ -228,7 +228,7 @@ func TestOneProcessPerPlugin(t *testing.T) {
 		t.Fatalf("profiles configured in processes %v; want exec and podman in one, edge in another", processes)
 	}
 	// Each plugin's identity is logged once, when it starts.
-	if want := "receiver: plugin fake: version v0.0.0-test protocol 10\nreceiver: plugin other: version v0.0.0-test protocol 10\n"; logged.String() != want {
+	if want := "receiver: plugin fake: version v0.0.0-test protocol 11\nreceiver: plugin other: version v0.0.0-test protocol 11\n"; logged.String() != want {
 		t.Fatalf("logged %q, want %q", logged.String(), want)
 	}
 }
@@ -327,8 +327,8 @@ func TestReceiverLocalConfigExampleParses(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(config, want) {
 		t.Fatalf("example = %+v, %v; want %+v", config, err, want)
 	}
-	documented(t, "configuration.md", "example-receiver-config.yaml")
-	documented(t, "operations.md", "example-receiver-config.yaml")
+	documented(t, "configuration-receiver.md", "example-receiver-config.yaml")
+	documented(t, "operations-operator.md", "example-receiver-config.yaml")
 }
 
 func TestReceiverLocalConfigDefaultsAndExpansion(t *testing.T) {
@@ -392,7 +392,7 @@ func TestProfileCredentialReachesThePluginInPlaceOfItsName(t *testing.T) {
 	plugins := &plugins{dir: installPlugin(t), credentials: map[string]credential.Source{"nomad-token": {File: token}}, hold: func(string, []byte) {},
 		logs: io.Discard, logger: discard, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
-	settings := operator.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": "nomad-token", "outputs": true}}
+	settings := operator.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude", Replicas: 3, Config: map[string]any{"credential": "nomad-token", "outputs": true}}
 	if _, err := plugins.profile("build", settings, fakeSHA256); err != nil {
 		t.Fatal(err)
 	}

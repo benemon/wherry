@@ -135,7 +135,7 @@ type ClaimDecision struct {
 	Served        bool           `json:"served"`
 }
 
-// AdvertisedRef names an advertisement by its offset on wherry.receivers and its append time.
+// AdvertisedRef names an advertisement by its offset on its pool's receivers topic and its append time.
 type AdvertisedRef struct {
 	Offset int64 `json:"offset"`
 	AtMS   int64 `json:"at_ms"`

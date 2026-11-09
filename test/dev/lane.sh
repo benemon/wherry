@@ -9,7 +9,9 @@ runtime=${RUNTIME:?RUNTIME names docker or podman}
 wherry=${WHERRY:-$RUNNER_TEMP/wherry}
 work=${WORK:-$RUNNER_TEMP/dev-lane}
 root=${XDG_DATA_HOME:-$HOME/.local/share}/wherry/dev/default
-config=$root/env/host/config.yaml
+# up writes the default instance's host config at the standard path, which every host command reads.
+config=${XDG_CONFIG_HOME:-$HOME/.config}/wherry/config.yaml
+state=${XDG_STATE_HOME:-$HOME/.local/state}/wherry
 mkdir -p "$work"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -23,7 +25,7 @@ refused() {
 
 # submit PROMPT [FLAG...] submits a mock run and prints its run ID.
 submit() {
-  "$wherry" submit --config-file "$config" --agent mock --prompt "$@" | sed -n 's/^run_id=\([^ ]*\) .*/\1/p'
+  "$wherry" submit --agent mock --prompt "$@" | sed -n 's/^run_id=\([^ ]*\) .*/\1/p'
 }
 
 case $step in
@@ -44,6 +46,13 @@ up)
   : "${WHERRY_DEV_MOCK_TOKEN:?}"
   "$wherry" dev up | tee "$work/up.txt"
   grep -q '^ready: instance default (' "$work/up.txt" || fail "no ready line"
+  grep -qx 'submit: wherry submit --prompt "..."' "$work/up.txt" || fail "no submit line without a config"
+  if grep -q -e --config-file -e WHERRY_CONFIG "$work/up.txt"; then fail "the ready output names a config"; fi
+  [ -f "$config" ] || fail "no host config at $config"
+  for file in operator.yaml operator.password .gitignore; do
+    [ -f "$root/env/operator/$file" ] || fail "env/operator has no $file"
+  done
+  "$wherry" operator --dir "$root/env/operator" check
   ;;
 refusals)
   refused dev up "instance default is already up"
@@ -51,22 +60,22 @@ refusals)
   refused dev down --reset "instance default is up; run wherry dev down first"
   ;;
 receivers)
-  "$wherry" host receivers --config-file "$config" | tee "$work/receivers.txt"
+  "$wherry" host receivers | tee "$work/receivers.txt"
   grep -q '^receiver=dev-1 pool=dev .* status=live$' "$work/receivers.txt" || fail "dev-1 is not live in pool dev"
   grep -q '^  profile=mock plugin=nomad agent=mock ready=true ' "$work/receivers.txt" || fail "profile mock is not ready"
   ;;
 run)
   id=$(submit 'mock: ci' --output echo.txt:required)
   echo "$id" > "$work/run-id"
-  "$wherry" wait "$id" --config-file "$config" --timeout 5m --outputs-dir "$work/out" | tee "$work/watch.txt"
-  "$wherry" logs "$id" --config-file "$config" > "$work/out/transcript.jsonl"
-  [ "$("$wherry" status "$id" --config-file "$config" | head -n 1)" = TASK_STATE_COMPLETED ] || fail "run $id did not complete"
+  "$wherry" wait "$id" --timeout 5m --outputs-dir "$work/out" | tee "$work/watch.txt"
+  "$wherry" logs "$id" > "$work/out/transcript.jsonl"
+  [ "$("$wherry" status "$id" | head -n 1)" = TASK_STATE_COMPLETED ] || fail "run $id did not complete"
   [ "$(cat "$work/out/echo.txt")" = "mock: ci" ] || fail "echo.txt does not hold the prompt"
   grep -qx 'MOCK_TOKEN set' "$work/watch.txt" || fail "the mock had no MOCK_TOKEN"
   if [ "${STORAGE:-false}" = true ]; then
     echo "s3 input" > "$work/s3-input.txt"
     id=$(submit 'mock: s3' --input "$work/s3-input.txt:s3" --output echo.txt:required:s3)
-    "$wherry" wait "$id" --config-file "$config" --timeout 5m --outputs-dir "$work/out-s3" | tee "$work/watch-s3.txt"
+    "$wherry" wait "$id" --timeout 5m --outputs-dir "$work/out-s3" | tee "$work/watch-s3.txt"
     [ "$(cat "$work/out-s3/echo.txt")" = "mock: s3" ] || fail "the S3 echo.txt does not hold the prompt"
     grep -q '^input s3-input.txt ' "$work/watch-s3.txt" || fail "the mock saw no S3 input"
   fi
@@ -105,7 +114,7 @@ leak)
 fail)
   id=$(submit 'mock: fail')
   code=0
-  "$wherry" wait "$id" --config-file "$config" --timeout 5m --outputs-dir "$work/out-fail" > "$work/watch-fail.txt" || code=$?
+  "$wherry" wait "$id" --timeout 5m --outputs-dir "$work/out-fail" > "$work/watch-fail.txt" || code=$?
   [ "$code" = 2 ] || fail "wait of a failed run exited $code, want 2 (TASK_STATE_FAILED)"
   ;;
 down)
@@ -113,6 +122,8 @@ down)
   if ss -ltn | awk '{print $4}' | grep -E ':(4646|4647|4648|9093|18080)$'; then fail "a port is still held"; fi
   [ -z "$("$runtime" ps -a -q --filter label=com.hashicorp.nomad.alloc_id)" ] || fail "a Nomad container is left"
   [ ! -e "$root/env" ] || fail "env/ is left"
+  [ ! -e "$config" ] || fail "the host config is left"
+  [ ! -e "$state" ] || fail "the host state is left"
   [ -d "$root/cache" ] || fail "cache/ is gone"
   ;;
 reset)

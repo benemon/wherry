@@ -2,6 +2,8 @@ wherry_VERSION_darwin_amd64.tar.gz
   wherry_VERSION_darwin_amd64/LICENSE
   wherry_VERSION_darwin_amd64/README.md
   wherry_VERSION_darwin_amd64/contrib/observability/README.md
+  wherry_VERSION_darwin_amd64/contrib/observability/counter-zero.test.yml
+  wherry_VERSION_darwin_amd64/contrib/observability/routing.test.yml
   wherry_VERSION_darwin_amd64/contrib/observability/wherry-alerts.yaml
   wherry_VERSION_darwin_amd64/contrib/observability/wherry-dashboard.json
   wherry_VERSION_darwin_amd64/wherry
@@ -9,6 +11,8 @@ wherry_VERSION_darwin_arm64.tar.gz
   wherry_VERSION_darwin_arm64/LICENSE
   wherry_VERSION_darwin_arm64/README.md
   wherry_VERSION_darwin_arm64/contrib/observability/README.md
+  wherry_VERSION_darwin_arm64/contrib/observability/counter-zero.test.yml
+  wherry_VERSION_darwin_arm64/contrib/observability/routing.test.yml
   wherry_VERSION_darwin_arm64/contrib/observability/wherry-alerts.yaml
   wherry_VERSION_darwin_arm64/contrib/observability/wherry-dashboard.json
   wherry_VERSION_darwin_arm64/wherry
@@ -16,6 +20,8 @@ wherry_VERSION_linux_amd64.tar.gz
   wherry_VERSION_linux_amd64/LICENSE
   wherry_VERSION_linux_amd64/README.md
   wherry_VERSION_linux_amd64/contrib/observability/README.md
+  wherry_VERSION_linux_amd64/contrib/observability/counter-zero.test.yml
+  wherry_VERSION_linux_amd64/contrib/observability/routing.test.yml
   wherry_VERSION_linux_amd64/contrib/observability/wherry-alerts.yaml
   wherry_VERSION_linux_amd64/contrib/observability/wherry-dashboard.json
   wherry_VERSION_linux_amd64/wherry
@@ -23,6 +29,8 @@ wherry_VERSION_linux_arm64.tar.gz
   wherry_VERSION_linux_arm64/LICENSE
   wherry_VERSION_linux_arm64/README.md
   wherry_VERSION_linux_arm64/contrib/observability/README.md
+  wherry_VERSION_linux_arm64/contrib/observability/counter-zero.test.yml
+  wherry_VERSION_linux_arm64/contrib/observability/routing.test.yml
   wherry_VERSION_linux_arm64/contrib/observability/wherry-alerts.yaml
   wherry_VERSION_linux_arm64/contrib/observability/wherry-dashboard.json
   wherry_VERSION_linux_arm64/wherry

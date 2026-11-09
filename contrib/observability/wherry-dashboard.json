@@ -1,7 +1,7 @@
 {
   "title": "wherry receivers",
   "uid": "wherry-receivers",
-  "description": "Receivers, admission, run durations, plugins and Kafka for wherry pools, from the receiver's /metrics.",
+  "description": "Receivers, admission, run durations, plugins, Kafka and routing for wherry pools, from the receiver's /metrics.",
   "tags": [
     "wherry"
   ],
@@ -554,7 +554,7 @@
       "id": 10,
       "type": "timeseries",
       "title": "Start failures by class",
-      "description": "Start failures per second: input-too-large, dispatch, platform, and offer-unavailable (a member with no matching profile).",
+      "description": "Start failures per second: input-too-large, dispatch, platform.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1559,6 +1559,335 @@
           "refId": "D",
           "expr": "sum by (pool) (increase(wherry_fenced_total{pool=~\"$pool\", instance=~\"$instance\"}[$__rate_interval]))",
           "legendFormat": "fenced {{pool}}"
+        }
+      ]
+    },
+    {
+      "id": 36,
+      "type": "row",
+      "title": "Routing",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 93
+      },
+      "panels": []
+    },
+    {
+      "id": 37,
+      "type": "stat",
+      "title": "Signature topics with a ready offer",
+      "description": "Over the receivers the `instance` variable selects. Distinct configured signature topics with at least one ready offer. 0 means profiles are observed but none has a ready offer; an empty result means no matching profile samples are available. A ready offer contributes to the desired subscription; the gate and an idle slot must also permit a new poll.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 94
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "expr": "sum by (pool) (max by (pool, topic) (wherry_profile_ready{pool=~\"$pool\", instance=~\"$instance\"}))",
+          "instant": true,
+          "legendFormat": "{{pool}}"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "type": "stat",
+      "title": "Signature topics of scraped receivers",
+      "description": "Over the receivers the `instance` variable selects. Distinct signature topics they configure, including unready profiles: inventory, not a readiness count. No matching profile samples gives an empty result.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 94
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "expr": "count by (pool) (count by (pool, topic) (wherry_profile_ready{pool=~\"$pool\", instance=~\"$instance\"}))",
+          "instant": true,
+          "legendFormat": "{{pool}}"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "type": "table",
+      "title": "Profiles and signature topics",
+      "description": "Each profile of each selected receiver, its signature topic, and whether it is in the receiver's current ready offers. receiver show maps a topic to its labels. Ready describes the desired subscription when claiming is permitted, not live Kafka membership.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 94
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "not ready",
+                  "index": 1
+                },
+                "1": {
+                  "text": "ready",
+                  "index": 0
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "expr": "max by (pool, instance, profile, topic) (wherry_profile_ready{pool=~\"$pool\", instance=~\"$instance\"})",
+          "format": "table",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "type": "timeseries",
+      "title": "Receivers with a ready offer per signature",
+      "description": "Over the receivers the `instance` variable selects. Receivers with a ready offer for each configured signature topic; 0 while every receiver that configures it is unready.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 102
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "expr": "sum by (pool, topic) (max by (pool, instance, topic) (wherry_profile_ready{pool=~\"$pool\", instance=~\"$instance\"}))",
+          "legendFormat": "{{pool}} {{topic}}"
+        }
+      ]
+    },
+    {
+      "id": 41,
+      "type": "table",
+      "title": "Signatures with no ready offer",
+      "description": "Over the receivers the `instance` variable selects. Configured topics whose observed profiles are all unready; a listed topic has value 0. A topic no selected receiver configures (a removed profile's) is not listed. An empty result can mean every observed topic has a ready offer or no matching profile samples are available; consult the inventory stat and receiver scrape health.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 102
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "expr": "max by (pool, topic) (wherry_profile_ready{pool=~\"$pool\", instance=~\"$instance\"}) == 0",
+          "format": "table",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "Claim gate",
+      "description": "1 while the restriction prevents the receiver opening a new poll. Reasons are independent and can hold together. 0 for all three means no restriction applies; an idle slot must also be free, and it does not show a poll is open.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 110
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "expr": "max by (pool, instance, reason) (wherry_claim_gated{pool=~\"$pool\", instance=~\"$instance\"})",
+          "legendFormat": "{{pool}} {{instance}} {{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 43,
+      "type": "timeseries",
+      "title": "Admissions by signature",
+      "description": "Admissions per second by signature topic, including profiles not ready now. Absent until a profile has admitted a task and the rate window has two samples.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 110
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "expr": "sum by (pool, topic) (rate(wherry_admissions_total{pool=~\"$pool\", instance=~\"$instance\"}[$__rate_interval]) * on (pool, instance, profile) group_left (topic) (wherry_profile_ready{pool=~\"$pool\", instance=~\"$instance\"} * 0 + 1))",
+          "legendFormat": "{{pool}} {{topic}}"
         }
       ]
     }

@@ -21,19 +21,49 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// operatorUsage is each operator command's usage, under "" the operator's.
+var operatorUsage = map[string]string{
+	"":                   "usage: wherry operator <init|pool apply|tenant add|tenant list|tenant pool add|tenant pool remove|tenant host add|tenant host remove|tenant remove|pool suspend|pool resume|pool rotate-key|receiver apply|receiver show|receiver remove|check> [--dir DIR]",
+	"init":               "usage: wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] [--super-user NAME --super-user-password-file FILE]",
+	"pool apply":         "usage: wherry operator pool apply NAME [-f PATH] [--dry-run]",
+	"tenant add":         "usage: wherry operator tenant add TENANT",
+	"tenant list":        "usage: wherry operator tenant list",
+	"tenant remove":      "usage: wherry operator tenant remove TENANT",
+	"tenant pool add":    "usage: wherry operator tenant pool add TENANT POOL",
+	"tenant pool remove": "usage: wherry operator tenant pool remove TENANT POOL",
+	"pool suspend":       "usage: wherry operator pool suspend POOL",
+	"pool resume":        "usage: wherry operator pool resume POOL",
+	"pool rotate-key":    "usage: wherry operator pool rotate-key POOL [--suspect-key KID]...",
+	"receiver apply":     "usage: wherry operator receiver apply NAME [-f PATH] [--dry-run] | NAME --force",
+	"receiver show":      "usage: wherry operator receiver show ID",
+	"receiver remove":    "usage: wherry operator receiver remove RECEIVER [--wait DURATION]",
+	"tenant host add":    "usage: wherry operator tenant host add TENANT HOST [--force]",
+	"tenant host remove": "usage: wherry operator tenant host remove TENANT HOST [--wait DURATION]",
+	"check":              "usage: wherry operator check",
+}
+
 func runOperator(args []string, stdout, stderr io.Writer) error {
 	pos, options, err := operatorArgs(args)
+	if len(pos) > 0 && operatorUsage[operatorCommand(pos)] == "" {
+		return errors.New("unknown operator command")
+	}
+	if errors.Is(err, flag.ErrHelp) {
+		fmt.Fprintln(stderr, cmp.Or(operatorUsage[operatorCommand(pos)], operatorUsage[""]))
+	}
 	if err != nil {
 		return err
 	}
 	if len(pos) == 0 {
-		return errors.New("usage: wherry operator <init|pool apply|pool entitle|pool suspend|pool resume|pool rotate-key|receiver apply|receiver show|receiver remove|host add|host remove|check> [--dir DIR]")
+		return errors.New(operatorUsage[""])
+	}
+	if _, ok := operatorUsage[operatorCommand(pos)]; !ok {
+		return errors.New("unknown operator command")
 	}
 	dir := cmp.Or(options["dir"], ".")
 	ctx := context.Background()
 	if pos[0] == "init" {
 		if len(pos) != 1 {
-			return errors.New("usage: wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] [--super-user NAME --super-user-password-file FILE]")
+			return errors.New(operatorUsage["init"])
 		}
 		return operatorInit(ctx, dir, options, stderr)
 	}
@@ -42,14 +72,14 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer service.Operator.Close()
-	command := strings.Join(pos[:min(len(pos), 2)], " ")
+	command := operatorCommand(pos)
 	switch command {
 	case "pool apply":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry operator pool apply NAME [-f PATH] [--dry-run]")
+			return errors.New(operatorUsage[command])
 		}
 		_, dryRun := options["dry-run"]
-		path, directory, err := objectFile(dir, "pools", pos[2], options, dryRun, stderr, poolFields, promptPool)
+		path, directory, err := objectFile(ctx, dir, "pools", pos[2], options, dryRun, stderr, poolFields, promptPool)
 		if err != nil {
 			return err
 		}
@@ -62,14 +92,33 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		_, force := options["force"]
 		_, dryRun := options["dry-run"]
 		if len(pos) != 3 {
-			return errors.New("usage: wherry operator receiver apply NAME [-f PATH] [--dry-run] | NAME --force")
+			return errors.New(operatorUsage[command])
+		}
+		var path string
+		var directory bool
+		var config operator.ReceiverConfig
+		if !force {
+			path, directory, err = objectFile(ctx, dir, "receivers", pos[2], options, dryRun, stderr, receiverFields, func(q *questions) (any, error) {
+				state, err := service.LoadState(q.ctx)
+				if err != nil {
+					return nil, err
+				}
+				return promptReceiver(q, pos[2], state, service.Broker)
+			})
+			if err != nil {
+				return err
+			}
+			config, err = readReceiverConfig(path, directory)
+			if err != nil {
+				return err
+			}
 		}
 		state, err := service.LoadState(ctx)
 		if err != nil {
 			return err
 		}
 		current, exists := state.Receivers[pos[2]]
-		bundle, err := bundlePath(dir, "receivers", !dryRun, pos[2])
+		bundle, err := bundlePath(dir, "receivers", false, pos[2])
 		if err != nil {
 			return err
 		}
@@ -84,30 +133,38 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			if kept, err := readReceiverConfig(filepath.Join(dir, "receivers", pos[2]+".yaml"), false); err == nil && kept.Broker != "" {
 				broker = kept.Broker
 			}
-			return service.ReceiverReissue(ctx, pos[2], broker, bundle)
-		}
-		path, directory, err := objectFile(dir, "receivers", pos[2], options, dryRun, stderr, receiverFields, func(p *prompter) (any, error) { return promptReceiver(p, service.Broker) })
-		if err != nil {
-			return err
-		}
-		config, err := readReceiverConfig(path, directory)
-		if err != nil {
-			return err
-		}
-		config.Receiver, config.Broker = pos[2], cmp.Or(config.Broker, service.Broker)
-		switch {
-		case exists && config.Pool != "" && config.Pool != current.Pool:
-			return errors.New("receiver cannot move pool")
-		case !exists && config.Pool == "":
-			return fmt.Errorf("%s names no pool", path)
-		case exists:
-			recorded, err := service.ReceiverUpdate(ctx, config, true)
-			if err != nil {
+			if _, err := bundlePath(dir, "receivers", true, pos[2]); err != nil {
 				return err
 			}
-			if dryRun {
-				return showReceiver(stdout, recorded)
-			}
+			return service.ReceiverReissue(ctx, pos[2], broker, bundle)
+		}
+		config.Receiver, config.Broker = pos[2], cmp.Or(config.Broker, service.Broker)
+		if exists && config.Pool != "" && config.Pool != current.Pool {
+			return errors.New("receiver cannot move pool")
+		}
+		if !exists && config.Pool == "" {
+			return fmt.Errorf("%s names no pool", path)
+		}
+		var recorded operator.ReceiverConfig
+		if exists {
+			recorded, err = service.ReceiverUpdate(ctx, config, true)
+		} else {
+			recorded, err = service.ReceiverCheck(ctx, config)
+		}
+		if err != nil {
+			return err
+		}
+		if err := receiverLocalFile(ctx, dir, pos[2], path, directory, dryRun, stderr, config, service.Broker, service.CA != nil); err != nil {
+			return err
+		}
+		if dryRun {
+			return showReceiver(stdout, recorded)
+		}
+		// The bundle directories are made, or hardened to 0700, only once both configurations have passed their checks.
+		if _, err := bundlePath(dir, "receivers", true, pos[2]); err != nil {
+			return err
+		}
+		if exists {
 			// Only the bundle's password can carry a new broker, so a missing bundle is refused before recording.
 			kept, err := operator.ReadBundle(bundle)
 			if errors.Is(err, os.ErrNotExist) {
@@ -119,18 +176,12 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 				return err
 			}
 			return rebroker(bundle, kept, config.Broker)
-		case dryRun:
-			recorded, err := service.ReceiverCheck(ctx, config)
-			if err != nil {
-				return err
-			}
-			return showReceiver(stdout, recorded)
-		default:
-			return service.ReceiverAdd(ctx, config, config.Broker, bundle)
 		}
+		return service.ReceiverAdd(ctx, config, config.Broker, bundle)
+
 	case "receiver show":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry operator receiver show ID")
+			return errors.New(operatorUsage[command])
 		}
 		state, err := service.LoadState(ctx)
 		if err != nil {
@@ -141,14 +192,74 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			return errors.New("no receiver by that name")
 		}
 		return showReceiver(stdout, config)
-	case "pool entitle":
-		if len(pos) != 3 || options["tenant"] == "" {
-			return errors.New("usage: wherry operator pool entitle POOL --tenant TENANT")
+	case "tenant add":
+		if len(pos) != 3 {
+			return errors.New(operatorUsage[command])
 		}
-		return service.TenantAdd(ctx, options["tenant"], pos[2])
+		return service.TenantAdd(ctx, pos[2])
+	case "tenant list":
+		if len(pos) != 2 {
+			return errors.New(operatorUsage[command])
+		}
+		state, err := service.LoadState(ctx)
+		if err != nil {
+			return err
+		}
+		for _, tenant := range slices.Sorted(maps.Keys(state.Tenants)) {
+			if state.Tenants[tenant] {
+				continue
+			}
+			fmt.Fprintln(stdout, tenant)
+			for _, pool := range slices.Sorted(maps.Keys(state.Entitlements[tenant])) {
+				fmt.Fprintf(stdout, "  pool %s\n", pool)
+			}
+			for _, principal := range slices.Sorted(maps.Keys(state.Hosts)) {
+				host := state.Hosts[principal]
+				if host.Tenant == tenant && !state.Ended[principal] && !state.Revoking[principal] {
+					fmt.Fprintf(stdout, "  host %s\n", host.Name)
+				}
+			}
+		}
+		return nil
+	case "tenant pool add", "tenant pool remove":
+		if len(pos) != 5 {
+			return errors.New(operatorUsage[command])
+		}
+		state, err := service.LoadState(ctx)
+		if err != nil {
+			return err
+		}
+		entitled := state.Entitlements[pos[3]][pos[4]]
+		if pos[2] == "add" {
+			err = service.TenantPoolAdd(ctx, pos[3], pos[4])
+			if err == nil && entitled {
+				fmt.Fprintln(stdout, "already entitled")
+			}
+		} else {
+			err = service.TenantPoolRemove(ctx, pos[3], pos[4])
+			if err == nil && !entitled {
+				fmt.Fprintln(stdout, "not entitled")
+			}
+		}
+		return err
+	case "tenant remove":
+		if len(pos) != 3 {
+			return errors.New(operatorUsage[command])
+		}
+		if !wire.ValidName(pos[2]) {
+			return errors.New("invalid tenant name")
+		}
+		if err := service.TenantRemove(ctx, pos[2]); err != nil {
+			return err
+		}
+		if err := os.RemoveAll(filepath.Join(dir, "bundles", "hosts", pos[2])); err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, "done")
+		return nil
 	case "pool suspend", "pool resume":
 		if len(pos) != 3 {
-			return fmt.Errorf("usage: wherry operator pool %s POOL", pos[1])
+			return errors.New(operatorUsage[command])
 		}
 		outcome, err := service.PoolSuspendAcknowledged(ctx, pos[2], pos[1] == "suspend", stderr)
 		if err != nil {
@@ -158,7 +269,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		return nil
 	case "pool rotate-key":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry operator pool rotate-key POOL [--suspect-key KID]...")
+			return errors.New(operatorUsage[command])
 		}
 		var suspects []string
 		if options["suspect-key"] != "" {
@@ -170,22 +281,22 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		}
 		writeRotateReport(stdout, pos[2], report, time.Now())
 		return nil
-	case "host add":
-		if len(pos) != 3 || options["tenant"] == "" {
-			return errors.New("usage: wherry operator host add HOST --tenant TENANT [--force]")
+	case "tenant host add":
+		if len(pos) != 5 {
+			return errors.New(operatorUsage[command])
 		}
-		bundle, err := bundlePath(dir, "hosts", true, options["tenant"], pos[2])
+		bundle, err := bundlePath(dir, "hosts", true, pos[3], pos[4])
 		if err != nil {
 			return err
 		}
 		_, force := options["force"]
-		return service.HostAdd(ctx, options["tenant"], pos[2], bundle, force)
-	case "host remove", "receiver remove":
-		if pos[0] == "host" && (len(pos) != 3 || options["tenant"] == "") {
-			return errors.New("usage: wherry operator host remove HOST --tenant TENANT [--wait DURATION]")
+		return service.HostAdd(ctx, pos[3], pos[4], bundle, force)
+	case "tenant host remove", "receiver remove":
+		if pos[0] == "tenant" && (len(pos) != 5) {
+			return errors.New(operatorUsage[command])
 		}
-		if len(pos) != 3 {
-			return errors.New("usage: wherry operator receiver remove RECEIVER [--wait DURATION]")
+		if pos[0] == "receiver" && len(pos) != 3 {
+			return errors.New(operatorUsage[command])
 		}
 		wait, err := time.ParseDuration(cmp.Or(options["wait"], "0s"))
 		if err != nil {
@@ -195,13 +306,13 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			return errors.New("--wait must be positive; omit it to compute the safe wait from the broker's timeouts")
 		}
 		topic := operator.ReceiverTopic(pos[2])
-		if pos[0] == "host" {
-			topic = operator.HostTopic(options["tenant"], pos[2])
+		if pos[0] == "tenant" {
+			topic = operator.HostTopic(pos[3], pos[4])
 		}
 		probe := service.Probe(topic)
 		var result operator.RevocationResult
-		if pos[0] == "host" {
-			result = service.RevokeHost(ctx, options["tenant"], pos[2], wait, probe)
+		if pos[0] == "tenant" {
+			result = service.RevokeHost(ctx, pos[3], pos[4], wait, probe)
 		} else {
 			result = service.RevokeReceiver(ctx, pos[2], wait, probe)
 		}
@@ -218,7 +329,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		return nil
 	case "check":
 		if len(pos) != 1 {
-			return errors.New("usage: wherry operator check")
+			return errors.New(operatorUsage[command])
 		}
 		return service.Check(ctx)
 	default:
@@ -230,14 +341,14 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 func writeRotateReport(out io.Writer, pool string, report operator.RotateReport, now time.Time) {
 	fmt.Fprintf(out, "pool %s's key custodian rotated for the rotate-key request; tasks appended through that rotation are listed\n", pool)
 	fmt.Fprintf(out, "suspect_keys=%s\n", strings.Join(report.SuspectKeys, ","))
-	for _, partition := range slices.Sorted(maps.Keys(report.Horizon)) {
-		fmt.Fprintf(out, "horizon partition=%d oldest_retained_offset=%d\n", partition, report.Horizon[partition])
+	for _, topic := range report.Topics {
+		fmt.Fprintf(out, "horizon topic=%s oldest_retained_offset=%d\n", topic, report.Horizon[topic])
 	}
-	for _, partition := range slices.Sorted(maps.Keys(report.DeletedFrom)) {
-		fmt.Fprintf(out, "horizon partition=%d: retention deleted the tasks at offsets %d to %d during the scan; they may not be listed\n", partition, report.DeletedFrom[partition], report.Horizon[partition]-1)
+	for _, topic := range slices.Sorted(maps.Keys(report.DeletedFrom)) {
+		fmt.Fprintf(out, "horizon topic=%s: retention deleted the tasks at offsets %d to %d during the scan; they may not be listed\n", topic, report.DeletedFrom[topic], report.Horizon[topic]-1)
 	}
 	if report.OldestMS == 0 {
-		fmt.Fprintln(out, "horizon: the task topic retains no task; tasks deleted by retention are not listed")
+		fmt.Fprintln(out, "horizon: the task topics retain no task; tasks deleted by retention are not listed")
 	} else {
 		oldest := time.UnixMilli(report.OldestMS)
 		fmt.Fprintf(out, "horizon: the oldest retained task was appended at %s, %s ago; tasks deleted by retention before it are not listed\n", oldest.UTC().Format(time.RFC3339), now.Sub(oldest).Truncate(time.Second))
@@ -248,17 +359,27 @@ func writeRotateReport(out io.Writer, pool string, report operator.RotateReport,
 	fmt.Fprintf(out, "tasks=%d\n", len(report.Tasks))
 }
 
-// showReceiver writes config's capacity, plugin pins and resolved profiles, in routing order, to out as YAML.
+// showReceiver writes resolved profiles and plugin pins as YAML.
 func showReceiver(out io.Writer, config operator.ReceiverConfig) error {
-	// The record decodes numbers as float64, which YAML would print as 1e+06.
-	for i := range config.Profiles {
-		config.Profiles[i].Config = integral(config.Profiles[i].Config).(map[string]any)
+	type shown struct {
+		operator.ProfileSettings `yaml:",inline"`
+		Signature                yaml.Node `yaml:"signature"`
+		Topic                    string    `yaml:"topic"`
+	}
+	profiles := make([]shown, 0, len(config.Profiles))
+	for _, profile := range config.Profiles {
+		// The record decodes numbers as float64, which YAML would print as 1e+06.
+		profile.Config = integral(profile.Config).(map[string]any)
+		signature := yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Style: yaml.DoubleQuotedStyle, Value: operator.Signature(profile.Agent, profile.Labels)}
+		if profile.Replicas == 1 {
+			profile.Replicas = 0
+		}
+		profiles = append(profiles, shown{profile, signature, operator.SignatureTopic(config.Pool, profile.Agent, profile.Labels)})
 	}
 	encoded, err := yaml.Marshal(struct {
-		Capacity     int64                      `yaml:"capacity"`
-		PluginSHA256 map[string]string          `yaml:"plugin_sha256,omitempty"`
-		Profiles     []operator.ProfileSettings `yaml:"profiles"`
-	}{config.Capacity, config.PluginSHA256, config.Profiles})
+		PluginSHA256 map[string]string `yaml:"plugin_sha256,omitempty"`
+		Profiles     []shown           `yaml:"profiles"`
+	}{config.PluginSHA256, profiles})
 	if err != nil {
 		return err
 	}
@@ -288,7 +409,7 @@ func integral(value any) any {
 func operatorArgs(args []string) ([]string, map[string]string, error) {
 	flags := flag.NewFlagSet("operator", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	for _, name := range []string{"f", "tenant", "wait", "sha256", "dir", "broker", "ca-file", "super-user", "super-user-password-file"} {
+	for _, name := range []string{"f", "wait", "sha256", "dir", "broker", "ca-file", "super-user", "super-user-password-file"} {
 		flags.String(name, "", "")
 	}
 	var suspects []string
@@ -297,7 +418,7 @@ func operatorArgs(args []string) ([]string, map[string]string, error) {
 	flags.Bool("force", false, "")
 	positional, err := parseAnywhere(flags, args)
 	if err != nil {
-		return nil, nil, err
+		return positional, nil, err
 	}
 	options := map[string]string{}
 	flags.Visit(func(option *flag.Flag) {
@@ -313,20 +434,20 @@ func operatorArgs(args []string) ([]string, map[string]string, error) {
 	if len(suspects) > 0 {
 		options["suspect-key"] = strings.Join(suspects, "\n")
 	}
-	command := strings.Join(positional[:min(len(positional), 2)], " ")
+	command := operatorCommand(positional)
 	allowed := map[string]map[string]bool{
-		"init":            {"broker": true, "ca-file": true, "super-user": true, "super-user-password-file": true},
-		"pool apply":      {"f": true, "dry-run": true},
-		"receiver apply":  {"f": true, "dry-run": true, "force": true},
-		"receiver show":   {},
-		"pool entitle":    {"tenant": true},
-		"pool suspend":    {},
-		"pool resume":     {},
-		"pool rotate-key": {"suspect-key": true},
-		"host add":        {"tenant": true, "force": true},
-		"host remove":     {"tenant": true, "wait": true},
-		"receiver remove": {"wait": true},
-		"check":           {},
+		"init":           {"broker": true, "ca-file": true, "super-user": true, "super-user-password-file": true},
+		"pool apply":     {"f": true, "dry-run": true},
+		"receiver apply": {"f": true, "dry-run": true, "force": true},
+		"receiver show":  {},
+		"tenant add":     {}, "tenant list": {}, "tenant remove": {}, "tenant pool add": {}, "tenant pool remove": {},
+		"pool suspend":       {},
+		"pool resume":        {},
+		"pool rotate-key":    {"suspect-key": true},
+		"tenant host add":    {"force": true},
+		"tenant host remove": {"wait": true},
+		"receiver remove":    {"wait": true},
+		"check":              {},
 	}[command]
 	if allowed != nil {
 		for _, name := range slices.Sorted(maps.Keys(options)) {
@@ -358,20 +479,18 @@ type receiverPlugin struct {
 }
 
 type receiverProfile struct {
-	Name   string             `yaml:"name"`
-	Agent  string             `yaml:"agent"`
-	Labels map[string]*string `yaml:"labels"`
-	Config map[string]any     `yaml:"config"`
+	Name     string             `yaml:"name"`
+	Agent    string             `yaml:"agent"`
+	Replicas int                `yaml:"replicas,omitempty"`
+	Labels   map[string]*string `yaml:"labels"`
+	Config   map[string]any     `yaml:"config"`
 }
 
-// readReceiverConfig reads a receiver config from a single file holding its head, capacity and plugins, or from a
-// directory holding receiver.yaml, with its head and capacity, and, for each plugin, plugins/<type>/plugin.yaml with plugins/<type>/profiles/*.yaml,
-// where profile file order is routing order within the plugin.
+// readReceiverConfig decodes a receiver file or directory in profile recorded order.
 func readReceiverConfig(path string, directory bool) (operator.ReceiverConfig, error) {
 	if !directory {
 		var file struct {
 			receiverHead `yaml:",inline"`
-			Capacity     int64                     `yaml:"capacity"`
 			Plugins      map[string]receiverPlugin `yaml:"plugins"`
 		}
 		if err := readYAML(path, &file); err != nil {
@@ -382,20 +501,19 @@ func readReceiverConfig(path string, directory bool) (operator.ReceiverConfig, e
 			where := fmt.Sprintf("%s: plugins.%s", path, kind)
 			plugins = append(plugins, plugin{where, kind, value.Labels, value.Config, labelled(where, "profiles", value.Profiles)})
 		}
-		return receiverConfig(file.receiverHead, file.Capacity, plugins)
+		return receiverConfig(file.receiverHead, plugins)
 	}
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return operator.ReceiverConfig{}, err
 	}
 	for _, entry := range entries {
-		if name := entry.Name(); !strings.HasPrefix(name, ".") && name != "receiver.yaml" && name != "plugins" {
+		if name := entry.Name(); !strings.HasPrefix(name, ".") && name != "receiver.yaml" && name != "config.yaml" && name != "plugins" {
 			return operator.ReceiverConfig{}, fmt.Errorf("%s does not belong in a receiver config directory", filepath.Join(path, name))
 		}
 	}
 	var receiver struct {
 		receiverHead `yaml:",inline"`
-		Capacity     int64 `yaml:"capacity"`
 	}
 	if err := readYAML(filepath.Join(path, "receiver.yaml"), &receiver); err != nil {
 		return operator.ReceiverConfig{}, err
@@ -435,7 +553,7 @@ func readReceiverConfig(path string, directory bool) (operator.ReceiverConfig, e
 		}
 		plugins = append(plugins, plugin{dir, kind.Name(), settings.Labels, settings.Config, profiles})
 	}
-	return receiverConfig(receiver.receiverHead, receiver.Capacity, plugins)
+	return receiverConfig(receiver.receiverHead, plugins)
 }
 
 // plugin is a decoded plugin entry with the place it was read from, which errors name.
@@ -485,10 +603,9 @@ type receiverHead struct {
 	Broker       string            `yaml:"broker"`
 }
 
-// receiverConfig is head's receiver with the profiles of plugins sorted by type, each plugin's in their order, every
-// profile's labels and config merged onto its plugin's.
-func receiverConfig(head receiverHead, capacity int64, plugins []plugin) (operator.ReceiverConfig, error) {
-	config := operator.ReceiverConfig{Pool: head.Pool, Capacity: cmp.Or(capacity, 1), PluginSHA256: head.PluginSHA256, Broker: head.Broker}
+// receiverConfig merges plugin defaults into profiles in recorded order.
+func receiverConfig(head receiverHead, plugins []plugin) (operator.ReceiverConfig, error) {
+	config := operator.ReceiverConfig{Pool: head.Pool, PluginSHA256: head.PluginSHA256, Broker: head.Broker}
 	if config.PluginSHA256 == nil {
 		config.PluginSHA256 = map[string]string{}
 	}
@@ -533,7 +650,7 @@ func receiverConfig(head receiverHead, capacity int64, plugins []plugin) (operat
 			if err != nil {
 				return config, fmt.Errorf("%s: profile %q: labels %w", e.where, profile.Name, err)
 			}
-			settings := operator.ProfileSettings{Name: profile.Name, Plugin: p.kind, Agent: profile.Agent, Config: merged}
+			settings := operator.ProfileSettings{Name: profile.Name, Plugin: p.kind, Agent: profile.Agent, Replicas: profile.Replicas, Config: merged}
 			for key, value := range mergedLabels {
 				if settings.Labels == nil {
 					settings.Labels = map[string]string{}
@@ -673,10 +790,21 @@ func yamlFiles(dir string) ([]string, error) {
 }
 
 // operatorKafka connects to broker as user with password, trusting ca or, when ca is nil, the system roots.
-func operatorKafka(broker string, ca []byte, user, password string) (*kgo.Client, error) {
+var operatorKafka = func(broker string, ca []byte, user, password string) (*kgo.Client, error) {
 	opts, err := operator.KafkaOpts(broker, ca, user, password)
 	if err != nil {
 		return nil, fmt.Errorf("broker %w", err)
 	}
 	return kgo.NewClient(append(opts, kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
+}
+
+func operatorCommand(pos []string) string {
+	if len(pos) > 0 && (pos[0] == "init" || pos[0] == "check") {
+		return pos[0]
+	}
+	length := 2
+	if len(pos) >= 2 && pos[0] == "tenant" && (pos[1] == "pool" || pos[1] == "host") {
+		length = 3
+	}
+	return strings.Join(pos[:min(len(pos), length)], " ")
 }

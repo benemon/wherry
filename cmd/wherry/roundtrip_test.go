@@ -224,23 +224,6 @@ func TestKafkaOptsAskApiVersionsOncePerConnection(t *testing.T) {
 	}
 }
 
-// resalt works around kfake's SCRAM handshake, which always names 4096 iterations.
-func resalt(t *testing.T, service *operator.Service, bundlePath string) {
-	t.Helper()
-	encoded, err := os.ReadFile(bundlePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var bundle operator.Bundle
-	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
-		t.Fatal(err)
-	}
-	upsert := kadm.UpsertSCRAM{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}
-	if altered, err := kadm.NewClient(service.Operator).AlterUserSCRAMs(context.Background(), nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
-		t.Fatalf("re-salt %s: %v %v", bundle.Principal, err, altered.Error())
-	}
-}
-
 // TestRoundTrip runs a task from a host's Submit through a receiver and the test plugin process to the host's Await,
 // on records each side produces for the other: provisioning through wherry operator, bundles, the host and receiver
 // constructors, plugin discovery and the plugin link, the platform credential's local source, the real claim, admission, the
@@ -264,13 +247,14 @@ func TestRoundTrip(t *testing.T) {
 	}
 	terms.Storage = &operator.Storage{Endpoint: bucket.endpoint, Bucket: s3Bucket}
 	hostBundle, otherBundle, receiverBundle := filepath.Join(dir, "host.yaml"), filepath.Join(dir, "other.yaml"), filepath.Join(dir, "receiver.yaml")
-	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2,
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a",
 		Profiles: []operator.ProfileSettings{{Name: "fake", Plugin: "fake", Agent: "claude", Labels: map[string]string{"gpu": "yes"},
 			Config: map[string]any{"outputs": true, "finish": true, "inline_limit": 1000, "credential": "fake-token"}}},
 		PluginSHA256: map[string]string{"fake": fakeSHA256}}
 	for _, step := range []func() error{
 		func() error { return service.PoolApply(ctx, "pool-a", terms, false) },
-		func() error { return service.TenantAdd(ctx, "tenant-a", "pool-a") },
+		func() error { return service.TenantAdd(ctx, "tenant-a") },
+		func() error { return service.TenantPoolAdd(ctx, "tenant-a", "pool-a") },
 		func() error { return service.HostAdd(ctx, "tenant-a", "host-a", hostBundle, false) },
 		func() error { return service.HostAdd(ctx, "tenant-a", "host-b", otherBundle, false) },
 		func() error { return service.ReceiverAdd(ctx, config, service.Broker, receiverBundle) },
@@ -279,9 +263,6 @@ func TestRoundTrip(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	resalt(t, service, hostBundle)
-	resalt(t, service, otherBundle)
-	resalt(t, service, receiverBundle)
 
 	encoded, err := os.ReadFile(receiverBundle)
 	if err != nil {
@@ -679,7 +660,7 @@ func TestPlatformCredentialIsRedactedFromTheReceiverLog(t *testing.T) {
 	service := &operator.Service{Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
 		Broker: address, CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
-	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []operator.ProfileSettings{
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{
 		{Name: "fake", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": "fake-token", "log_credential": true}},
 	}, PluginSHA256: map[string]string{"fake": fakeSHA256}}
 	dir := t.TempDir()
@@ -690,7 +671,6 @@ func TestPlatformCredentialIsRedactedFromTheReceiverLog(t *testing.T) {
 	if err := service.ReceiverAdd(ctx, config, service.Broker, bundlePath); err != nil {
 		t.Fatal(err)
 	}
-	resalt(t, service, bundlePath)
 	bundle, err := operator.ReadBundle(bundlePath)
 	if err != nil {
 		t.Fatal(err)

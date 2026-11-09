@@ -27,7 +27,7 @@ import (
 )
 
 // devManifestVersion is the manifest layout this build reads and writes.
-const devManifestVersion = 1
+const devManifestVersion = 2
 
 // devHarnesses are the agent CLIs init looks for on PATH, in profile order.
 var devHarnesses = []string{"claude", "codex", "gemini"}
@@ -47,8 +47,24 @@ type devManifest struct {
 	Agents       []string            `json:"agents"`
 	DefaultAgent string              `json:"default_agent"`
 	Storage      *devImage           `json:"storage"`
+	// HostFiles is what up created at the standard host paths; init keeps it.
+	HostFiles *devHostFiles `json:"host_files,omitzero"`
 	// EnvDenylist holds the names in the user's environment at init that end _TOKEN, _KEY, _SECRET or _PASSWORD.
 	EnvDenylist []string `json:"env_denylist"`
+}
+
+// devHostFiles are the files up created at the standard host paths, by their resolved paths.
+type devHostFiles struct {
+	Files map[string]devHostFile `json:"files"`
+}
+
+// devHostFile is the device and inode up created a file as, and its size and modification time then. The file holds a
+// credential, so no digest of its content is kept.
+type devHostFile struct {
+	Device  uint64 `json:"device,omitzero"`
+	Inode   uint64 `json:"inode,omitzero"`
+	Size    int64  `json:"size,omitzero"`
+	ModTime int64  `json:"mod_time,omitzero"`
 }
 
 type devArtefact struct {
@@ -133,6 +149,10 @@ func runDev(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
+	if slices.Contains([]string{"-h", "-help", "--help"}, args[0]) {
+		fmt.Fprintln(stderr, usage)
+		return flag.ErrHelp
+	}
 	if args[0] == "mock" {
 		return runDevMock(args[1:], stdout)
 	}
@@ -176,7 +196,7 @@ func runDev(args []string, stdout, stderr io.Writer) error {
 		return devUp(ctx, instance, *runtimeName, images, stdout, stderr)
 	case "down":
 		if *reset {
-			return devReset(instance, stdout)
+			return devReset(instance, stdout, stderr)
 		}
 		return devDown(ctx, instance, stdout, stderr)
 	}
@@ -211,18 +231,25 @@ func (images *devAgentImages) Set(value string) error {
 func readManifest(instance devInstance) (*devManifest, error) {
 	path := instance.cache("manifest.json")
 	encoded, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+	// A dangling symlink reads as not existing, but may stand in for a manifest that records host files.
+	if _, lerr := os.Lstat(path); errors.Is(err, os.ErrNotExist) && errors.Is(lerr, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	// Another version's layout may not decode as this one's.
 	var manifest devManifest
-	if err := json.Unmarshal(encoded, &manifest); err != nil {
+	if err := json.Unmarshal(encoded, &struct {
+		Version *int `json:"version"`
+	}{&manifest.Version}); err != nil {
 		return nil, fmt.Errorf("manifest %s: %w", path, err)
 	}
 	if manifest.Version != devManifestVersion {
 		return nil, fmt.Errorf("manifest %s has version %d, which this wherry does not read; run wherry dev down --reset", path, manifest.Version)
+	}
+	if err := json.Unmarshal(encoded, &manifest); err != nil {
+		return nil, fmt.Errorf("manifest %s: %w", path, err)
 	}
 	return &manifest, nil
 }
@@ -319,7 +346,8 @@ func runtimeAnswers(runtime string) bool {
 }
 
 const (
-	kafkaReference   = "docker.io/apache/kafka:latest"
+	// kafkaReference is Kafka 4.3.1, the image test/kafka/up.sh pins, so dev runs the broker CI tests.
+	kafkaReference   = "docker.io/apache/kafka@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837"
 	storageReference = "quay.io/benjamin_holmes/ceph-aio:v21"
 )
 
@@ -382,7 +410,7 @@ func devInit(ctx context.Context, instance devInstance, runtimeName string, stor
 	next := devManifest{
 		Version: devManifestVersion, OS: runtime.GOOS, Arch: runtime.GOARCH, Runtime: runtimeName,
 		Agents: append([]string{}, detected...), DefaultAgent: defaultAgent, Images: map[string]devImage{},
-		EnvDenylist: credentialNames(os.Environ()),
+		EnvDenylist: credentialNames(os.Environ()), HostFiles: prev.HostFiles,
 	}
 	step("nomad")
 	if next.Nomad, err = devSources.hashicorp(ctx, "nomad", instance.cache(), "nomad", prev.Nomad, stderr); err != nil {
@@ -544,8 +572,11 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(sum.Sum(nil)), nil
 }
 
-func devReset(instance devInstance, stdout io.Writer) error {
+func devReset(instance devInstance, stdout, stderr io.Writer) error {
 	if err := refuseUp(instance); err != nil {
+		return err
+	}
+	if err := removeHostFiles(instance, stderr); err != nil {
 		return err
 	}
 	if err := os.RemoveAll(instance.cache()); err != nil {

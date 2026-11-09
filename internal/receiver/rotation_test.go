@@ -48,7 +48,7 @@ func TestCompletedRunRedeliveredAfterSelfRotation(t *testing.T) {
 			if rotate {
 				rotateSelf(t, &f)
 			}
-			admitted, ack := f.receiver.admit(f.ctx, record)
+			admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0])
 			if admitted != nil || ack != kgo.AckAccept {
 				t.Errorf("a committed terminal was not acknowledged on redelivery")
 			}
@@ -62,7 +62,7 @@ func TestCompletedRunPastStartByAfterSelfRotation(t *testing.T) {
 	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy = time.Now().Add(-time.Second).Unix() })
 	f.publishStatus(t, record, testReceiver, f.receiver.signing, "terminal", wire.TaskStateCompleted, nil)
 	rotateSelf(t, &f)
-	admitted, ack := f.receiver.admit(f.ctx, record)
+	admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0])
 	if admitted != nil || ack != kgo.AckAccept {
 		t.Errorf("a committed terminal was not acknowledged on redelivery")
 	}
@@ -91,7 +91,7 @@ func TestHeldRunPastStartBy(t *testing.T) {
 			f.publishStatus(t, record, test.holder, key, "started", wire.TaskStateWorking, nil)
 			passed(startBy)
 			test.rotate(t, &f, key)
-			admitted, _ := f.receiver.admit(f.ctx, record)
+			admitted, _ := f.receiver.admit(f.ctx, record, f.receiver.profiles[0])
 			if admitted == nil {
 				t.Errorf("a held run was not admitted for adoption")
 			}
@@ -123,13 +123,13 @@ func TestCancelOfHeldRunAfterSelfRotation(t *testing.T) {
 	f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
 	rotateSelf(t, &f)
 	f.publishCancel(t, testRun("run-a"), 1, f.host, nil)
-	admitted, _ := f.receiver.admit(f.ctx, record)
+	admitted, _ := f.receiver.admit(f.ctx, record, f.receiver.profiles[0])
 	if admitted == nil || !admitted.cancelled {
 		t.Errorf("the redelivered run does not carry its cancel")
 	}
 	// The adopter's first commit is its own claimed status, under the new key.
 	run := testActiveRun(t, f, "run-a", 2)
-	if err := run.commit(f.ctx, run.claimRecords(f.taskOffset(t, run.taskHash))...); err != nil {
+	if err := run.commit(f.ctx, run.claimRecords(f.tasksTopic(), f.taskOffset(t, run.taskHash))...); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.receiver.readCancels(f.ctx); err != nil {
@@ -156,7 +156,7 @@ func TestRunIDOfAnotherTenantAfterHolderRotation(t *testing.T) {
 			t.Cleanup(producer.Close)
 			task := testSubmission("run-x")
 			holder := &activeRun{receiver: f.receiver, producer: producer, task: task, taskHash: wire.TaskHash(must(t)(wire.SignRecord(task, f.host))), history: []wire.Message{task.Message}, attempt: 1, profile: f.receiver.profiles[0]}
-			if err := holder.commit(f.ctx, holder.claimRecords(0)...); err != nil {
+			if err := holder.commit(f.ctx, holder.claimRecords(f.tasksTopic(), 0)...); err != nil {
 				t.Fatal(err)
 			}
 			if rotate {
@@ -184,7 +184,7 @@ func TestRetiredKeyAfterRotationRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	admitted, ack := f.receiver.admit(f.ctx, record)
+	admitted, ack := f.receiver.admit(f.ctx, record, f.receiver.profiles[0])
 	if len(events.statuses[testRun("run-a")]) != 0 || admitted != nil || ack != kgo.AckReject {
 		t.Errorf("a status signed by the retired key after the rotation counted")
 	}

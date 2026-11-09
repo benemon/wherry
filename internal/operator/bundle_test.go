@@ -117,7 +117,7 @@ func TestHostAddRecordsNothingWhenItsTopicIsRefused(t *testing.T) {
 		}
 		return response, nil, true
 	})
-	if err := service.HostAdd(ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.bundle"), false); err == nil {
+	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.bundle"), false); err == nil {
 		t.Fatal("host add succeeded; want its topic's creation refused")
 	}
 	if state, err := service.LoadState(ctx); err != nil || len(state.Hosts) != 0 {
@@ -208,7 +208,7 @@ func TestReissueFailingAfterThePasswordChanges(t *testing.T) {
 			reissue func(*Service, string) error
 		}{
 			{"host", func(service *Service, path string) error {
-				return service.HostAdd(t.Context(), "tenant-a", "host-a", path, true)
+				return hostFixture(t, service, t.Context(), "tenant-a", "host-a", path, true)
 			}},
 			{"receiver", func(service *Service, path string) error {
 				return service.ReceiverReissue(t.Context(), "receiver-a", service.Broker, path)
@@ -245,7 +245,7 @@ func TestHostAddForceRefusesAnEndedHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "host.bundle")
-	if err := service.HostAdd(ctx, "tenant-a", "host-a", path, true); err == nil || err.Error() != "host cannot return after its membership end" {
+	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", path, true); err == nil || err.Error() != "host cannot return after its membership end" {
 		t.Fatalf("host add --force of an ended host = %v; want it refused", err)
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {

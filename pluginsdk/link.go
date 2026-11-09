@@ -2,6 +2,8 @@ package pluginsdk
 
 import (
 	"context"
+	"maps"
+	"slices"
 
 	"github.com/benemon/wherry/pluginsdk/internal/pluginv1"
 	"github.com/hashicorp/go-plugin"
@@ -18,9 +20,15 @@ var handshake = plugin.HandshakeConfig{
 }
 
 // versionedPlugins is every plugin protocol version Serve serves and Launch accepts, each with its plugin set. go-plugin
-// runs the newest version both sides list and refuses a plugin that lists none of Launch's.
-func versionedPlugins(p *grpcPlugin) map[int]plugin.PluginSet {
-	return map[int]plugin.PluginSet{10: {pluginName: p}}
+// runs the newest version both sides list and refuses a plugin that lists none of Launch's. It is a variable so tests
+// can stand in for a set of several versions.
+var versionedPlugins = func(p *grpcPlugin) map[int]plugin.PluginSet {
+	return map[int]plugin.PluginSet{11: {pluginName: p}}
+}
+
+// Protocols returns the plugin protocol versions Launch accepts, ascending.
+func Protocols() []int {
+	return slices.Sorted(maps.Keys(versionedPlugins(nil)))
 }
 
 type grpcPlugin struct {

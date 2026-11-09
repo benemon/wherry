@@ -13,6 +13,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
@@ -28,11 +30,11 @@ type AgentTerms struct {
 	DefaultModel string   `json:"default_model,omitzero" yaml:"default_model"`
 }
 
-// AgentCredential is a credential an agent takes, at the target its TaskCredential names. A required credential the
-// submitting host has no source for refuses the submission; Required defaults to true.
+// AgentCredential names an agent target and display description; Required defaults to true and refuses submission without a source.
 type AgentCredential struct {
 	wire.TaskCredential `yaml:",inline"`
-	Required            *bool `json:"required,omitzero" yaml:"required"`
+	Description         string `json:"description,omitzero" yaml:"description,omitempty"`
+	Required            *bool  `json:"required,omitzero" yaml:"required"`
 }
 
 // Optional reports whether a run goes without the credential when its host has no source for it.
@@ -192,12 +194,10 @@ func withDefaults(terms Terms) Terms {
 	return terms
 }
 
-// ReceiverConfig is a receiver's whole configuration, recorded on
-// wherry.operator and read by the receiver after it authenticates.
+// ReceiverConfig is the receiver configuration recorded on wherry.operator.
 type ReceiverConfig struct {
 	Receiver string            `json:"receiver"`
 	Pool     string            `json:"pool"`
-	Capacity int64             `json:"capacity"`
 	Profiles []ProfileSettings `json:"profiles"`
 	// PluginSHA256 maps each plugin type to the lowercase hex SHA-256 its binary must have; the receiver refuses to
 	// start a plugin whose type has none.
@@ -206,15 +206,14 @@ type ReceiverConfig struct {
 	Broker string `json:"-"`
 }
 
-// ProfileSettings configures one profile: the plugin that runs it, the agent it launches, the labels its
-// operator declares for it, and its plugin's config merged with its own, which the plugin decodes (runtime, node pool
-// and the like stay there).
+// ProfileSettings configures a profile and its replica count.
 type ProfileSettings struct {
-	Name   string            `json:"name"`
-	Plugin string            `json:"plugin"`
-	Agent  string            `json:"agent"`
-	Labels map[string]string `json:"labels,omitzero"`
-	Config map[string]any    `json:"config"`
+	Name     string            `json:"name"`
+	Plugin   string            `json:"plugin"`
+	Agent    string            `json:"agent"`
+	Replicas int               `json:"replicas,omitzero" yaml:"replicas,omitempty"`
+	Labels   map[string]string `json:"labels,omitzero"`
+	Config   map[string]any    `json:"config"`
 }
 
 type Record struct {
@@ -232,13 +231,15 @@ type Record struct {
 }
 type Host struct{ Tenant, Name string }
 type State struct {
-	Pools        map[string]Terms
-	Receivers    map[string]ReceiverConfig
-	Hosts        map[string]Host
-	Entitlements map[string]map[string]bool
-	Ended        map[string]bool
-	Revoking     map[string]bool
-	Suspended    map[string]bool
+	Tenants           map[string]bool // false is live; true is ended.
+	EndedEntitlements map[string]map[string]bool
+	Pools             map[string]Terms
+	Receivers         map[string]ReceiverConfig
+	Hosts             map[string]Host
+	Entitlements      map[string]map[string]bool
+	Ended             map[string]bool
+	Revoking          map[string]bool
+	Suspended         map[string]bool
 	// RotateRequested is the wherry.operator offset of each pool's latest rotate-key record.
 	RotateRequested map[string]int64
 	// SuspendChanged is the wherry.operator offset of each pool's latest suspend or resume record.
@@ -246,7 +247,7 @@ type State struct {
 }
 
 func NewState() State {
-	return State{map[string]Terms{}, map[string]ReceiverConfig{}, map[string]Host{}, map[string]map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]int64{}, map[string]int64{}}
+	return State{Tenants: map[string]bool{}, EndedEntitlements: map[string]map[string]bool{}, Pools: map[string]Terms{}, Receivers: map[string]ReceiverConfig{}, Hosts: map[string]Host{}, Entitlements: map[string]map[string]bool{}, Ended: map[string]bool{}, Revoking: map[string]bool{}, Suspended: map[string]bool{}, RotateRequested: map[string]int64{}, SuspendChanged: map[string]int64{}}
 }
 
 // RecordVersion is the wherry.operator record version this release writes and the highest it reads.
@@ -301,6 +302,11 @@ func Fold(records []Record) (State, error) {
 
 func apply(state *State, record Record) error {
 	switch record.Kind {
+	case "tenant":
+		if _, exists := state.Tenants[record.Tenant]; exists {
+			return errors.New("tenant exists; a tenant name cannot return")
+		}
+		state.Tenants[record.Tenant] = false
 	case "pool":
 		state.Pools[record.Pool] = withDefaults(*record.Terms)
 	case "receiver":
@@ -312,11 +318,17 @@ func apply(state *State, record Record) error {
 		}
 		state.Receivers[record.Receiver] = *record.Config
 	case "host":
+		if err := state.LiveTenant(record.Tenant); err != nil {
+			return err
+		}
 		if state.Ended[TenantPrincipal(record.Tenant, record.Host)] {
 			return errors.New("host cannot return after its membership end")
 		}
 		state.Hosts[TenantPrincipal(record.Tenant, record.Host)] = Host{record.Tenant, record.Host}
 	case "entitlement":
+		if err := state.LiveTenant(record.Tenant); err != nil {
+			return err
+		}
 		if _, ok := state.Pools[record.Pool]; !ok {
 			return errors.New("entitlement names unknown pool")
 		}
@@ -324,8 +336,41 @@ func apply(state *State, record Record) error {
 			state.Entitlements[record.Tenant] = map[string]bool{}
 		}
 		state.Entitlements[record.Tenant][record.Pool] = true
+		delete(state.EndedEntitlements[record.Tenant], record.Pool)
+		if len(state.EndedEntitlements[record.Tenant]) == 0 {
+			delete(state.EndedEntitlements, record.Tenant)
+		}
 	case "end":
-		state.Ended[subject(record)] = true
+		if record.Receiver == "" && record.Host == "" {
+			if err := state.LiveTenant(record.Tenant); err != nil {
+				return err
+			}
+			if record.Pool != "" {
+				if !state.Entitlements[record.Tenant][record.Pool] {
+					return errors.New("end names absent entitlement")
+				}
+				delete(state.Entitlements[record.Tenant], record.Pool)
+				if len(state.Entitlements[record.Tenant]) == 0 {
+					delete(state.Entitlements, record.Tenant)
+				}
+				if state.EndedEntitlements[record.Tenant] == nil {
+					state.EndedEntitlements[record.Tenant] = map[string]bool{}
+				}
+				state.EndedEntitlements[record.Tenant][record.Pool] = true
+			} else {
+				if len(state.Entitlements[record.Tenant]) != 0 {
+					return errors.New("tenant still has entitlements")
+				}
+				for principal, host := range state.Hosts {
+					if host.Tenant == record.Tenant && !state.Ended[principal] {
+						return errors.New("tenant still has hosts")
+					}
+				}
+				state.Tenants[record.Tenant] = true
+			}
+		} else {
+			state.Ended[subject(record)] = true
+		}
 	case "revoking":
 		state.Revoking[subject(record)] = true
 	case "suspend", "resume", "rotate-key":
@@ -345,8 +390,19 @@ func apply(state *State, record Record) error {
 	return nil
 }
 
+func (state State) LiveTenant(tenant string) error {
+	ended, exists := state.Tenants[tenant]
+	if !exists {
+		return errors.New("tenant absent; use tenant add first")
+	}
+	if ended {
+		return errors.New("tenant has ended")
+	}
+	return nil
+}
+
 func (state State) CheckNames() error {
-	seen := map[string]string{OperatorTopic: "operator topic", ReceiversTopic: "receivers topic"}
+	seen := map[string]string{OperatorTopic: "operator topic"}
 	add := func(value, owner string) error {
 		if previous, ok := seen[value]; ok {
 			return fmt.Errorf("name collision between %s and %s", previous, owner)
@@ -358,7 +414,7 @@ func (state State) CheckNames() error {
 		if err := validateNames(pool); err != nil {
 			return err
 		}
-		for _, value := range []string{PoolTasksTopic(pool), PoolEventsTopic(pool), PoolGroup(pool), TransactionalPrefix(pool)} {
+		for _, value := range []string{PoolEventsTopic(pool), PoolGroup(pool), TransactionalPrefix(pool)} {
 			if err := add(value, "pool "+pool); err != nil {
 				return err
 			}
@@ -374,6 +430,16 @@ func (state State) CheckNames() error {
 			}
 		}
 	}
+	for tenant := range state.Tenants {
+		if err := validateNames(tenant); err != nil {
+			return err
+		}
+		for _, topic := range []string{TenantTopic(tenant), TenantTranscriptTopic(tenant)} {
+			if err := add(topic, "tenant "+tenant); err != nil {
+				return err
+			}
+		}
+	}
 	for _, host := range state.Hosts {
 		if err := validateNames(host.Tenant, host.Name); err != nil {
 			return err
@@ -383,9 +449,6 @@ func (state State) CheckNames() error {
 				return err
 			}
 		}
-		if _, ok := seen[TenantTopic(host.Tenant)]; !ok {
-			seen[TenantTopic(host.Tenant)] = "tenant " + host.Tenant
-		}
 	}
 	return nil
 }
@@ -393,22 +456,34 @@ func (state State) CheckNames() error {
 // pluginSHA256 is a pinned plugin binary's SHA-256 as the release's checksums.txt writes it.
 var pluginSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// ValidPluginSHA256 reports whether sum is a plugin pin as the release's checksums.txt writes it.
+func ValidPluginSHA256(sum string) bool { return pluginSHA256.MatchString(sum) }
+
 func ValidateConfig(config ReceiverConfig, terms Terms) error {
 	if err := validateNames(config.Receiver, config.Pool); err != nil {
 		return err
 	}
-	if config.Capacity <= 0 || len(config.Profiles) == 0 {
-		return errors.New("receiver config needs a capacity and profiles")
+	if len(config.Profiles) == 0 {
+		return errors.New("receiver config needs profiles")
 	}
 	for kind, sum := range config.PluginSHA256 {
-		if !wire.ValidName(kind) || !pluginSHA256.MatchString(sum) {
+		if !wire.ValidName(kind) || !ValidPluginSHA256(sum) {
 			return fmt.Errorf("plugin SHA-256 %q=%q needs a valid plugin type and 64 lowercase hex digits", kind, sum)
 		}
 	}
 	names := map[string]bool{}
 	for _, profile := range config.Profiles {
+		if profile.Replicas < 0 {
+			return errors.New("profile replicas must not be negative")
+		}
 		if validateNames(profile.Name) != nil || names[profile.Name] || !wire.ValidName(profile.Plugin) {
 			return errors.New("profiles need unique valid names and a valid plugin")
+		}
+		if name, ok := profile.Config["credential"]; ok {
+			value, valid := name.(string)
+			if !valid || !wire.ValidName(value) {
+				return fmt.Errorf("credential %q is not a valid name", name)
+			}
 		}
 		names[profile.Name] = true
 		if _, ok := config.PluginSHA256[profile.Plugin]; !ok {
@@ -620,6 +695,12 @@ func ValidateReceiverRecord(record Record, receiver string, terms Terms) error {
 }
 
 func subject(record Record) string {
+	if record.Receiver == "" && record.Host == "" {
+		if record.Pool != "" {
+			return "entitlement." + record.Tenant + "." + record.Pool
+		}
+		return "tenant." + record.Tenant
+	}
 	if record.Receiver != "" {
 		return ReceiverPrincipal(record.Receiver)
 	}
@@ -631,9 +712,16 @@ func validateRecord(record Record) error {
 		return errors.New("invalid operator record")
 	}
 	switch record.Kind {
+	case "tenant":
+		if validateNames(record.Tenant) != nil || record.Pool != "" || record.Host != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
+			return errors.New("invalid tenant record")
+		}
 	case "pool":
-		if validateNames(record.Pool) != nil || record.Terms == nil || validateTerms(withDefaults(*record.Terms)) != nil {
+		if validateNames(record.Pool) != nil || record.Terms == nil {
 			return errors.New("invalid pool record")
+		}
+		if err := validateTerms(withDefaults(*record.Terms)); err != nil {
+			return fmt.Errorf("invalid pool record: %w", err)
 		}
 	case "receiver":
 		if validateNames(record.Pool, record.Receiver) != nil || record.Config == nil || record.Config.Receiver != record.Receiver || record.Config.Pool != record.Pool {
@@ -648,11 +736,26 @@ func validateRecord(record Record) error {
 			return errors.New("invalid entitlement record")
 		}
 	case "end":
-		if (record.Receiver == "") == (record.Host == "" || record.Tenant == "") || validateNames(record.Receiver+record.Tenant, record.Host+record.Receiver) != nil {
-			return errors.New("invalid membership end")
+		if record.Terms != nil || record.Config != nil {
+			return errors.New("invalid end record")
+		}
+		switch {
+		case record.Receiver != "":
+			if validateNames(record.Receiver) != nil || record.Tenant != "" || record.Host != "" || record.Pool != "" {
+				return errors.New("invalid receiver end")
+			}
+		case record.Host != "":
+			if validateNames(record.Tenant, record.Host) != nil || record.Pool != "" {
+				return errors.New("invalid host end")
+			}
+		default:
+			if validateNames(record.Tenant) != nil || record.Pool != "" && validateNames(record.Pool) != nil {
+				return errors.New("invalid tenant or entitlement end")
+			}
 		}
 	case "revoking":
-		if (record.Receiver == "") == (record.Host == "" || record.Tenant == "") || validateNames(record.Receiver+record.Tenant, record.Host+record.Receiver) != nil ||
+		if record.Receiver != "" && (record.Tenant != "" || record.Host != "" || validateNames(record.Receiver) != nil) ||
+			record.Receiver == "" && validateNames(record.Tenant, record.Host) != nil ||
 			record.Pool != "" || record.Terms != nil || record.Config != nil {
 			return errors.New("invalid revoking record")
 		}
@@ -722,9 +825,12 @@ func validateTerms(terms Terms) error {
 			return err
 		}
 	}
-	for _, agent := range terms.Agents {
+	for i, agent := range terms.Agents {
 		if validateNames(agent.Name) != nil {
 			return errors.New("invalid agent name")
+		}
+		if slices.ContainsFunc(terms.Agents[:i], func(other AgentTerms) bool { return other.Name == agent.Name }) {
+			return fmt.Errorf("agent %s is listed twice", agent.Name)
 		}
 		if agent.DefaultModel != "" && !slices.Contains(agent.Models, agent.DefaultModel) {
 			return errors.New("an agent's default_model must be one of its models")
@@ -732,6 +838,23 @@ func validateTerms(terms Terms) error {
 		if err := wire.ValidateCredentials(agent.Targets()); err != nil {
 			return fmt.Errorf("agent %s: %w", agent.Name, err)
 		}
+		for _, credential := range agent.Credentials {
+			if err := ValidateDescription(credential.Description); err != nil {
+				return fmt.Errorf("agent %s credential %s: %w", agent.Name, credential.Name, err)
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateDescription checks the display description of an agent credential.
+func ValidateDescription(description string) error {
+	invalid := !utf8.ValidString(description) || utf8.RuneCountInString(description) > 80
+	for _, r := range description {
+		invalid = invalid || unicode.IsControl(r) || r == '\u2028' || r == '\u2029'
+	}
+	if invalid {
+		return errors.New("invalid description")
 	}
 	return nil
 }

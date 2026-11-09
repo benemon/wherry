@@ -210,6 +210,8 @@ func (r *Receiver) stepDown(ctx context.Context, stopped time.Time, closeGroup f
 	for waitCtx.Err() == nil {
 		latest, err := r.readCurrent(waitCtx)
 		if err == nil && latest.snapshot != nil && latest.snapshot.Custodian != r.id {
+			// The successor's snapshot is seen before handOver lists the task topics, so a host that read this key did so
+			// before the listing.
 			if err := r.handOver(bounded, latest.snapshot.Current); err != nil {
 				r.logger.Printf("custodian: hand over to %s: %v; keeping the pool keys to their deadlines", latest.snapshot.Custodian, err)
 			}
@@ -222,8 +224,8 @@ func (r *Receiver) stepDown(ctx context.Context, stopped time.Time, closeGroup f
 
 // handOver writes, in one transaction, a re-key wrap to the successor's current key for every task hash the receiver's
 // keys open that is an admissible task of its run, its run's task when it has one, not terminal and not past its
-// task_ended_by, from one read of the task topic to its last stable offset, and then deletes the keys. Any error keeps
-// them.
+// task_ended_by, from one listing of the pool's task topics and one read of each to its last stable offset, and then
+// deletes the keys. Any error, the listing's or a read's, keeps them.
 func (r *Receiver) handOver(ctx context.Context, current wire.PoolKey) error {
 	r.custody.mu.Lock()
 	defer r.custody.mu.Unlock()
@@ -234,10 +236,23 @@ func (r *Receiver) handOver(ctx context.Context, current wire.PoolKey) error {
 	if r.suspended() {
 		return fmt.Errorf("pool %s is suspended; its re-key scan waits for resume", r.config.Pool)
 	}
-	tasks, err := r.reader.ReadFrom(ctx, operator.PoolTasksTopic(r.config.Pool), 0)
+	admin, err := r.reader.Admin()
+	if err != nil {
+		return err
+	}
+	topics, err := operator.PoolTaskTopics(ctx, admin, r.config.Pool)
 	if err != nil {
 		r.deny(err, capRead)
 		return err
+	}
+	var tasks []*kgo.Record
+	for _, topic := range topics {
+		read, err := r.reader.ReadFrom(ctx, topic, 0)
+		if err != nil {
+			r.deny(err, capRead)
+			return err
+		}
+		tasks = append(tasks, read...)
 	}
 	events, err := r.readEvents(ctx)
 	if err != nil {

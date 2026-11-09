@@ -20,7 +20,7 @@
 
     <rect x="200" y="30" width="156" height="52" rx="6" fill="#fffdf7" stroke="#3f6b4a" stroke-width="1.5"/>
     <text x="278" y="52" text-anchor="middle" font-weight="600">Tasks</text>
-    <text x="278" y="70" text-anchor="middle" font-size="9" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#2e4a35">wherry.pool.&lt;pool&gt;.tasks</text>
+    <text x="278" y="70" text-anchor="middle" font-size="9" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#2e4a35">wherry.pool.&lt;pool&gt;.tasks.*</text>
 
     <rect x="368" y="30" width="156" height="52" rx="6" fill="#fffdf7" stroke="#3f6b4a" stroke-width="1.5"/>
     <text x="446" y="52" text-anchor="middle" font-weight="600">Events</text>
@@ -80,7 +80,7 @@
 
   <!-- 1. place and record -->
   <rect x="36" y="104" width="350" height="44" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1"/>
-  <text x="211" y="122" text-anchor="middle" font-size="10.5" fill="#2e4a35">resolves placement from wherry.operator and wherry.receivers,</text>
+  <text x="211" y="122" text-anchor="middle" font-size="10.5" fill="#2e4a35">resolves placement from wherry.operator and pool advertisements,</text>
   <text x="211" y="137" text-anchor="middle" font-size="10.5" fill="#2e4a35">records the run and its redaction key locally</text>
 
   <g font-size="10.5" fill="#2e4a35" text-anchor="middle">

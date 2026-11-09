@@ -35,6 +35,7 @@ import (
 	"github.com/benemon/wherry/pluginsdk"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sasl/plain"
@@ -80,6 +81,8 @@ type fakePlugin struct {
 	dispatchErr error
 	// outcome is what Dispatch reports, OutcomeCreated when zero, or beside dispatchErr OutcomeUnknown when zero.
 	outcome pluginsdk.Outcome
+	// dispatchBlocks makes Dispatch wait until its context ends before it reports, as one returning at the bound.
+	dispatchBlocks bool
 	// handleSize is the length of the handle data Dispatch and Lookup return.
 	handleSize int
 	// jobName is the handle name Dispatch and Lookup return, or else agent- and the run ID.
@@ -87,8 +90,24 @@ type fakePlugin struct {
 	lastRun pluginsdk.Run
 	// lastDeadline is the deadline of the context Follow last ran under.
 	lastDeadline time.Time
-	// placing makes Dispatch and Lookup wait, as for a job the platform never places, until their context ends.
-	placing bool
+	// placing makes Lookup report a dispatched job pending with placingReason, as for a job the platform never places;
+	// reasons makes it report one pending with each in turn, then running.
+	placing       bool
+	placingReason string
+	reasons       []string
+	// placedRuns are the runs placing leaves out; vanish makes Lookup find a dispatched job absent.
+	placedRuns map[string]bool
+	vanish     bool
+	// lookupHold makes Lookup wait until it is closed, whatever its context, and lookupCtxs records each such Lookup's
+	// context.
+	lookupHold chan struct{}
+	lookupCtxs []context.Context
+	// created holds the runs Dispatch created; Lookup finds each running unless placing, reasons or neverStarted say
+	// otherwise. Dispatch's handle is not Lookup's: wrongHandles counts the Follows and Collects given Dispatch's.
+	created      map[string]bool
+	wrongHandles int
+	// lookupHook runs as Lookup returns, with the state it reports.
+	lookupHook func(pluginsdk.JobState)
 	// afterLookup, when set, runs after Lookup reports an absent job, as a receiver shutting down at that moment.
 	afterLookup func()
 	// lookupBlocks makes Lookup alone wait until its context ends, as a platform call that hangs.
@@ -97,6 +116,12 @@ type fakePlugin struct {
 	// lookupErr fails every Lookup, or else the first lookupFailures of them.
 	lookupErr      error
 	lookupFailures int
+	// followedJob, when set, is the state Lookup reports once the job has been followed; followedErr fails the Lookups
+	// after the first Follow, every one or else the first followedFailures of them.
+	followedJob      *pluginsdk.JobState
+	followedErr      error
+	followedFailures int
+	followedLookups  int
 	// job is the state Lookup reports; jobProfile and jobAgent override the metadata it reports.
 	job                  pluginsdk.JobState
 	jobProfile, jobAgent string
@@ -113,9 +138,11 @@ type fakePlugin struct {
 	releaseErr    error
 	releaseIDs    []string
 	// calls records Purge and Release in order.
-	calls    []string
-	sweeps   int
-	sweepErr error
+	calls        []string
+	sweeps       int
+	sweepErr     error
+	dispatchHold <-chan struct{}
+	followHold   <-chan struct{}
 	// endDelay holds the job open after its stream before it ends; pauses hold it that long before the line at each index.
 	endDelay time.Duration
 	pauses   map[int]time.Duration
@@ -127,6 +154,9 @@ type fakePlugin struct {
 	lostErr   error
 	froms     []int64
 	delivered int
+	// followStarts records when each Follow began, and deadFollows counts the Follows begun under an ended context.
+	followStarts []time.Time
+	deadFollows  int
 	// hang makes Sweep and Ready block until their context ends.
 	hang bool
 	// outputs are what Collect streams after the outcome file, unless collectErr fails it, or collectFailures fails that many
@@ -167,24 +197,54 @@ func (f *fakePlugin) handle(runID string) pluginsdk.Handle {
 	return pluginsdk.Handle{Data: []byte(runID + strings.Repeat("h", max(0, f.handleSize-len(runID)))), Name: cmp.Or(f.jobName, "agent-"+runID)}
 }
 
+// dispatchedPrefix marks the data of Dispatch's handle.
+const dispatchedPrefix = "dispatch:"
+
+// lookupHandle counts a Follow or Collect given Dispatch's handle, and reports whether it was.
+func (f *fakePlugin) lookupHandle(handle pluginsdk.Handle) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if strings.HasPrefix(string(handle.Data), dispatchedPrefix) {
+		f.wrongHandles++
+		return false
+	}
+	return true
+}
+
 func (f *fakePlugin) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk.Outcome, pluginsdk.Handle, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.dispatches++
-	f.lastRun = run
-	if f.placing {
+	if f.dispatchBlocks {
 		f.mu.Unlock()
 		<-ctx.Done()
 		f.mu.Lock()
-		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, ctx.Err()
 	}
+	f.dispatches++
+	if hold := f.dispatchHold; hold != nil {
+		f.mu.Unlock()
+		select {
+		case <-hold:
+		case <-ctx.Done():
+			f.mu.Lock()
+			return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, ctx.Err()
+		}
+		f.mu.Lock()
+	}
+	f.lastRun = run
 	if f.dispatchErr != nil {
 		return f.outcome, pluginsdk.Handle{}, f.dispatchErr
 	}
 	if f.outcome == pluginsdk.OutcomeNothingCreated {
 		return f.outcome, pluginsdk.Handle{}, nil
 	}
-	return cmp.Or(f.outcome, pluginsdk.OutcomeCreated), f.handle(run.ID), nil
+	if f.created == nil {
+		f.created = map[string]bool{}
+	}
+	f.created[run.ID] = true
+	// Dispatch's handle is as long as Lookup's.
+	handle := f.handle(run.ID)
+	handle.Data = append([]byte(dispatchedPrefix), handle.Data...)[:max(len(handle.Data), len(dispatchedPrefix))]
+	return cmp.Or(f.outcome, pluginsdk.OutcomeCreated), handle, nil
 }
 
 func (f *fakePlugin) Lookup(ctx context.Context, runID string) (pluginsdk.Job, error) {
@@ -197,14 +257,19 @@ func (f *fakePlugin) Lookup(ctx context.Context, runID string) (pluginsdk.Job, e
 		f.mu.Lock()
 		return pluginsdk.Job{}, ctx.Err()
 	}
-	if f.placing {
+	if hold := f.lookupHold; hold != nil {
+		f.lookupCtxs = append(f.lookupCtxs, ctx)
 		f.mu.Unlock()
-		<-ctx.Done()
+		<-hold
 		f.mu.Lock()
-		return pluginsdk.Job{}, ctx.Err()
 	}
 	if f.lookupErr != nil {
 		return pluginsdk.Job{}, f.lookupErr
+	}
+	if f.follows > 0 && f.followedErr != nil {
+		if f.followedLookups++; f.followedFailures == 0 || f.followedLookups <= f.followedFailures {
+			return pluginsdk.Job{}, f.followedErr
+		}
 	}
 	if f.lookups <= f.lookupFailures {
 		return pluginsdk.Job{}, errors.New("lookup down")
@@ -212,22 +277,59 @@ func (f *fakePlugin) Lookup(ctx context.Context, runID string) (pluginsdk.Job, e
 	if err := ctx.Err(); err != nil {
 		return pluginsdk.Job{}, err
 	}
-	if f.job == pluginsdk.JobAbsent {
+	job := pluginsdk.Job{State: f.job, Handle: f.handle(runID), Attempt: 1, Profile: cmp.Or(f.jobProfile, f.name), Agent: cmp.Or(f.jobAgent, f.agent)}
+	if f.follows > 0 && f.followedJob != nil {
+		job.State = *f.followedJob
+	} else if job.State == pluginsdk.JobAbsent && f.created[runID] {
+		switch {
+		case f.vanish:
+		case f.neverStarted:
+			job.State = pluginsdk.JobNeverStarted
+		case f.placing && !f.placedRuns[runID]:
+			job.State, job.Reason = pluginsdk.JobPending, f.placingReason
+		case len(f.reasons) > 0:
+			job.State, job.Reason, f.reasons = pluginsdk.JobPending, f.reasons[0], f.reasons[1:]
+		default:
+			job.State = pluginsdk.JobRunning
+		}
+	}
+	switch job.State {
+	case pluginsdk.JobAbsent:
 		if f.afterLookup != nil {
 			f.afterLookup()
 		}
-		return pluginsdk.Job{}, nil
+		job = pluginsdk.Job{}
+	case pluginsdk.JobPending:
+		if f.job == pluginsdk.JobPending {
+			job.Reason = f.placingReason
+		}
+	case pluginsdk.JobNeverStarted:
+		job.Class, job.Reason = f.neverClass, f.neverReason
+		if f.neverStarted {
+			job.Class = cmp.Or(f.neverClass, "driver")
+		}
 	}
-	return pluginsdk.Job{State: f.job, Handle: f.handle(runID), Attempt: 1, Profile: cmp.Or(f.jobProfile, f.name), Agent: cmp.Or(f.jobAgent, f.agent)}, nil
+	if f.lookupHook != nil {
+		f.lookupHook(job.State)
+	}
+	return job, nil
 }
 
 // Follow emits the stream, then ends the job after endDelay or when its context ends.
-func (f *fakePlugin) Follow(ctx context.Context, _ pluginsdk.Handle, from int64, lines chan<- pluginsdk.Line) (pluginsdk.Terminal, error) {
+func (f *fakePlugin) Follow(ctx context.Context, handle pluginsdk.Handle, from int64, lines chan<- pluginsdk.Line) (pluginsdk.Terminal, error) {
+	if !f.lookupHandle(handle) {
+		return pluginsdk.Terminal{}, errors.New("read allocation: the handle is Dispatch's")
+	}
 	f.mu.Lock()
 	f.follows++
 	f.froms = append(f.froms, from)
+	f.followStarts = append(f.followStarts, time.Now())
+	if ctx.Err() != nil {
+		f.deadFollows++
+	}
 	f.lastDeadline, _ = ctx.Deadline()
 	lost, lostErr := f.follows <= f.linkLost, cmp.Or(f.lostErr, pluginsdk.ErrLinkLost)
+	hold := f.followHold
 	stream, followErr, endDelay, pauses, neverStarted, neverClass, neverReason, ended := append([]string(nil), f.stream...), f.followErr, f.endDelay, f.pauses, f.neverStarted, f.neverClass, f.neverReason, f.ended
 	f.mu.Unlock()
 	var offset int64
@@ -259,6 +361,13 @@ func (f *fakePlugin) Follow(ctx context.Context, _ pluginsdk.Handle, from int64,
 	if followErr != nil {
 		return pluginsdk.Terminal{}, followErr
 	}
+	if hold != nil {
+		select {
+		case <-hold:
+		case <-ctx.Done():
+			return pluginsdk.Terminal{}, ctx.Err()
+		}
+	}
 	select {
 	case <-time.After(endDelay):
 	case <-ctx.Done():
@@ -284,7 +393,10 @@ func (f *fakePlugin) Stop(context.Context, pluginsdk.Handle) error {
 	return err
 }
 
-func (f *fakePlugin) Collect(ctx context.Context, _ pluginsdk.Handle, limits pluginsdk.Limits, out chan<- pluginsdk.Output) error {
+func (f *fakePlugin) Collect(ctx context.Context, handle pluginsdk.Handle, limits pluginsdk.Limits, out chan<- pluginsdk.Output) error {
+	if !f.lookupHandle(handle) {
+		return errors.New("read allocation: the handle is Dispatch's")
+	}
 	f.mu.Lock()
 	f.collects++
 	f.limits = limits
@@ -419,13 +531,18 @@ type fixture struct {
 	cluster  *kfake.Cluster
 	service  *operator.Service
 	host     ed25519.PrivateKey
+	profiles []operator.ProfileSettings
 	receiver *Receiver
 	plugin   *fakePlugin
 	logs     *syncBuffer
 	// plugins are the fakes the receiver's factory builds, by profile name.
 	plugins map[string]*fakePlugin
+	// members records the share clients of the pool's share group from the fixture's start.
+	members *memberLog
 	// serving is set while the receiver, its pool's custodian, serves open requests.
 	serving *atomic.Bool
+	// stopServing ends the fixture's serving of open requests, once a pass under way returns; nil for a bare fixture.
+	stopServing func()
 	// envelope, when set, edits the values submit seals in a task's envelope.
 	envelope func(*wire.Submission, *signed.EnvelopeValues)
 }
@@ -447,14 +564,14 @@ var testPluginSHA256 = strings.Repeat("ab", 32)
 
 func testConfig(receiver string) operator.ReceiverConfig {
 	return operator.ReceiverConfig{
-		Receiver: receiver, Pool: testPool, Capacity: 1,
+		Receiver: receiver, Pool: testPool,
 		Profiles:     []operator.ProfileSettings{{Name: "nomad", Plugin: "fake", Agent: "claude", Labels: map[string]string{"zone": "dc1", "example.com/gpu": "none"}, Config: map[string]any{}}},
 		PluginSHA256: map[string]string{"fake": testPluginSHA256},
 	}
 }
 
 func shortIntervals(t *testing.T) {
-	for _, interval := range []*time.Duration{&renewInterval, &advertiseInterval, &refreshInterval, &cancelReadInterval, &reconcileInterval, &custodyInterval, &openInterval} {
+	for _, interval := range []*time.Duration{&renewInterval, &advertiseInterval, &refreshInterval, &cancelReadInterval, &reconcileInterval, &custodyInterval, &openInterval, &startPollInterval} {
 		previous := *interval
 		*interval = 200 * time.Millisecond
 		t.Cleanup(func() { *interval = previous })
@@ -504,7 +621,10 @@ func newService(t *testing.T, ctx context.Context, terms operator.Terms) (*kfake
 	if err := service.PoolApply(ctx, testPool, terms, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.TenantAdd(ctx, testTenant, testPool); err != nil {
+	if err := service.TenantAdd(ctx, testTenant); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.TenantPoolAdd(ctx, testTenant, testPool); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.HostAdd(ctx, testTenant, testHost, filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
@@ -531,7 +651,8 @@ func newFixtureWith(t *testing.T, stream []string, terms operator.Terms, config 
 	f.serving.Store(true)
 	serveCtx, stop := context.WithCancel(f.ctx)
 	served := make(chan struct{})
-	t.Cleanup(func() { stop(); <-served })
+	f.stopServing = func() { stop(); <-served }
+	t.Cleanup(f.stopServing)
 	go func() {
 		defer close(served)
 		for serveCtx.Err() == nil {
@@ -566,7 +687,7 @@ func newBareFixtureWith(t *testing.T, terms operator.Terms, config operator.Rece
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := fixture{ctx: ctx, cluster: cluster, service: service, host: host, plugins: plugins, plugin: plugins["nomad"], serving: &atomic.Bool{}}
+	f := fixture{ctx: ctx, cluster: cluster, service: service, host: host, profiles: slices.Clone(config.Profiles), plugins: plugins, plugin: plugins["nomad"], members: watchMembers(cluster), serving: &atomic.Bool{}}
 	f.produce(t, operator.HostTopic(testTenant, testHost), "", must(t)(signed.RegisterKey(signed.HostOwner(testTenant, testHost), host)))
 	f.receiver, f.logs = f.newReceiver(t, config)
 	r := f.receiver
@@ -607,11 +728,6 @@ func (f fixture) newReceiver(t *testing.T, config operator.ReceiverConfig) (*Rec
 	var bundle operator.Bundle
 	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
 		t.Fatal(err)
-	}
-	// kfake's server-first message always names 4096 iterations, whatever the credential was stored with.
-	upsert := kadm.UpsertSCRAM{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}
-	if altered, err := kadm.NewClient(f.service.Operator).AlterUserSCRAMs(f.ctx, nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
-		t.Fatalf("re-salt SCRAM credential: %v %v", err, altered.Error())
 	}
 	opts := []kgo.Opt{kgo.SeedBrokers(f.cluster.ListenAddrs()...), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()), kgo.FetchMaxWait(10 * time.Millisecond)}
 	base, err := kgo.NewClient(feedBatches(opts)...)
@@ -675,7 +791,7 @@ func testSubmission(name string) *wire.Submission {
 }
 
 // submit signs a submission with key, with an envelope of its values wrapped to the pool's current key as a host builds
-// it, and puts it on the pool's task topic, where every delivered record is.
+// it, and puts it on its signature's task topic, where every delivered record is.
 func (f fixture) submit(t *testing.T, key ed25519.PrivateKey, mutate func(*wire.Submission)) *kgo.Record {
 	t.Helper()
 	submission := testSubmission("run-a")
@@ -685,7 +801,42 @@ func (f fixture) submit(t *testing.T, key ed25519.PrivateKey, mutate func(*wire.
 	if submission.Wherry.Envelope == "" {
 		f.seal(t, submission)
 	}
-	return f.produce(t, operator.PoolTasksTopic(testPool), submission.Wherry.Run, must(t)(wire.SignRecord(submission, key)))
+	return f.produce(t, f.taskTopic(t, submission.Wherry.Placement), submission.Wherry.Run, must(t)(wire.SignRecord(submission, key)))
+}
+
+// taskTopic is the signature topic of the receiver's first profile that launches
+// placement's agent with labels satisfying its selector, as a host places a task. When none does, as for a signed task
+// that bypassed placement, it is the agent's signature with no labels, which this creates as another member's
+// receiver apply would.
+func (f fixture) taskTopic(t *testing.T, placement wire.Placement) string {
+	t.Helper()
+	topic, placed := f.signatureTopic(placement)
+	if !placed {
+		created, err := kadm.NewClient(f.service.Operator).CreateTopic(f.ctx, 1, -1, map[string]*string{"message.timestamp.type": kadm.StringPtr("LogAppendTime")}, topic)
+		if err == nil {
+			err = created.Err
+		}
+		if err != nil && !errors.Is(err, kerr.TopicAlreadyExists) {
+			t.Fatalf("create %s: %v", topic, err)
+		}
+	}
+	return topic
+}
+
+// signatureTopic is taskTopic without the topic's creation, and reports whether a profile places the task.
+func (f fixture) signatureTopic(placement wire.Placement) (string, bool) {
+	for _, named := range f.profiles {
+		if named.Agent == placement.Agent && wire.Satisfies(placement.Selector, named.Labels) {
+			return operator.SignatureTopic(testPool, named.Agent, named.Labels), true
+		}
+	}
+	return operator.SignatureTopic(testPool, placement.Agent, nil), false
+}
+
+// tasksTopic is the signature topic of a claude task with no selector, where testSubmission's tasks go.
+func (f fixture) tasksTopic() string {
+	topic, _ := f.signatureTopic(wire.Placement{Agent: "claude"})
+	return topic
 }
 
 // seal puts in submission an envelope sealTask builds, edited by f.envelope, wrapped to the pool's current key.
@@ -765,7 +916,7 @@ func (f fixture) publishStatus(t *testing.T, record *kgo.Record, receiver string
 	status := f.receiver.status(f.parse(t, record), wire.TaskHash(record.Value), 1, kind, taskStatus(state, ""), nil)
 	status.Wherry.Receiver = receiver
 	if kind == "claimed" {
-		status.Wherry.TaskOffset = &record.Offset
+		status.Wherry.TaskTopic, status.Wherry.TaskOffset = record.Topic, &record.Offset
 	}
 	if mutate != nil {
 		mutate(status)
@@ -902,7 +1053,14 @@ func decodeObject(t *testing.T, value []byte) map[string]any {
 // admitted admits record, failing the test when it is not admitted.
 func (f fixture) admitted(t *testing.T, record *kgo.Record) *admission {
 	t.Helper()
-	admitted, ack := f.receiver.admit(f.ctx, record)
+	profile := f.receiver.profiles[0]
+	for _, named := range f.receiver.profiles {
+		if operator.SignatureTopic(f.receiver.config.Pool, named.Agent, named.Labels) == record.Topic {
+			profile = named
+			break
+		}
+	}
+	admitted, ack := f.receiver.admit(f.ctx, record, profile)
 	if admitted == nil {
 		t.Fatalf("not admitted (ack %v); logs:\n%s", ack, f.logs.String())
 	}
@@ -914,9 +1072,15 @@ func (f fixture) execute(t *testing.T, record *kgo.Record, attempt int64) kgo.Ac
 	return f.receiver.execute(f.ctx, f.service.Operator, record, f.admitted(t, record), attempt)
 }
 
-// run starts the receiver's Run, which the test's end stops, and returns the channel its error arrives on.
+// run starts the receiver's Run, which the test's end stops, and returns the channel its error arrives on. Run serves
+// open requests itself, so the fixture's serving ends first: a pass under way returns before Run configures the
+// receiver.
 func (f fixture) run(t *testing.T, ctx context.Context) <-chan error {
 	t.Helper()
+	if f.stopServing != nil {
+		f.serving.Store(false)
+		f.stopServing()
+	}
 	ctx, stop := context.WithCancel(ctx)
 	done, returned := make(chan error, 1), make(chan struct{})
 	go func() {
@@ -1107,7 +1271,7 @@ func TestRunExitsOnConfigChange(t *testing.T) {
 	default:
 	}
 	config := testConfig(testReceiver)
-	config.Capacity = 2
+	config.Profiles[0].Replicas = 2
 	f.appendConfig(t, config)
 	select {
 	case err := <-done:
@@ -1232,7 +1396,7 @@ func (f fixture) advertisedOffers(t *testing.T) wire.Advertisement {
 	}
 	reader := operator.NewReader(f.service.Operator)
 	defer reader.Close()
-	latest, err := reader.ReadAdvertisements(f.ctx, state, f.keys(), time.Now(), 2*time.Minute)
+	latest, err := reader.ReadAdvertisements(f.ctx, state, f.keys(), []string{testPool}, time.Now(), 2*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1282,7 +1446,7 @@ func TestReceiverWithNoReadyProfileAdvertisesNoOffers(t *testing.T) {
 	if advertisement := f.advertisedOffers(t); len(advertisement.Offers) != 0 || advertisement.Capacity != 1 {
 		t.Fatalf("advertisement %#v, want a live advertisement with no offers", advertisement)
 	}
-	if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, nil)); admitted != nil || ack != kgo.AckRelease {
+	if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, nil), f.receiver.profiles[0]); admitted != nil || ack != kgo.AckRelease {
 		t.Fatalf("admitted=%v ack=%v, want a start failure and release", admitted != nil, ack)
 	}
 }
@@ -1399,8 +1563,8 @@ type multiFixture struct {
 }
 
 // newMultiFixture configures profiles lab, cloud and edge, in that order, for one agent with the labels
-// their operator declares: lab and cloud both carry class=cpu, only cloud an accelerator, edge class=arm. The agent's
-// credential is answered.
+// their operator declares, so each profile is a signature of its own: lab and cloud both carry
+// class=cpu, only cloud an accelerator, edge class=arm. The agent's credential is answered.
 func newMultiFixture(t *testing.T) multiFixture {
 	t.Helper()
 	m := multiFixture{lab: &fakePlugin{stream: resultStream}, cloud: &fakePlugin{stream: resultStream}, edge: &fakePlugin{stream: resultStream}}
@@ -1477,29 +1641,6 @@ func TestEachSelectorOperatorRoutes(t *testing.T) {
 	}
 }
 
-func TestUnreadyProfileIsNeverChosen(t *testing.T) {
-	m := newMultiFixture(t)
-	m.lab.mu.Lock()
-	m.lab.unready = true
-	m.lab.mu.Unlock()
-	if err := m.receiver.advertise(m.ctx); err != nil {
-		t.Fatal(err)
-	}
-	for _, offer := range m.advertisedOffers(t).Offers {
-		if offer.Profile == "lab" {
-			t.Fatal("a profile that is not ready was advertised")
-		}
-	}
-	if got := m.routed(t, in("class", "cpu")); got != "cloud" {
-		t.Fatalf("routed to %s, want cloud: lab is not ready", got)
-	}
-	// Only the unready plugin satisfies this selector: a start failure, not a dispatch.
-	record := m.submit(t, m.host, func(task *wire.Submission) { task.Wherry.Placement.Selector = []wire.Requirement{in("site", "lab")} })
-	if admitted, ack := m.receiver.admit(m.ctx, record); admitted != nil || ack != kgo.AckRelease {
-		t.Fatalf("admitted=%v ack=%v, want a start failure and release", admitted != nil, ack)
-	}
-}
-
 func TestProfilesAreBuiltForTheReceiversPool(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.plugin.mu.Lock()
@@ -1522,12 +1663,15 @@ func TestStopReleasesHeldTaskOnce(t *testing.T) {
 	for name, want := range map[string]error{"cancelled": context.Canceled} {
 		t.Run(name, func(t *testing.T) {
 			terms, config := testTerms(), testConfig(testReceiver)
-			terms.DeliveryLimit, config.Capacity = 5, 6
+			terms.DeliveryLimit, config.Profiles[0].Replicas = 5, 6
 			f := newFixtureWith(t, noResultStream, terms, config, map[string]*fakePlugin{"nomad": {stream: noResultStream, endDelay: time.Minute}})
+			previous := openWait
+			openWait = 10 * time.Second
+			t.Cleanup(func() { openWait = previous })
 			ctx, stop := context.WithCancel(f.ctx)
 			defer stop()
-			done := f.run(t, ctx)
 			f.submit(t, f.host, nil)
+			done := f.run(t, ctx)
 			for {
 				if _, _, follows, _ := f.plugin.counts(); follows == 1 {
 					break
@@ -1536,6 +1680,16 @@ func TestStopReleasesHeldTaskOnce(t *testing.T) {
 					t.Fatalf("run never started; logs:\n%s", f.logs.String())
 				}
 				time.Sleep(50 * time.Millisecond)
+			}
+			waitFor(t, f, func() bool { return f.live() == 6 })
+			var claims []int64
+			for _, status := range f.eventStatuses(t) {
+				if status.Wherry.Kind == "claimed" {
+					claims = append(claims, status.Wherry.Attempt)
+				}
+			}
+			if !slices.Equal(claims, []int64{1}) {
+				t.Fatalf("claims before stop %v, want only attempt 1", claims)
 			}
 			stop()
 			select {
@@ -1563,8 +1717,8 @@ func holdRun(t *testing.T, f fixture) (<-chan error, context.CancelFunc) {
 	t.Helper()
 	ctx, stop := context.WithCancel(f.ctx)
 	t.Cleanup(stop)
-	done := f.run(t, ctx)
 	f.submit(t, f.host, nil)
+	done := f.run(t, ctx)
 	for {
 		if _, _, follows, _ := f.plugin.counts(); follows == 1 {
 			return done, stop
@@ -1602,7 +1756,7 @@ func TestConfigChangeDrainsHeldRun(t *testing.T) {
 	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, endDelay: 3 * time.Second}})
 	done, _ := holdRun(t, f)
 	config := testConfig(testReceiver)
-	config.Capacity = 2
+	config.Profiles[0].Replicas = 2
 	f.appendConfig(t, config)
 	f.submit(t, f.host, func(task *wire.Submission) {
 		named(task, "run-b")
@@ -1646,7 +1800,7 @@ func TestCancelStopsADrainingRun(t *testing.T) {
 	f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: noResultStream, endDelay: time.Minute}})
 	done, _ := holdRun(t, f)
 	config := testConfig(testReceiver)
-	config.Capacity = 2
+	config.Profiles[0].Replicas = 2
 	f.appendConfig(t, config)
 	for !strings.Contains(f.logs.String(), "configuration changed") {
 		time.Sleep(50 * time.Millisecond)
@@ -1793,27 +1947,22 @@ func TestRevocationLeavesAHeldRunToAnAdopter(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newBareFixtureWith(t, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: c.stream, endDelay: 40 * time.Second}})
-			// The adopter starts first, so it is the key custodian, and fetches nothing until the revoked receiver exits.
+			// The adopter starts first, so it is the key custodian, and fetches nothing until the revoked receiver exits: a
+			// run it holds pending gates its slots.
 			adopter := f.member(t, "receiver-b")
+			gate := &activeRun{receiver: adopter}
+			gate.pending()
 			revoked := make(chan struct{})
 			go func() {
-				for {
-					adopter.mu.Lock()
-					adopter.backoffUntil = time.Now().Add(time.Second)
-					adopter.mu.Unlock()
-					select {
-					case <-revoked:
-						return
-					case <-time.After(100 * time.Millisecond):
-					}
-				}
+				<-revoked
+				gate.placed()
 			}()
 			runUntilStopped(t, f.ctx, adopter)
 			f.awaitSnapshots(t, 1)
 			done, _ := holdRun(t, f)
 			if c.draining {
 				config := testConfig(testReceiver)
-				config.Capacity = 2
+				config.Profiles[0].Replicas = 2
 				f.appendConfig(t, config)
 				for !strings.Contains(f.logs.String(), "configuration changed") {
 					time.Sleep(50 * time.Millisecond)
@@ -1857,8 +2006,17 @@ func TestRegistrationDenialStopsTheReceiver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(families) != 1 || len(families[0].GetMetric()) != 1 || families[0].GetMetric()[0].GetCounter().GetValue() != 1 {
-		t.Fatalf("wherry_denials_total %v, want one denial", families)
+	if len(families) != 1 || len(families[0].GetMetric()) != 5 {
+		t.Fatalf("wherry_denials_total %v, want five operation series", families)
+	}
+	for _, metric := range families[0].GetMetric() {
+		want := float64(0)
+		if metric.GetLabel()[0].GetValue() == "write" {
+			want = 1
+		}
+		if metric.GetCounter().GetValue() != want {
+			t.Fatalf("wherry_denials_total %v, want only the write denial at 1", families)
+		}
 	}
 }
 

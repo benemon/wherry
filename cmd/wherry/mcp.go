@@ -42,8 +42,9 @@ const logsLimit, logsMaxLimit = 100, 500
 // logsBytes bounds a transcript page's JSON, within the 25,000-token default of Claude Code's MAX_MCP_OUTPUT_TOKENS.
 const logsBytes = 24 << 10
 
-func runMCP(ctx context.Context, args []string) error {
+func runMCP(ctx context.Context, args []string, stderr io.Writer) error {
 	flags := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	flags.SetOutput(stderr)
 	configFile := flags.String("config-file", "", "host configuration file")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -84,8 +85,13 @@ func waitCommand(configFile string) (func(id string) string, error) {
 	if path, err = filepath.Abs(path); err != nil {
 		return nil, err
 	}
-	quoted := "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+	quoted := shellQuote(path)
 	return func(id string) string { return "wherry wait " + id + " --config-file " + quoted }, nil
+}
+
+// shellQuote quotes s as one POSIX shell word.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // sharedHost returns a connect that opens one host on its first successful call and returns it to every later call, and
@@ -371,7 +377,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "submit",
-		Description: "Sign and publish a task to the pool of the live receiver whose offers match the selector. Returns the run id at once; collect the result with wait, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR or in environment variables; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which wait writes locally. Submit encrypts the agent's and the task's configured credentials into the task's envelope under the pool's key; the run needs nothing more from this host. Submit refuses with auth required when this host has no source for a credential the agent requires or the task names.",
+		Description: "Sign and publish a task to the task topic of a signature, an agent and all the labels of the profiles that carry it, that live receivers offer matching the selector, preferring the default agent, then the greatest spare capacity, then the lowest topic name. Returns the run id at once; collect the result with wait, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR or in environment variables; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which wait writes locally. Submit encrypts the agent's and the task's configured credentials into the task's envelope under the pool's key; the run needs nothing more from this host. Submit refuses with auth required when this host has no source for a credential the agent requires or the task names.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input submitInput) (*mcp.CallToolResult, submitOutput, error) {
 		submission, err := submitFromInput(input, readInput, openInput)
 		if err != nil {

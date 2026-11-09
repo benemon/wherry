@@ -144,6 +144,8 @@ const (
 	JobEnded
 	// JobNeverStarted means the platform ended the job before its agent task started.
 	JobNeverStarted
+	// JobPending means the platform has registered the job and not placed it.
+	JobPending
 )
 
 // Job is a run's job as Lookup finds it, with the attempt, profile and agent its platform metadata records.
@@ -153,6 +155,10 @@ type Job struct {
 	Handle         Handle
 	Attempt        int64
 	Profile, Agent string
+	// Class and Reason are, for JobNeverStarted, what Follow's Terminal carries for the job; Reason is, for JobPending,
+	// the platform's account of why the job is not placed, and may be empty. Both are empty otherwise. Reason can quote
+	// the run's material.
+	Class, Reason string
 }
 
 // Terminal is how a followed job ended.
@@ -183,17 +189,23 @@ type Plugin interface {
 	InlineLimit() int64
 	// Ready reports whether the profile can currently start a job.
 	Ready(ctx context.Context) (bool, error)
-	// Dispatch starts a run's job, converging on an existing one, and returns once it has started or ended.
-	// The core treats an error as OutcomeUnknown.
+	// Dispatch registers a run's job, converging on an existing one, and returns once the platform holds it, placed or
+	// not; a dispatch converging on an existing job returns its handle at once. The handle serves Stop. The core
+	// treats an error as OutcomeUnknown.
 	Dispatch(ctx context.Context, run Run) (Outcome, Handle, error)
-	// Lookup finds a run's job without creating one, and waits for it as Dispatch does.
+	// Lookup finds a run's job without creating one in one observation: it returns at once with JobPending while the
+	// platform has not placed the job, and with JobRunning, JobEnded or JobNeverStarted once it has started or ended.
+	// Any other observation, a placed job whose task is starting or a job the platform has not yet decided on, waits
+	// until one of those, bounded by ctx; a Lookup cut short returns ctx's error and removes nothing.
 	Lookup(ctx context.Context, runID string) (Job, error)
 	// Follow streams stdout lines from a byte offset and returns the Terminal once the job has ended;
 	// a Follow cut short returns an error and a zero Terminal. Follow may fail at any time, and the core calls it
 	// again from the end of the last line it took. On an ended job it reads the rest of the log and returns the Terminal.
+	// The core follows only with the handle of a Lookup that reported the job running or ended.
 	Follow(ctx context.Context, handle Handle, from int64, lines chan<- Line) (Terminal, error)
+	// Stop ends a run's job, placed or not.
 	Stop(ctx context.Context, handle Handle) error
-	// Collect streams every entry beneath a stopped job's outputs directory but the directories it descends, in name
+	// Collect takes the handle Follow does, and streams every entry beneath a stopped job's outputs directory but the directories it descends, in name
 	// order, reading only regular files within limits and never following a link. It reads nothing when the tree
 	// holds more than limits.Files entries. An error means the outputs were not collected.
 	Collect(ctx context.Context, handle Handle, limits Limits, outputs chan<- Output) error
@@ -233,7 +245,7 @@ type Histogram struct {
 	Count   uint64
 }
 
-// PlacementBuckets are the bounds, in seconds, of wherry_plugin_placement_seconds.
+// PlacementBuckets are the bounds, in seconds, of wherry_plugin_placement_seconds, which the core observes itself.
 var PlacementBuckets = []float64{1, 2, 5, 10, 30, 60, 120, 300, 600, 1800}
 
 // AgentEnvironment is the environment every plugin gives its agent over the environment it configures: git reads only

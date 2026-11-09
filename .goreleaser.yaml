@@ -75,11 +75,12 @@ release:
   mode: keep-existing
   replace_existing_artifacts: true
 
-# Formula/wherry.rb in benemon/homebrew-tap, so brew install benemon/tap/wherry is unchanged. The formula moves on
-# prereleases too. goreleaser writes it to dist/homebrew/Formula/wherry.rb and pushes nothing: the formula's URLs only
-# resolve once the draft release is published, and goreleaser OSS cannot push it after that, so release.yml pushes it
-# after publishing. brews is deprecated in favour of homebrew_casks, which goreleaser check reports; ci.yml's
-# release-build job accepts that one deprecation.
+# Formula/wherry.rb in benemon/homebrew-tap, so brew install benemon/tap/wherry is unchanged. The formula follows
+# prereleases until the first stable tag (vX.Y.Z) exists, then stable releases only: release.yml decides whether to
+# push it. goreleaser writes it to dist/homebrew/Formula/wherry.rb and pushes nothing: the formula's URLs only resolve
+# once the draft release is published, and goreleaser OSS cannot push it after that, so release.yml pushes it after
+# publishing. brews is deprecated in favour of homebrew_casks, which goreleaser check reports; ci.yml's release-build
+# job accepts that one deprecation.
 brews:
   - name: wherry
     description: Delegate coding agent tasks to receivers on other compute over Kafka

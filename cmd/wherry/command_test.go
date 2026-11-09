@@ -118,7 +118,10 @@ func newBus(t *testing.T) *bus {
 	if err := b.service.PoolApply(ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
+	if err := b.service.TenantAdd(ctx, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.service.TenantPoolAdd(ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
 	b.hostBundle = filepath.Join(t.TempDir(), "host.yaml")
@@ -126,7 +129,7 @@ func newBus(t *testing.T) *bus {
 		t.Fatal(err)
 	}
 	receiverBundle := filepath.Join(t.TempDir(), "receiver.yaml")
-	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []operator.ProfileSettings{{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "exec"}}},
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "exec"}}},
 		PluginSHA256: map[string]string{"nomad": fakeSHA256}}
 	if err := b.service.ReceiverAdd(ctx, config, b.service.Broker, receiverBundle); err != nil {
 		t.Fatal(err)
@@ -156,7 +159,7 @@ func newBus(t *testing.T) *bus {
 		t.Fatal(err)
 	}
 	b.produce(t, operator.ReceiverTopic("receiver-a"), "receiver-a", registration)
-	b.produce(t, operator.ReceiversTopic, "receiver-a", b.sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: "pool-a",
+	b.produce(t, operator.PoolReceiversTopic("pool-a"), "receiver-a", b.sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: "pool-a",
 		Offers: []wire.Offer{{Profile: "lab", Agent: "claude", InlineLimit: 49152}}, Capacity: 1, AtMS: time.Now().UnixMilli()}))
 	publishSnapshot(t, ctx, b.receiver, "pool-a", "receiver-a", b.receiverKey)
 	return b
@@ -189,10 +192,6 @@ func (b *bus) kafka(t *testing.T, path string) (*kgo.Client, string) {
 	}
 	var bundle operator.Bundle
 	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
-		t.Fatal(err)
-	}
-	// kfake's SCRAM server always offers 4096 iterations, so the 8192 that operator provisions never authenticates.
-	if _, err := kadm.NewClient(b.service.Operator).AlterUserSCRAMs(b.ctx, nil, []kadm.UpsertSCRAM{{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}}); err != nil {
 		t.Fatal(err)
 	}
 	kafka, err := kgo.NewClient(kgo.SeedBrokers(b.service.Broker), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()),
@@ -241,6 +240,7 @@ func (b *bus) sign(t *testing.T, record wire.Record) []byte {
 type task struct {
 	submission wire.Submission
 	hash       string
+	topic      string
 	offset     int64
 }
 
@@ -255,7 +255,7 @@ func (b *bus) tasks(t *testing.T, runID string) []task {
 	if err != nil {
 		t.Fatal(err)
 	}
-	records, err := readTopic(b.ctx, b.receiver, operator.PoolTasksTopic("pool-a"))
+	records, err := readTasks(b.ctx, b.receiver, "pool-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func (b *bus) tasks(t *testing.T, runID string) []task {
 		}
 		if submission.Wherry.Run == runID {
 			sum := sha256.Sum256(record.Value)
-			tasks = append(tasks, task{submission, hex.EncodeToString(sum[:]), record.Offset})
+			tasks = append(tasks, task{submission, hex.EncodeToString(sum[:]), record.Topic, record.Offset})
 		}
 	}
 	return tasks
@@ -288,7 +288,7 @@ func (b *bus) status(t *testing.T, task task, eventID, kind string, status wire.
 	value := &wire.RunStatus{StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: run, ContextID: run, Status: status},
 		Wherry: wire.StatusBinding{ReceiverBinding: b.binding(task), EventID: eventID, Kind: kind, TaskHash: task.hash}}
 	if kind == "claimed" {
-		value.Wherry.TaskOffset = &task.offset
+		value.Wherry.TaskTopic, value.Wherry.TaskOffset = task.topic, &task.offset
 	}
 	return b.sign(t, value)
 }
@@ -348,7 +348,7 @@ func (b *bus) admitted(t *testing.T) task {
 
 func TestReceiversJSONOutputShape(t *testing.T) {
 	b := newBus(t)
-	silent := operator.ReceiverConfig{Receiver: "receiver-b", Pool: "pool-a", Capacity: 1, Profiles: []operator.ProfileSettings{{Name: "lab", Plugin: "nomad", Agent: "claude"}}, PluginSHA256: map[string]string{"nomad": fakeSHA256}}
+	silent := operator.ReceiverConfig{Receiver: "receiver-b", Pool: "pool-a", Profiles: []operator.ProfileSettings{{Name: "lab", Plugin: "nomad", Agent: "claude"}}, PluginSHA256: map[string]string{"nomad": fakeSHA256}}
 	if err := b.service.ReceiverAdd(b.ctx, silent, b.service.Broker, filepath.Join(t.TempDir(), "receiver.yaml")); err != nil {
 		t.Fatal(err)
 	}
@@ -676,6 +676,57 @@ func TestEventsPrintsStatusesAndChunkCounts(t *testing.T) {
 	}
 }
 
+const (
+	placingFiltered  = "waiting for placement (1 nodes evaluated, 1 filtered, 0 exhausted)"
+	placingExhausted = "waiting for placement (2 nodes evaluated, 0 filtered, 2 exhausted)"
+)
+
+// placingStatus is a placing status as receiver-a writes it: WORKING, one text part, no log offset.
+func (b *bus) placingStatus(t *testing.T, admitted task, eventID, timestamp, text string) []byte {
+	status := wire.TaskStatus{State: wire.TaskStateWorking, Timestamp: timestamp,
+		Message: &wire.Message{MessageID: "msg-" + eventID, Role: wire.RoleAgent, Parts: []wire.Part{{Text: text}}, Extensions: []string{wire.ExtensionURI}}}
+	return b.status(t, admitted, eventID, "placing", status)
+}
+
+// placingRun admits a run whose job waits for placement twice, for a different reason each time, and returns the two
+// placing statuses' timestamps.
+func placingRun(t *testing.T) (*bus, string, [2]string) {
+	t.Helper()
+	b := newBus(t)
+	admitted := b.admitted(t)
+	runID := admitted.submission.Wherry.Run
+	times := [2]string{now(wire.TaskStateWorking).Timestamp, now(wire.TaskStateWorking).Timestamp}
+	b.feed(t, runID, b.placingStatus(t, admitted, "placing-1", times[0], placingFiltered),
+		b.placingStatus(t, admitted, "placing-2", times[1], placingExhausted))
+	return b, runID, times
+}
+
+func TestStatusShowsPlacing(t *testing.T) {
+	b, runID, _ := placingRun(t)
+	var stdout, stderr bytes.Buffer
+	if err := runStatus(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if want := "TASK_STATE_WORKING\n" + placingExhausted + "\n"; stdout.String() != want || stderr.Len() != 0 {
+		t.Fatalf("stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
+	}
+}
+
+func TestEventsListPlacing(t *testing.T) {
+	b, runID, times := placingRun(t)
+	var stdout, stderr bytes.Buffer
+	if err := runEvents(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 3 || !strings.HasPrefix(lines[0], "attempt=1 kind=claimed state=TASK_STATE_WORKING ") ||
+		lines[1] != "attempt=1 kind=placing state=TASK_STATE_WORKING receiver=receiver-a time="+times[0]+" message=\""+placingFiltered+"\"" ||
+		lines[2] != "attempt=1 kind=placing state=TASK_STATE_WORKING receiver=receiver-a time="+times[1]+" message=\""+placingExhausted+"\"" ||
+		stderr.Len() != 0 {
+		t.Fatalf("stdout %q stderr %q, want claimed then both placing statuses", stdout.String(), stderr.String())
+	}
+}
+
 func TestLogsPrintsTheLatestAttemptsLines(t *testing.T) {
 	b, runID := transcriptRun(t)
 	var stdout, stderr bytes.Buffer
@@ -930,7 +981,7 @@ func TestSubmitGitFlags(t *testing.T) {
 			}
 		})
 	}
-	if records, err := readTopic(b.ctx, b.receiver, operator.PoolTasksTopic("pool-a")); err != nil || len(records) != 0 {
+	if records, err := readTasks(b.ctx, b.receiver, "pool-a"); err != nil || len(records) != 0 {
 		t.Fatalf("refused submissions published %d tasks, %v", len(records), err)
 	}
 	submit := func(flags ...string) wire.Submission {
@@ -1008,6 +1059,23 @@ func TestVersionNeedsNoConfigOrBroker(t *testing.T) {
 	if len(lines) < 2 || !strings.HasPrefix(lines[0], "version=") || !strings.HasPrefix(lines[1], "revision=") {
 		t.Fatalf("version printed %q, want version= and revision= lines", stdout.String())
 	}
+}
+
+// readTasks reads every task topic of pool, one after another.
+func readTasks(ctx context.Context, client *kgo.Client, pool string) ([]*kgo.Record, error) {
+	topics, err := operator.PoolTaskTopics(ctx, kadm.NewClient(client), pool)
+	if err != nil {
+		return nil, err
+	}
+	var records []*kgo.Record
+	for _, topic := range topics {
+		read, err := readTopic(ctx, client, topic)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, read...)
+	}
+	return records, nil
 }
 
 // readTopic reads topic from its start through a reader of its own.

@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 640" font-family="Outfit, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="title desc">
+  <title id="title">A development instance and a production deployment</title>
+  <desc id="desc">On the left, wherry dev up puts a whole deployment on one machine: a Nomad agent in dev mode runs Kafka, one receiver named dev-1 and the agents' jobs; the operator's working directory, the host's configuration and the harness sit on the same machine, with pool dev, tenant dev and host dev. On the right, a production deployment spreads the same parts out: an operator machine holds the operator's working directory; a Kafka cluster with SCRAM over TLS carries every record; receivers run on Nomad, OpenShift or systemd hosts, each starting agent jobs on its platform; tenants' hosts, such as laptops and CI runners, submit work and collect results.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2e4a35"/>
+    </marker>
+  </defs>
+
+  <rect width="1180" height="640" fill="#f4f1e8"/>
+
+  <g font-size="12" fill="#00290b">
+    <!-- development -->
+    <text x="40" y="44" font-size="14" font-weight="600">Development: wherry dev up</text>
+    <rect x="30" y="62" width="460" height="540" rx="10" fill="#fffdf7" stroke="#3f6b4a" stroke-width="1.5"/>
+    <text x="50" y="88" font-weight="600">One machine</text>
+
+    <rect x="50" y="104" width="420" height="250" rx="8" fill="#efeadb" stroke="#b7c0b0"/>
+    <text x="66" y="128" font-weight="600">Nomad agent in dev mode</text>
+    <rect x="66" y="144" width="388" height="52" rx="6" fill="#e6ede2" stroke="#3f6b4a"/>
+    <text x="80" y="166" font-weight="600">Kafka</text>
+    <text x="80" y="184" font-size="11">one broker, SCRAM over TLS on 127.0.0.1, instance CA</text>
+    <rect x="66" y="206" width="388" height="52" rx="6" fill="#e6ede2" stroke="#3f6b4a"/>
+    <text x="80" y="228" font-weight="600">Receiver dev-1</text>
+    <text x="80" y="246" font-size="11">pool dev, a plugin profile per harness found, plus mock</text>
+    <rect x="66" y="268" width="388" height="70" rx="6" fill="#e6ede2" stroke="#3f6b4a"/>
+    <text x="80" y="290" font-weight="600">Agent jobs</text>
+    <text x="80" y="308" font-size="11">raw_exec on this machine (isolation: host), or an</text>
+    <text x="80" y="324" font-size="11">image you name (isolation: container)</text>
+
+    <rect x="50" y="370" width="200" height="96" rx="8" fill="#fffdf7" stroke="#b7c0b0"/>
+    <text x="64" y="394" font-weight="600">Operator directory</text>
+    <text x="64" y="414" font-size="11">env/operator in the</text>
+    <text x="64" y="430" font-size="11">instance: tenant dev,</text>
+    <text x="64" y="446" font-size="11">host dev, bundles</text>
+
+    <rect x="270" y="370" width="200" height="96" rx="8" fill="#fffdf7" stroke="#b7c0b0"/>
+    <text x="284" y="394" font-weight="600">Host and harness</text>
+    <text x="284" y="414" font-size="11">config, bundle and key;</text>
+    <text x="284" y="430" font-size="11">wherry CLI or MCP server</text>
+    <text x="284" y="446" font-size="11">in your coding agent</text>
+
+    <text x="50" y="500" font-size="11.5" font-weight="600">For trying wherry and developing it.</text>
+    <text x="50" y="522" font-size="11">wherry dev init and wherry dev up build it; wherry dev down removes it.</text>
+
+    <!-- production -->
+    <text x="560" y="44" font-size="14" font-weight="600">Production</text>
+
+    <rect x="560" y="62" width="250" height="96" rx="10" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
+    <text x="576" y="88" font-weight="600">Operator machine</text>
+    <text x="576" y="108" font-size="11">operator working directory;</text>
+    <text x="576" y="124" font-size="11">pools, tenants, hosts and</text>
+    <text x="576" y="140" font-size="11">receivers via wherry operator</text>
+
+    <rect x="880" y="62" width="270" height="96" rx="10" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
+    <text x="896" y="88" font-weight="600">Tenants' hosts</text>
+    <text x="896" y="108" font-size="11">laptops and CI runners, each</text>
+    <text x="896" y="124" font-size="11">with its own key and bundle;</text>
+    <text x="896" y="140" font-size="11">submit work, collect results</text>
+
+    <rect x="560" y="230" width="590" height="96" rx="10" fill="#e6ede2" stroke="#3f6b4a" stroke-width="1.5"/>
+    <text x="580" y="258" font-weight="600">Kafka cluster</text>
+    <text x="580" y="278" font-size="11">Kafka 4.3 with share groups, SCRAM over TLS and an authoriser, for example under Strimzi.</text>
+    <text x="580" y="296" font-size="11">Carries every record: operator state, tasks, events, results and transcripts.</text>
+    <text x="580" y="314" font-size="11">Its ACLs, generated from the operator's records, decide who reaches what.</text>
+
+    <rect x="560" y="398" width="180" height="120" rx="10" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
+    <text x="576" y="424" font-weight="600">Receivers on Nomad</text>
+    <text x="576" y="444" font-size="11">service job; agents run</text>
+    <text x="576" y="460" font-size="11">as Nomad jobs</text>
+
+    <rect x="765" y="398" width="180" height="120" rx="10" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
+    <text x="781" y="424" font-weight="600">Receivers on OpenShift</text>
+    <text x="781" y="444" font-size="11">Deployment; agents run</text>
+    <text x="781" y="460" font-size="11">as Kubernetes pods</text>
+
+    <rect x="970" y="398" width="180" height="120" rx="10" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
+    <text x="986" y="424" font-weight="600">Receivers on systemd</text>
+    <text x="986" y="444" font-size="11">service unit; agents run</text>
+    <text x="986" y="460" font-size="11">as transient units</text>
+
+    <text x="560" y="560" font-size="11">Pools group receivers; tenants are entitled to the pools they may use.</text>
+  </g>
+
+  <g stroke="#2e4a35" stroke-width="1.6" fill="none">
+    <line x1="685" y1="158" x2="685" y2="224" marker-end="url(#arrow)"/>
+    <line x1="1015" y1="158" x2="1015" y2="224" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+    <line x1="650" y1="392" x2="650" y2="332" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+    <line x1="855" y1="392" x2="855" y2="332" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+    <line x1="1060" y1="392" x2="1060" y2="332" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  </g>
+  <g font-size="10.5" fill="#00290b">
+    <text x="693" y="196">records and ACLs</text>
+    <text x="1023" y="196">tasks and results</text>
+  </g>
+</svg>

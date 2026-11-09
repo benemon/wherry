@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -24,7 +25,7 @@ func TestObjectFileTakesAFileOrADirectory(t *testing.T) {
 	}
 	dir := t.TempDir()
 	for path, want := range map[string]bool{file: false, dir: true} {
-		if got, directory, err := objectFile(t.TempDir(), "pools", "pool-a", map[string]string{"f": path}, false, io.Discard, poolFields, nil); err != nil || got != path || directory != want {
+		if got, directory, err := objectFile(context.Background(), t.TempDir(), "pools", "pool-a", map[string]string{"f": path}, false, io.Discard, poolFields, nil); err != nil || got != path || directory != want {
 			t.Errorf("objectFile(-f %s) = %s, %t, %v; want the path and directory %t", path, got, directory, err, want)
 		}
 	}
@@ -78,10 +79,11 @@ func TestPoolConfigExampleParses(t *testing.T) {
 	if _, err := operator.EncodeRecord(operator.Record{Kind: "pool", Pool: "build", Terms: &want}); err != nil {
 		t.Fatal(err)
 	}
-	documented(t, "configuration.md", "example-pool.yaml", "example-pool/pool.yaml", "example-pool/agents/claude.yaml", "example-pool/agents/coder.yaml", "example-pool/agents/codex.yaml")
+	documented(t, "configuration-operator.md", "example-pool.yaml", "example-pool/pool.yaml", "example-pool/agents/claude.yaml", "example-pool/agents/coder.yaml", "example-pool/agents/codex.yaml")
 }
 
-// documented fails unless the page docs/<page> holds each testdata file as a whole code block.
+// documented fails unless the page docs/<page> holds each testdata file as a whole code block, of its own or indented
+// three spaces in a numbered step.
 func documented(t *testing.T, page string, files ...string) {
 	t.Helper()
 	reference, err := os.ReadFile(filepath.Join("..", "..", "docs", page))
@@ -93,7 +95,8 @@ func documented(t *testing.T, page string, files ...string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(reference), "```yaml\n"+string(example)+"```\n") {
+		block := "```yaml\n" + string(example) + "```\n"
+		if !strings.Contains(string(reference), block) && !strings.Contains(string(reference), inStep(block)) {
 			t.Errorf("docs/%s has no code block holding testdata/%s", page, file)
 		}
 	}
@@ -161,12 +164,12 @@ func TestOperatorArgsRejectsUnknownOptions(t *testing.T) {
 	for _, args := range [][]string{
 		{"pool", "apply", "pool-a", "--terms", "pool.yaml"},
 		{"receiver", "apply", "receiver-a", "--config", "receiver.yaml"},
-		{"host", "add", "host-a", "--tenant", "tenant-a", "--bundle", "host.yaml"},
+		{"tenant", "host", "add", "tenant-a", "host-a", "--bundle", "host.yaml"},
 		{"pool", "apply", "pool-a", "--tenant", "tenant-a"},
 		{"receiver", "apply", "receiver-a", "--platform-credential-file", "nomad=token"},
 		{"receiver", "apply", "receiver-a", "--pool", "pool-a"},
 		{"receiver", "apply", "receiver-a", "--plugin-sha256", "nomad=" + fakeSHA256},
-		{"host", "add", "host-a", "--tenant", "tenant-a", "--bundle-file", "host.bundle"},
+		{"tenant", "host", "add", "tenant-a", "host-a", "--bundle-file", "host.bundle"},
 		{"pool", "apply", "pool-a", "--super-user", "admin"},
 	} {
 		_, _, err := operatorArgs(args)
@@ -259,4 +262,15 @@ func TestPoolConfigReadsDurations(t *testing.T) {
 	if _, err := readPoolConfig(file, false); err == nil {
 		t.Fatal("pool config accepted lock_duration_ms")
 	}
+}
+
+// inStep is block indented three spaces, as a code block in a numbered step is.
+func inStep(block string) string {
+	lines := strings.SplitAfter(block, "\n")
+	for i, line := range lines {
+		if line != "\n" && line != "" {
+			lines[i] = "   " + line
+		}
+	}
+	return strings.Join(lines, "")
 }

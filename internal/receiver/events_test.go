@@ -1,6 +1,7 @@
 package receiver
 
 import (
+	"crypto/ed25519"
 	"fmt"
 	"reflect"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
+	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
@@ -57,12 +59,9 @@ func describeEvents(events poolEvents) string {
 		}
 		return n
 	}
-	var statuses, failures, others, rekeys []int
+	var statuses, others, rekeys []int
 	for _, run := range events.statuses {
 		statuses = append(statuses, len(run))
-	}
-	for _, run := range events.startFailures {
-		failures = append(failures, len(run))
 	}
 	for _, run := range events.others {
 		others = append(others, len(run))
@@ -70,8 +69,8 @@ func describeEvents(events poolEvents) string {
 	for _, hash := range events.rekeys {
 		rekeys = append(rekeys, len(hash))
 	}
-	return fmt.Sprintf("{statuses %d, start failures %d, others %d, requests %d, answered %d, re-key wraps %d, decisions %d}",
-		count(statuses...), count(failures...), count(others...), len(events.requests), len(events.answered), count(rekeys...), len(events.decisions))
+	return fmt.Sprintf("{statuses %d, others %d, requests %d, answered %d, re-key wraps %d, decisions %d}",
+		count(statuses...), count(others...), len(events.requests), len(events.answered), count(rekeys...), len(events.decisions))
 }
 
 // The view each read of the fold returns equals a first read of the whole topic, after appends of every record kind,
@@ -234,8 +233,8 @@ func TestPoolEventsVerifyEachRecordOnce(t *testing.T) {
 		return events
 	}
 	for range 5 {
-		if events := read(); len(events.statuses[testRun("run-a")]) != 1 || len(events.startFailures[testRun("run-a")]) != 1 || len(events.others[testRun("run-a")]) != 1 || len(events.requests) != 1 {
-			t.Fatalf("events %s, want one status, one start failure, the cancel and the open request", describeEvents(events))
+		if events := read(); len(events.statuses[testRun("run-a")]) != 1 || len(events.others[testRun("run-a")]) != 1 || len(events.requests) != 1 {
+			t.Fatalf("events %s, want one status, the cancel and the open request", describeEvents(events))
 		}
 	}
 	if got := verifications.Load(); got != 3 {
@@ -247,5 +246,67 @@ func TestPoolEventsVerifyEachRecordOnce(t *testing.T) {
 	}
 	if got := verifications.Load(); got != 4 {
 		t.Fatalf("%d verifications after one more status, want 4", got)
+	}
+}
+
+// startFailed puts receiver's start failure, signed with key, for the task in record at attempt 1 on the pool's events.
+func (f fixture) startFailed(t *testing.T, record *kgo.Record, receiver string, key ed25519.PrivateKey) {
+	t.Helper()
+	task := f.parse(t, record)
+	failure := &wire.StartFailure{Wherry: f.receiver.binding(task, 1), Profile: "nomad", Agent: "claude", Class: "dispatch", TaskHash: wire.TaskHash(record.Value)}
+	failure.Wherry.Receiver = receiver
+	f.produce(t, operator.PoolEventsTopic(testPool), string(record.Key), must(t)(wire.SignRecord(failure, key)))
+}
+
+// A status on the pool's events counts only from a live member of the pool, naming the pool, for a tenant entitled to
+// it; a refused record, and a start failure, bound or not, is not kept for the cancel check either.
+func TestPoolEventsRefuseUnboundStatusesAndStartFailures(t *testing.T) {
+	for name, mutate := range map[string]func(*wire.ReceiverBinding){
+		"another pool":       func(binding *wire.ReceiverBinding) { binding.Pool = "pool-b" },
+		"unentitled tenant":  func(binding *wire.ReceiverBinding) { binding.Tenant = "tenant-b" },
+		"control (accepted)": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			record := f.submit(t, f.host, nil)
+			task := f.parse(t, record)
+			status := f.receiver.status(task, wire.TaskHash(record.Value), 1, "claimed", taskStatus(wire.TaskStateWorking, ""), nil)
+			status.Wherry.TaskTopic, status.Wherry.TaskOffset = record.Topic, &record.Offset
+			failure := &wire.StartFailure{Wherry: f.receiver.binding(task, 1), Profile: "nomad", Agent: "claude", Class: "dispatch", TaskHash: wire.TaskHash(record.Value)}
+			if mutate != nil {
+				mutate(&status.Wherry.ReceiverBinding)
+				mutate(&failure.Wherry)
+			}
+			for _, value := range []wire.Record{status, failure} {
+				f.produce(t, operator.PoolEventsTopic(testPool), testRun("run-a"), must(t)(wire.SignRecord(value, f.receiver.signing)))
+			}
+			events, err := f.receiver.readEvents(f.ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			counted := len(events.statuses[testRun("run-a")])
+			if want := map[bool]int{true: 1, false: 0}[mutate == nil]; counted != want || len(events.others[testRun("run-a")]) != 0 {
+				t.Fatalf("%d records counted and %d kept as others, want %d counted", counted, len(events.others[testRun("run-a")]), want)
+			}
+		})
+	}
+}
+
+// A status from a member whose membership ended counts for nothing on the pool's events.
+func TestPoolEventsRefuseAnEndedMember(t *testing.T) {
+	f := newFixture(t, resultStream)
+	record := f.submit(t, f.host, nil)
+	f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
+	f.startFailed(t, record, testReceiver, f.receiver.signing)
+	// A refresh replaces the state, never edits it.
+	f.receiver.mu.Lock()
+	f.receiver.state.Ended = map[string]bool{operator.ReceiverPrincipal(testReceiver): true}
+	f.receiver.mu.Unlock()
+	events, err := f.receiver.readEvents(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events.statuses[testRun("run-a")]) != 0 || len(events.others[testRun("run-a")]) != 0 {
+		t.Fatalf("an ended member's records counted: %+v", events)
 	}
 }

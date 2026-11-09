@@ -92,10 +92,9 @@ type Receiver struct {
 	shutdownBy time.Time
 	// halt, set by Run once it claims, ends claiming and held runs at once with the error Run returns.
 	halt func(error)
-	// backoffUntil is when the receiver may fetch from its pool again after releasing a task it failed to start, and
-	// fetching counts the share sessions polling the pool for a task.
-	backoffUntil time.Time
-	fetching     int
+	// pending holds each execution whose latest observation of its job found it not placed, keyed by execution so an
+	// old attempt clears only its own entry.
+	pending map[*activeRun]struct{}
 	// admissionMu serialises the admission transactional ID, which one producer at a time may hold.
 	admissionMu sync.Mutex
 	// cancelled holds the runs cancelled by a host of their tenant.
@@ -155,11 +154,9 @@ func (r *Receiver) newClient(extra ...kgo.Opt) (*kgo.Client, error) {
 	return kgo.NewClient(append(slices.Clone(r.base.Opts()), extra...)...)
 }
 
-// Run registers the receiver's keys, rotates them when New was asked to, waits for its configuration, then advertises
-// and claims until ctx ends or the configuration changes. Held runs then go on: after a configuration change until they
-// end, and after ctx ends for at most the drain timeout.
-// A Kafka authorisation error or a plugin process's exit ends Run at once with that error: held runs are left
-// unacknowledged and their jobs running, for an adopter to find once the broker redelivers their tasks.
+// Run advertises and claims until ctx ends or the configuration changes, then lets held runs finish: after a change
+// until they end, after ctx ends for at most the drain timeout. A Kafka authorisation error or a plugin process exit
+// returns at once, leaving held runs unacknowledged and their jobs running for adoption on redelivery.
 func (r *Receiver) Run(ctx context.Context) error {
 	defer r.base.Close()
 	defer r.reader.Close()
@@ -252,9 +249,12 @@ func (r *Receiver) Run(ctx context.Context) error {
 	// Held tasks are released only once every idle slot's share client has closed: a closing client releases what its
 	// pending fetch acquired, so a task released earlier would hop through each, one delivery per hop.
 	var idle, slots sync.WaitGroup
-	idle.Add(int(r.config.Capacity))
-	for slot := int64(0); slot < r.config.Capacity; slot++ {
-		slots.Go(func() { r.claimLoop(ctx, running, sync.OnceFunc(idle.Done)) })
+	idle.Add(r.replicas())
+	for i, profile := range r.profiles {
+		for range replicasOf(r.config.Profiles[i]) {
+			idleDone := sync.OnceFunc(idle.Done)
+			slots.Go(func() { r.claimLoop(ctx, running, profile, idleDone) })
+		}
 	}
 	idle.Wait()
 	go func() {
@@ -349,8 +349,7 @@ func (r *Receiver) register(ctx context.Context) error {
 	return nil
 }
 
-// configure waits for this receiver's configuration record, validates it against its pool's
-// terms and configures its profiles.
+// configure waits for a valid receiver configuration.
 func (r *Receiver) configure(ctx context.Context) error {
 	waiting := false
 	for {
@@ -377,8 +376,9 @@ func (r *Receiver) configure(ctx context.Context) error {
 			}
 			r.config, r.profiles = config, profiles
 			r.metrics.registerFor(r)
-			r.metrics.capacity.Set(float64(config.Capacity))
-			r.logger.Printf("configured: pool=%s profiles=%d capacity=%d", config.Pool, len(profiles), config.Capacity)
+			replicas := r.replicas()
+			r.metrics.capacity.Set(float64(replicas))
+			r.logger.Printf("configured: pool=%s profiles=%d replicas=%d", config.Pool, len(profiles), replicas)
 			return r.refresh(ctx)
 		}
 		if !waiting {
@@ -413,6 +413,7 @@ func (r *Receiver) refresh(ctx context.Context) error {
 	if err != nil {
 		return r.deny(err, capRead)
 	}
+	r.metrics.initialize(state, r.config.Pool, r.profiles)
 	// Revocation removes an ended receiver's write access before it records the end, so the broker refuses any record
 	// it signs afterwards: its keys verify only what it wrote while a member.
 	r.mu.Lock()
@@ -479,20 +480,6 @@ func authorisationError(err error) bool {
 func (r *Receiver) suspended() bool {
 	state, _, _ := r.snapshot()
 	return state.Suspended[r.config.Pool]
-}
-
-// backoff is how long the receiver waits before it fetches from its pool again.
-func (r *Receiver) backoff() time.Duration {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return time.Until(r.backoffUntil)
-}
-
-// sessions counts the share sessions polling the pool for a task.
-func (r *Receiver) sessions() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.fetching
 }
 
 func (r *Receiver) snapshot() (operator.State, signed.Keys, signed.Keys) {
@@ -564,9 +551,9 @@ func recordType(encoded []byte) string {
 	return typ
 }
 
-// advertise sweeps each profile, then publishes one offer per ready profile with its agent; with none ready it
-// publishes no offers and keeps its liveness and capacity visible. Each profile call has one advertise
-// interval, so a hung plugin delays the next advertisement by at most that much per call.
+// advertise publishes one offer per ready profile, and with none ready still publishes its liveness and capacity. Each
+// Sweep and Ready call is bounded by advertiseInterval, so a hung plugin delays the next advertisement by at most that
+// much per call.
 func (r *Receiver) advertise(ctx context.Context) error {
 	for _, named := range r.profiles {
 		callCtx, cancel := context.WithTimeout(ctx, advertiseInterval)
@@ -595,21 +582,23 @@ func (r *Receiver) advertise(ctx context.Context) error {
 			r.logger.Printf("profile %s readiness: %s", named.Name, logText(r.redactLive, err))
 			continue
 		}
-		if ready {
-			offers = append(offers, wire.Offer{Profile: named.Name, Agent: named.Agent, InlineLimit: named.Plugin.InlineLimit()})
+		if !ready {
+			r.logger.Printf("profile %s readiness: not ready", named.Name)
+			continue
 		}
+		offers = append(offers, wire.Offer{Profile: named.Name, Agent: named.Agent, InlineLimit: named.Plugin.InlineLimit()})
 	}
 	r.mu.Lock()
 	r.offers = offers
 	inFlight := r.inFlight
 	r.mu.Unlock()
 	value, err := wire.SignRecord(&wire.Advertisement{
-		Receiver: r.id, Pool: r.config.Pool, Offers: offers, Capacity: r.config.Capacity, InFlight: inFlight, AtMS: time.Now().UnixMilli(),
+		Receiver: r.id, Pool: r.config.Pool, Offers: offers, Capacity: int64(r.replicas()), InFlight: inFlight, AtMS: time.Now().UnixMilli(),
 	}, r.signing)
 	if err != nil {
 		return err
 	}
-	if err := r.base.ProduceSync(ctx, &kgo.Record{Topic: operator.ReceiversTopic, Key: []byte(r.id), Value: value}).FirstErr(); err != nil {
+	if err := r.base.ProduceSync(ctx, &kgo.Record{Topic: operator.PoolReceiversTopic(r.config.Pool), Key: []byte(r.id), Value: value}).FirstErr(); err != nil {
 		r.deny(err, capWrite)
 		return err
 	}
@@ -617,19 +606,24 @@ func (r *Receiver) advertise(ctx context.Context) error {
 	return nil
 }
 
-// offer returns this receiver's first profile, in record order, that is in its current offers and launches the
-// placement's agent with configured labels satisfying its selector. The record lists each plugin's profiles in their
-// declared order, plugins sorted by type, so the host's placement and this routing compute the same match.
-func (r *Receiver) offer(placement wire.Placement) (Named, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, named := range r.profiles {
-		if named.Agent == placement.Agent && wire.Satisfies(placement.Selector, named.Labels) &&
-			slices.ContainsFunc(r.offers, func(offer wire.Offer) bool { return offer.Profile == named.Name }) {
-			return named, true
-		}
+func replicasOf(settings operator.ProfileSettings) int {
+	if settings.Replicas == 0 {
+		return 1
 	}
-	return Named{}, false
+	return settings.Replicas
+}
+
+func (r *Receiver) replicas() int {
+	var total int
+	for _, settings := range r.config.Profiles {
+		total += replicasOf(settings)
+	}
+	return total
+}
+
+// ready requires r.mu.
+func (r *Receiver) ready(name string) bool {
+	return slices.ContainsFunc(r.offers, func(offer wire.Offer) bool { return offer.Profile == name })
 }
 
 // poolEvents is one read of the pool's events topic.
@@ -638,8 +632,6 @@ type poolEvents struct {
 	// record of each.
 	statuses map[string][]wire.RunStatus
 	records  map[string][]*kgo.Record
-	// startFailures holds, per run, this receiver's start failures in log order.
-	startFailures map[string][]wire.StartFailure
 	// others holds, per run, every other record, such as cancels.
 	others map[string][][]byte
 	// requests holds the open requests in log order; answered holds the digest of each request an attempt wrap or a
@@ -655,14 +647,14 @@ type poolEvents struct {
 
 func newPoolEvents() poolEvents {
 	return poolEvents{
-		statuses: map[string][]wire.RunStatus{}, records: map[string][]*kgo.Record{}, startFailures: map[string][]wire.StartFailure{}, others: map[string][][]byte{},
+		statuses: map[string][]wire.RunStatus{}, records: map[string][]*kgo.Record{}, others: map[string][][]byte{},
 		answered: map[string]bool{}, rekeys: map[string][]wire.RekeyWrap{}, decisions: map[string]wire.ClaimDecision{}, seen: map[string]bool{},
 	}
 }
 
 // view is a copy of events a reader may keep while the fold goes on: the fold only appends past each slice's length.
 func (events poolEvents) view() poolEvents {
-	events.statuses, events.records, events.startFailures, events.others = maps.Clone(events.statuses), maps.Clone(events.records), maps.Clone(events.startFailures), maps.Clone(events.others)
+	events.statuses, events.records, events.others = maps.Clone(events.statuses), maps.Clone(events.records), maps.Clone(events.others)
 	events.answered, events.rekeys, events.decisions, events.seen = maps.Clone(events.answered), maps.Clone(events.rekeys), maps.Clone(events.decisions), nil
 	return events
 }
@@ -753,7 +745,6 @@ func (r *Receiver) foldEvents(ctx context.Context, records []*kgo.Record, state 
 		// The JWS type picks the one parse a record gets; the parse checks the type again under the signature. parseErr
 		// tells a record that does not verify, kept for the cancel check, from one that verifies and is refused.
 		var status wire.RunStatus
-		var failure wire.StartFailure
 		var request wire.OpenRequest
 		var attemptWrap wire.AttemptWrap
 		var refusal wire.OpenRefusal
@@ -787,7 +778,7 @@ func (r *Receiver) foldEvents(ctx context.Context, records []*kgo.Record, state 
 			case wire.StatusType:
 				status, err = operator.AuthorizePoolStatus(parse, state, peers, record.Value, r.config.Pool)
 			case wire.StartFailureType:
-				failure, err = operator.AuthorizePoolStartFailure(parse, state, peers, record.Value, r.config.Pool)
+				_, err = operator.AuthorizePoolStartFailure(parse, state, peers, record.Value, r.config.Pool)
 			case wire.OpenRequestType:
 				err = strict(&request)
 			case wire.AttemptWrapType:
@@ -826,10 +817,7 @@ func (r *Receiver) foldEvents(ctx context.Context, records []*kgo.Record, state 
 		case err != nil:
 			// A status or start failure that verifies but is not authorised counts for nothing.
 		case typ == wire.StartFailureType:
-			// A start failure binds its run's tenant through the task hash, which failedHere matches.
-			if failure.Wherry.Run == run && failure.Wherry.Receiver == r.id {
-				apply = func(events *poolEvents) { events.startFailures[run] = append(events.startFailures[run], failure) }
-			}
+			// A start failure is a pool event, not a cancel, and counts for nothing in the fold.
 		case typ == wire.AttemptWrapType:
 			apply = func(events *poolEvents) { events.answered[attemptWrap.Request] = true }
 		case typ == wire.OpenRefusalType:
@@ -888,28 +876,22 @@ func (events poolEvents) claim(run, hash string) *wire.RunStatus {
 	return nil
 }
 
-// failedHere reports a start failure for the task record hash, which binds the failure to its run's tenant.
-func failedHere(failures []wire.StartFailure, hash string) bool {
-	return slices.ContainsFunc(failures, func(failure wire.StartFailure) bool { return failure.TaskHash == hash })
-}
-
 type runKey struct{ tenant, run string }
 
 // cancelledRun reports whether a live host of tenant has cancelled run.
 func (r *Receiver) cancelledRun(ctx context.Context, events poolEvents, run, tenant string) bool {
 	found := false
 	for _, encoded := range events.others[run] {
-		err := r.authorizeHost(ctx, encoded, func(state operator.State, hosts signed.Keys) error {
+		// A record that is not an authorised cancel changes nothing.
+		if r.authorizeHost(ctx, encoded, func(state operator.State, hosts signed.Keys) error {
 			cancel, err := operator.AuthorizeCancel(state, hosts, encoded, r.config.Pool, tenant)
 			if err == nil && cancel.Run != run {
 				return errors.New("cancel names another run than its key")
 			}
-			if err == nil {
-				found = true
-			}
 			return err
-		})
-		_ = err // a record that is not an authorised cancel changes nothing
+		}) == nil {
+			found = true
+		}
 	}
 	return found
 }

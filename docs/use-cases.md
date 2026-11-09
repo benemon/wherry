@@ -1,61 +1,75 @@
 # Use cases
 
-## Offload a long build from a laptop
+## Hand off work and walk away
 
-A task that takes minutes or hours runs on a receiver while the laptop
-carries on with other work. The agent clones the repository itself and
-returns its commits as a patch or a bundle, which the laptop applies. The
-run goes on whether or not the caller is watching, and the caller can
-follow it or collect its result later. [Quickstart](quickstart.md) runs a
-first task, and [Git repositories](operations.md#git-repositories) covers
-the clone and the changes it returns.
+You have a task that takes an hour, and you don't want to keep your laptop awake for it.
+Submit it to wherry and close the lid.
+The run keeps going on a receiver.
+Its result waits in Kafka, for 30 days by default.
+When you're back, run `wherry host wait RUN_ID` on the same host to collect it.
+If you asked for the agent's commits with `--git-changes`, they come back as a patch or a bundle.
 
-## Delegate work into controlled environments
+[Runs and attempts](concepts.md#runs-and-attempts) explains what happens if a receiver stops mid-run.
+[Git repositories](operations-hosts.md#git-repositories) shows how to get changes back.
 
-A coding agent needs a repository or a service that only a particular
-network can reach. The task runs on a receiver inside that network, so the
-developer's machine never needs the access. The operator decides which
-tenants may use the pool, the broker enforces it, and the receiver gets
-only the credentials its run declares, in an envelope that opens for that
-attempt and for the pool's key custodian, which checks it against the task.
-[Identity and grants](governance.md#identity-and-grants),
-[Placement](concepts.md#placement) and
-[Credential envelopes](security.md#credential-envelopes) describe access,
-placement and credential delivery.
+## Run agents where the network access exists
 
-## Run on another OS, architecture or isolation level
+Your agent needs a repository or a service that only one network can reach.
+Your laptop isn't on that network.
+Run a receiver inside it and send the task there.
+The agent runs next to the system it needs, so your laptop never needs the access.
+The credentials the run needs travel encrypted, and only receivers in the pool can open them.
+The receiver that claims the task gets them for that one attempt.
 
-Some tasks need specialised hardware, such as a GPU or another
-architecture, or a stronger isolation level than the developer's machine
-gives. The operator labels each plugin profile with what it offers, and a task's
-selector picks among them. [Placement](concepts.md#placement) explains the
-labels and selectors, and the
-[receiver configuration example](configuration.md#receiver-configuration-example)
-declares two profiles with different isolation.
+[Placement](concepts.md#placement) explains how a task reaches a receiver.
+[Credential envelopes](security.md#credential-envelopes) explains how credentials travel.
+
+## Run tasks in the environment they need
+
+Some tasks need a GPU, another architecture, or stronger isolation than your machine gives.
+Your operator labels each receiver's profiles with what they offer.
+You choose one with a selector when you submit.
+The rest of the command stays the same.
+
+[Placement](concepts.md#placement) explains labels and selectors.
+[Receiver configuration](configuration-receiver.md#receiver-configuration-example) shows profiles with container and host
+isolation.
 
 ## Fan out independent tasks
 
-A harness splits work into independent tasks, submits each as its own run
-and waits for each one. The pool's receivers claim them as their capacity
-allows, so the tasks run side by side. The harness does the splitting and
-combines the results. [MCP tools](mcp.md) lists the `submit` and `wait`
-tools a harness calls.
+Your work splits into pieces that don't depend on each other.
+Submit each piece as its own run.
+The pool's receivers take them as they have room.
+They run side by side, up to the replicas the pool's receivers configure for
+each profile.
+You, or your coding agent, split the work and combine the results.
+A coding agent uses the same tools for many runs as for one.
 
-## Follow delegated work across machines
+[MCP tools](mcp.md) lists the tools a coding agent calls.
 
-A delegated task runs on another machine and can outlast the session that
-started it. The caller sees whether the run was claimed, which receiver
-handled each attempt, every status it reported and its transcript, and
-receives its result with the output files checked against their digests.
-[Runs and attempts](concepts.md#runs-and-attempts) explains a run's
-lifecycle, and [Run history](governance.md#run-history) describes which
-records are kept and for how long.
+## Share agent compute across teams
 
-## Compare agent harnesses
+Several teams need somewhere to run delegated agent work, and each needs its own access and run history.
+Rather than build separate infrastructure for every team, an operator can offer one shared set of receivers through
+pools.
 
-A pool's terms can name several agents, each launched by its own harness.
-Submitting the same prompt once per agent, with `--agent`, runs the same task
-through each harness, to check behaviour that should not depend on the
-harness. The [pool terms example](configuration.md#pool-terms-example) names
-three agents, and [`wherry submit`](commands.md#wherry-host-submit) takes the
-agent.
+Each team is a tenant, with access only to the pools it has been given.
+Its hosts submit work and follow their own runs, and never see another team's.
+The operator manages each tenant's access, and can remove it when the team no longer needs it.
+
+[Tenants](concepts.md#tenants) explains the model, and
+[Operator operations](operations-operator.md#tenant-onboarding-and-offboarding) covers onboarding and offboarding.
+
+## Trace delegated work from request to result
+
+A delegated task has finished, and you need to establish where it ran, which receiver handled it, what the agent
+reported and which files it returned.
+The host or receiver that wrote each task, status and result signs it.
+`wherry host events` shows which receiver ran each attempt, and when.
+`wherry host logs` shows the agent's transcript.
+The receiver redacts the run's credentials from it, by the rules [Credential envelopes](security.md#credential-envelopes) gives.
+Every file the run returns is checked against its digest, and a file that doesn't match is not kept.
+Anything the agent did inside its job that its transcript doesn't show is visible only if your platform records it.
+
+[Run history](governance.md#run-history) explains what is kept and for how long.
+[Host commands](commands.md#host-commands) lists the commands.

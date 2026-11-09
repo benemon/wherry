@@ -156,10 +156,10 @@ func TestHostAddAppliesPoolQuotasOnRealBroker(t *testing.T) {
 	if err := service.PoolApply(ctx, pool, terms, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.TenantAdd(ctx, tenant, pool); err != nil {
+	if err := entitleFixture(t, service, ctx, tenant, pool); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, tenant, host, filepath.Join(t.TempDir(), "bundle"), false); err != nil {
+	if err := hostFixture(t, service, ctx, tenant, host, filepath.Join(t.TempDir(), "bundle"), false); err != nil {
 		t.Fatal(err)
 	}
 	// A broker describes the quotas only once the alter reaches its metadata.
@@ -205,7 +205,15 @@ func sharePool(t *testing.T) shareTest {
 		t.Fatal(err)
 	}
 	groupTerms(t, service, s.pool, strconv.Itoa(int(terms.DeliveryLimit)), strconv.FormatInt(int64(terms.LockDurationMS), 10))
-	if err := kafkatest.Led(ctx, service.Operator, PoolTasksTopic(s.pool)); err != nil {
+	// The pool has no receiver, so the test creates the one signature topic its members subscribe to.
+	retention, err := poolRetention(withDefaults(terms))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.createTaskTopics(ctx, retention.tasks, modelTopic(s.pool)); err != nil {
+		t.Fatal(err)
+	}
+	if err := kafkatest.Led(ctx, service.Operator, modelTopic(s.pool)); err != nil {
 		t.Fatal(err)
 	}
 	return s
@@ -215,6 +223,12 @@ func sharePool(t *testing.T) shareTest {
 // so a record whose lock lapses goes to another member rather than back to it. Acknowledgement results go to results
 // if it is not nil.
 func (s shareTest) member(t *testing.T, results chan<- kgo.ShareAckResults) *kgo.Client {
+	t.Helper()
+	return s.subscriber(t, results, modelTopic(s.pool))
+}
+
+// subscriber is member subscribed to topics.
+func (s shareTest) subscriber(t *testing.T, results chan<- kgo.ShareAckResults, topics ...string) *kgo.Client {
 	t.Helper()
 	ca, err := os.ReadFile(os.Getenv("WHERRY_TRUST_CA"))
 	if err != nil {
@@ -230,7 +244,7 @@ func (s shareTest) member(t *testing.T, results chan<- kgo.ShareAckResults) *kgo
 	}
 	client, err := kgo.NewClient(kgo.SeedBrokers(os.Getenv("WHERRY_TRUST_BROKER")), kgo.DialTLSConfig(&tls.Config{RootCAs: roots}),
 		kgo.SASL(scram.Auth{User: os.Getenv("WHERRY_TRUST_SUPER_USER"), Pass: strings.TrimSpace(string(password))}.AsSha512Mechanism()),
-		kgo.ConsumeTopics(PoolTasksTopic(s.pool)), kgo.ShareGroup(PoolGroup(s.pool)), kgo.ShareMaxRecords(1), kgo.ShareMaxRecordsStrict(),
+		kgo.ConsumeTopics(topics...), kgo.ShareGroup(PoolGroup(s.pool)), kgo.ShareMaxRecords(1), kgo.ShareMaxRecordsStrict(),
 		kgo.MaxConcurrentFetches(0), kgo.FetchMaxWait(time.Second),
 		kgo.ShareAckCallback(func(_ *kgo.Client, r kgo.ShareAckResults) {
 			if results != nil {
@@ -246,7 +260,7 @@ func (s shareTest) member(t *testing.T, results chan<- kgo.ShareAckResults) *kgo
 
 func (s shareTest) produce(t *testing.T, value string) {
 	t.Helper()
-	if err := s.service.Operator.ProduceSync(context.Background(), &kgo.Record{Topic: PoolTasksTopic(s.pool), Value: []byte(value)}).FirstErr(); err != nil {
+	if err := s.service.Operator.ProduceSync(context.Background(), &kgo.Record{Topic: modelTopic(s.pool), Value: []byte(value)}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 }

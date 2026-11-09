@@ -1,0 +1,214 @@
+# promtool unit tests of the dashboard's Routing queries: promtool test rules contrib/observability/routing.test.yml
+#
+# Each expr is the dashboard's, with $pool as pool-a, $instance as r1|r2 and $__rate_interval as 5m;
+# TestDashboardRoutingQueriesAreTested in internal/receiver fails when a Routing query has no test here. Groups vary
+# the input series, never the selectors. T1 and T2 stand for pool-a signature topics, T3 for another.
+
+tests:
+  # r1 has a and c ready on T1 and b unready on T2; r2 has a ready on T1. r3 in pool-a is outside the instance
+  # selector and r4 in pool-b outside both; neither may appear.
+  - interval: 1m
+    input_series:
+      - series: 'wherry_profile_ready{pool="pool-a",instance="r1",profile="a",topic="T1"}'
+        values: '1x10'
+      - series: 'wherry_profile_ready{pool="pool-a",instance="r1",profile="b",topic="T2"}'
+        values: '0x10'
+      - series: 'wherry_profile_ready{pool="pool-a",instance="r1",profile="c",topic="T1"}'
+        values: '1x10'
+      - series: 'wherry_profile_ready{pool="pool-a",instance="r2",profile="a",topic="T1"}'
+        values: '1x10'
+      - series: 'wherry_profile_ready{pool="pool-a",instance="r3",profile="b",topic="T2"}'
+        values: '1x10'
+      - series: 'wherry_profile_ready{pool="pool-a",instance="r3",profile="d",topic="T3"}'
+        values: '0x10'
+      - series: 'wherry_profile_ready{pool="pool-b",instance="r4",profile="a",topic="T1"}'
+        values: '1x10'
+      - series: 'wherry_admissions_total{pool="pool-a",instance="r1",profile="a",tenant="t1"}'
+        values: '0+60x10'
+      - series: 'wherry_admissions_total{pool="pool-a",instance="r1",profile="a",tenant="t2"}'
+        values: '0+120x10'
+      - series: 'wherry_admissions_total{pool="pool-a",instance="r1",profile="b",tenant="t1"}'
+        values: '0+60x10'
+      - series: 'wherry_admissions_total{pool="pool-a",instance="r3",profile="b",tenant="t1"}'
+        values: '0+300x10'
+      - series: 'wherry_admissions_total{pool="pool-b",instance="r4",profile="a",tenant="t1"}'
+        values: '0+300x10'
+    promql_expr_test:
+      - expr: 'sum by (pool) (max by (pool, topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"}))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{pool="pool-a"}'
+            value: 1
+      - expr: 'count by (pool) (count by (pool, topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"}))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{pool="pool-a"}'
+            value: 2
+      - expr: 'max by (pool, instance, profile, topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"})'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{pool="pool-a", instance="r1", profile="a", topic="T1"}'
+            value: 1
+          - labels: '{pool="pool-a", instance="r1", profile="b", topic="T2"}'
+            value: 0
+          - labels: '{pool="pool-a", instance="r1", profile="c", topic="T1"}'
+            value: 1
+          - labels: '{pool="pool-a", instance="r2", profile="a", topic="T1"}'
+            value: 1
+      - expr: 'sum by (pool, topic) (max by (pool, instance, topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"}))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{pool="pool-a", topic="T1"}'
+            value: 2
+          - labels: '{pool="pool-a", topic="T2"}'
+            value: 0
+      - expr: 'max by (pool, topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"}) == 0'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{pool="pool-a", topic="T2"}'
+            value: 0
+      - expr: 'sum by (pool, topic) (rate(wherry_admissions_total{pool=~"pool-a", instance=~"r1|r2"}[5m]) * on (pool, instance, profile) group_left (topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"} * 0 + 1))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{pool="pool-a", topic="T1"}'
+            value: 3
+          - labels: '{pool="pool-a", topic="T2"}'
+            value: 1
+
+  # Every pool-a profile on r1 and r2 unready: the counts are 0, not empty.
+  - interval: 1m
+    input_series:
+      - series: 'wherry_profile_ready{pool="pool-a",instance="r1",profile="a",topic="T1"}'
+        values: '0x10'
+      - series: 'wherry_profile_ready{pool="pool-a",instance="r1",profile="b",topic="T2"}'
+        values: '0x10'
+      - series: 'wherry_profile_ready{pool="pool-a",instance="r2",profile="a",topic="T1"}'
+        values: '0x10'
+      - series: 'wherry_profile_ready{pool="pool-a",instance="r3",profile="a",topic="T1"}'
+        values: '1x10'
+      - series: 'wherry_profile_ready{pool="pool-b",instance="r4",profile="a",topic="T1"}'
+        values: '1x10'
+    promql_expr_test:
+      - expr: 'sum by (pool) (max by (pool, topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"}))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{pool="pool-a"}'
+            value: 0
+      - expr: 'count by (pool) (count by (pool, topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"}))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{pool="pool-a"}'
+            value: 2
+      - expr: 'max by (pool, instance, profile, topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"})'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{pool="pool-a", instance="r1", profile="a", topic="T1"}'
+            value: 0
+          - labels: '{pool="pool-a", instance="r1", profile="b", topic="T2"}'
+            value: 0
+          - labels: '{pool="pool-a", instance="r2", profile="a", topic="T1"}'
+            value: 0
+      - expr: 'sum by (pool, topic) (max by (pool, instance, topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"}))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{pool="pool-a", topic="T1"}'
+            value: 0
+          - labels: '{pool="pool-a", topic="T2"}'
+            value: 0
+      - expr: 'max by (pool, topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"}) == 0'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{pool="pool-a", topic="T1"}'
+            value: 0
+          - labels: '{pool="pool-a", topic="T2"}'
+            value: 0
+
+  # No pool-a sample, only other pools' receivers, some at the selected instances: every Routing query is empty.
+  - interval: 1m
+    input_series:
+      - series: 'wherry_profile_ready{pool="pool-b",instance="r1",profile="a",topic="T3"}'
+        values: '1x10'
+      - series: 'wherry_profile_ready{pool="pool-b",instance="r2",profile="b",topic="T3"}'
+        values: '0x10'
+      - series: 'wherry_profile_ready{pool="pool-b",instance="r4",profile="a",topic="T3"}'
+        values: '1x10'
+      - series: 'wherry_admissions_total{pool="pool-b",instance="r1",profile="a",tenant="t1"}'
+        values: '0+60x10'
+      - series: 'wherry_claim_gated{pool="pool-b",instance="r1",reason="suspended"}'
+        values: '1x10'
+      - series: 'wherry_claim_gated{pool="pool-b",instance="r1",reason="no_ready_offer"}'
+        values: '0x10'
+      - series: 'wherry_claim_gated{pool="pool-b",instance="r1",reason="pending_run"}'
+        values: '0x10'
+    promql_expr_test:
+      - expr: 'sum by (pool) (max by (pool, topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"}))'
+        eval_time: 10m
+        exp_samples: []
+      - expr: 'count by (pool) (count by (pool, topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"}))'
+        eval_time: 10m
+        exp_samples: []
+      - expr: 'max by (pool, instance, profile, topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"})'
+        eval_time: 10m
+        exp_samples: []
+      - expr: 'sum by (pool, topic) (max by (pool, instance, topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"}))'
+        eval_time: 10m
+        exp_samples: []
+      - expr: 'max by (pool, topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"}) == 0'
+        eval_time: 10m
+        exp_samples: []
+      - expr: 'max by (pool, instance, reason) (wherry_claim_gated{pool=~"pool-a", instance=~"r1|r2"})'
+        eval_time: 10m
+        exp_samples: []
+      - expr: 'sum by (pool, topic) (rate(wherry_admissions_total{pool=~"pool-a", instance=~"r1|r2"}[5m]) * on (pool, instance, profile) group_left (topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"} * 0 + 1))'
+        eval_time: 10m
+        exp_samples: []
+
+  # The gate on r1: no ready offer and a pending run hold together. r3 and pool-b's r4 may not appear.
+  - interval: 1m
+    input_series:
+      - series: 'wherry_claim_gated{pool="pool-a",instance="r1",reason="suspended"}'
+        values: '0x10'
+      - series: 'wherry_claim_gated{pool="pool-a",instance="r1",reason="no_ready_offer"}'
+        values: '1x10'
+      - series: 'wherry_claim_gated{pool="pool-a",instance="r1",reason="pending_run"}'
+        values: '1x10'
+      - series: 'wherry_claim_gated{pool="pool-a",instance="r3",reason="suspended"}'
+        values: '1x10'
+      - series: 'wherry_claim_gated{pool="pool-b",instance="r4",reason="suspended"}'
+        values: '1x10'
+    promql_expr_test:
+      - expr: 'max by (pool, instance, reason) (wherry_claim_gated{pool=~"pool-a", instance=~"r1|r2"})'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{pool="pool-a", instance="r1", reason="suspended"}'
+            value: 0
+          - labels: '{pool="pool-a", instance="r1", reason="no_ready_offer"}'
+            value: 1
+          - labels: '{pool="pool-a", instance="r1", reason="pending_run"}'
+            value: 1
+
+  - interval: 1m
+    input_series:
+      - series: 'wherry_profile_ready{pool="pool-a",instance="r1",profile="a",topic="T1"}'
+        values: '1x4'
+      - series: 'wherry_admissions_total{pool="pool-a",instance="r1",profile="a",tenant="t1"}'
+        values: '0 0 1 1 1'
+    promql_expr_test:
+      - expr: 'sum by (pool, topic) (rate(wherry_admissions_total{pool=~"pool-a", instance=~"r1|r2"}[5m]) * on (pool, instance, profile) group_left (topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"} * 0 + 1))'
+        eval_time: 4m
+        exp_samples:
+          - labels: '{pool="pool-a",topic="T1"}'
+            value: 0.0033333333333333335
+
+  - interval: 1m
+    input_series:
+      - series: 'wherry_profile_ready{pool="pool-a",instance="r1",profile="a",topic="T1"}'
+        values: '1x4'
+      - series: 'wherry_admissions_total{pool="pool-a",instance="r1",profile="a",tenant="t1"}'
+        values: '1 1 1 1 1'
+    promql_expr_test:
+      - expr: 'sum by (pool, topic) (rate(wherry_admissions_total{pool=~"pool-a", instance=~"r1|r2"}[5m]) * on (pool, instance, profile) group_left (topic) (wherry_profile_ready{pool=~"pool-a", instance=~"r1|r2"} * 0 + 1))'
+        eval_time: 4m
+        exp_samples:
+          - labels: '{pool="pool-a",topic="T1"}'
+            value: 0

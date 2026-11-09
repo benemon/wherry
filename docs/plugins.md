@@ -1,70 +1,48 @@
 # Plugins
 
-A plugin is the binary `wherry-plugin-<type>` that supplies
-support for one kind of platform, which the receiver starts from its plugin
-directory and talks to over the plugin protocol. A receiver runs each task
-on a plugin profile, a named, configured use of a plugin with its agent, labels
-and runtime, and one plugin process serves every one of its profiles in the
-receiver's [configuration](configuration.md#receiver-configuration). The
-[plugins reference](commands.md#plugins) specifies what a receiver expects
-of a plugin, and the protocol is the Go module in
-[`pluginsdk`](https://github.com/benemon/wherry/tree/main/pluginsdk).
+A plugin runs jobs on one kind of platform.
+The receiver starts its `wherry-plugin-<type>` binary from the plugin directory.
+One plugin process serves all of that plugin's profiles on the receiver.
+Each profile names an agent, labels and runtime settings.
+See [Receiver configuration](configuration-receiver.md#receiver-configuration).
 
-The plugins live in
-[wherry-plugins](https://github.com/benemon/wherry-plugins), each with its
-own README covering installation, settings and the platform's
-permissions:
+## Which platform do you use?
 
-- [Nomad](https://github.com/benemon/wherry-plugins/tree/main/nomad)
-- [Kubernetes](https://github.com/benemon/wherry-plugins/tree/main/kubernetes),
-  OpenShift included
-- [systemd](https://github.com/benemon/wherry-plugins/tree/main/systemd)
+The [wherry-plugins repository](https://github.com/benemon/wherry-plugins) maintains these plugins.
+Install a receiver with its platform's receiver page.
+Use each plugin's guide for settings and platform permissions.
+
+| Plugin | Install | Guide |
+| --- | --- | --- |
+| Nomad | [Receiver on Nomad](install-receiver-nomad.md). | [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad). |
+| Kubernetes and OpenShift | [Receiver on Kubernetes and OpenShift](install-receiver-kubernetes.md). | [Kubernetes plugin](https://github.com/benemon/wherry-plugins/tree/main/kubernetes). |
+| systemd | [Receiver on systemd](install-receiver-systemd.md). | [systemd plugin](https://github.com/benemon/wherry-plugins/tree/main/systemd). |
 
 ## Why Nomad
 
-Nomad is the primary platform for receivers because one Nomad cluster
-runs many kinds of workload. Each Nomad
-[task driver](https://developer.hashicorp.com/nomad/docs/deploy/task-driver) runs a
-different kind: containers through Docker or Podman, an isolated process
-on the host through `exec`, a plain host process through `raw_exec`, a
-virtual machine through QEMU, and further kinds through community driver
-plugins. A cluster's clients can themselves be bare-metal hosts, virtual
-machines or cloud instances. Nomad places each job on a client whose driver
-is healthy, within the node pool and datacenters the job names.
-
-A plugin profile of the Nomad plugin names one driver and its configuration, and
-the receiver's configuration can hold several profiles of the Nomad
-plugin, each with its own driver and labels. So one receiver can offer containers, host
-processes and virtual machines side by side, and a task chooses between
-them by its agent and label selector, the way it chooses anything else.
-The Nomad plugin hands the driver to Nomad unchanged; the drivers
-exercised with wherry so far are Docker, Podman and `exec`.
-
-The
-[Nomad plugin's README](https://github.com/benemon/wherry-plugins/tree/main/nomad)
-gives the settings for each driver.
+The Nomad plugin passes each profile's driver settings to Nomad.
+You can define several profiles for the same plugin.
+Give each profile labels that describe its capabilities.
+Your tasks select profiles by agent and label selector.
+Use the [Nomad plugin settings](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings) to configure each driver.
 
 ## Running a receiver
 
-The [receiver examples](https://github.com/benemon/wherry-plugins/tree/main/examples) in wherry-plugins show ways to
-run a receiver with its plugins. [Run a receiver](operations.md#run-a-receiver)
-lists what every receiver needs, and each plugin's README gives the full
-instructions.
+Follow [Run a receiver](operations-receivers.md#run-a-receiver) for wherry's requirements.
+The examples below are imported from the plugin repository.
+[Plugin protocol](plugin-protocol.md) describes the authoring interface.
+[Command reference](commands.md#plugins) explains pins and process recovery.
 
 ### systemd
 
-A local configuration and a service unit for the receiver, a slice for the
-agents' units, and a tmpfiles entry for the credential mount point. The
-[systemd plugin's README](https://github.com/benemon/wherry-plugins/tree/main/systemd#run-the-receiver-as-a-systemd-service)
-covers installing them.
+[Receiver on systemd](install-receiver-systemd.md#run-the-receiver-as-a-systemd-service)
+describes these files and installs them.
 
-A systemd receiver adopts only the jobs on its own host. In a pool with
-receivers on several hosts, a task whose holder is lost, the latest receiver
-the key custodian served it to that has not since released it, starts again
-on another host once the lease lapses, 120 seconds after the holder's last
-advertisement, or once its membership ends, while the first job may still
-run. Give each systemd
-receiver a pool of its own.
+A systemd receiver adopts jobs only on its own host.
+Give each systemd receiver a signature of its own: give each of its profiles a `host: <name>` label.
+With receivers on several hosts, redelivery can start another job while the first still runs.
+This can happen after the previous holder's lease expires or its membership ends.
+The lease expires 120 seconds after its last advertisement.
 
 `config.yaml`:
 
@@ -84,14 +62,8 @@ receiver a pool of its own.
 
 ### Kubernetes
 
-A receiver image, its local configuration, a manifest with the Deployment,
-service account, Role, state claim, runs claim and metrics Service, and a script that applies them, on Kubernetes and
-OpenShift alike. The receiver pod and every agent pod mount the runs claim, so the
-cluster needs a storage class that provisions ReadWriteMany claims, such as
-CephFS, NFS, EFS or Azure Files. An agent pod runs the agent's image alone, the
-plugin's config has no `helper_image`, and an upgrade is an image change. The
-[Kubernetes plugin's README](https://github.com/benemon/wherry-plugins/tree/main/kubernetes#run-the-receiver-in-the-cluster)
-covers building the image and deploying it.
+[Receiver on Kubernetes and OpenShift](install-receiver-kubernetes.md#run-the-receiver-in-the-cluster)
+describes these files, on Kubernetes and OpenShift alike, and deploys them.
 
 `config.yaml`:
 
@@ -105,15 +77,18 @@ covers building the image and deploying it.
 
 <<< @/examples/kubernetes/receiver.yaml{yaml}
 
-`apply.sh`:
+`kustomization.yaml`:
 
-<<< @/examples/kubernetes/apply.sh{bash}
+<<< @/examples/kubernetes/kustomization.yaml{yaml}
+
+`fsgroup.yaml`, for a state volume whose root the receiver cannot write:
+
+<<< @/examples/kubernetes/fsgroup.yaml{yaml}
 
 ### Nomad
 
-A receiver image with the Nomad plugin, and its local configuration. The
-[Nomad plugin's README](https://github.com/benemon/wherry-plugins/tree/main/nomad#run-the-receiver-in-a-container)
-covers building and running it.
+[Receiver on Nomad](install-receiver-nomad.md#run-the-receiver-in-nomad)
+describes these files and runs them.
 
 `config.yaml`:
 
@@ -122,3 +97,7 @@ covers building and running it.
 `Containerfile`:
 
 <<< @/examples/nomad/Containerfile{dockerfile}
+
+`wherry-receiver.nomad.hcl`:
+
+<<< @/examples/nomad/wherry-receiver.nomad.hcl{hcl}

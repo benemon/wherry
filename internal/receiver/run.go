@@ -58,6 +58,8 @@ var (
 	shutdownTimeout = 5 * time.Second
 	// reconcileInterval separates the Lookups that resolve an ambiguous Dispatch.
 	reconcileInterval = time.Second
+	// startPollInterval separates the Lookups of a job not yet started.
+	startPollInterval = 2 * time.Second
 	// purgeDeadline bounds the Purge retries of a start failure.
 	purgeDeadline = 5 * time.Minute
 	// followRetryInterval separates the Follows and Lookups of a run whose log stream failed.
@@ -66,19 +68,21 @@ var (
 	collectTimeout = 2 * time.Minute
 )
 
-// claimLoop holds one slot: a dedicated share client per claimed record,
-// because renews do not survive a poll and held records are tied to the connection.
-// It claims until claiming ends and runs a held task until running ends. idle is called once the slot's
-// idle share client has closed, or once claiming ends while the slot holds a task.
-func (r *Receiver) claimLoop(claiming, running context.Context, idle func()) {
+// clock is the receiver's clock for placement: when Dispatch returned and when each Lookup of the await-start phase
+// completed. A variable so tests can control it.
+var clock = time.Now
+
+// newClaimClient lets tests tell apart the members of profiles that share a signature topic.
+var newClaimClient = func(r *Receiver, _ Named, opts ...kgo.Opt) (*kgo.Client, error) {
+	return r.newClient(opts...)
+}
+
+// claimLoop retains a dedicated connection per held record because renewal cannot survive another poll, calling
+// idle once the idle client closes or claiming ends with a held task.
+func (r *Receiver) claimLoop(claiming, running context.Context, profile Named, idle func()) {
 	defer idle()
 	for claiming.Err() == nil {
-		// A suspended pool takes no new work: its receivers fetch nothing from it.
-		if r.suspended() {
-			sleep(claiming, time.Second)
-			continue
-		}
-		if err := r.claimOne(claiming, running, idle); err != nil && claiming.Err() == nil {
+		if err := r.claimOne(claiming, running, profile, idle); err != nil && claiming.Err() == nil {
 			r.deny(err, capClaim)
 			r.logger.Printf("claim: %v", err)
 			sleep(claiming, 2*time.Second)
@@ -86,27 +90,24 @@ func (r *Receiver) claimLoop(claiming, running context.Context, idle func()) {
 	}
 }
 
-func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
-	// The check and the count share the lock, so a slot releasing a task for another member knows every session that
-	// could fetch it again.
+// claimGated requires r.mu, which must not span a poll, close, sleep, or plugin call.
+func (r *Receiver) claimGated() bool {
+	return r.state.Suspended[r.config.Pool] || len(r.offers) == 0 || len(r.pending) > 0
+}
+
+func (r *Receiver) gated(profile Named) bool {
 	r.mu.Lock()
-	wait := time.Until(r.backoffUntil)
-	if wait <= 0 {
-		r.fetching++
-	}
-	r.mu.Unlock()
-	if wait > 0 {
-		sleep(claiming, wait)
+	defer r.mu.Unlock()
+	return r.claimGated() || !r.ready(profile.Name)
+}
+
+func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle func()) error {
+	if r.gated(profile) {
+		sleep(claiming, time.Second)
 		return nil
 	}
-	fetched := sync.OnceFunc(func() {
-		r.mu.Lock()
-		r.fetching--
-		r.mu.Unlock()
-	})
-	defer fetched()
-	share, err := r.newClient(
-		kgo.ConsumeTopics(operator.PoolTasksTopic(r.config.Pool)),
+	share, err := newClaimClient(r, profile,
+		kgo.ConsumeTopics(operator.SignatureTopic(r.config.Pool, profile.Agent, profile.Labels)),
 		kgo.ShareGroup(operator.PoolGroup(r.config.Pool)),
 		kgo.ShareMaxRecords(1),
 		kgo.ShareMaxRecordsStrict(),
@@ -131,11 +132,15 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		defer cancel()
 		return share.FlushAcks(flushCtx)
 	}
+	// A held client keeps renewing through readiness changes.
+	stale := func() bool {
+		return r.gated(profile)
+	}
 	var record *kgo.Record
 	for record == nil {
 		pollCtx, cancel := context.WithTimeout(claiming, 30*time.Second)
 		go func() {
-			for pollCtx.Err() == nil && !r.suspended() && r.backoff() <= 0 {
+			for pollCtx.Err() == nil && !stale() {
 				sleep(pollCtx, 100*time.Millisecond)
 			}
 			cancel()
@@ -146,7 +151,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		if claiming.Err() != nil {
 			return claiming.Err()
 		}
-		if (r.suspended() || r.backoff() > 0) && len(fetches.Records()) == 0 {
+		if len(fetches.Records()) == 0 && stale() {
 			return nil
 		}
 		if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
@@ -156,21 +161,14 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 			record = records[0]
 		}
 	}
-	fetched()
 	// A slot holding a task releases it only after running ends, so it does not hold up the idle slots' close.
 	defer context.AfterFunc(claiming, idle)()
 	if r.suspended() {
 		record.Ack(kgo.AckRelease)
 		return flush()
 	}
-	admitted, ack := r.admit(ctx, record)
+	admitted, ack := r.admit(ctx, record, profile)
 	if admitted == nil {
-		if ack == kgo.AckRelease && r.backoff() > 0 {
-			// Another slot's session open when the task goes back could be handed it at once.
-			for claiming.Err() == nil && r.sessions() > 0 {
-				sleep(claiming, 10*time.Millisecond)
-			}
-		}
 		record.Ack(ack)
 		return flush()
 	}
@@ -209,7 +207,7 @@ type admission struct {
 }
 
 // admit decides whether record's task runs here; a nil admission carries the acknowledgement.
-func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, kgo.AckStatus) {
+func (r *Receiver) admit(ctx context.Context, record *kgo.Record, profile Named) (*admission, kgo.AckStatus) {
 	hash := wire.TaskHash(record.Value)
 	// Released even at the delivery budget: without the events, a terminal could repeat a committed one.
 	events, err := r.readEvents(ctx)
@@ -257,14 +255,14 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	}
 	// A mismatch's rejection carries its signer's tenant and hash, which every reader of the run's statuses filters by.
 	if err := wire.CheckRunID(task.Wherry); err != nil {
-		return reject(err.Error())
+		return rejectAs(rejectionReasonRunID, err.Error())
 	}
 	if first := events.task(run); first != "" && first != hash {
-		return reject("duplicate submission")
+		return reject(rejectionReasonDuplicate)
 	}
-	// A copy of the claimed record, byte for byte at another offset, is acknowledged without a claim before anything is
-	// written under the run's key.
-	if claim := events.claim(run, hash); claim != nil && *claim.Wherry.TaskOffset != record.Offset {
+	// A copy of the claimed record, byte for byte at another topic or offset, is acknowledged without a claim before
+	// anything is written under the run's key.
+	if claim := events.claim(run, hash); claim != nil && (claim.Wherry.TaskTopic != record.Topic || *claim.Wherry.TaskOffset != record.Offset) {
 		return nil, kgo.AckAccept
 	}
 	state, _, _ := r.snapshot()
@@ -272,10 +270,10 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	placement := task.Wherry.Placement
 	agent := slices.IndexFunc(terms.Agents, func(agent operator.AgentTerms) bool { return agent.Name == placement.Agent })
 	if agent < 0 {
-		return reject("agent is outside the pool terms")
+		return reject(rejectionReasonAgent)
 	}
 	if !modelInTerms(terms.Agents[agent], placement.Model) {
-		return reject("model not in the pool's terms")
+		return reject(rejectionReasonModel)
 	}
 	cancelled := r.cancelledRun(ctx, events, run, task.Wherry.Tenant)
 	// A run a member already claimed is past the age and bound checks; its redelivery goes on to adoption.
@@ -285,10 +283,10 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	// The receiver's clock decides both bounds, each passed only when now is past its whole second.
 	now := time.Now().Unix()
 	if !claimed && !cancelled && now > task.Wherry.TaskStartedBy {
-		return rejectAs("not started by task_started_by", wire.NotStartedBy(task.Wherry.TaskStartedBy))
+		return rejectAs(rejectionReasonStartBound, wire.NotStartedBy(task.Wherry.TaskStartedBy))
 	}
 	if !claimed && !cancelled && now > task.Wherry.TaskEndedBy {
-		return rejectAs("not ended by task_ended_by", wire.NotEndedBy(task.Wherry.TaskEndedBy))
+		return rejectAs(rejectionReasonEndBound, wire.NotEndedBy(task.Wherry.TaskEndedBy))
 	}
 	if reason := inadmissible(runSubmission{&task, hash, record.Timestamp}, terms); !claimed && reason != "" {
 		return reject(reason)
@@ -298,26 +296,27 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		return status.Wherry.TaskHash == hash && status.Wherry.Kind == "started" && status.Wherry.LogOffset != nil
 	})
 	ending := claimed && (now > task.Wherry.TaskStartedBy && !started || now > task.Wherry.TaskEndedBy)
-	// A member that failed to start the task does not try again, and fetches nothing for one lock duration so the
-	// broker can hand the task to another member.
-	if failedHere(events.startFailures[run], hash) && !ending {
-		admitted, ack := giveBack()
-		if ack == kgo.AckRelease {
-			r.logger.Printf("run %s: already failed here; releasing for another member", run)
-			r.mu.Lock()
-			r.backoffUntil = time.Now().Add(terms.LockDuration())
-			r.mu.Unlock()
-		}
-		return admitted, ack
+	// The record's topic routes the task: its agent is the placement's, and the profile it reached is ready and serves
+	// the selector, or the host computed the wrong topic.
+	if _, topicAgent, ok := wire.ParseTaskTopic(record.Topic); !ok || topicAgent != placement.Agent || record.Topic != operator.SignatureTopic(r.config.Pool, profile.Agent, profile.Labels) {
+		return reject(rejectionReasonTopicAgent)
 	}
-	profile, offered := r.offer(placement)
+	r.mu.Lock()
+	offered := r.ready(profile.Name)
+	r.mu.Unlock()
 	if !offered && !ending {
-		r.logger.Printf("run %s: no current offer for agent %s satisfying its selector", run, placement.Agent)
-		r.metrics.startFailures.WithLabelValues("none", "offer-unavailable").Inc()
+		// A profile that went unready since this slot subscribed: another member, or this one once ready, takes it.
+		r.logger.Printf("run %s: no ready profile for topic %s; releasing", run, record.Topic)
 		return giveBack()
 	}
+	if !wire.Satisfies(placement.Selector, profile.Labels) {
+		return reject(rejectionReasonSelector)
+	}
+	if !offered && ending {
+		profile = Named{}
+	}
 	if !claimed && time.Since(record.Timestamp) > terms.StartByLimit() {
-		return reject("task_started_by is past the pool's start_by_limit")
+		return reject(rejectionReasonStartLimit)
 	}
 	history := []wire.Message{task.Message}
 	admitted := &admission{task: &task, taskHash: hash, profile: profile, history: history, cancelled: cancelled}
@@ -331,21 +330,21 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		case !slices.Contains(declared.Unsupplied, credential.Name):
 			supplied = append(supplied, credential.TaskCredential)
 		case !credential.Optional():
-			return reject("the host does not supply a required credential of the agent")
+			return reject(rejectionReasonRequiredCredential)
 		}
 	}
 	for _, credential := range declared.Credentials {
 		if slices.ContainsFunc(terms.Agents[agent].Targets(), func(target wire.TaskCredential) bool { return target.Target() == credential.Target() }) {
-			return reject("a task credential takes the target of one of the agent's credentials")
+			return reject(rejectionReasonCredentialTarget)
 		}
 	}
 	if declared.Git != nil {
 		if host := declared.Git.VCSHost(); !slices.Contains(terms.VCS, host) {
-			return rejectAs("git remote host outside the pool's vcs hosts", "git remote host "+host+" is not in pool "+r.config.Pool+"'s vcs hosts")
+			return rejectAs(rejectionReasonVCS, "git remote host "+host+" is not in pool "+r.config.Pool+"'s vcs hosts")
 		}
 	}
 	if (len(declared.S3Inputs) > 0 || len(s3Outputs(declared.Outputs)) > 0) && terms.Storage == nil {
-		return rejectAs("pool has no storage", "pool "+r.config.Pool+" has no storage for S3 inputs and outputs")
+		return rejectAs(rejectionReasonStorage, "pool "+r.config.Pool+" has no storage for S3 inputs and outputs")
 	}
 	inputs, rejection := deliverables(history, declared.Git)
 	if rejection != "" {
@@ -387,7 +386,7 @@ func deliverables(history []wire.Message, git *wire.GitInput) ([]pluginsdk.File,
 				// Decoding refused repeated input names, so each is unique.
 				inputs = append(inputs, pluginsdk.File{Name: wire.InputName(part), Data: append(slices.Clone([]byte(part.Raw)), part.Data...)})
 			default:
-				return nil, "unsupported message part"
+				return nil, rejectionReasonPart
 			}
 		}
 	}
@@ -478,15 +477,15 @@ func inadmissible(submission runSubmission, terms operator.Terms) string {
 	binding, appended := submission.record.Wherry, submission.submitted
 	switch {
 	case binding.Envelope == "":
-		return "the task carries no envelope"
+		return rejectionReasonEnvelope
 	case appended.Unix() > binding.TaskStartedBy:
-		return "task_started_by is before its append time"
+		return rejectionReasonAppendTime
 	case binding.TaskStartedBy > appended.Add(terms.StartByLimit()).Unix():
-		return "task_started_by is past the pool's start_by_limit"
+		return rejectionReasonStartLimit
 	case binding.TaskStartedBy > binding.TaskEndedBy:
-		return "task_ended_by is before task_started_by"
+		return rejectionReasonBoundOrder
 	case binding.TaskEndedBy > binding.TaskStartedBy+operator.MaxRunDurationMS/1000:
-		return "task_ended_by is past task_started_by plus the 6h run cap"
+		return rejectionReasonRunCap
 	}
 	return ""
 }
@@ -559,6 +558,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		delete(r.live, run)
 		r.liveMu.Unlock()
 	}()
+	defer run.placed()
 	pastDeadline := r.metrics.pastDeadline.WithLabelValues(admitted.profile.Name)
 	// A timer firing as the run ends must not count it after its decrement.
 	var overdueMu sync.Mutex
@@ -581,7 +581,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		}
 	}()
 
-	if err := run.commit(ctx, append([]*kgo.Record{run.feed(r.echo(task, admitted.taskHash))}, run.claimRecords(record.Offset)...)...); err != nil {
+	if err := run.commit(ctx, append([]*kgo.Record{run.feed(r.echo(task, admitted.taskHash))}, run.claimRecords(record.Topic, record.Offset)...)...); err != nil {
 		return run.abandon(err)
 	}
 	// A claim given back to the pool is released first, so the next claimant is served without waiting out this one.
@@ -624,9 +624,11 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		defer cancelLookup()
 	}
 	var handle pluginsdk.Handle
+	var job pluginsdk.Job
 	adopted, neverStarted := false, false
 	if attempt > 1 {
-		job, found, err := run.findJob(ctx, lookupCtx)
+		var found bool
+		job, found, err = run.findJob(ctx, lookupCtx)
 		// An unresolved Lookup is asked again while the claim is held, until task_ended_by passes; no open is requested
 		// before the job's state is known.
 		for err != nil {
@@ -658,16 +660,26 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if run.profile.Plugin == nil {
 		return run.expired(ctx, nil, nil)
 	}
-	// A job no started event reported by task_started_by is located only to be stopped.
+	// A job no started event reported by task_started_by is located only to be stopped; a pending one past both bounds
+	// names the end bound.
 	if !started && adopted && !admitted.cancelled && startCtx.Err() != nil && ctx.Err() == nil {
+		if job.State == pluginsdk.JobPending {
+			return run.expired(ctx, &handle, nil)
+		}
 		return run.stopAndFail(ctx, handle, wire.NotStartedBy(task.Wherry.TaskStartedBy), nil)
 	}
 	if !started && neverStarted && startCtx.Err() != nil && ctx.Err() == nil {
 		return run.expired(ctx, nil, nil)
 	}
 	if neverStarted {
-		return run.startFailure(ctx, "platform", "job never started")
+		return run.neverStarted(ctx, handle, pluginsdk.Terminal{Class: job.Class, Reason: job.Reason}, nil)
 	}
+	// unplaced is an adopted job Lookup found pending; awaiting marks a run whose job is observed until it starts, from
+	// first when a Lookup's result is already in hand.
+	unplaced := adopted && job.State == pluginsdk.JobPending
+	awaiting := unplaced
+	var first *lookupResult
+	var dispatchedAt time.Time
 	if startCtx.Err() != nil && ctx.Err() == nil && !adopted {
 		return run.expired(ctx, nil, nil)
 	}
@@ -701,29 +713,30 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				run.terms().ReplyLimit) + prompt(admitted.history)),
 			Inputs: admitted.inputs, Credentials: secrets, Fetches: fetches,
 		})
+		returned := clock()
 		var tooLarge *pluginsdk.InputTooLargeError
 		var failure *pluginsdk.Error
 		switch {
 		// A dispatch that errs may have created a job; it is returned unpurged, and its redelivery locates the job and
 		// stops it if the bound has passed.
 		case err != nil && startCtx.Err() != nil && ctx.Err() == nil:
-			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "unknown").Inc()
+			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, dispatchOutcomeUnknown).Inc()
 			return run.returnTask(ctx, nil)
 		case errors.As(err, &tooLarge) && dispatched == pluginsdk.OutcomeNothingCreated:
-			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "nothing").Inc()
+			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, dispatchOutcomeNothing).Inc()
 			// The plugin's name for the input reaches the status only when it is one of the run's inputs.
 			name := "an input"
 			if slices.ContainsFunc(admitted.inputs, func(input pluginsdk.File) bool { return input.Name == tooLarge.Name }) {
 				name = "input " + tooLarge.Name
 			}
 			r.logger.Printf("run %s: profile %s cannot deliver %s", runID, named.Name, name)
-			if err := run.commit(ctx, r.startFailure(task, run.taskHash, attempt, named.Name, "input-too-large")); err != nil {
+			if err := run.commit(ctx, r.startFailure(task, run.taskHash, attempt, named.Name, startClassInputTooLarge)); err != nil {
 				return run.abandon(err)
 			}
-			r.metrics.startFailures.WithLabelValues(named.Name, "input-too-large").Inc()
+			r.metrics.startFailures.WithLabelValues(named.Name, startClassInputTooLarge).Inc()
 			return run.fail(ctx, name+" takes the run's inputs over what profile "+named.Name+" delivers", nil)
 		case errors.As(err, &failure) && failure.Class == pluginsdk.ClassFetch && dispatched == pluginsdk.OutcomeNothingCreated:
-			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "nothing").Inc()
+			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, dispatchOutcomeNothing).Inc()
 			r.logger.Printf("run %s: dispatch failed: an S3 input was not fetched", runID)
 			return run.fail(ctx, "an S3 input was not fetched, or did not match its size and SHA-256", nil)
 		case errors.Is(err, pluginsdk.ErrMessageTooLarge):
@@ -735,29 +748,37 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		}
 		switch dispatched {
 		case pluginsdk.OutcomeCreated:
-			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "created").Inc()
+			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, dispatchOutcomeCreated).Inc()
+			awaiting, dispatchedAt = true, returned
 		case pluginsdk.OutcomeNothingCreated:
-			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "nothing").Inc()
+			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, dispatchOutcomeNothing).Inc()
 			r.logger.Printf("run %s: profile %s created no job", runID, named.Name)
-			return run.startFailure(ctx, "dispatch", "profile "+named.Name+" created no job")
+			return run.startFailure(ctx, startClassDispatch, "profile "+named.Name+" created no job")
 		default:
-			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "unknown").Inc()
+			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, dispatchOutcomeUnknown).Inc()
 			job, resolved := run.reconcile(startCtx)
 			switch {
 			case !resolved:
 				r.logger.Printf("run %s: dispatch unresolved", runID)
 				return run.returnTask(ctx, nil)
 			case job.State == pluginsdk.JobAbsent:
-				return run.startFailure(ctx, "dispatch", "profile "+named.Name+" created no job")
+				return run.startFailure(ctx, startClassDispatch, "profile "+named.Name+" created no job")
 			case job.State == pluginsdk.JobNeverStarted:
-				return run.startFailure(ctx, "platform", "job never started")
+				return run.neverStarted(ctx, job.Handle, pluginsdk.Terminal{Class: job.Class, Reason: job.Reason}, nil)
+			case job.State == pluginsdk.JobPending:
+				run.pending()
+				awaiting, first = true, &lookupResult{job: job}
 			}
 			dispatchedHandle = job.Handle
 		}
 		handle = dispatchedHandle
 		run.labels = admitted.profile.Labels
 	}
-	if len(handle.Data) > maxHandle || len(handle.Name) > wire.MaxJobName {
+	// oversized stops a job whose handle is over the bounds and returns the task.
+	oversized := func(handle pluginsdk.Handle) (kgo.AckStatus, bool) {
+		if len(handle.Data) <= maxHandle && len(handle.Name) <= wire.MaxJobName {
+			return 0, false
+		}
 		if len(handle.Data) > maxHandle {
 			r.logger.Printf("run %s: profile %s returned a handle over %d bytes", runID, run.profile.Name, maxHandle)
 		} else {
@@ -767,7 +788,10 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			r.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 			r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
 		}
-		return run.returnTask(ctx, nil)
+		return run.returnTask(ctx, nil), true
+	}
+	if status, over := oversized(handle); over {
+		return status
 	}
 	run.job = handle.Name
 	if adopted && admitted.cancelled {
@@ -797,20 +821,49 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			ended <- followed{terminal, err}
 		}()
 	}
-	follow(offset)
 	// An adopter holds the job's lines until its own open gives it the values to redact; the input URLs the job
-	// fetched with are not delivered again.
+	// fetched with are not delivered again. An unplaced job is followed only once it has started.
 	var held []pluginsdk.Line
 	if adopted {
-		release := run.hold(lines)
+		var release func() []pluginsdk.Line
+		if !unplaced {
+			follow(offset)
+			release = run.hold(lines)
+		}
 		values, status, ok := run.awaitOpen(ctx, runCtx, &handle)
-		held = release()
+		if release != nil {
+			held = release()
+		}
 		if !ok {
 			return status
 		}
 		run.redactionKey = values.RedactionKey
 		run.deliver(values.Credentials)
 		_, run.puts = run.presigned(values, nil, outputNames)
+	}
+	if unplaced {
+		switch {
+		case ctx.Err() != nil:
+			return kgo.AckRelease
+		case run.cancelHeld():
+			return run.stopAndCancel(ctx, handle, nil)
+		case startCtx.Err() != nil:
+			return run.expired(ctx, &handle, nil)
+		}
+	}
+	if awaiting {
+		observed, status, done := run.awaitStart(ctx, startCtx, handle, dispatchedAt, first)
+		if done {
+			return status
+		}
+		handle = observed.Handle
+		if status, over := oversized(handle); over {
+			return status
+		}
+		run.job = handle.Name
+	}
+	if !adopted || unplaced {
+		follow(offset)
 	}
 	r.logger.Printf("run %s: attempt %d in profile %s with %s (%s)", runID, attempt, run.profile.Name, wire.TermsText(admitted.profile.Labels), handle.Name)
 	var pending []pluginsdk.Line
@@ -880,7 +933,8 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		job, lookupErr := run.profile.Plugin.Lookup(lookupCtx, runID)
 		cancel()
 		switch {
-		case lookupErr != nil:
+		// A started job is never pending again; a Lookup that says so is an observation error.
+		case lookupErr != nil || job.State == pluginsdk.JobPending:
 			recovering("lookup failed")
 			lookupRetry, retry = true, time.After(followRetryInterval)
 			return 0, false
@@ -895,7 +949,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			return 0, false
 		case job.State == pluginsdk.JobNeverStarted:
 			r.logger.Printf("run %s: job never started", runID)
-			return run.startFailure(ctx, "platform", "job never started"), true
+			return run.startFailure(ctx, startClassPlatform, "job never started"), true
 		}
 		// A dropped stream does not mean the task ended; stop it rather than leave it running.
 		r.logger.Printf("run %s: follow failed: %s", runID, logText(run.redactText, err))
@@ -904,10 +958,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	var followErr error
 	// stopHeld ends the run when the receiver holds its cancel.
 	stopHeld := func() (kgo.AckStatus, bool) {
-		r.mu.Lock()
-		cancelled := r.cancelled[runKey{task.Wherry.Tenant, runID}]
-		r.mu.Unlock()
-		if cancelled {
+		if run.cancelHeld() {
 			stopFollow()
 			return run.stopAndCancel(ctx, handle, pending), true
 		}
@@ -920,10 +971,10 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		case <-retry:
 			retry = nil
 			switch {
-			case !lookupRetry:
-				follow(position)
 			case runCtx.Err() != nil && ctx.Err() == nil:
 				return run.expired(ctx, &handle, pending)
+			case !lookupRetry:
+				follow(position)
 			default:
 				if status, done := recoverFollow(followErr); done {
 					return status
@@ -954,13 +1005,8 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				if status, done := recoverFollow(end.err); done {
 					return status
 				}
-			case !end.terminal.Started && end.terminal.Class == pluginsdk.ClassFetch:
-				r.logger.Printf("run %s: job never started: an S3 input was not fetched%s", runID, run.startReason(end.terminal))
-				return run.stopAndFail(ctx, handle, "an S3 input was not fetched, or did not match its size and SHA-256", pending)
 			case !end.terminal.Started:
-				cause := "job never started (" + end.terminal.Class + ")" + run.startReason(end.terminal)
-				r.logger.Printf("run %s: %s", runID, cause)
-				return run.startFailure(ctx, "platform", cause)
+				return run.neverStarted(ctx, handle, end.terminal, pending)
 			default:
 				return run.conclude(ctx, handle, pending, end.terminal)
 			}
@@ -1003,6 +1049,236 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			reported = at
 		}
 	}
+}
+
+// lookupResult is one Lookup of a job not yet started, with the receiver's clock when it completed.
+type lookupResult struct {
+	job         pluginsdk.Job
+	err         error
+	completedAt time.Time
+}
+
+// action is what the await-start phase does when it wakes.
+type action int
+
+const (
+	// awaitAction acts on nothing yet.
+	awaitAction action = iota
+	// leaveAction gives the run up: released on a shutdown, abandoned on a halt.
+	leaveAction
+	cancelAction
+	resultAction
+	expireAction
+)
+
+// decide is the await-start phase's action when it wakes, the first that holds of: ctx ended, the run's cancel held,
+// a bound fired with a result accepted against bound, a bound fired, a result.
+func decide(ctxDone, cancelled bool, result *lookupResult, boundFired bool, bound time.Time) action {
+	switch {
+	case ctxDone:
+		return leaveAction
+	case cancelled:
+		return cancelAction
+	case boundFired && result != nil && result.err == nil && accepted(result.job.State, result.completedAt, bound):
+		return resultAction
+	case boundFired:
+		return expireAction
+	case result != nil:
+		return resultAction
+	}
+	return awaitAction
+}
+
+// accepted reports a result acted on once a bound has fired: the job running or ended, by a Lookup completed before
+// bound.
+func accepted(state pluginsdk.JobState, completedAt, bound time.Time) bool {
+	return (state == pluginsdk.JobRunning || state == pluginsdk.JobEnded) && completedAt.Before(bound)
+}
+
+// awaitStart observes a job not yet started, one Lookup at a time, until it starts or ends. Ending the start phase
+// cancels the Lookup in flight without joining it and drops its late result. first is a result already in hand;
+// dispatched is when this attempt's Dispatch returned created, or zero otherwise.
+func (run *activeRun) awaitStart(ctx, startCtx context.Context, handle pluginsdk.Handle, dispatched time.Time, first *lookupResult) (pluginsdk.Job, kgo.AckStatus, bool) {
+	r, runID := run.receiver, run.task.Wherry.Run
+	bound := wire.PastBound(run.task.Wherry.TaskStartedBy)
+	results := make(chan lookupResult, 1)
+	cancelLookup := func() {}
+	defer func() { cancelLookup() }()
+	lookup := func() {
+		lookupCtx, cancel := context.WithCancel(startCtx)
+		cancelLookup = cancel
+		go func() {
+			job, err := run.profile.Plugin.Lookup(lookupCtx, runID)
+			results <- lookupResult{job: job, err: err, completedAt: clock()}
+		}()
+	}
+	// No Lookup is issued under a startCtx already ended; the bound is acted on below.
+	if first != nil {
+		results <- *first
+	} else if startCtx.Err() == nil {
+		lookup()
+	}
+	checks := time.NewTicker(stateCheckInterval)
+	defer checks.Stop()
+	var next <-chan time.Time
+	logged := map[string]bool{}
+	for {
+		var result *lookupResult
+		select {
+		case got := <-results:
+			result = &got
+		case <-next:
+			next = nil
+			if startCtx.Err() == nil {
+				lookup()
+				continue
+			}
+		case <-ctx.Done():
+		case <-startCtx.Done():
+		case <-checks.C:
+		}
+		// The bound is read after the cancel, so a result is judged against the bound as it stands when acted on.
+		cancelled := run.cancelHeld()
+		boundFired := startCtx.Err() != nil
+		if boundFired && result == nil {
+			select {
+			case got := <-results:
+				result = &got
+			default:
+			}
+		}
+		switch decide(ctx.Err() != nil, cancelled, result, boundFired, bound) {
+		case awaitAction:
+			continue
+		case leaveAction:
+			cancelLookup()
+			return pluginsdk.Job{}, kgo.AckRelease, true
+		case cancelAction:
+			cancelLookup()
+			return pluginsdk.Job{}, run.stopAndCancel(ctx, handle, nil), true
+		case expireAction:
+			cancelLookup()
+			return pluginsdk.Job{}, run.expired(ctx, &handle, nil), true
+		}
+		job := result.job
+		switch {
+		case result.err != nil || !slices.Contains([]pluginsdk.JobState{pluginsdk.JobAbsent, pluginsdk.JobRunning, pluginsdk.JobEnded, pluginsdk.JobNeverStarted, pluginsdk.JobPending}, job.State):
+			class := "error"
+			var failure *pluginsdk.Error
+			switch {
+			case result.err == nil:
+				class = "state " + strconv.Itoa(int(job.State))
+			case errors.Is(result.err, pluginsdk.ErrLinkLost):
+				class = "link lost"
+			case errors.As(result.err, &failure):
+				class = "class " + failure.Class
+			}
+			if !logged[class] {
+				logged[class] = true
+				text := class
+				if result.err != nil {
+					text = logText(run.redactText, result.err)
+				}
+				r.logger.Printf("run %s: lookup in profile %s failed (%s); looking up again", runID, run.profile.Name, text)
+			}
+			next = time.After(startPollInterval)
+		case job.State == pluginsdk.JobPending:
+			run.pending()
+			if status, done := run.placing(ctx, job.Reason); done {
+				return pluginsdk.Job{}, status, true
+			}
+			next = time.After(startPollInterval)
+		case job.State == pluginsdk.JobRunning || job.State == pluginsdk.JobEnded:
+			run.placed()
+			if !dispatched.IsZero() {
+				r.metrics.placement.WithLabelValues(run.profile.Name).Observe(result.completedAt.Sub(dispatched).Seconds())
+			}
+			return job, 0, false
+		case job.State == pluginsdk.JobNeverStarted:
+			run.placed()
+			if job.Handle.Data != nil {
+				handle = job.Handle
+			}
+			return pluginsdk.Job{}, run.neverStarted(ctx, handle, pluginsdk.Terminal{Class: job.Class, Reason: job.Reason}, nil), true
+		default:
+			run.placed()
+			r.logger.Printf("run %s: job removed before it started", runID)
+			return pluginsdk.Job{}, run.startFailure(ctx, startClassPlatform, "job removed before it started"), true
+		}
+	}
+}
+
+// placing publishes the run's placing status for reason, unless this attempt's last one has the same normalised text;
+// done carries the acknowledgement of a write that failed.
+func (run *activeRun) placing(ctx context.Context, reason string) (kgo.AckStatus, bool) {
+	text := logText(run.redactText, errors.New(reason))
+	if run.placingPublished && text == run.placingText {
+		return 0, false
+	}
+	message := "waiting for placement"
+	if text != "" {
+		message += " (" + text + ")"
+	}
+	if err := run.commit(ctx, run.statusRecords("placing", taskStatus(wire.TaskStateWorking, message), nil, nil)...); err != nil {
+		if ctx.Err() != nil {
+			return kgo.AckRelease, true
+		}
+		return run.abandon(err), true
+	}
+	run.placingPublished, run.placingText = true, text
+	return 0, false
+}
+
+// pending enters this execution into the receiver's pending set, which closes its claim gate; placed leaves it.
+func (run *activeRun) pending() {
+	r := run.receiver
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.pending == nil {
+		r.pending = map[*activeRun]struct{}{}
+	}
+	r.pending[run] = struct{}{}
+}
+
+func (run *activeRun) placed() {
+	r := run.receiver
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.pending, run)
+}
+
+// unplaced reports that this execution's latest observation of its job found it pending.
+func (run *activeRun) unplaced() bool {
+	r := run.receiver
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, pending := r.pending[run]
+	return pending
+}
+
+// cancelHeld reports that the receiver holds the run's cancel.
+func (run *activeRun) cancelHeld() bool {
+	r := run.receiver
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cancelled[runKey{run.task.Wherry.Tenant, run.task.Wherry.Run}]
+}
+
+// neverStarted ends the attempt of a run whose job ended before its agent started, as terminal's class and reason
+// say: a fetch failure fails the run; any other class is a start failure.
+func (run *activeRun) neverStarted(ctx context.Context, handle pluginsdk.Handle, terminal pluginsdk.Terminal, pending []pluginsdk.Line) kgo.AckStatus {
+	runID := run.task.Wherry.Run
+	if terminal.Class == pluginsdk.ClassFetch {
+		run.receiver.logger.Printf("run %s: job never started: an S3 input was not fetched%s", runID, run.startReason(terminal))
+		return run.stopAndFail(ctx, handle, "an S3 input was not fetched, or did not match its size and SHA-256", pending)
+	}
+	cause := "job never started"
+	if terminal.Class != "" {
+		cause += " (" + terminal.Class + ")"
+	}
+	cause += run.startReason(terminal)
+	run.receiver.logger.Printf("run %s: %s", runID, cause)
+	return run.startFailure(ctx, startClassPlatform, cause)
 }
 
 // hold reads lines until the returned release, which gives back the most recent of them within heldLimit bytes and
@@ -1109,6 +1385,9 @@ type activeRun struct {
 	next int64
 	// firstDelivery marks the task's first claim, at attempt 1: no job can exist for it.
 	firstDelivery bool
+	// placingText is the normalised reason of this attempt's last placing status, once placingPublished.
+	placingText      string
+	placingPublished bool
 	// event is the wherry event of the run's terminal status; kept leaves the run's material to the plugin's cleanup.
 	event string
 	kept  bool
@@ -1276,8 +1555,13 @@ func (run *activeRun) abandon(err error) kgo.AckStatus {
 	return kgo.AckRelease
 }
 
+// stopAndFail and stopAndCancel write nothing once ctx has ended during the Stop: the task is released, or on a halt left.
 func (run *activeRun) stopAndFail(ctx context.Context, handle pluginsdk.Handle, reason string, pending []pluginsdk.Line) kgo.AckStatus {
-	if err := run.profile.Plugin.Stop(ctx, handle); err != nil {
+	err := run.profile.Plugin.Stop(ctx, handle)
+	if ctx.Err() != nil {
+		return kgo.AckRelease
+	}
+	if err != nil {
 		run.receiver.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		return run.returnTask(ctx, pending)
@@ -1286,7 +1570,11 @@ func (run *activeRun) stopAndFail(ctx context.Context, handle pluginsdk.Handle, 
 }
 
 func (run *activeRun) stopAndCancel(ctx context.Context, handle pluginsdk.Handle, pending []pluginsdk.Line) kgo.AckStatus {
-	if err := run.profile.Plugin.Stop(ctx, handle); err != nil {
+	err := run.profile.Plugin.Stop(ctx, handle)
+	if ctx.Err() != nil {
+		return kgo.AckRelease
+	}
+	if err != nil {
 		run.receiver.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		return run.returnTask(ctx, pending)
@@ -1417,6 +1705,9 @@ func (run *activeRun) findJob(ctx, lookupCtx context.Context) (pluginsdk.Job, bo
 			r.logger.Printf("run %s: purged a job from profile %q agent %q", runID, job.Profile, job.Agent)
 			continue
 		}
+		if job.State == pluginsdk.JobPending {
+			run.pending()
+		}
 		r.logger.Printf("run %s: found attempt %d's job in profile %s", runID, job.Attempt, named.Name)
 		run.profile = named
 		return job, true, nil
@@ -1523,22 +1814,21 @@ func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pen
 	return run.end(ctx, status, result, pending, ack)
 }
 
-// collect reads the outputs of a stopped job, redacts them and keeps their chunks and the result's lists of what the
-// run returned and did not. S3 outputs are uploaded as Collect streams them, unredacted, since they go to the host's own
-// bucket and never to the feed. Every expected output is listed as one or the other.
+// collect redacts feed outputs and uploads S3 outputs unredacted to the host's bucket, listing every expected
+// output as returned or missing.
 func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stopped bool, terms operator.Terms) {
 	limit := terms.OutputLimit
 	stored := map[string]storedOutput{}
 	collected, err := run.collected(ctx, handle, stopped, limit, stored)
 	if err != nil {
-		reason := "failed"
+		reason := collectionReasonFailed
 		switch {
 		case !stopped:
-			reason = "not_stopped"
+			reason = collectionReasonNotStopped
 		case errors.Is(err, errOverLimits):
-			reason = "over_limits"
+			reason = collectionReasonOverLimits
 		case errors.Is(err, context.DeadlineExceeded):
-			reason = "timeout"
+			reason = collectionReasonTimeout
 		}
 		run.receiver.metrics.collectionFailures.WithLabelValues(run.profile.Name, reason).Inc()
 		run.receiver.logger.Printf("run %s: outputs not collected: %s", run.task.Wherry.Run, logText(run.redactText, err))
@@ -1916,10 +2206,10 @@ func (run *activeRun) statusRecords(kind string, status wire.TaskStatus, offset 
 	return run.receiver.statusRecords(run.task, run.status(kind, status, offset, metadata))
 }
 
-// claimRecords are the run's claimed status records, naming the task record's offset.
-func (run *activeRun) claimRecords(offset int64) []*kgo.Record {
+// claimRecords are the run's claimed status records, naming the task record's topic and offset.
+func (run *activeRun) claimRecords(topic string, offset int64) []*kgo.Record {
 	value := run.status("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)
-	value.Wherry.TaskOffset = &offset
+	value.Wherry.TaskTopic, value.Wherry.TaskOffset = topic, &offset
 	return run.receiver.statusRecords(run.task, value)
 }
 

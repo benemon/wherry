@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -45,7 +46,7 @@ const (
 // signal; it stays below the platform's stop window, which the receiver cannot read.
 type receiverLocalConfig struct {
 	Bundle       string                       `yaml:"bundle"`
-	CAFile       string                       `yaml:"ca_file"`
+	CAFile       string                       `yaml:"ca_file,omitempty"`
 	StateDir     string                       `yaml:"state_dir"`
 	PluginDir    string                       `yaml:"plugin_dir"`
 	MetricsAddr  string                       `yaml:"metrics_addr"`
@@ -98,6 +99,10 @@ func loadReceiverLocalConfig(path string) (receiverLocalConfig, error) {
 
 func runReceiver(args []string, stdout, stderr io.Writer) error {
 	const usage = "usage: wherry receiver run [--config-file FILE] [--rotate-key]"
+	if len(args) == 1 && slices.Contains([]string{"-h", "-help", "--help"}, args[0]) {
+		fmt.Fprintln(stderr, usage)
+		return flag.ErrHelp
+	}
 	if len(args) == 0 || args[0] != "run" {
 		return errors.New(usage)
 	}

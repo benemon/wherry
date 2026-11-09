@@ -25,8 +25,11 @@ import (
 const usage = `usage: wherry <command>
 
 operator:
-  wherry operator pool apply|entitle|suspend|resume|rotate-key
-  wherry operator host add|remove
+  wherry operator init
+  wherry operator pool apply|suspend|resume|rotate-key
+  wherry operator tenant add|list|remove
+  wherry operator tenant pool add|remove
+  wherry operator tenant host add|remove
   wherry operator receiver apply|show|remove
   wherry operator check
 receiver:
@@ -63,6 +66,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 	case "dev":
 		return runDev(args[1:], stdout, stderr)
 	case "version":
+		if len(args) == 2 && slices.Contains([]string{"-h", "-help", "--help"}, args[1]) {
+			fmt.Fprintln(stderr, "usage: wherry version")
+			return flag.ErrHelp
+		}
 		if len(args) != 1 {
 			return errors.New("usage: wherry version")
 		}
@@ -91,10 +98,14 @@ func run(args []string, stdout, stderr io.Writer) error {
 }
 
 func runHost(args []string, stdout, stderr io.Writer) error {
+	const hostUsage = "usage: wherry host <init|key rotate|receivers|mcp|submit|wait|status|events|logs|cancel>"
 	if len(args) == 0 {
-		return errors.New("usage: wherry host <init|key rotate|receivers|mcp|submit|wait|status|events|logs|cancel>")
+		return errors.New(hostUsage)
 	}
 	switch args[0] {
+	case "-h", "-help", "--help":
+		fmt.Fprintln(stderr, hostUsage)
+		return flag.ErrHelp
 	case "init":
 		const initUsage = "usage: wherry host init [BUNDLE] [--config-file FILE]"
 		flags := flag.NewFlagSet("host init", flag.ContinueOnError)
@@ -137,7 +148,7 @@ func runHost(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "old_key_id=%s new_key_id=%s\n", old, next)
 		return nil
 	case "mcp":
-		return runMCP(context.Background(), args[1:])
+		return runMCP(context.Background(), args[1:], stderr)
 	case "receivers":
 		return runReceivers(context.Background(), nil, args[1:], stdout, stderr)
 	}
@@ -147,12 +158,13 @@ func runHost(args []string, stdout, stderr io.Writer) error {
 	return fmt.Errorf("unknown host command %q", args[0])
 }
 
-// parseAnywhere parses flags given before, between or after the positional arguments, which it returns in order.
+// parseAnywhere parses flags given before, between or after the positional arguments, which it returns in order, those
+// before a flag error with it.
 func parseAnywhere(flags *flag.FlagSet, args []string) ([]string, error) {
 	var positional []string
 	for {
 		if err := flags.Parse(args); err != nil {
-			return nil, err
+			return positional, err
 		}
 		if flags.NArg() == 0 {
 			return positional, nil

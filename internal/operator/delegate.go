@@ -3,7 +3,6 @@ package operator
 import (
 	"context"
 	"fmt"
-	"slices"
 
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -12,26 +11,14 @@ import (
 // OperatorACLs are what wherry.operator needs to provision. Alter on the cluster lets it grant itself any other ACL, so
 // it is close to the Kafka super user in effect.
 var OperatorACLs = []ACL{
-	{OperatorPrincipal, "cluster", "kafka-cluster", false, []string{"ALTER", "DESCRIBE", "ALTER_CONFIGS", "DESCRIBE_CONFIGS"}},
-	{OperatorPrincipal, "topic", "wherry.", true, []string{"CREATE", "ALTER_CONFIGS", "DESCRIBE_CONFIGS", "DESCRIBE", "READ", "WRITE"}},
+	{OperatorPrincipal, "cluster", "kafka-cluster", false, []string{"ALTER", "ALTER_CONFIGS"}},
+	{OperatorPrincipal, "topic", "wherry.", true, []string{"CREATE", "ALTER_CONFIGS", "READ", "WRITE"}},
 	{OperatorPrincipal, "group", PoolGroup(""), true, []string{"ALTER_CONFIGS"}},
 }
 
-// operatorChecked are the OperatorACLs operator check requires: all but those Kafka implies by another of them, which
-// need not be granted on their own: Describe by Read, Write or Alter, and DescribeConfigs by AlterConfigs.
-func operatorChecked() []ACL {
-	var acls []ACL
-	for _, acl := range OperatorACLs {
-		acl.Operations = slices.DeleteFunc(slices.Clone(acl.Operations), func(operation string) bool {
-			return operation == "DESCRIBE" || operation == "DESCRIBE_CONFIGS"
-		})
-		acls = append(acls, acl)
-	}
-	return acls
-}
-
-// Delegate, connected as the Kafka super user, grants wherry.operator OperatorACLs, creates the installation-wide
-// topics and then sets wherry.operator's password, creating the principal or replacing its password.
+// Delegate, connected as the Kafka super user, grants wherry.operator OperatorACLs, creates the wherry.operator
+// topic and then sets wherry.operator's password, creating the principal or replacing its password. A caller that uses
+// the new password at once calls Service.WaitOperatorCredential first, since brokers apply it in turn.
 func Delegate(ctx context.Context, superUser *kgo.Client, password string) error {
 	client := kadm.NewClient(superUser)
 	for _, acl := range OperatorACLs {
@@ -51,9 +38,6 @@ func Delegate(ctx context.Context, superUser *kgo.Client, password string) error
 	}
 	service := &Service{Operator: superUser}
 	if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
-		return err
-	}
-	if err := service.createTopicsWith(ctx, receiversConfigs, ReceiversTopic); err != nil {
 		return err
 	}
 	return setSCRAM(ctx, superUser, OperatorPrincipal, password)

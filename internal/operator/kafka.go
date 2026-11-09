@@ -165,15 +165,35 @@ func (service *Service) PoolApply(ctx context.Context, pool string, terms Terms,
 	if err := service.checkPoolFeedsRetention(ctx, current, pool, retention.feed); err != nil {
 		return err
 	}
+	tasks, err := service.taskTopics(ctx, pool)
+	if err != nil {
+		return err
+	}
 	if dryRun {
-		return service.onePartition(ctx, true, PoolTasksTopic(pool), PoolEventsTopic(pool))
+		return service.onePartition(ctx, true, append(tasks, PoolEventsTopic(pool))...)
+	}
+	// Every recorded profile of a receiver whose membership has not ended has its signature topic, recreated here when it
+	// was deleted, before the record and before the no-update path; a new pool has no receivers.
+	if exists {
+		if err := service.createTaskTopics(ctx, retention.tasks, signatureTopics(current, pool)...); err != nil {
+			return err
+		}
 	}
 	// Terms with a longer start_by_limit take effect only once the retention they need has.
 	if update {
 		if err := service.poolTopics(ctx, current, pool, retention.tasks); err != nil {
 			return err
 		}
-	} else if err := service.onePartition(ctx, true, PoolTasksTopic(pool), PoolEventsTopic(pool)); err != nil {
+	} else if err := service.onePartition(ctx, true, append(tasks, PoolEventsTopic(pool))...); err != nil {
+		return err
+	}
+	// A recorded pool always has its receivers topic, which readers of the record expect. Pool names hold no dots, so the
+	// topic cannot collide with another derived name before CheckNames accepts the record.
+	if err := service.createTopicsWith(ctx, receiversConfigs, PoolReceiversTopic(pool)); err != nil {
+		return err
+	}
+	// A topic created with older configs converges on the next apply.
+	if err := service.configureTopics(ctx, receiversConfigs, PoolReceiversTopic(pool)); err != nil {
 		return err
 	}
 	state := current
@@ -225,23 +245,72 @@ func (service *Service) loadPoolState(ctx context.Context, dryRun bool) (State, 
 	return service.LoadState(ctx)
 }
 
-// poolTopics creates pool's tasks and events topics and converges them, and its live receivers' progress topics, on
-// their configs.
+// poolTopics creates pool's events topic and converges it and every task topic under the pool's prefix, and its live
+// receivers' progress topics, on their configs.
 func (service *Service) poolTopics(ctx context.Context, state State, pool string, retentionMS int64) error {
-	topics := []string{PoolTasksTopic(pool), PoolEventsTopic(pool)}
+	if err := service.createTopics(ctx, strconv.FormatInt(retentionMS, 10), PoolEventsTopic(pool)); err != nil {
+		return err
+	}
+	tasks, err := service.taskTopics(ctx, pool)
+	if err != nil {
+		return err
+	}
+	// The events topic comes last, so it keeps at least the greatest task topic's retention.
+	if err := service.convergeTaskTopics(ctx, retentionMS, append(tasks, PoolEventsTopic(pool))...); err != nil {
+		return err
+	}
+	return service.progressTopics(ctx, state, pool)
+}
+
+// createTaskTopics creates task topics, as poolTopics creates the events topic, and converges them on their configs.
+func (service *Service) createTaskTopics(ctx context.Context, retentionMS int64, topics ...string) error {
+	if len(topics) == 0 {
+		return nil
+	}
 	if err := service.createTopics(ctx, strconv.FormatInt(retentionMS, 10), topics...); err != nil {
 		return err
 	}
+	return service.convergeTaskTopics(ctx, retentionMS, topics...)
+}
+
+// convergeTaskTopics refuses any of topics without one partition, raises their retention to retentionMS, each topic's
+// at least the one before it, and sets poolConfigs.
+func (service *Service) convergeTaskTopics(ctx context.Context, retentionMS int64, topics ...string) error {
 	if err := service.onePartition(ctx, false, topics...); err != nil {
 		return err
 	}
 	if err := service.configureTopicRetention(ctx, retentionMS, topics...); err != nil {
 		return err
 	}
-	if err := service.configureTopics(ctx, poolConfigs, topics...); err != nil {
-		return err
+	return service.configureTopics(ctx, poolConfigs, topics...)
+}
+
+// taskTopics lists pool's task topics on the broker.
+func (service *Service) taskTopics(ctx context.Context, pool string) ([]string, error) {
+	return PoolTaskTopics(ctx, kadm.NewClient(service.Operator), pool)
+}
+
+// signatureTopics are the signature topics of every recorded profile of pool's receivers whose membership has not ended,
+// sorted.
+func signatureTopics(state State, pool string) []string {
+	var topics []string
+	for receiver, config := range state.Receivers {
+		if config.Pool == pool && !state.Ended[ReceiverPrincipal(receiver)] {
+			topics = append(topics, profileTopics(config)...)
+		}
 	}
-	return service.progressTopics(ctx, state, pool)
+	slices.Sort(topics)
+	return slices.Compact(topics)
+}
+
+// profileTopics are the signature topics of config's profiles, sorted.
+func profileTopics(config ReceiverConfig) []string {
+	var topics []string
+	for _, profile := range config.Profiles {
+		topics = append(topics, SignatureTopic(config.Pool, profile.Agent, profile.Labels))
+	}
+	slices.Sort(topics)
+	return slices.Compact(topics)
 }
 
 // strandedReceivers refuses terms for pool under which a live receiver's recorded configuration fails ValidateConfig,
@@ -318,6 +387,10 @@ func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, 
 		return err
 	}
 	if err := service.progressTopics(ctx, state, config.Pool); err != nil {
+		return err
+	}
+	// The record never precedes its profiles' signature topics.
+	if err := service.receiverTaskTopics(ctx, state, config); err != nil {
 		return err
 	}
 	// A live peer that reads the record before it may read the new receiver's topics exits (agb-yk39).
@@ -398,12 +471,24 @@ func (service *Service) ReceiverUpdate(ctx context.Context, config ReceiverConfi
 	}
 	record := Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &config}
 	if !dryRun {
+		if err := service.receiverTaskTopics(ctx, state, config); err != nil {
+			return ReceiverConfig{}, err
+		}
 		if state, err = service.appendChecked(ctx, []byte(config.Receiver), record); err != nil {
 			return ReceiverConfig{}, err
 		}
 		return state.Receivers[config.Receiver], service.converge(ctx)
 	}
 	return asRecorded(record)
+}
+
+// receiverTaskTopics creates the signature topics of config's profiles with its pool's recorded retention.
+func (service *Service) receiverTaskTopics(ctx context.Context, state State, config ReceiverConfig) error {
+	retention, err := poolRetention(withDefaults(state.Pools[config.Pool]))
+	if err != nil {
+		return err
+	}
+	return service.createTaskTopics(ctx, retention.tasks, profileTopics(config)...)
 }
 
 // asRecorded is record's configuration as a reader of the encoded record would decode it.
@@ -437,6 +522,9 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	if err != nil {
 		return err
 	}
+	if err := current.LiveTenant(tenant); err != nil {
+		return err
+	}
 	principal := TenantPrincipal(tenant, host)
 	if _, exists := current.Hosts[principal]; exists {
 		if !force {
@@ -444,6 +532,14 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 		}
 		if current.Ended[principal] {
 			return errors.New("host cannot return after its membership end")
+		}
+		if current.Revoking[principal] {
+			return errors.New("host is revoking")
+		}
+		// --force also repairs a host add whose quota failed after its record was appended; the quota comes first so
+		// that a failure leaves no working bundle for an unquoted host.
+		if err := service.applyQuota(ctx, current, tenant, principal); err != nil {
+			return err
 		}
 		return service.reissue(ctx, principal, service.Broker, bundlePath)
 	}
@@ -459,9 +555,6 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 		return err
 	}
 	if err := service.createTopics(ctx, "-1", HostTopic(tenant, host)); err != nil {
-		return err
-	}
-	if err := service.tenantTopics(ctx, tenant); err != nil {
 		return err
 	}
 	password, err := service.upsertUser(ctx, principal)
@@ -481,18 +574,20 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	return writeBundle(bundle, Bundle{service.Broker, principal, password})
 }
 
-func (service *Service) TenantAdd(ctx context.Context, tenant, pool string) error {
+func (service *Service) TenantPoolAdd(ctx context.Context, tenant, pool string) error {
 	current, err := service.LoadState(ctx)
 	if err != nil {
 		return err
 	}
+	if err := current.LiveTenant(tenant); err != nil {
+		return err
+	}
+	if current.Entitlements[tenant][pool] {
+		return service.convergeTenantQuotas(ctx, current, tenant)
+	}
 	terms, ok := current.Pools[pool]
 	if !ok {
 		return errors.New("entitlement names unknown pool")
-	}
-	// The pool's records must fit the tenant's feed, so it exists, at FeedRecordLimit, before the entitlement does.
-	if err := service.tenantTopics(ctx, tenant); err != nil {
-		return err
 	}
 	if current.Entitlements[tenant] == nil {
 		current.Entitlements[tenant] = map[string]bool{}
@@ -513,11 +608,50 @@ func (service *Service) TenantAdd(ctx context.Context, tenant, pool string) erro
 	if err != nil {
 		return err
 	}
+	return service.convergeTenantQuotas(ctx, state, tenant)
+}
+
+func (service *Service) TenantAdd(ctx context.Context, tenant string) error {
+	record := Record{Kind: "tenant", Tenant: tenant}
+	if _, _, err := service.planRecord(ctx, record); err != nil {
+		return err
+	}
+	if err := service.tenantTopics(ctx, tenant); err != nil {
+		return err
+	}
+	if _, err := service.appendChecked(ctx, []byte("tenant."+tenant), record); err != nil {
+		return err
+	}
+	return service.converge(ctx)
+}
+
+func (service *Service) TenantPoolRemove(ctx context.Context, tenant, pool string) error {
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return err
+	}
+	if err := state.LiveTenant(tenant); err != nil {
+		return err
+	}
+	if state.Entitlements[tenant][pool] {
+		state, err = service.appendChecked(ctx, []byte("end.entitlement."+tenant+"."+pool), Record{Kind: "end", Tenant: tenant, Pool: pool})
+		if err != nil {
+			return err
+		}
+	}
+	return service.convergeTenantQuotas(ctx, state, tenant)
+}
+
+func (service *Service) convergeTenantQuotas(ctx context.Context, state State, tenant string) error {
 	if err := service.converge(ctx); err != nil {
 		return err
 	}
+	return service.tenantQuotas(ctx, state, tenant)
+}
+
+func (service *Service) tenantQuotas(ctx context.Context, state State, tenant string) error {
 	for principal, host := range state.Hosts {
-		if host.Tenant == tenant {
+		if host.Tenant == tenant && !state.Ended[principal] {
 			if err := service.applyQuota(ctx, state, tenant, principal); err != nil {
 				return err
 			}
@@ -544,13 +678,39 @@ func (service *Service) Check(ctx context.Context) error {
 			return fmt.Errorf("pool %s: %w", pool, err)
 		}
 	}
+	if err := service.checkSignatureTopics(ctx, state); err != nil {
+		return err
+	}
 	if err := service.checkRetention(ctx, state); err != nil {
 		return err
 	}
 	if err := service.checkFeedLimits(ctx, state); err != nil {
 		return err
 	}
-	return service.verifyACLs(ctx, append(ACLs(state), operatorChecked()...))
+	return service.verifyACLs(ctx, append(ACLs(state), OperatorACLs...))
+}
+
+// checkSignatureTopics refuses a profile of a receiver whose membership has not ended when its signature topic is
+// missing.
+func (service *Service) checkSignatureTopics(ctx context.Context, state State) error {
+	for _, pool := range slices.Sorted(maps.Keys(state.Pools)) {
+		tasks, err := service.taskTopics(ctx, pool)
+		if err != nil {
+			return err
+		}
+		for _, receiver := range slices.Sorted(maps.Keys(state.Receivers)) {
+			config := state.Receivers[receiver]
+			if config.Pool != pool || state.Ended[ReceiverPrincipal(receiver)] {
+				continue
+			}
+			for _, profile := range config.Profiles {
+				if topic := SignatureTopic(pool, profile.Agent, profile.Labels); !slices.Contains(tasks, topic) {
+					return fmt.Errorf("receiver %s profile %s: signature topic %s is missing; pool apply %s with the same terms creates it", receiver, profile.Name, topic, pool)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func (service *Service) LoadState(ctx context.Context) (State, error) {
@@ -561,7 +721,7 @@ func (service *Service) LoadState(ctx context.Context) (State, error) {
 // the most a receiver's producer batches: a result lists a reference artifact for each output it returns.
 const FeedRecordLimit = 2 << 20
 
-// feedConfigs are the configs host add, pool entitle and pool apply set on tenant feeds beyond the
+// feedConfigs are the configs tenant add and pool apply set on tenant feeds beyond the
 // retention they are created with.
 var feedConfigs = map[string]string{"max.message.bytes": strconv.Itoa(FeedRecordLimit)}
 
@@ -574,18 +734,13 @@ func (service *Service) tenantTopics(ctx context.Context, tenant string) error {
 	return service.configureTopics(ctx, feedConfigs, topics...)
 }
 
-// tenantFeeds are the feeds and transcript topics of every tenant with a host or an entitlement.
+// tenantFeeds are the feeds and transcript topics of every live tenant.
 func tenantFeeds(state State) []string {
-	tenants := map[string]bool{}
-	for _, host := range state.Hosts {
-		tenants[host.Tenant] = true
-	}
-	for tenant := range state.Entitlements {
-		tenants[tenant] = true
-	}
 	var topics []string
-	for _, tenant := range slices.Sorted(maps.Keys(tenants)) {
-		topics = append(topics, TenantTopic(tenant), TenantTranscriptTopic(tenant))
+	for _, tenant := range slices.Sorted(maps.Keys(state.Tenants)) {
+		if !state.Tenants[tenant] {
+			topics = append(topics, TenantTopic(tenant), TenantTranscriptTopic(tenant))
+		}
 	}
 	return topics
 }
@@ -594,7 +749,7 @@ func tenantFeeds(state State) []string {
 // hold anything the agent printed.
 const tenantRetentionMS = 30 * 24 * 60 * 60 * 1000
 
-// receiversConfigs are wherry.receivers' topic configs: readers want only each receiver's latest advertisement, which
+// receiversConfigs are a pool's receivers topic configs: readers want only each receiver's latest advertisement, which
 // is its key's latest record. Compaction cleans closed segments alone, so a segment closes within the compaction lag.
 var receiversConfigs = map[string]string{
 	"cleanup.policy":         "compact,delete",
@@ -624,6 +779,30 @@ func progressConfigs(retentionMS int64) map[string]string {
 	return configs
 }
 
+// taskRetention is the greatest retention.ms among pool's task topics, -1 unlimited, and the retention pool's recorded
+// terms require when it has none.
+func (service *Service) taskRetention(ctx context.Context, state State, pool string) (int64, error) {
+	tasks, err := service.taskTopics(ctx, pool)
+	if err != nil {
+		return 0, err
+	}
+	if len(tasks) == 0 {
+		bounds, err := poolRetention(withDefaults(state.Pools[pool]))
+		return bounds.tasks, err
+	}
+	retentions, err := service.topicRetentions(ctx, tasks...)
+	if err != nil {
+		return 0, err
+	}
+	greatest := retentions[tasks[0]]
+	for _, topic := range tasks[1:] {
+		if retentionAtLeast(retentions[topic], greatest) {
+			greatest = retentions[topic]
+		}
+	}
+	return greatest, nil
+}
+
 // progressTopics creates the progress topics of pool's live receivers and converges existing ones on their configs.
 func (service *Service) progressTopics(ctx context.Context, state State, pool string) error {
 	var topics []string
@@ -635,11 +814,10 @@ func (service *Service) progressTopics(ctx context.Context, state State, pool st
 	if len(topics) == 0 {
 		return nil
 	}
-	retentions, err := service.topicRetentions(ctx, PoolTasksTopic(pool))
+	minimum, err := service.taskRetention(ctx, state, pool)
 	if err != nil {
 		return err
 	}
-	minimum := retentions[PoolTasksTopic(pool)]
 	if err := service.createTopicsWith(ctx, progressConfigs(minimum), topics...); err != nil {
 		return err
 	}
@@ -701,13 +879,6 @@ var appended = func(Record) {}
 // planRecord is the state once record is appended and record encoded, refusing a record the state refuses.
 func (service *Service) planRecord(ctx context.Context, record Record) (State, []byte, error) {
 	if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
-		return State{}, nil, err
-	}
-	if err := service.createTopicsWith(ctx, receiversConfigs, ReceiversTopic); err != nil {
-		return State{}, nil, err
-	}
-	// A topic created with older configs converges on the next operator write.
-	if err := service.configureTopics(ctx, receiversConfigs, ReceiversTopic); err != nil {
 		return State{}, nil, err
 	}
 	state, err := service.LoadState(ctx)
@@ -926,20 +1097,25 @@ func (service *Service) checkPoolFeedsRetention(ctx context.Context, state State
 	return nil
 }
 
-func (service *Service) checkRetention(ctx context.Context, state State) error {
+func (service *Service) checkRetention(ctx context.Context, state State) (err error) {
 	topics := []string{OperatorTopic}
 	for receiver := range state.Receivers {
 		topics = append(topics, ReceiverTopic(receiver))
 	}
-	for _, host := range state.Hosts {
-		topics = append(topics, HostTopic(host.Tenant, host.Name))
+	for principal, host := range state.Hosts {
+		if !state.Ended[principal] {
+			topics = append(topics, HostTopic(host.Tenant, host.Name))
+		}
 	}
+	keyTopics := len(topics)
+	tasks := map[string][]string{}
 	for pool := range state.Pools {
-		topics = append(topics, PoolTasksTopic(pool), PoolEventsTopic(pool))
+		if tasks[pool], err = service.taskTopics(ctx, pool); err != nil {
+			return err
+		}
+		topics = append(append(topics, tasks[pool]...), PoolEventsTopic(pool))
 	}
-	for tenant := range state.Entitlements {
-		topics = append(topics, TenantTopic(tenant), TenantTranscriptTopic(tenant))
-	}
+	topics = append(topics, tenantFeeds(state)...)
 	for receiver := range state.Receivers {
 		if !state.Ended[ReceiverPrincipal(receiver)] {
 			topics = append(topics, ReceiverProgressTopic(receiver))
@@ -949,14 +1125,14 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 	if err != nil {
 		return err
 	}
-	for _, topic := range topics[:1+len(state.Receivers)+len(state.Hosts)] {
+	for _, topic := range topics[:keyTopics] {
 		if retentions[topic] != -1 {
 			return fmt.Errorf("topic %s retention.ms is %d, want -1", topic, retentions[topic])
 		}
 	}
 	var poolTopics []string
 	for pool := range state.Pools {
-		poolTopics = append(poolTopics, PoolTasksTopic(pool), PoolEventsTopic(pool))
+		poolTopics = append(append(poolTopics, tasks[pool]...), PoolEventsTopic(pool))
 	}
 	types, err := service.topicConfigs(ctx, "message.timestamp.type", poolTopics...)
 	if err != nil {
@@ -978,22 +1154,28 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 			}
 		}
 	}
-	var custodianTopics []string
+	var custodianTopics, receiversTopics []string
 	for pool := range state.Pools {
 		custodianTopics = append(custodianTopics, CustodianTopic(pool))
+		receiversTopics = append(receiversTopics, PoolReceiversTopic(pool))
 	}
-	for _, name := range slices.Sorted(maps.Keys(custodianConfigs)) {
-		values, err := service.topicConfigs(ctx, name, custodianTopics...)
-		if err != nil {
-			return err
-		}
-		for _, topic := range custodianTopics {
-			if values[topic] != custodianConfigs[name] {
-				return fmt.Errorf("topic %s %s is %s, want %s", topic, name, values[topic], custodianConfigs[name])
+	for _, checked := range []struct {
+		topics  []string
+		configs map[string]string
+	}{{custodianTopics, custodianConfigs}, {receiversTopics, receiversConfigs}} {
+		for _, name := range slices.Sorted(maps.Keys(checked.configs)) {
+			values, err := service.topicConfigs(ctx, name, checked.topics...)
+			if err != nil {
+				return err
+			}
+			for _, topic := range checked.topics {
+				if values[topic] != checked.configs[name] {
+					return fmt.Errorf("topic %s %s is %s, want %s", topic, name, values[topic], checked.configs[name])
+				}
 			}
 		}
 	}
-	if err := service.onePartition(ctx, false, slices.Concat(poolTopics, custodianTopics)...); err != nil {
+	if err := service.onePartition(ctx, false, slices.Concat(poolTopics, custodianTopics, receiversTopics)...); err != nil {
 		return err
 	}
 	for pool, terms := range state.Pools {
@@ -1001,17 +1183,24 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 		if err != nil {
 			return fmt.Errorf("pool %s: %w", pool, err)
 		}
-		tasksTopic, eventsTopic := PoolTasksTopic(pool), PoolEventsTopic(pool)
-		if !retentionAtLeast(retentions[tasksTopic], bounds.tasks) {
-			return fmt.Errorf("topic %s retention.ms %d is below required %d", tasksTopic, retentions[tasksTopic], bounds.tasks)
+		// The events and progress topics keep at least the greatest task topic's retention, -1 unlimited.
+		greatest := bounds.tasks
+		for _, topic := range tasks[pool] {
+			if !retentionAtLeast(retentions[topic], bounds.tasks) {
+				return fmt.Errorf("topic %s retention.ms %d is below required %d", topic, retentions[topic], bounds.tasks)
+			}
+			if retentionAtLeast(retentions[topic], greatest) {
+				greatest = retentions[topic]
+			}
 		}
-		if !retentionAtLeast(retentions[eventsTopic], retentions[tasksTopic]) {
-			return fmt.Errorf("topic %s retention.ms %d is below tasks retention.ms %d", eventsTopic, retentions[eventsTopic], retentions[tasksTopic])
+		eventsTopic := PoolEventsTopic(pool)
+		if !retentionAtLeast(retentions[eventsTopic], greatest) {
+			return fmt.Errorf("topic %s retention.ms %d is below tasks retention.ms %d", eventsTopic, retentions[eventsTopic], greatest)
 		}
 		for receiver, config := range state.Receivers {
 			progress := ReceiverProgressTopic(receiver)
-			if config.Pool == pool && !state.Ended[ReceiverPrincipal(receiver)] && !retentionAtLeast(retentions[progress], retentions[tasksTopic]) {
-				return fmt.Errorf("topic %s retention.ms %d is below tasks retention.ms %d", progress, retentions[progress], retentions[tasksTopic])
+			if config.Pool == pool && !state.Ended[ReceiverPrincipal(receiver)] && !retentionAtLeast(retentions[progress], greatest) {
+				return fmt.Errorf("topic %s retention.ms %d is below tasks retention.ms %d", progress, retentions[progress], greatest)
 			}
 		}
 		for tenant, pools := range state.Entitlements {
@@ -1102,7 +1291,7 @@ func Password() (string, error) {
 
 // setSCRAM creates user's SCRAM credential, or replaces it, with password.
 func setSCRAM(ctx context.Context, client *kgo.Client, user, password string) error {
-	results, err := kadm.NewClient(client).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{{User: user, Mechanism: kadm.ScramSha512, Iterations: 8192, Password: password}})
+	results, err := kadm.NewClient(client).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{{User: user, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: password}})
 	if err != nil {
 		return err
 	}
@@ -1124,10 +1313,7 @@ func (service *Service) applyQuota(ctx context.Context, state State, tenant, pri
 			request = terms.RequestPercentage
 		}
 	}
-	if rate == 0 {
-		return nil
-	}
-	results, err := kadm.NewClient(service.Operator).AlterClientQuotas(ctx, []kadm.AlterClientQuotaEntry{{Entity: kadm.ClientQuotaEntity{{Type: "user", Name: &principal}}, Ops: []kadm.AlterClientQuotaOp{{Key: "producer_byte_rate", Value: float64(rate)}, {Key: "request_percentage", Value: request}}}})
+	results, err := kadm.NewClient(service.Operator).AlterClientQuotas(ctx, []kadm.AlterClientQuotaEntry{{Entity: kadm.ClientQuotaEntity{{Type: "user", Name: &principal}}, Ops: []kadm.AlterClientQuotaOp{{Key: "producer_byte_rate", Value: float64(rate), Remove: rate == 0}, {Key: "request_percentage", Value: request, Remove: rate == 0}}}})
 	if err != nil {
 		return err
 	}
@@ -1218,15 +1404,19 @@ func (service *Service) checkLimits(ctx context.Context, state State, pool strin
 	return tasks, nil
 }
 
-// recordLimits are the largest record batches that the pool's task topic, for submissions, and the feeds of its
+// recordLimits are the largest record batches that every task topic of the pool, for submissions, and the feeds of its
 // tenants, for receiver records, accept, each within what its producers batch. A topic's max.message.bytes overrides
-// the brokers' message.max.bytes, which bounds a topic that does not describe its own.
+// the brokers' message.max.bytes, which bounds a pool with no task topic yet.
 func (service *Service) recordLimits(ctx context.Context, state State, pool string, raised bool) (int64, int64, error) {
 	limit, err := service.brokerSetting(ctx, "message.max.bytes", func(a, b int64) int64 { return min(a, b) })
 	if err != nil {
 		return 0, 0, err
 	}
-	topics := []string{PoolTasksTopic(pool)}
+	tasksTopics, err := service.taskTopics(ctx, pool)
+	if err != nil {
+		return 0, 0, err
+	}
+	topics := slices.Clone(tasksTopics)
 	for tenant, pools := range state.Entitlements {
 		if pools[pool] {
 			topics = append(topics, TenantTopic(tenant), TenantTranscriptTopic(tenant))
@@ -1238,31 +1428,32 @@ func (service *Service) recordLimits(ctx context.Context, state State, pool stri
 	}
 	// Hosts, like the operator's client, produce with franz-go's default batch maximum, and receivers with FeedRecordLimit.
 	tasks, feeds := int64(service.Operator.OptValue(kgo.ProducerBatchMaxBytes).(int32)), int64(FeedRecordLimit)
+	if len(tasksTopics) == 0 {
+		tasks = min(tasks, limit)
+	}
 	for _, resource := range resources {
-		// A topic without its own max.message.bytes, as a pool's task topic before its first create, takes each
-		// broker's message.max.bytes; one set on the topic overrides them.
+		// A topic without its own max.message.bytes takes each broker's message.max.bytes; one set on the topic overrides
+		// them.
 		topic := limit
-		if !errors.Is(resource.Err, kerr.UnknownTopicOrPartition) || resource.Name != PoolTasksTopic(pool) {
-			if resource.Err != nil {
-				return 0, 0, fmt.Errorf("describe topic %s: %w", resource.Name, resource.Err)
+		if resource.Err != nil {
+			return 0, 0, fmt.Errorf("describe topic %s: %w", resource.Name, resource.Err)
+		}
+		for _, config := range resource.Configs {
+			if config.Key != "max.message.bytes" || config.Value == nil {
+				continue
 			}
-			for _, config := range resource.Configs {
-				if config.Key != "max.message.bytes" || config.Value == nil {
-					continue
-				}
-				parsed, err := strconv.ParseInt(*config.Value, 10, 64)
-				if err != nil {
-					return 0, 0, err
-				}
-				if config.Source == kmsg.ConfigSourceDynamicTopicConfig {
-					topic = parsed
-				} else {
-					topic = min(topic, parsed)
-				}
+			parsed, err := strconv.ParseInt(*config.Value, 10, 64)
+			if err != nil {
+				return 0, 0, err
+			}
+			if config.Source == kmsg.ConfigSourceDynamicTopicConfig {
+				topic = parsed
+			} else {
+				topic = min(topic, parsed)
 			}
 		}
 		switch {
-		case resource.Name == PoolTasksTopic(pool):
+		case slices.Contains(tasksTopics, resource.Name):
 			tasks = min(tasks, topic)
 		case raised:
 			feeds = min(feeds, max(topic, FeedRecordLimit))

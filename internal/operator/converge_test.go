@@ -88,10 +88,10 @@ func removeUndoesAStaleHostAddForce(t *testing.T, service *Service, pool, tenant
 	if err := service.PoolApply(ctx, pool, modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, tenant, host, filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, tenant, host, filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.TenantAdd(ctx, tenant, pool); err != nil {
+	if err := entitleFixture(t, service, ctx, tenant, pool); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := service.LoadState(ctx)
@@ -142,7 +142,7 @@ func TestNextCommandWithdrawsARemovedReceiversRestoredGrants(t *testing.T) {
 		}
 		return service.reconcileACLs(ctx, loaded)
 	})
-	if err := service.HostAdd(ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
 		t.Fatal(err)
 	}
 	if count, err := principalACLs(ctx, service, ReceiverPrincipal("receiver-a")); err != nil || count != 0 {
@@ -211,9 +211,9 @@ func TestConvergeTouchesOnlyWhatWherryManages(t *testing.T) {
 	commands := []func() error{
 		func() error { return service.PoolApply(ctx, "pool-a", modelTerms(), false) },
 		func() error {
-			return service.HostAdd(ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false)
+			return hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false)
 		},
-		func() error { return service.TenantAdd(ctx, "tenant-a", "pool-a") },
+		func() error { return entitleFixture(t, service, ctx, "tenant-a", "pool-a") },
 		func() error {
 			return service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), service.Broker, filepath.Join(t.TempDir(), "receiver.yaml"))
 		},
@@ -257,10 +257,10 @@ func TestSuspensionReassertsItsDeletionAfterItsRecord(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
+	if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := service.LoadState(ctx)
@@ -271,7 +271,7 @@ func TestSuspensionReassertsItsDeletionAfterItsRecord(t *testing.T) {
 	if err := service.PoolSuspend(ctx, "pool-a", true); err != nil {
 		t.Fatal(err)
 	}
-	write := ACL{TenantPrincipal("tenant-a", "host-a"), "topic", PoolTasksTopic("pool-a"), false, []string{"WRITE"}}
+	write := ACL{TenantPrincipal("tenant-a", "host-a"), "topic", PoolTasksPrefix("pool-a"), true, []string{"WRITE"}}
 	if ok, err := granted(ctx, service, write); err != nil || ok {
 		t.Fatalf("suspended pool's task topic keeps a host's WRITE: %t, %v", ok, err)
 	}
@@ -317,10 +317,10 @@ func entitledHost(t *testing.T, service *Service) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
+	if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -343,10 +343,10 @@ func TestAPassDuringWhichTheLogMovedRepeats(t *testing.T) {
 	ctx := context.Background()
 	entitledHost(t, service)
 	duringPass(t, func() error { return service.PoolSuspend(ctx, "pool-a", true) })
-	if err := service.HostAdd(ctx, "tenant-b", "host-b", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, "tenant-b", "host-b", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
 		t.Fatal(err)
 	}
-	withdrawn(t, service, ACL{TenantPrincipal("tenant-a", "host-a"), "topic", PoolTasksTopic("pool-a"), false, []string{"WRITE"}})
+	withdrawn(t, service, ACL{TenantPrincipal("tenant-a", "host-a"), "topic", PoolTasksPrefix("pool-a"), true, []string{"WRITE"}})
 }
 
 func TestConvergeStopsAtItsBound(t *testing.T) {
@@ -388,7 +388,7 @@ func TestStaleReissueRefusesAndWritesNoBundle(t *testing.T) {
 		return nil
 	})
 	dir := t.TempDir()
-	err := service.HostAdd(ctx, "tenant-a", "host-a", filepath.Join(dir, "host.yaml"), true)
+	err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(dir, "host.yaml"), true)
 	if err == nil || !strings.Contains(err.Error(), "cannot return after its membership end") {
 		t.Fatalf("stale reissue = %v, want a refusal", err)
 	}
@@ -480,7 +480,7 @@ func TestReceiverUpdateConverges(t *testing.T) {
 		t.Fatal(err)
 	}
 	grant(t, service, stray)
-	config.Capacity = 2
+	config.Profiles[0].Replicas = 2
 	if _, err := service.ReceiverUpdate(ctx, config, false); err != nil {
 		t.Fatal(err)
 	}
@@ -523,4 +523,68 @@ func TestPoolRotateKeyConverges(t *testing.T) {
 		t.Fatalf("rotate-key = %v, want the custodian wait to time out", err)
 	}
 	withdrawn(t, service, stray)
+}
+
+func TestTenantAddConverges(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	grant(t, service, stray)
+	if err := service.TenantAdd(context.Background(), "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	withdrawn(t, service, stray)
+}
+
+// ReceiverAdd's grants before its record only create; its pass after the record withdraws.
+func TestReceiverAddConvergesAfterItsRecord(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
+		t.Fatal(err)
+	}
+	grant(t, service, stray)
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), service.Broker, filepath.Join(t.TempDir(), "receiver.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	withdrawn(t, service, stray)
+}
+
+// A grant the records call for, bound to one client host rather than every host, is not the grant they call for: a
+// pass deletes it and keeps the binding for every host.
+func TestConvergeWithdrawsAHostSpecificBinding(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), service.Broker, filepath.Join(t.TempDir(), "receiver.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	wanted := ACL{ReceiverPrincipal("receiver-a"), "topic", ReceiverTopic("receiver-a"), false, []string{"READ"}}
+	bound := func() *kadm.ACLBuilder {
+		builder := kadm.NewACLs().Allow(wanted.Principal).AllowHosts("192.0.2.1").Topics(wanted.Resource).
+			ResourcePatternType(kadm.ACLPatternLiteral).Operations(kadm.OpRead)
+		builder.PrefixUser()
+		return builder
+	}
+	if _, err := kadm.NewClient(service.Operator).CreateACLs(ctx, bound()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.converge(ctx); err != nil {
+		t.Fatal(err)
+	}
+	described, err := kadm.NewClient(service.Operator).DescribeACLs(ctx, bound())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range described {
+		if result.Err != nil || len(result.Described) != 0 {
+			t.Fatalf("the host-specific binding survived: %+v, %v", result.Described, result.Err)
+		}
+	}
+	if ok, err := granted(ctx, service, wanted); err != nil || !ok {
+		t.Fatalf("the binding for every host was withdrawn: %v", err)
+	}
 }

@@ -1,7 +1,7 @@
 agents:
   - name: claude
     credentials:
-      - {name: claude-oauth-token, env: CLAUDE_CODE_OAUTH_TOKEN}
+      - {name: claude-oauth-token, env: CLAUDE_CODE_OAUTH_TOKEN, description: Claude account token}
     models:
       - haiku
       - sonnet
@@ -17,7 +17,7 @@ agents:
       - {name: github-token, env: GH_TOKEN, required: false}
 default_agent: claude
 start_by_limit: 72h
-# Each receiver with no matching profile spends one delivery, so this covers the pool's receivers plus a margin.
+# The attempts one task may make, start failures included, plus a margin for the releases of a profile going unready.
 delivery_limit: 6
 # Above the receiver's 10s renewal interval.
 lock_duration: 30s

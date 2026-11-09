@@ -84,7 +84,7 @@ func TestRotateKeyRecordRotatesAtOnceAndHostsEncryptToTheNewKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, record := range f.records(t, operator.PoolTasksTopic(testPool)) {
+	for _, record := range f.records(t, f.tasksTopic()) {
 		if string(record.Key) != submitted.RunID {
 			continue
 		}
@@ -180,7 +180,7 @@ func TestARunInProgressAtSuspensionCompletes(t *testing.T) {
 	f.plugin.endDelay = 3 * time.Second
 	record := f.submit(t, f.host, nil)
 	done := make(chan error, 1)
-	go func() { done <- f.receiver.claimOne(f.ctx, f.ctx, func() {}) }()
+	go func() { done <- f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], func() {}) }()
 	for {
 		if _, _, follows, _ := f.plugin.counts(); follows == 1 {
 			break

@@ -42,14 +42,14 @@ func newKeyHost(t *testing.T) keyHost {
 	bundle := filepath.Join(dir, "host.yaml")
 	for _, step := range []func() error{
 		func() error { return service.PoolApply(ctx, "pool-a", terms, false) },
-		func() error { return service.TenantAdd(ctx, "tenant-a", "pool-a") },
+		func() error { return service.TenantAdd(ctx, "tenant-a") },
+		func() error { return service.TenantPoolAdd(ctx, "tenant-a", "pool-a") },
 		func() error { return service.HostAdd(ctx, "tenant-a", "host-a", bundle, false) },
 	} {
 		if err := step(); err != nil {
 			t.Fatal(err)
 		}
 	}
-	resalt(t, service, bundle)
 	caFile := filepath.Join(dir, "ca.pem")
 	if err := os.WriteFile(caFile, []byte(ca), 0o600); err != nil {
 		t.Fatal(err)
@@ -222,12 +222,11 @@ func TestReceiverRotateKey(t *testing.T) {
 	dir := t.TempDir()
 	bundle, stateDir := filepath.Join(dir, "receiver.yaml"), filepath.Join(dir, "state")
 	keyPath := filepath.Join(stateDir, "signing.key")
-	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1,
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a",
 		Profiles: []operator.ProfileSettings{{Name: "fake", Plugin: "fake", Agent: "claude"}}, PluginSHA256: map[string]string{"fake": fakeSHA256}}
 	if err := service.ReceiverAdd(ctx, config, service.Broker, bundle); err != nil {
 		t.Fatal(err)
 	}
-	resalt(t, service, bundle)
 	topic := operator.ReceiverTopic("receiver-a")
 	folded := func() ([]*kgo.Record, signed.KeyState) {
 		t.Helper()

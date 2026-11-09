@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/benemon/wherry/internal/operator"
@@ -67,6 +68,8 @@ func (run *activeRun) awaitOpen(ctx, bound context.Context, job *pluginsdk.Handl
 			return signed.EnvelopeValues{}, run.fail(ctx, reason, nil), false
 		case job != nil && requested == 0:
 			r.logger.Printf("run %s: refused %s; requesting once more", task.Wherry.Run, reason)
+		case job != nil && run.unplaced():
+			return signed.EnvelopeValues{}, run.purgeKeyLost(ctx), false
 		case job != nil:
 			return signed.EnvelopeValues{}, run.stopAndFail(ctx, *job, keyLostReason, nil), false
 		case run.firstDelivery:
@@ -77,8 +80,7 @@ func (run *activeRun) awaitOpen(ctx, bound context.Context, job *pluginsdk.Handl
 	}
 }
 
-// openOnce writes one open request and waits for its answer: the values of an attempt wrap, or a refusal's reason, or
-// done with the run's acknowledgement.
+// openOnce returns envelope values, a refusal, or a final acknowledgement.
 func (run *activeRun) openOnce(ctx, bound context.Context, job *pluginsdk.Handle, waited func(string)) (*signed.EnvelopeValues, string, kgo.AckStatus, bool) {
 	r, task := run.receiver, run.task
 	runID := task.Wherry.Run
@@ -163,24 +165,24 @@ func (run *activeRun) openOnce(ctx, bound context.Context, job *pluginsdk.Handle
 		case cancelled:
 			return nil, "", run.cancel(ctx, nil), true
 		case bound.Err() != nil:
-			waited("expired")
+			waited(openOutcomeExpired)
 			return nil, "", run.expired(ctx, job, nil), true
 		case failure != "":
-			waited("opened")
+			waited(openOutcomeOpened)
 			r.logger.Printf("run %s: %s", runID, failure)
 			if job != nil {
 				return nil, "", run.stopAndFail(ctx, *job, failure, nil), true
 			}
 			return nil, "", run.fail(ctx, failure, nil), true
 		case values != nil:
-			waited("opened")
+			waited(openOutcomeOpened)
 			return values, "", 0, true
 		case refused != "":
-			waited("refused")
+			waited(openOutcomeRefused)
 			return nil, refused, 0, false
 		case !time.Now().Before(deadline):
 			// Silence asserts nothing about the key: the task goes back to the pool.
-			waited("unanswered")
+			waited(openOutcomeUnanswered)
 			r.logger.Printf("run %s: no answer to the open request for attempt %d", runID, run.attempt)
 			return nil, "", kgo.AckRelease, true
 		}
@@ -233,8 +235,16 @@ func (run *activeRun) keyLost(ctx context.Context) kgo.AckStatus {
 	return run.fail(ctx, keyLostReason, nil)
 }
 
-// reconcileKey ends a run refused key unavailable from its job's state: key-lost only for a job absent or never
-// started, and past its bound once task_ended_by passes with Lookup unresolved.
+// purgeKeyLost removes a job that never started, or is not placed, and ends its run key-lost.
+func (run *activeRun) purgeKeyLost(ctx context.Context) kgo.AckStatus {
+	if err := run.purge(ctx); err != nil {
+		return run.returnTask(ctx, nil)
+	}
+	return run.keyLost(ctx)
+}
+
+// reconcileKey ends a run refused key unavailable from its job's state: key-lost only for a job absent, never started
+// or not placed, and past its bound once task_ended_by passes with Lookup unresolved.
 func (run *activeRun) reconcileKey(ctx context.Context) kgo.AckStatus {
 	written := false
 	for {
@@ -244,11 +254,8 @@ func (run *activeRun) reconcileKey(ctx context.Context) kgo.AckStatus {
 		switch {
 		case err == nil && !found:
 			return run.keyLost(ctx)
-		case err == nil && job.State == pluginsdk.JobNeverStarted:
-			if err := run.purge(ctx); err != nil {
-				return run.returnTask(ctx, nil)
-			}
-			return run.keyLost(ctx)
+		case err == nil && (job.State == pluginsdk.JobNeverStarted || job.State == pluginsdk.JobPending):
+			return run.purgeKeyLost(ctx)
 		case err == nil:
 			return run.stopAndFail(ctx, job.Handle, keyLostReason, nil)
 		case ctx.Err() != nil:
@@ -321,16 +328,18 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 	if !custodian && keys[current.KeyID] != nil {
 		return nil
 	}
-	// One read of wherry.operator decides the pass's suspension. A pass begins once every attempt wrap of the previous one
-	// committed, so a suspension acknowledged here holds for every first start decided after it.
+	// One read of wherry.operator decides the pass's suspension and the terms its envelopes are checked against. A pass
+	// begins once every attempt wrap of the previous one committed, so a suspension acknowledged here holds for every
+	// first start decided after it.
 	var suspended bool
+	var terms operator.Terms
 	if custodian {
 		state, err := loadState(r.reader, ctx)
 		if err != nil {
 			r.deny(err, capRead)
 			return fmt.Errorf("read wherry.operator: %w", err)
 		}
-		suspended = state.Suspended[r.config.Pool]
+		suspended, terms = state.Suspended[r.config.Pool], state.Pools[r.config.Pool]
 		if err := r.acknowledgeSuspension(ctx, keys, latest, state); err != nil {
 			return err
 		}
@@ -361,7 +370,7 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 	if !custodian {
 		return r.rekey(ctx, pending, events, keys, current)
 	}
-	check := &claimCheck{r: r, events: events, keys: keys, now: time.Now(), suspended: suspended}
+	check := &claimCheck{r: r, events: events, keys: keys, now: time.Now(), suspended: suspended, terms: terms}
 	for _, request := range pending {
 		records := check.decide(ctx, request)
 		if len(records) == 0 {
@@ -467,14 +476,15 @@ func (r *Receiver) contentKey(task *wire.Submission, keys map[string]*poolKey, r
 	return nil
 }
 
-// claimCheck is one custodian pass's view for its claim checks; suspended is the pool's suspension read at the pass's
-// start, and changed the reason of the claimant change the last decision served, empty for none.
+// claimCheck is one custodian pass's view for its claim checks; suspended and terms are the pool's suspension and terms
+// read at the pass's start, and changed the reason of the claimant change the last decision served, empty for none.
 type claimCheck struct {
 	r         *Receiver
 	events    poolEvents
 	keys      map[string]*poolKey
 	now       time.Time
 	suspended bool
+	terms     operator.Terms
 	ads       []*kgo.Record
 	adsRead   bool
 	changed   string
@@ -546,9 +556,10 @@ func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Reco
 	}
 	// A spliced envelope never releases its content key.
 	values, err := signed.OpenEnvelope([]byte(binding.Envelope), contentKey)
+	// The pass's terms, not the receiver's snapshot: a host seals under the terms it reads at submit, and the snapshot can
+	// lag a terms change by a refresh. A change after the pass's read still applies only from the next pass.
 	if err == nil {
-		state, _, _ := r.snapshot()
-		err = checkOpened(state.Pools[r.config.Pool], task.record, values)
+		err = checkOpened(c.terms, task.record, values)
 	}
 	if err != nil {
 		r.logger.Printf("custodian: run %s's envelope does not open for its task: %v", request.Run, err)
@@ -566,9 +577,9 @@ func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Reco
 	return answer(&wire.AttemptWrap{Custodian: r.id, TaskHash: task.hash, Request: opened.digest, Receiver: request.Receiver, Attempt: request.Attempt, JWE: string(jwe)})
 }
 
-// lookup applies rules 1 and 3 and the terminal or cancelled refusal to request, then rule 2: the claim's task offset
-// holds the run's task. It returns the indexes of the run's ownership events of the task, the claim last, and the task,
-// or the refusal; an error leaves the request unanswered.
+// lookup applies rules 1 and 3 and the terminal or cancelled refusal to request, then rule 2: the claim's task topic
+// and offset hold the run's task. It returns the indexes of the run's ownership events of the task, the claim last, and
+// the task, or the refusal; an error leaves the request unanswered.
 func (r *Receiver) lookup(ctx context.Context, events poolEvents, request *wire.OpenRequest) ([]int, *runSubmission, string, error) {
 	// Rule 1: the request verifies as the live pool member it names.
 	if state, _, _ := r.snapshot(); request == nil || !poolMember(state, r.config.Pool, request.Receiver) {
@@ -592,12 +603,17 @@ func (r *Receiver) lookup(ctx context.Context, events poolEvents, request *wire.
 	if events.committedTerminal(request.Run, request.TaskHash) || r.cancelledRun(ctx, events, request.Run, claim.Wherry.Tenant) {
 		return nil, nil, wire.RefusedTerminal, nil
 	}
-	// Rule 2: the record at the claim's task offset is the run's task, an authorised host's under the run's key and
-	// derived ID, its bounds holding at its append time.
+	// Rule 2: the record at the claim's task topic and offset is the run's task, an authorised host's under the run's key
+	// and derived ID, its bounds holding at its append time.
 	if events.task(request.Run) != request.TaskHash {
 		return nil, nil, wire.RefusedNotClaimant, nil
 	}
-	record, err := r.reader.ReadAt(ctx, operator.PoolTasksTopic(r.config.Pool), *claim.Wherry.TaskOffset)
+	// The claim's own topic is read, never one recomputed from the claimant's recorded profiles, and only within the
+	// pool's prefix.
+	if !strings.HasPrefix(claim.Wherry.TaskTopic, operator.PoolTasksPrefix(r.config.Pool)) {
+		return nil, nil, wire.RefusedNotClaimant, nil
+	}
+	record, err := r.reader.ReadAt(ctx, claim.Wherry.TaskTopic, *claim.Wherry.TaskOffset)
 	if err != nil {
 		r.deny(err, capRead)
 		return nil, nil, "", err
@@ -657,7 +673,7 @@ func (c *claimCheck) claimDecision(ctx context.Context, digest string, statuses 
 	}
 	if !c.adsRead {
 		readCtx, cancel := context.WithTimeout(ctx, readTimeout)
-		ads, err := c.r.reader.ReadFrom(readCtx, operator.ReceiversTopic, 0)
+		ads, err := c.r.reader.ReadFrom(readCtx, operator.PoolReceiversTopic(c.r.config.Pool), 0)
 		cancel()
 		if err != nil {
 			// Without the advertisements the previous holder is taken as live.

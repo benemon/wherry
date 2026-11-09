@@ -105,10 +105,10 @@ func TestTenantFeedACLIsIsolated(t *testing.T) {
 	}
 }
 
-// grants is the operations each principal holds on topic.
+// grants is the operations each principal, wherry.operator included, holds on topic.
 func grants(state State, topic string) map[string][]string {
 	got := map[string][]string{}
-	for _, acl := range ACLs(state) {
+	for _, acl := range append(ACLs(state), OperatorACLs...) {
 		if acl.Resource == topic || acl.Prefix && strings.HasPrefix(topic, acl.Resource) {
 			got[acl.Principal] = append(got[acl.Principal], acl.Operations...)
 		}
@@ -116,13 +116,14 @@ func grants(state State, topic string) map[string][]string {
 	return got
 }
 
-// A tenant's transcript topic is written by the receivers of its entitled pools and read by its hosts, and by no one else.
+// A tenant's transcript topic is written by the receivers of its entitled pools and read by its hosts, and by no one else
+// but wherry.operator.
 func TestTranscriptTopicACLsAreExactlyItsWritersAndReaders(t *testing.T) {
 	state := modelState(t)
-	write, read := []string{"WRITE", "DESCRIBE"}, []string{"READ", "DESCRIBE"}
+	write, read, operator := []string{"WRITE", "DESCRIBE"}, []string{"READ", "DESCRIBE"}, []string{"CREATE", "ALTER_CONFIGS", "READ", "WRITE"}
 	for topic, want := range map[string]map[string][]string{
-		TenantTranscriptTopic("tenant-a"): {ReceiverPrincipal("receiver-a"): write, ReceiverPrincipal("receiver-b"): write, TenantPrincipal("tenant-a", "host-a"): read},
-		TenantTranscriptTopic("tenant-b"): {ReceiverPrincipal("receiver-a"): write, TenantPrincipal("tenant-b", "host-b"): read},
+		TenantTranscriptTopic("tenant-a"): {ReceiverPrincipal("receiver-a"): write, ReceiverPrincipal("receiver-b"): write, TenantPrincipal("tenant-a", "host-a"): read, OperatorPrincipal: operator},
+		TenantTranscriptTopic("tenant-b"): {ReceiverPrincipal("receiver-a"): write, TenantPrincipal("tenant-b", "host-b"): read, OperatorPrincipal: operator},
 	} {
 		if got := grants(state, topic); !reflect.DeepEqual(got, want) {
 			t.Fatalf("%s grants %v, want %v", topic, got, want)
@@ -130,23 +131,24 @@ func TestTranscriptTopicACLsAreExactlyItsWritersAndReaders(t *testing.T) {
 	}
 	state.Ended[ReceiverPrincipal("receiver-b")] = true
 	state.Ended[TenantPrincipal("tenant-a", "host-a")] = true
-	if got, want := grants(state, TenantTranscriptTopic("tenant-a")), map[string][]string{ReceiverPrincipal("receiver-a"): write}; !reflect.DeepEqual(got, want) {
+	if got, want := grants(state, TenantTranscriptTopic("tenant-a")), map[string][]string{ReceiverPrincipal("receiver-a"): write, OperatorPrincipal: operator}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("after membership ends, grants %v, want %v", got, want)
 	}
 }
 
-// A receiver's progress topic is written by that receiver and read by the live receivers of its pool, and by no one else.
+// A receiver's progress topic is written by that receiver and read by the live receivers of its pool, and by no one else
+// but wherry.operator.
 func TestProgressTopicACLsAreExactlyItsWriterAndPoolPeers(t *testing.T) {
 	state := modelState(t)
 	config := modelConfig("receiver-c", "pool-a")
 	if err := apply(&state, Record{Version: 1, Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &config, AtMS: 1}); err != nil {
 		t.Fatal(err)
 	}
-	own, read := []string{"READ", "WRITE", "DESCRIBE"}, []string{"READ", "DESCRIBE"}
+	own, read, operator := []string{"READ", "WRITE", "DESCRIBE"}, []string{"READ", "DESCRIBE"}, []string{"CREATE", "ALTER_CONFIGS", "READ", "WRITE"}
 	for topic, want := range map[string]map[string][]string{
-		ReceiverProgressTopic("receiver-a"): {ReceiverPrincipal("receiver-a"): own, ReceiverPrincipal("receiver-c"): read},
-		ReceiverProgressTopic("receiver-c"): {ReceiverPrincipal("receiver-c"): own, ReceiverPrincipal("receiver-a"): read},
-		ReceiverProgressTopic("receiver-b"): {ReceiverPrincipal("receiver-b"): own},
+		ReceiverProgressTopic("receiver-a"): {ReceiverPrincipal("receiver-a"): own, ReceiverPrincipal("receiver-c"): read, OperatorPrincipal: operator},
+		ReceiverProgressTopic("receiver-c"): {ReceiverPrincipal("receiver-c"): own, ReceiverPrincipal("receiver-a"): read, OperatorPrincipal: operator},
+		ReceiverProgressTopic("receiver-b"): {ReceiverPrincipal("receiver-b"): own, OperatorPrincipal: operator},
 	} {
 		if got := grants(state, topic); !reflect.DeepEqual(got, want) {
 			t.Fatalf("%s grants %v, want %v", topic, got, want)
@@ -154,8 +156,8 @@ func TestProgressTopicACLsAreExactlyItsWriterAndPoolPeers(t *testing.T) {
 	}
 	state.Ended[ReceiverPrincipal("receiver-c")] = true
 	for topic, want := range map[string]map[string][]string{
-		ReceiverProgressTopic("receiver-a"): {ReceiverPrincipal("receiver-a"): own},
-		ReceiverProgressTopic("receiver-c"): {},
+		ReceiverProgressTopic("receiver-a"): {ReceiverPrincipal("receiver-a"): own, OperatorPrincipal: operator},
+		ReceiverProgressTopic("receiver-c"): {OperatorPrincipal: operator},
 	} {
 		if got := grants(state, topic); !reflect.DeepEqual(got, want) {
 			t.Fatalf("after receiver-c ends, %s grants %v, want %v", topic, got, want)
@@ -172,6 +174,24 @@ func TestConstructedNamesDoNotAlias(t *testing.T) {
 	state.Hosts[TenantPrincipal("a-b", "c")] = Host{"a-b", "c"}
 	if err := state.CheckNames(); err != nil {
 		t.Fatal(err)
+	}
+	// A signature topic parses back to its own pool and agent, which no other split of the same names gives, and lies
+	// under its pool's prefix alone: no other derived name of either pool is under it.
+	for _, names := range [][2]string{{"a", "b-c"}, {"a-b", "c"}, {"tasks", "events"}} {
+		topic := SignatureTopic(names[0], names[1], nil)
+		if pool, agent, ok := wire.ParseTaskTopic(topic); !ok || pool != names[0] || agent != names[1] {
+			t.Fatalf("%s parses to %q, %q, %t; want %v", topic, pool, agent, ok, names)
+		}
+		for _, pool := range []string{"a", "a-b", "tasks"} {
+			if strings.HasPrefix(topic, PoolTasksPrefix(pool)) != (pool == names[0]) {
+				t.Fatalf("%s under %s's prefix: %t", topic, pool, pool != names[0])
+			}
+			for _, derived := range []string{PoolEventsTopic(pool), CustodianTopic(pool), PoolReceiversTopic(pool), PoolGroup(pool), TransactionalPrefix(pool)} {
+				if derived == topic || strings.HasPrefix(derived, PoolTasksPrefix(names[0])) {
+					t.Fatalf("%s aliases the task topic prefix of %s", derived, names[0])
+				}
+			}
+		}
 	}
 }
 
@@ -581,13 +601,11 @@ func TestShareGroupStartsAtEarliest(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
+	poolWithReceiver(t, service)
+	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: modelTopic("pool-a"), Value: []byte("submitted-before-fetch")}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: PoolTasksTopic("pool-a"), Value: []byte("submitted-before-fetch")}).FirstErr(); err != nil {
-		t.Fatal(err)
-	}
-	member, err := kgo.NewClient(kgo.SeedBrokers(service.Broker), kgo.SASL(scram.Auth{User: "admin", Pass: "password"}.AsSha512Mechanism()), kgo.ConsumeTopics(PoolTasksTopic("pool-a")), kgo.ShareGroup(PoolGroup("pool-a")), kgo.ShareMaxRecords(1))
+	member, err := kgo.NewClient(kgo.SeedBrokers(service.Broker), kgo.SASL(scram.Auth{User: "admin", Pass: "password"}.AsSha512Mechanism()), kgo.ConsumeTopics(modelTopic("pool-a")), kgo.ShareGroup(PoolGroup("pool-a")), kgo.ShareMaxRecords(1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -646,13 +664,16 @@ func modelTerms() Terms {
 }
 
 func modelConfig(receiver, pool string) ReceiverConfig {
-	return ReceiverConfig{Receiver: receiver, Pool: pool, Capacity: 1, Profiles: []ProfileSettings{{Name: "profile-a", Plugin: "fake", Agent: "agent-a"}},
+	return ReceiverConfig{Receiver: receiver, Pool: pool, Profiles: []ProfileSettings{{Name: "profile-a", Plugin: "fake", Agent: "agent-a"}},
 		PluginSHA256: map[string]string{"fake": strings.Repeat("ab", 32)}}
 }
 
+// modelTopic is the signature topic of modelConfig's one profile in pool.
+func modelTopic(pool string) string { return SignatureTopic(pool, "agent-a", nil) }
+
 func modelState(t *testing.T) State {
 	terms := modelTerms()
-	records := []Record{{Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}, {Version: 1, Kind: "pool", Pool: "pool-b", Terms: &terms, AtMS: 1}, {Version: 1, Kind: "host", Tenant: "tenant-a", Host: "host-a", AtMS: 1}, {Version: 1, Kind: "host", Tenant: "tenant-b", Host: "host-b", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-a", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-b", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-a", AtMS: 1}}
+	records := []Record{{Version: 1, Kind: "tenant", Tenant: "tenant-a", AtMS: 1}, {Version: 1, Kind: "tenant", Tenant: "tenant-b", AtMS: 1}, {Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}, {Version: 1, Kind: "pool", Pool: "pool-b", Terms: &terms, AtMS: 1}, {Version: 1, Kind: "host", Tenant: "tenant-a", Host: "host-a", AtMS: 1}, {Version: 1, Kind: "host", Tenant: "tenant-b", Host: "host-b", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-a", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-b", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-a", AtMS: 1}}
 	for _, config := range []ReceiverConfig{modelConfig("receiver-a", "pool-a"), modelConfig("receiver-b", "pool-b")} {
 		copy := config
 		records = append(records, Record{Version: 1, Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &copy, AtMS: 1})
@@ -730,7 +751,12 @@ func realService(t *testing.T) (*Service, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Delegate(context.Background(), realRoot(t), strings.TrimSpace(string(password))); err != nil {
+	root := realRoot(t)
+	if err := Delegate(context.Background(), root, strings.TrimSpace(string(password))); err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{Operator: root, Broker: os.Getenv("WHERRY_TRUST_BROKER"), CA: ca}
+	if err := service.WaitOperatorCredential(context.Background(), strings.TrimSpace(string(password))); err != nil {
 		t.Fatal(err)
 	}
 	operator := realClient(t, OperatorPrincipal, os.Getenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE"))
@@ -848,7 +874,11 @@ func TestDecodeRecordToleratesUnknownMembers(t *testing.T) {
 		t.Fatal(err)
 	}
 	extra := append([]byte(`{"later_member":true,`), encoded[1:]...)
-	state, err := load([]rawRecord{{Offset: 0, Value: extra}})
+	tenant, err := EncodeRecord(Record{Kind: "tenant", Tenant: "tenant-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := load([]rawRecord{{Offset: 0, Value: tenant}, {Offset: 1, Value: extra}})
 	if err != nil || state.Hosts[TenantPrincipal("tenant-a", "host-a")].Name != "host-a" {
 		t.Fatalf("unknown member at v1: %v, %v; want it folded", state.Hosts, err)
 	}
@@ -930,11 +960,6 @@ func TestReceiverUpdateKeepsThePrincipal(t *testing.T) {
 	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
 		t.Fatal(err)
 	}
-	// kfake's SCRAM handshake always names 4096 iterations.
-	upsert := kadm.UpsertSCRAM{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}
-	if altered, err := kadm.NewClient(service.Operator).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
-		t.Fatalf("re-salt: %v %v", err, altered.Error())
-	}
 	login := func() error {
 		client, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()))
 		if err != nil {
@@ -947,7 +972,7 @@ func TestReceiverUpdateKeepsThePrincipal(t *testing.T) {
 		t.Fatal(err)
 	}
 	changed := modelConfig("receiver-a", "pool-b")
-	changed.Capacity = 3
+	changed.Profiles[0].Replicas = 3
 	if _, err := service.ReceiverUpdate(ctx, changed, false); err != nil {
 		t.Fatal(err)
 	}
@@ -955,8 +980,8 @@ func TestReceiverUpdateKeepsThePrincipal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config := state.Receivers["receiver-a"]; config.Capacity != 3 || config.Pool != "pool-a" {
-		t.Fatalf("configuration %+v; want capacity 3 in the receiver's own pool", config)
+	if config := state.Receivers["receiver-a"]; config.Profiles[0].Replicas != 3 || config.Pool != "pool-a" {
+		t.Fatalf("configuration %+v; want replicas 3 in the receiver's own pool", config)
 	}
 	if err := login(); err != nil {
 		t.Fatalf("configure changed the receiver's credential: %v", err)

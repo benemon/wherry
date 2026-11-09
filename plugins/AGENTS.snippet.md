@@ -7,21 +7,23 @@ only the prompt, the files you send and, if given, a pushed git ref it
 clones itself.
 
 1. `wherry host receivers --json` lists receivers with each plugin profile's `agent`,
-   `labels`, `ready` and `credentials`, each agent credential's `name`, with
+   the agent's `models` and `default_model` when it has them, `labels`,
+   `ready` and `credentials`, each agent credential's `name`, with
    its target (`env` or `file`), `optional` and `configured`, whether this
    host has a source for it. Pick
    an agent and build a selector from the labels.
 2. `wherry submit --prompt TEXT` prints `run_id` and `pool`. Add `--agent NAME`
-   to choose the agent, and `--selector` with comma-separated terms
+   to choose the agent, `--model NAME` to choose one of its `models` in place
+   of its `default_model`, and `--selector` with comma-separated terms
    (`key=v1|v2`, `key!=v`, `key`, `!key`) to require labels. Add
    `--git REMOTE@REF` for a repository the agent clones (its host must be one of
    the pool's VCS hosts), and `--git-changes patch` to get its commits back as
    `changes.patch` (`git am` it). The clone's credential and an `ssh` remote's
-   host key come from the `git` entries of your wherry configuration. Add `--input FILE` for each file the
-   agent needs (inputs that would take the task over the broker's record limit
-   or a matching profile's limit go through S3 when the pool and host have
-   storage; otherwise submit refuses before publishing),
-   `--credential NAME:file=FILE` or `--credential NAME:env=VAR` for each
+   host key come from the `git` entries of your wherry configuration. Add
+   `--input FILE` for each file the agent needs. Inputs over the broker's
+   record limit or a matching profile's limit go through S3 when the pool
+   and host have storage, and otherwise submit refuses before publishing.
+   Add `--credential NAME:file=FILE` or `--credential NAME:env=VAR` for each
    configured credential it needs as a file or an environment variable, and `--output NAME[:required]` for each file you want back. Where the
    pool has storage and your configuration a storage credential for it,
    `--input FILE:s3` sends a larger file (5 GiB at most) through the pool's

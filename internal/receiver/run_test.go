@@ -572,7 +572,7 @@ func (f fixture) holding(t *testing.T, task *wire.Submission, hash, receiver str
 	status := f.receiver.status(task, hash, 1, kind, taskStatus(wire.TaskStateWorking, ""), offset)
 	status.Wherry.Receiver = receiver
 	if kind == "claimed" {
-		status.Wherry.TaskOffset = new(int64)
+		status.Wherry.TaskTopic, status.Wherry.TaskOffset = f.tasksTopic(), new(int64)
 	}
 	f.produce(t, operator.PoolEventsTopic(testPool), task.Wherry.Run, must(t)(wire.SignRecord(status, key)))
 }
@@ -580,7 +580,7 @@ func (f fixture) holding(t *testing.T, task *wire.Submission, hash, receiver str
 // taskOffset is the offset of the task record hashing to hash on the pool's task topic.
 func (f fixture) taskOffset(t *testing.T, hash string) int64 {
 	t.Helper()
-	for _, record := range f.records(t, operator.PoolTasksTopic(testPool)) {
+	for _, record := range f.records(t, f.tasksTopic()) {
 		if wire.TaskHash(record.Value) == hash {
 			return record.Offset
 		}
@@ -699,7 +699,10 @@ func TestAdoptedRunEndsFromTheOutcomeFile(t *testing.T) {
 
 func TestLastOffsetIgnoresMismatchedStatus(t *testing.T) {
 	f := newFixture(t, resultStream)
-	if err := f.service.TenantAdd(f.ctx, "tenant-b", testPool); err != nil {
+	if err := f.service.TenantAdd(f.ctx, "tenant-b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.TenantPoolAdd(f.ctx, "tenant-b", testPool); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.receiver.refresh(f.ctx); err != nil {
@@ -877,14 +880,14 @@ func TestLastOffsetSkipsOnlyAnEndedHoldersTopicDenial(t *testing.T) {
 func TestFencedProducerStopsRunWrites(t *testing.T) {
 	f := newFixture(t, resultStream)
 	zombie := testActiveRun(t, f, "run-fence", 1)
-	if err := zombie.commit(f.ctx, zombie.claimRecords(f.taskOffset(t, zombie.taskHash))...); err != nil {
+	if err := zombie.commit(f.ctx, zombie.claimRecords(f.tasksTopic(), f.taskOffset(t, zombie.taskHash))...); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(operator.TransactionalPrefix(testPool)+testRun("run-fence"), "p."+testPool+".") {
 		t.Fatal("transactional ID is outside the pool's prefix")
 	}
 	adopter := testActiveRun(t, f, "run-fence", 2)
-	if err := adopter.commit(f.ctx, adopter.claimRecords(f.taskOffset(t, adopter.taskHash))...); err != nil {
+	if err := adopter.commit(f.ctx, adopter.claimRecords(f.tasksTopic(), f.taskOffset(t, adopter.taskHash))...); err != nil {
 		t.Fatal(err)
 	}
 	err := zombie.commit(f.ctx, zombie.progress(42))
@@ -903,11 +906,11 @@ func TestFencedProducerStopsRunWrites(t *testing.T) {
 func TestFencedStartFailureLeavesTheJob(t *testing.T) {
 	f := newFixture(t, resultStream)
 	zombie := testActiveRun(t, f, "run-fence", 1)
-	if err := zombie.commit(f.ctx, zombie.claimRecords(f.taskOffset(t, zombie.taskHash))...); err != nil {
+	if err := zombie.commit(f.ctx, zombie.claimRecords(f.tasksTopic(), f.taskOffset(t, zombie.taskHash))...); err != nil {
 		t.Fatal(err)
 	}
 	adopter := testActiveRun(t, f, "run-fence", 2)
-	if err := adopter.commit(f.ctx, adopter.claimRecords(f.taskOffset(t, adopter.taskHash))...); err != nil {
+	if err := adopter.commit(f.ctx, adopter.claimRecords(f.tasksTopic(), f.taskOffset(t, adopter.taskHash))...); err != nil {
 		t.Fatal(err)
 	}
 	if status := zombie.startFailure(f.ctx, "dispatch", "profile nomad created no job"); status != 0 {
@@ -940,7 +943,7 @@ func TestStartFailureWriteDenialStopsTheReceiver(t *testing.T) {
 
 func TestFollowErrorReasonIsFixed(t *testing.T) {
 	f := newFixture(t, nil)
-	f.plugin.followErr = errors.New("upstream detail")
+	f.plugin.followErr, f.plugin.followedJob = errors.New("upstream detail"), new(pluginsdk.JobAbsent)
 	task := runToTask(t, f)
 	if got := task.Artifacts[0].Parts[0].Text; got != "log stream failed" {
 		t.Fatalf("result reason %q, want fixed reason", got)
@@ -963,7 +966,7 @@ func TestFollowLinkLossResumesFromOffset(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.plugin.linkLost = 1
 	f.submit(t, f.host, nil)
-	if err := f.receiver.claimOne(f.ctx, f.ctx, func() {}); err != nil {
+	if err := f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], func() {}); err != nil {
 		t.Fatal(err)
 	}
 	if task := f.lastTask(t); task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "done" {
@@ -997,7 +1000,7 @@ func TestFollowErrorResumesFromOffsetByJobState(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.plugin.linkLost, f.plugin.lostErr, f.plugin.job = 1, errors.New("stream reset"), test.state
 			f.submit(t, f.host, nil)
-			if err := f.receiver.claimOne(f.ctx, f.ctx, func() {}); err != nil {
+			if err := f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], func() {}); err != nil {
 				t.Fatal(err)
 			}
 			if task := f.lastTask(t); task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "done" {
@@ -1007,8 +1010,9 @@ func TestFollowErrorResumesFromOffsetByJobState(t *testing.T) {
 			froms, lookups := f.plugin.froms, f.plugin.lookups
 			f.plugin.mu.Unlock()
 			first := int64(len(resultStream[0]) + 1)
-			if !slices.Equal(froms, []int64{0, first}) || lookups != 1 {
-				t.Fatalf("follows from %v after %d lookups; want 0, then the offset after the line taken before the failure, after one", froms, lookups)
+			// One Lookup finds the job started, one after the failure.
+			if !slices.Equal(froms, []int64{0, first}) || lookups != 2 {
+				t.Fatalf("follows from %v after %d lookups; want 0, then the offset after the line taken before the failure, after two", froms, lookups)
 			}
 			var transcript strings.Builder
 			for _, chunk := range f.chunks(t) {
@@ -1050,14 +1054,14 @@ func TestFollowFailureRetriesUntilTaskEndedBy(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, noResultStream)
-			f.plugin.linkLost, f.plugin.lostErr, f.plugin.job, f.plugin.lookupErr = 1<<20, test.lostErr, pluginsdk.JobRunning, test.lookupErr
+			f.plugin.linkLost, f.plugin.lostErr, f.plugin.job, f.plugin.followedErr = 1<<20, test.lostErr, pluginsdk.JobRunning, test.lookupErr
 			shortLock(f, time.Second)
 			endBy := time.Now().Add(4 * time.Second).Unix()
 			f.submit(t, f.host, func(task *wire.Submission) {
 				task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = endBy, endBy
 			})
 			done := make(chan error, 1)
-			go func() { done <- f.receiver.claimOne(f.ctx, f.ctx, func() {}) }()
+			go func() { done <- f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], func() {}) }()
 			select {
 			case err := <-done:
 				if err != nil {
@@ -1079,9 +1083,76 @@ func TestFollowFailureRetriesUntilTaskEndedBy(t *testing.T) {
 	}
 }
 
+// The Follows after a lost link are followRetryInterval, a second, apart.
+func TestFollowRetriesAreSpacedByTheRetryInterval(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.plugin.linkLost = 2
+	if task := runToTask(t, f); task.Status.State != wire.TaskStateCompleted {
+		t.Fatalf("task %#v after lost plugin links; want the run completed; logs:\n%s", task.Status, f.logs.String())
+	}
+	f.plugin.mu.Lock()
+	starts := slices.Clone(f.plugin.followStarts)
+	f.plugin.mu.Unlock()
+	if len(starts) != 3 {
+		t.Fatalf("followed %d times; want 3", len(starts))
+	}
+	for i := 1; i < len(starts); i++ {
+		if gap := starts[i].Sub(starts[i-1]); gap < time.Second {
+			t.Fatalf("follow %d began %s after the one before; want at least a second", i+1, gap)
+		}
+	}
+}
+
+// A Follow that fails for a job Lookup reports absent fails the run at once, with no Follow after it.
+func TestFollowErrorOnAnAbsentJobFailsTheRun(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.plugin.linkLost, f.plugin.lostErr, f.plugin.followedJob = 1, errors.New("stream reset"), new(pluginsdk.JobAbsent)
+	task := runToTask(t, f)
+	if task.Status.State != wire.TaskStateFailed || task.Artifacts[0].Parts[0].Text != "log stream failed" {
+		t.Fatalf("task %#v; want FAILED log stream failed; logs:\n%s", task.Status, f.logs.String())
+	}
+	// One Lookup finds the job started, one after the failure.
+	if _, lookups, follows, _ := f.plugin.counts(); follows != 1 || lookups != 2 {
+		t.Fatalf("followed %d times after %d lookups; want no follow after the failure's lookup", follows, lookups)
+	}
+}
+
+// A retry that comes due after task_ended_by ends the run without another Follow.
+func TestFollowRetryChecksTheRunDeadline(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		lostErr error
+	}{
+		{"link lost", nil},
+		{"job running", errors.New("stream reset")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t, noResultStream)
+			f.plugin.linkLost, f.plugin.lostErr, f.plugin.job = 1<<20, test.lostErr, pluginsdk.JobRunning
+			shortLock(f, time.Second)
+			endBy := time.Now().Add(3 * time.Second).Unix()
+			f.submit(t, f.host, func(task *wire.Submission) {
+				task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = endBy, endBy
+			})
+			if err := f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], func() {}); err != nil {
+				t.Fatal(err)
+			}
+			if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != wire.NotEndedBy(endBy) {
+				t.Fatalf("terminal %s %q; want FAILED %q", state, reason, wire.NotEndedBy(endBy))
+			}
+			f.plugin.mu.Lock()
+			dead, follows := f.plugin.deadFollows, f.plugin.follows
+			f.plugin.mu.Unlock()
+			if dead != 0 {
+				t.Fatalf("%d of %d follows began after task_ended_by; want none", dead, follows)
+			}
+		})
+	}
+}
+
 func TestFollowErrorRetriesAFailedLookup(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.plugin.linkLost, f.plugin.lostErr, f.plugin.job, f.plugin.lookupFailures = 1, errors.New("stream reset"), pluginsdk.JobRunning, 2
+	f.plugin.linkLost, f.plugin.lostErr, f.plugin.job, f.plugin.followedErr, f.plugin.followedFailures = 1, errors.New("stream reset"), pluginsdk.JobRunning, errors.New("lookup down"), 2
 	shortLock(f, time.Millisecond)
 	if task := runToTask(t, f); task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "done" {
 		t.Fatalf("task %#v after failed lookups; want the run completed; logs:\n%s", task.Status, f.logs.String())
@@ -1089,14 +1160,15 @@ func TestFollowErrorRetriesAFailedLookup(t *testing.T) {
 	f.plugin.mu.Lock()
 	froms, lookups := f.plugin.froms, f.plugin.lookups
 	f.plugin.mu.Unlock()
-	if first := int64(len(resultStream[0]) + 1); !slices.Equal(froms, []int64{0, first}) || lookups != 3 {
-		t.Fatalf("follows from %v after %d lookups; want 0, then the offset after the line taken, after three", froms, lookups)
+	// One Lookup finds the job started, three after the failure.
+	if first := int64(len(resultStream[0]) + 1); !slices.Equal(froms, []int64{0, first}) || lookups != 4 {
+		t.Fatalf("follows from %v after %d lookups; want 0, then the offset after the line taken, after four", froms, lookups)
 	}
 }
 
 func TestFollowErrorOnANeverStartedJobIsAStartFailure(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.plugin.linkLost, f.plugin.lostErr, f.plugin.job = 1, errors.New("stream reset"), pluginsdk.JobNeverStarted
+	f.plugin.linkLost, f.plugin.lostErr, f.plugin.followedJob = 1, errors.New("stream reset"), new(pluginsdk.JobNeverStarted)
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release; logs:\n%s", status, f.logs.String())
 	}
@@ -1516,7 +1588,8 @@ func TestReceiverFirstAttemptSkipsLookup(t *testing.T) {
 	}
 	labDispatches, labLookups, _, _ := m.lab.counts()
 	_, cloudLookups, _, _ := m.cloud.counts()
-	if labLookups != 0 || cloudLookups != 0 || labDispatches != 1 {
+	// The one Lookup is the dispatching profile's, which finds the dispatched job started.
+	if labLookups != 1 || cloudLookups != 0 || labDispatches != 1 {
 		t.Fatalf("lookups lab=%d cloud=%d, lab dispatches=%d", labLookups, cloudLookups, labDispatches)
 	}
 }
@@ -1598,7 +1671,7 @@ func TestShutdownDuringACommitCommitsTheDeliveredLine(t *testing.T) {
 			t.Cleanup(base.Close)
 			f.receiver.base = base
 			f.submit(t, f.host, nil)
-			if err := f.receiver.claimOne(ctx, ctx, func() {}); err != nil && !errors.Is(err, context.Canceled) {
+			if err := f.receiver.claimOne(ctx, ctx, f.receiver.profiles[0], func() {}); err != nil && !errors.Is(err, context.Canceled) {
 				t.Fatalf("claimOne after shutdown: %v", err)
 			}
 			for _, chunk := range f.chunks(t) {
@@ -1701,7 +1774,7 @@ func TestDenialStopsTheReceiver(t *testing.T) {
 		want   string
 	}{
 		"fetch":            {kadm.NewACLs().Topics(operator.PoolEventsTopic(testPool)).Operations(kadm.OpRead), "denied read: "},
-		"produce":          {kadm.NewACLs().Topics(operator.ReceiversTopic).Operations(kadm.OpWrite), "denied write: "},
+		"produce":          {kadm.NewACLs().Topics(operator.PoolReceiversTopic(testPool)).Operations(kadm.OpWrite), "denied write: "},
 		"transactional ID": {kadm.NewACLs().TransactionalIDs(operator.TransactionalPrefix(testPool)).Operations(kadm.OpAny), "denied transactional ID: "},
 		"share group":      {kadm.NewACLs().Groups(operator.PoolGroup(testPool)).Operations(kadm.OpAny), "denied share group: "},
 	} {
@@ -1742,12 +1815,12 @@ func TestPluginExitStopsTheReceiver(t *testing.T) {
 func TestRestartedReceiverAdoptsTheJobADeniedOneLeft(t *testing.T) {
 	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, endDelay: 40 * time.Second}})
 	done, _ := holdRun(t, f)
-	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(operator.ReceiversTopic).Operations(kadm.OpWrite))
+	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(operator.PoolReceiversTopic(testPool)).Operations(kadm.OpWrite))
 	if err := f.stopped(t, done, 10*time.Second); err == nil {
 		t.Fatal("Run returned no error after a denial")
 	}
 	f.quiet()
-	if err := f.service.TenantAdd(f.ctx, testTenant, testPool); err != nil { // reconciles the ACLs
+	if err := f.service.TenantPoolAdd(f.ctx, testTenant, testPool); err != nil { // reconciles the ACLs
 		t.Fatal(err)
 	}
 	f.plugin.mu.Lock()
@@ -1776,7 +1849,7 @@ func (f fixture) adoptedOnce(t *testing.T) {
 func TestAdmissionWritesDoNotFenceTheRunsHolder(t *testing.T) {
 	f := newFixture(t, resultStream)
 	holder := testActiveRun(t, f, "run-a", 1)
-	if err := holder.commit(f.ctx, holder.claimRecords(f.taskOffset(t, holder.taskHash))...); err != nil {
+	if err := holder.commit(f.ctx, holder.claimRecords(f.tasksTopic(), f.taskOffset(t, holder.taskHash))...); err != nil {
 		t.Fatal(err)
 	}
 	// A duplicate of the held turn is rejected while the holder runs.
@@ -1829,8 +1902,8 @@ func TestAmbiguousCommitAbandonsToRedelivery(t *testing.T) {
 				t.Fatalf("terminals on the pool's events %d, want %d", terminals, test.terminals)
 			}
 			commitTransaction = previous
-			tasks := f.records(t, operator.PoolTasksTopic(testPool))
-			admitted, ack := f.receiver.admit(f.ctx, tasks[len(tasks)-1])
+			tasks := f.records(t, f.tasksTopic())
+			admitted, ack := f.receiver.admit(f.ctx, tasks[len(tasks)-1], f.receiver.profiles[0])
 			if test.applied && (admitted != nil || ack != kgo.AckAccept) {
 				t.Fatalf("redelivered holder admitted=%v ack=%v, want accept without running", admitted != nil, ack)
 			}

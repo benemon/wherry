@@ -1,0 +1,73 @@
+rule_files: [wherry-alerts.yaml]
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'wherry_delivery_budget_exhausted_total{pool="pool-a",tenant="tenant-a",profile="nomad"}'
+        values: '0 0 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: WherryDeliveryBudgetExhausted
+        exp_alerts:
+          - exp_labels:
+              pool: pool-a
+              tenant: tenant-a
+              severity: warning
+              profile: nomad
+            exp_annotations:
+              summary: Runs of tenant tenant-a in pool pool-a spent their delivery budget
+              description: Runs end TASK_STATE_FAILED with "delivery budget exhausted" when no receiver can start them.
+              runbook_url: https://benemon.github.io/wherry/runbooks#wherrydeliverybudgetexhausted
+  - interval: 1m
+    input_series:
+      - series: 'wherry_delivery_budget_exhausted_total{pool="pool-a",tenant="tenant-a",profile="nomad"}'
+        values: '1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: WherryDeliveryBudgetExhausted
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'wherry_open_waits_total{pool="pool-a",tenant="tenant-a",outcome="unanswered"}'
+        values: '0 0 1 1 2 2'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WherryOpenRequestsUnanswered
+        exp_alerts:
+          - exp_labels:
+              pool: pool-a
+              tenant: tenant-a
+              severity: warning
+            exp_annotations:
+              summary: No key custodian answered open requests for tenant tenant-a in pool pool-a
+              description: A claimant whose open request no key custodian answers within 5 minutes and 120 seconds releases the task.
+              runbook_url: https://benemon.github.io/wherry/runbooks#wherryopenrequestsunanswered
+  - interval: 1m
+    input_series:
+      - series: 'wherry_open_waits_total{pool="pool-a",tenant="tenant-a",outcome="unanswered"}'
+        values: '1 1 2 2 2 2'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WherryOpenRequestsUnanswered
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'wherry_bus_errors_total{job="wherry-receiver",instance="r1",pool="pool-a",op="read"}'
+        values: '0 0 3'
+    promql_expr_test:
+      - expr: 'sum by (job, instance, pool) (increase(wherry_bus_errors_total{op=~"read|share group"}[5m]))'
+        eval_time: 2m
+        exp_samples:
+          - labels: '{job="wherry-receiver",instance="r1",pool="pool-a"}'
+            value: 3
+  - interval: 1m
+    input_series:
+      - series: 'wherry_bus_errors_total{job="wherry-receiver",instance="r1",pool="pool-a",op="read"}'
+        values: '3 3 3'
+    promql_expr_test:
+      - expr: 'sum by (job, instance, pool) (increase(wherry_bus_errors_total{op=~"read|share group"}[5m]))'
+        eval_time: 2m
+        exp_samples:
+          - labels: '{job="wherry-receiver",instance="r1",pool="pool-a"}'
+            value: 0

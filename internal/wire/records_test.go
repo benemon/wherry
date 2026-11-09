@@ -184,14 +184,55 @@ func TestRecordSignedByAnotherOwnerIsRejected(t *testing.T) {
 func TestClaimedStatusCarriesTaskOffsetZero(t *testing.T) {
 	keys, _, receiver := testKeys(t)
 	status := testRecords()["status"].(*RunStatus)
-	status.Wherry.Kind, status.Wherry.TaskOffset = "claimed", new(int64(0))
+	status.Wherry.Kind, status.Wherry.TaskTopic, status.Wherry.TaskOffset = "claimed", testTaskTopic, new(int64(0))
 	encoded, err := SignRecord(status, receiver)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var decoded RunStatus
-	if err := ParseRecord(encoded, keys, &decoded); err != nil || decoded.Wherry.TaskOffset == nil || *decoded.Wherry.TaskOffset != 0 {
-		t.Fatalf("decoded task offset %v, %v; want 0", decoded.Wherry.TaskOffset, err)
+	if err := ParseRecord(encoded, keys, &decoded); err != nil || decoded.Wherry.TaskOffset == nil || *decoded.Wherry.TaskOffset != 0 || decoded.Wherry.TaskTopic != testTaskTopic {
+		t.Fatalf("decoded task topic %q, offset %v, %v; want %s at 0", decoded.Wherry.TaskTopic, decoded.Wherry.TaskOffset, err, testTaskTopic)
+	}
+}
+
+// A placing status is working, with one text part and no log offset; it encodes, validates and decodes.
+func TestPlacingStatus(t *testing.T) {
+	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	keys := signed.Keys{"receiver-a": signed.KeyState{Current: key.Public().(ed25519.PublicKey)}}
+	text := func(parts ...Part) *Message {
+		return &Message{MessageID: "msg-a", Role: RoleAgent, Parts: parts, Extensions: []string{ExtensionURI}}
+	}
+	waiting := Part{Text: "waiting for placement (1 nodes evaluated, 1 filtered, 0 exhausted)"}
+	for name, test := range map[string]struct {
+		state   TaskState
+		message *Message
+		offset  *int64
+		valid   bool
+	}{
+		"working with its text":         {TaskStateWorking, text(waiting), nil, true},
+		"working with its text raw":     {TaskStateWorking, text(Part{Raw: StdBytes(`waiting for placement ("""")`), MediaType: "text/plain"}), nil, true},
+		"with a log offset":             {TaskStateWorking, text(waiting), new(int64(0)), false},
+		"submitted":                     {TaskStateSubmitted, text(waiting), nil, false},
+		"failed":                        {TaskStateFailed, text(waiting), nil, false},
+		"without a message":             {TaskStateWorking, nil, nil, false},
+		"with two parts":                {TaskStateWorking, text(waiting, waiting), nil, false},
+		"with a data part":              {TaskStateWorking, text(Part{Data: []byte(`{}`), MediaType: "application/json"}), nil, false},
+		"with a raw part of other type": {TaskStateWorking, text(Part{Raw: StdBytes("x"), MediaType: "application/octet-stream"}), nil, false},
+	} {
+		status := &RunStatus{StatusUpdate: TaskStatusUpdateEvent{TaskID: "run-a", ContextID: "run-a", Status: TaskStatus{State: test.state, Timestamp: testTime, Message: test.message}},
+			Wherry: StatusBinding{ReceiverBinding: testBinding(), EventID: "event-a", Kind: "placing", TaskHash: testHash, LogOffset: test.offset}}
+		encoded, err := SignRecord(status, key)
+		if (err == nil) != test.valid {
+			t.Errorf("%s: sign = %v, want valid %v", name, err, test.valid)
+			continue
+		}
+		if !test.valid {
+			continue
+		}
+		var decoded RunStatus
+		if err := ParseRecord(encoded, keys, &decoded); err != nil || decoded.Wherry.Kind != "placing" || decoded.StatusUpdate.Status.State != TaskStateWorking {
+			t.Errorf("%s: decoded %+v, %v; want the placing status", name, decoded, err)
+		}
 	}
 }
 
@@ -246,7 +287,7 @@ func TestRecordValidation(t *testing.T) {
 		},
 		"claimed status without its task offset": func(r map[string]Record) Record {
 			value := r["status"].(*RunStatus)
-			value.Wherry.Kind = "claimed"
+			value.Wherry.Kind, value.Wherry.TaskTopic = "claimed", testTaskTopic
 			return value
 		},
 		"started status with a task offset": func(r map[string]Record) Record {
@@ -256,7 +297,22 @@ func TestRecordValidation(t *testing.T) {
 		},
 		"claimed status at a negative task offset": func(r map[string]Record) Record {
 			value := r["status"].(*RunStatus)
-			value.Wherry.Kind, value.Wherry.TaskOffset = "claimed", new(int64(-1))
+			value.Wherry.Kind, value.Wherry.TaskTopic, value.Wherry.TaskOffset = "claimed", testTaskTopic, new(int64(-1))
+			return value
+		},
+		"started status with a task topic": func(r map[string]Record) Record {
+			value := r["status"].(*RunStatus)
+			value.Wherry.TaskTopic = testTaskTopic
+			return value
+		},
+		"claimed status without a task topic": func(r map[string]Record) Record {
+			value := r["status"].(*RunStatus)
+			value.Wherry.Kind, value.Wherry.TaskOffset = "claimed", new(int64(0))
+			return value
+		},
+		"claimed status on an off-pattern task topic": func(r map[string]Record) Record {
+			value := r["status"].(*RunStatus)
+			value.Wherry.Kind, value.Wherry.TaskTopic, value.Wherry.TaskOffset = "claimed", "wherry.pool.pool-1.tasks", new(int64(0))
 			return value
 		},
 		"status attempt 0": func(r map[string]Record) Record {

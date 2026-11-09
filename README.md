@@ -5,32 +5,44 @@
   </picture>
 </h1>
 
+[![CI](https://github.com/benemon/wherry/actions/workflows/ci.yml/badge.svg)](https://github.com/benemon/wherry/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/benemon/wherry/actions/workflows/codeql.yml/badge.svg)](https://github.com/benemon/wherry/actions/workflows/codeql.yml)
+[![Scorecard](https://github.com/benemon/wherry/actions/workflows/scorecard.yml/badge.svg)](https://github.com/benemon/wherry/actions/workflows/scorecard.yml)
+[![govulncheck](https://github.com/benemon/wherry/actions/workflows/govulncheck.yml/badge.svg)](https://github.com/benemon/wherry/actions/workflows/govulncheck.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/benemon/wherry/badge)](https://securityscorecards.dev/viewer/?uri=github.com/benemon/wherry)
+
 An execution fabric for delegated agent work. The
 [Introduction](https://benemon.github.io/wherry/introduction) describes the
-model and [what ships](https://benemon.github.io/wherry/introduction#what-ships).
+model and [how it works](https://benemon.github.io/wherry/introduction#how-does-wherry-work).
 
 ## Getting started
 
-The [Quickstart](https://benemon.github.io/wherry/quickstart) installs
-`wherry` from a release, provisions one pool with one receiver, and runs a
-first task.
+The [development quickstart](https://benemon.github.io/wherry/quickstart-development)
+runs a whole deployment on one machine with `wherry dev`.
+[Install](https://benemon.github.io/wherry/install)
+provisions a pool, tenant and receiver on Nomad, Kubernetes or systemd and runs a first task.
 
 ## Configuration
 
-[Configuration](https://benemon.github.io/wherry/configuration) lists the
-client configuration, the receiver's local configuration, bundle, pool
-terms, receiver configuration and environment variables.
+The configuration guides cover the
+[operator](https://benemon.github.io/wherry/configuration-operator),
+[receiver](https://benemon.github.io/wherry/configuration-receiver),
+[host](https://benemon.github.io/wherry/configuration-host) and
+[development instance](https://benemon.github.io/wherry/configuration-development).
 
 ## Operations
 
-[Operations](https://benemon.github.io/wherry/operations) covers preparing
-Kafka, adding tenants, hosts and receivers, revocation, key rotation, the
-pool's key custodian, the response to a compromised receiver or pool key,
-and upgrades.
+[Operator operations](https://benemon.github.io/wherry/operations-operator)
+covers Kafka, pools, tenants, receiver provisioning, revocation and reset.
+[Receiver operations](https://benemon.github.io/wherry/operations-receivers)
+covers platforms, plugins, metrics and custody.
+[Host operations](https://benemon.github.io/wherry/operations-hosts)
+covers enrolment, harnesses, files and key rotation.
+[Upgrade and uninstall](https://benemon.github.io/wherry/upgrade) gives the rolling procedure.
 
 ## Harness integration
 
-[Harness integration](https://benemon.github.io/wherry/operations#harness-integration)
+[Harness integration](https://benemon.github.io/wherry/operations-hosts#harness-integration)
 installs the [`plugins/wherry`](plugins/wherry) MCP server and Agent Skill,
 and [MCP tools](https://benemon.github.io/wherry/mcp) lists the tools.
 
@@ -49,8 +61,8 @@ own `go.mod` and `pluginsdk/v*` tags.
 ## Make targets
 
 `make help` lists the targets. `make check` runs every CI gate: gofmt, vet,
-the unit tests of both modules, the dependency licence check and the
-attribution-marker check.
+the unit tests of both modules, the dependency licence check, the
+attribution-marker check and the old-name check.
 
 ## Tests
 
@@ -76,7 +88,7 @@ run when their variables are set and skip otherwise:
   tests and the S3 leg of the round-trip test.
 
 `test/kafka/up.sh DIR` starts one Kafka 4.3 container serving both brokers
-and writes their variables to `DIR/env`; CI runs these tests against it:
+and writes their variables to `DIR/env`. CI runs these tests against it:
 
 ```sh
 test/kafka/up.sh /tmp/wherry-kafka && . /tmp/wherry-kafka/env
@@ -87,7 +99,7 @@ The packages share the broker's `wherry.operator`, so they run one at a time.
 
 `test/s3/up.sh DIR` starts [ceph-aio](https://github.com/benemon/ceph-aio), a
 single-node Ceph with RGW, creates a user with generated keys and writes the S3
-variables to `DIR/env`; CI runs the S3 tests against it:
+variables to `DIR/env`. CI runs the S3 tests against it:
 
 ```sh
 test/s3/up.sh /tmp/wherry-s3 && . /tmp/wherry-s3/env
@@ -124,10 +136,18 @@ the published release as a user receives it: the assets against
 `.github/release-contents.txt`, the checksums' signature and the checksums,
 each archive's attestation, and, on macOS, `brew install benemon/tap/wherry`
 and `brew test wherry`. A tag with a hyphenated qualifier, such as
-`v0.1.0-rc.1`, publishes a prerelease. `pluginsdk/v*` tags version the
+`v0.1.0-rc.1`, publishes a prerelease. The Homebrew formula follows
+prereleases until the first stable tag (`vX.Y.Z`) exists, then stable releases
+only. `pluginsdk/v*` tags version the
 `pluginsdk` module and publish nothing. The same build, unsigned and
 unpublished, writes the archives into `dist` locally:
 
 ```sh
 goreleaser release --snapshot --clean --skip=sign
 ```
+
+The documentation site embeds the wherry-plugins examples at the commit
+`WHERRY_PLUGINS_REF` names in `.github/workflows/pages.yml`. After a
+wherry-plugins release, set `WHERRY_PLUGINS_REF` to the full SHA of the
+commit its tags were cut from (`git rev-list -n 1 nomad/<version>` in
+wherry-plugins) and merge that change to `main`, which republishes the site.

@@ -8,86 +8,43 @@ hero:
   tagline: An execution fabric for delegated agent work.
   actions:
     - theme: brand
-      text: Quickstart
-      link: /quickstart
+      text: Install
+      link: /install
     - theme: alt
       text: How it works
       link: /introduction
 features:
-  - title: Run delegated AI workloads on infrastructure you control
-    link: /#run-delegated-ai-workloads-on-infrastructure-you-control
-  - title: Keep control of identity and credentials when you delegate
-    link: /#keep-control-of-identity-and-credentials-when-you-delegate
-  - title: Follow every delegated run, and recover it when a receiver restarts
-    link: /#follow-every-delegated-run-and-recover-it-when-a-receiver-restarts
-  - title: Keep your agent and workflow when you change where work runs
-    link: /#keep-your-agent-and-workflow-when-you-change-where-work-runs
-  - title: Trace every run from request to result
-    link: /#trace-every-run-from-request-to-result
+  - title: Hand off work and walk away
+    link: /use-cases#hand-off-work-and-walk-away
+  - title: Run agents where the network access exists
+    link: /use-cases#run-agents-where-the-network-access-exists
+  - title: Run tasks in the environment they need
+    link: /use-cases#run-tasks-in-the-environment-they-need
+  - title: Fan out independent tasks
+    link: /use-cases#fan-out-independent-tasks
+  - title: Share agent compute across teams
+    link: /use-cases#share-agent-compute-across-teams
+  - title: Trace delegated work from request to result
+    link: /use-cases#trace-delegated-work-from-request-to-result
 ---
 
 ## Why wherry
 
-A coding agent can hand its subagent work to other compute, but usually
-only to the machine it runs on or to its vendor's cloud. wherry gives an
-organisation control over where that work runs, under whose authority, and
-how it is governed and recovered.
+Coding agents can delegate work, but where that work runs is often decided for you: on the machine running the agent,
+or in infrastructure its vendor provides. Neither is necessarily where the work belongs. A task might need a GPU, access
+to a private network, or stronger isolation than your laptop gives.
 
-### Run delegated AI workloads on infrastructure you control
+wherry separates the decision to delegate work from the infrastructure that runs it. Tasks travel through your Kafka
+cluster to receivers on infrastructure you control. Platform plugins start the agent, as its harness ships it, on
+Nomad, Kubernetes, OpenShift or hosts under systemd, and labels on each receiver's profiles let a task choose the
+capabilities it needs. [Placement](concepts.md#placement) explains how a task reaches a receiver.
 
-Delegated agent work runs on the compute an organisation already operates:
-Nomad, Kubernetes and OpenShift, or plain hosts under systemd. Placement by
-label sends each task to the environment it needs, whether that is a GPU
-node, a particular network segment or a stronger isolation level. wherry
-carries tasks, files and results through the organisation's own Kafka
-cluster and object storage; the agent's own calls, such as those to its
-model provider, go where its environment and configuration send them.
-[Placement](concepts.md#placement) and
-[Where your data goes](governance.md#where-your-data-goes) explain how.
+Moving work between machines also means crossing trust boundaries, and wherry makes those boundaries explicit.
+Operators define pools and which tenants may use them. Hosts and receivers sign the tasks, statuses, transcripts and results they share. A task's credentials travel with it only
+in encrypted form, and the pool's key custodian checks each claim before it releases the key to that attempt. [Security](security.md) describes the trust model.
 
-### Keep control of identity and credentials when you delegate
-
-The operator decides who may submit work and who may run it. Every host
-and receiver has its own identity, the broker enforces what each may
-reach, and each credential travels in an envelope under the pool's key.
-The pool's key custodian opens it to check it is bound to its task, and
-it opens for the one receiver and the one attempt that needs it. [Governance](governance.md) and
-[Security](security.md) cover the model.
-
-### Follow every delegated run, and recover it when a receiver restarts
-
-A delegated run is managed work, so it outlives a dropped connection. When
-a receiver stops renewing its claim, Kafka offers the task again. The next
-receiver adopts the run's job when it matches and otherwise starts it
-afresh, and fencing stops the earlier attempt from publishing. The pool's
-key custodian opens a run's envelope for its current claimant, so an
-adopter receives the run's credentials for its own attempt. Every run's status, events and transcript can be
-followed from the CLI or from the agent's own harness.
-[Runs and attempts](concepts.md#runs-and-attempts) and
-[Credential envelopes](security.md#credential-envelopes) give the detail.
-
-### Keep your agent and workflow when you change where work runs
-
-A coding agent delegates through the same tools whatever runs the work.
-The MCP server fits any harness, the agent that runs the task is
-unmodified, and everything platform-specific stays in a plugin.
-[Harness integration](operations.md#harness-integration) shows the setup.
-
-### Trace every run from request to result
-
-Each run keeps the thread from the request to its result: who submitted
-it, which receiver ran each attempt, what it reported, and which files came
-back. Every shared record is signed, and every returned file is checked
-against its digest before it is written.
-[Run history](governance.md#run-history) shows what is kept and for how
-long.
-
-## What you need
-
-wherry is self-hosted and needs Kafka. An operator runs a Kafka 4.3 cluster
-with share groups, SCRAM over TLS and an authoriser, creates pools and
-grants access with `wherry operator`, and runs receivers with the plugins
-for the target platforms. A coding agent's harness talks to wherry
-through the `wherry` CLI or its MCP server. [Prepare Kafka](operations.md#prepare-kafka)
-lists the cluster settings, [Why Kafka](design.md#why-kafka) explains the
-choice, and the [Quickstart](quickstart.md) runs a first task.
+Once submitted, a run has a lifecycle of its own. You can leave the session that started it, come back to its status
+and transcript, and collect its result later. When a receiver stops, Kafka offers the task again, and a later
+attempt adopts the existing job or starts it afresh. The run's records show each attempt along the way.
+[Runs and attempts](concepts.md#runs-and-attempts) explains the recovery guarantees and their limits, and
+[Run history](governance.md#run-history) describes what is kept.

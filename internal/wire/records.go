@@ -237,7 +237,9 @@ type StatusBinding struct {
 	Kind      string `json:"kind"`
 	TaskHash  string `json:"task_hash"`
 	LogOffset *int64 `json:"log_offset,omitzero"`
-	// TaskOffset is the claimed task record's offset on the pool's task topic, present exactly on a claimed status.
+	// TaskTopic and TaskOffset are the claimed task record's signature task topic and offset on it, present exactly on a
+	// claimed status.
+	TaskTopic  string `json:"task_topic,omitzero"`
 	TaskOffset *int64 `json:"task_offset,omitzero"`
 	// TranscriptChunks is the number of transcript chunks the attempt wrote, on a terminal status.
 	TranscriptChunks int64 `json:"transcript_chunks,omitzero"`
@@ -297,7 +299,7 @@ type Echo struct {
 	MessageID string    `json:"message_id"`
 }
 
-// Advertisement is a receiver's live offers on wherry.receivers.
+// Advertisement is a receiver's live offers on its pool's receivers topic.
 type Advertisement struct {
 	V        int     `json:"v"`
 	Receiver string  `json:"receiver"`
@@ -476,11 +478,27 @@ func (value *Snapshot) version() *int      { return &value.V }
 // p.<pool>.admission.<receiver>, and a run ID is safe in logs and job names.
 var runID = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-var namePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`)
+// nameBody is the grammar of the names wherry operator issues.
+const nameBody = `[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?`
+
+var namePattern = regexp.MustCompile(`^` + nameBody + `$`)
 
 // ValidName reports whether name follows the grammar of the names wherry operator issues, which a pool's credentials
 // follow too.
 func ValidName(name string) bool { return namePattern.MatchString(name) }
+
+// taskTopic is a signature task topic, wherry.pool.<pool>.tasks.<agent>.<hex>: the one parser of a task topic read
+// back, so no reader splits one on dots.
+var taskTopic = regexp.MustCompile(`^wherry\.pool\.(` + nameBody + `)\.tasks\.(` + nameBody + `)\.[0-9a-f]{64}$`)
+
+// ParseTaskTopic returns the pool and agent a signature task topic names, or false when topic is not one.
+func ParseTaskTopic(topic string) (pool, agent string, ok bool) {
+	match := taskTopic.FindStringSubmatch(topic)
+	if match == nil {
+		return "", "", false
+	}
+	return match[1], match[2], true
+}
 
 // TaskHash is the SHA-256, in lowercase hex, of a task record's encoded value.
 func TaskHash(encoded []byte) string {
@@ -692,7 +710,8 @@ func (value *RunStatus) validate() error {
 	}
 	if update.TaskID != binding.Run || update.ContextID != binding.Run || !ValidHash(binding.TaskHash) ||
 		binding.TranscriptChunks < 0 || binding.TranscriptChunks > 0 && binding.Kind != "terminal" ||
-		(binding.TaskOffset != nil) != (binding.Kind == "claimed") || binding.TaskOffset != nil && *binding.TaskOffset < 0 {
+		(binding.TaskOffset != nil) != (binding.Kind == "claimed") || binding.TaskOffset != nil && *binding.TaskOffset < 0 ||
+		(binding.TaskTopic != "") != (binding.Kind == "claimed") || binding.TaskTopic != "" && !taskTopic.MatchString(binding.TaskTopic) {
 		return errors.New("invalid status")
 	}
 	if err := validateTaskStatus(&update.Status); err != nil {
@@ -706,6 +725,14 @@ func (value *RunStatus) validate() error {
 	}
 	switch binding.Kind {
 	case "claimed", "started", "rejected", "terminal", "released", "adopting", "reconciling":
+		return nil
+	case "placing":
+		// The text travels raw, as any status text does, when escaping would make it longer than base64.
+		message := update.Status.Message
+		if update.Status.State != TaskStateWorking || binding.LogOffset != nil || message == nil || len(message.Parts) != 1 ||
+			message.Parts[0].Text == "" && (message.Parts[0].Raw == nil || message.Parts[0].MediaType != "text/plain") {
+			return errors.New("a placing status is working, with one text part and no log offset")
+		}
 		return nil
 	default:
 		return errors.New("invalid status kind")

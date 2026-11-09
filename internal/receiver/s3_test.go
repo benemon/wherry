@@ -134,7 +134,7 @@ func TestS3ObjectsTravelOnlyInTheEnvelope(t *testing.T) {
 		t.Fatalf("prompt %q; want the input's path and no URL", prompt)
 	}
 	// Every record on the feed and the pool's topics is free of the URLs, the signature and the endpoint's paths.
-	for _, topic := range []string{operator.TenantTopic(testTenant), operator.TenantTranscriptTopic(testTenant), operator.PoolTasksTopic(testPool), operator.PoolEventsTopic(testPool)} {
+	for _, topic := range []string{operator.TenantTopic(testTenant), operator.TenantTranscriptTopic(testTenant), f.tasksTopic(), operator.PoolEventsTopic(testPool)} {
 		for _, record := range f.records(t, topic) {
 			for _, never := range []string{s3Signature, "X-Amz", s.endpoint()} {
 				if bytes.Contains(record.Value, []byte(never)) || bytes.Contains(decodedPayload(record.Value), []byte(never)) {
@@ -272,7 +272,7 @@ func TestS3UseWithoutPoolStorageIsRejected(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, edit)); admitted != nil || ack != kgo.AckReject {
+			if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, edit), f.receiver.profiles[0]); admitted != nil || ack != kgo.AckReject {
 				t.Fatalf("admitted %v with ack %v", admitted, ack)
 			}
 			if status := f.feedStatuses(t); len(status) != 1 || status[0].StatusUpdate.Status.Message.Parts[0].Text != "pool pool-a has no storage for S3 inputs and outputs" {

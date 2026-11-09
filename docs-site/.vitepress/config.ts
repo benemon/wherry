@@ -3,39 +3,169 @@ import { defineConfig } from 'vitepress'
 
 const sidebar = [
   {
-    text: 'Get started',
-    items: [
-      { text: 'Introduction', link: '/introduction' },
-      { text: 'Quickstart', link: '/quickstart' },
-      { text: 'Use cases', link: '/use-cases' },
-    ],
+    "text": "Get started",
+    "items": [
+      {
+        "text": "Introduction",
+        "link": "/introduction"
+      },
+      {
+        "text": "Use cases",
+        "link": "/use-cases"
+      },
+      {
+        "text": "Install the wherry CLI",
+        "link": "/install-cli"
+      },
+      {
+        "text": "Quickstart (development)",
+        "link": "/quickstart-development"
+      }
+    ]
   },
   {
-    text: 'Docs',
-    items: [
-      { text: 'Key concepts', link: '/concepts' },
-      { text: 'Design', link: '/design' },
+    "text": "Deploy",
+    "items": [
       {
-        text: 'Governance and security',
-        items: [
-          { text: 'Governance', link: '/governance' },
-          { text: 'Security', link: '/security' },
-        ],
+        "text": "Install",
+        "items": [
+          {
+            "text": "Overview",
+            "link": "/install"
+          },
+          {
+            "text": "Set up the operator",
+            "link": "/install-operator"
+          },
+          {
+            "text": "Receiver on Nomad",
+            "link": "/install-receiver-nomad"
+          },
+          {
+            "text": "Receiver on Kubernetes and OpenShift",
+            "link": "/install-receiver-kubernetes"
+          },
+          {
+            "text": "Receiver on systemd",
+            "link": "/install-receiver-systemd"
+          },
+          {
+            "text": "Set up a host",
+            "link": "/install-host"
+          },
+          {
+            "text": "Run a first task",
+            "link": "/install-first-task"
+          }
+        ]
       },
-      { text: 'Configuration', link: '/configuration' },
-      { text: 'Operations', link: '/operations' },
-      { text: 'Runbooks', link: '/runbooks' },
-      { text: 'Plugins', link: '/plugins' },
       {
-        text: 'APIs',
-        items: [
-          { text: 'Commands', link: '/commands' },
-          { text: 'MCP tools', link: '/mcp' },
-          { text: 'The wherry A2A extension', link: '/a2a-extension-v1' },
-        ],
-      },
-    ],
+        "text": "Upgrade and uninstall",
+        "link": "/upgrade"
+      }
+    ]
   },
+  {
+    "text": "Docs",
+    "items": [
+      {
+        "text": "Key concepts",
+        "link": "/concepts"
+      },
+      {
+        "text": "Design",
+        "link": "/design"
+      },
+      {
+        "text": "Governance and security",
+        "items": [
+          {
+            "text": "Governance",
+            "link": "/governance"
+          },
+          {
+            "text": "Security",
+            "link": "/security"
+          }
+        ]
+      },
+      {
+        "text": "Configuration",
+        "items": [
+          {
+            "text": "Operator",
+            "link": "/configuration-operator"
+          },
+          {
+            "text": "Receiver",
+            "link": "/configuration-receiver"
+          },
+          {
+            "text": "Host",
+            "link": "/configuration-host"
+          },
+          {
+            "text": "Development instance",
+            "link": "/configuration-development"
+          }
+        ]
+      },
+      {
+        "text": "Operations",
+        "items": [
+          {
+            "text": "Operator",
+            "link": "/operations-operator"
+          },
+          {
+            "text": "Receivers",
+            "link": "/operations-receivers"
+          },
+          {
+            "text": "Hosts",
+            "link": "/operations-hosts"
+          },
+          {
+            "text": "Runbooks",
+            "link": "/runbooks"
+          }
+        ]
+      },
+      {
+        "text": "Plugins",
+        "link": "/plugins"
+      }
+    ]
+  },
+  {
+    "text": "Reference",
+    "items": [
+      {
+        "text": "Commands",
+        "link": "/commands"
+      },
+      {
+        "text": "Development commands",
+        "link": "/commands-dev"
+      },
+      {
+        "text": "MCP tools",
+        "link": "/mcp"
+      },
+      {
+        "text": "Metrics",
+        "link": "/metrics"
+      },
+      {
+        "text": "Plugin protocol",
+        "link": "/plugin-protocol"
+      },
+      {
+        "text": "The wherry A2A extension",
+        "link": "/a2a-extension-v1"
+      }
+    ]
+  }
 ]
 
 const check = (items) => {
@@ -50,13 +180,14 @@ check(sidebar)
 
 // The pages are the repository's docs/, copied to src/ by the build, so they also read as plain Markdown on GitHub;
 // rendered from outside this directory, their imports would not resolve against node_modules. The build also copies
-// wherry-plugins' examples/ to src/examples/ for the Plugins page's snippet imports; they are not pages.
+// wherry-plugins' examples/ to src/examples/ for the Plugins page's snippet imports, and each plugin's README.md to
+// src/plugins/<plugin>/README.md for the Install pages' includes of its install region; they are not pages.
 export default defineConfig({
   title: 'wherry',
   description: 'An execution fabric for delegated agent work.',
   base: '/wherry/',
   srcDir: 'src',
-  srcExclude: ['examples/**'],
+  srcExclude: ['examples/**', 'plugins/**'],
   ignoreDeadLinks: false,
   vite: { publicDir: '../../brand' },
   head: [
@@ -71,8 +202,8 @@ export default defineConfig({
     // The lockup carries the wordmark.
     siteTitle: false,
     nav: [
-      { text: 'Quickstart', link: '/quickstart' },
-      { text: 'Configuration', link: '/configuration' },
+      { text: 'Install', link: '/install' },
+      { text: 'Configuration', link: '/configuration-host' },
       { text: 'Commands', link: '/commands' },
       { text: 'GitHub', link: 'https://github.com/benemon/wherry' },
     ],

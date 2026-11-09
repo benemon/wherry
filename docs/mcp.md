@@ -1,10 +1,12 @@
 # MCP tools
 
-`wherry host mcp` serves seven tools over stdio. Each takes and returns JSON with
-a declared schema and uses the server's one host. `start_by` and `end_by`
-set the task's `task_started_by` and `task_ended_by`, each an RFC 3339 time
-or a Go duration from now, such as `90m`; omitted, they take the CLI
-defaults, `10m` and `2h`.
+Run `wherry host mcp` to serve seven tools over stdio.
+Each tool takes and returns JSON with a declared schema.
+All tools use the server's host identity.
+
+`start_by` and `end_by` set `task_started_by` and `task_ended_by`.
+Pass an RFC 3339 time or a Go duration from now, such as `90m`.
+The defaults are `10m` and `2h`.
 
 | Tool | Input | Output |
 | --- | --- | --- |
@@ -35,13 +37,16 @@ defaults, `10m` and `2h`.
   as `--input`, `--credential` and `--output` take them;
   `storage` is `s3` or absent, and `s3` is `:s3`. An input must resolve, through any
   symbolic links, to a regular file beneath one of the
-  [`input_roots`](configuration.md#client-configuration), and opens through that
+  [`input_roots`](configuration-host.md#client-configuration), and opens through that
   root, so a link that leads out of it, even one that appears after the path
   resolves, is refused. An input root is matched by its path with symbolic links
   resolved when the server starts; an input that spells a root in different case,
   even on a case-insensitive file system, is refused. It must resolve to none of `state_dir`,
   `host_key`, `bundle`, a file a `file` source names or a storage key file; a relative
-  path is taken from the server's working directory.
+  path is taken from the server's working directory. Keep `state_dir` outside every
+  input root. With the default `state_dir`, `~/.local/state/wherry`, a root of `~`,
+  `~/.local`, `~/.local/state` or `~/.local/state/wherry` holds it; `XDG_STATE_HOME`
+  moves it.
 - `status` returns the latest verified state of a run without
   waiting. `runs` holds one entry for the run `id` names, or,
   without `id`, one per run `wherry status` lists, latest update first.
@@ -56,32 +61,8 @@ defaults, `10m` and `2h`.
   timestamp of the run's echo. A run that ended with the wherry event
   `key-lost` before its `task_started_by` is resubmitted under a new run ID,
   as `wherry status` does, and `replaced_by` is the replacement's run ID.
-- `wait` waits up to 45 seconds. It returns the outcome with `message`, the
-  status message's parts, and `artifacts`, or, while the run is unfinished, its current `state` with
-  `retry_after` set to 5. For a run whose `task_started_by` passes with no
-  status from a receiver, it returns at once with `state`
-  `TASK_STATE_SUBMITTED`, the `message` `status` gives, and no
-  `retry_after`. With a progress token it sends a progress notification
-  every 5 seconds. The artifacts are the result's: `result`, then a
-  [reference](a2a-extension-v1.md#reference-artifacts) for each returned
-  output, the reply over 64 KiB and the transcript. Each artifact is `{artifact_id, parts}`, and each part has
-  one of `text`, `data`, `url` or `raw_bytes` (the size of a binary part, which
-  is not included), with `media_type`. `wait` writes the run's verified
-  outputs as `wherry wait` does, to the default outputs directory, and returns
-  each in `outputs` as `{name, path, sha256, size}`, S3 outputs included, which
-  it downloads and verifies, then deletes the run's prefix, as `wherry wait`
-  does. `not_returned` holds `{name, size, reason}` for each output the result
-  lists as not returned and each one that fails verification. For a
-  [reply](a2a-extension-v1.md#the-reply) over 64 KiB, `message` holds its
-  first 64 KiB, and `wait` writes the verified reply to `reply.txt` among the
-  run's outputs and returns `reply` as `{path, sha256, size, cut}`, with
-  `sha256` and `size` of the file and `cut` set when the reply was longer than
-  the pool's `reply_limit`; when the chunks do not verify, `reply` is
-  `{rejected}` with the reason. A reply within 64 KiB is `message` whole, with
-  no `reply`. No expected output takes the name `reply.txt`. For a
-  run whose `task_started_by` passed unclaimed it writes nothing. `model`
-  is the run's placement's model. The `wait` tool returns no transcript;
-  `logs` pages it.
+- `wait` waits up to 45 seconds for the run to end;
+  [The `wait` tool](#the-wait-tool) gives its fields.
 - A run that ends with the wherry event `key-lost` before its
   `task_started_by` never started: its pool key was lost. `wait` resubmits
   it under a new run ID and follows each replacement, as `wherry wait` does.
@@ -92,7 +73,10 @@ defaults, `10m` and `2h`.
   `wherry status` and `wherry wait` print it, and `redacted` maps each name
   to the number of its markers in the messages, the artifacts, or every line
   of the transcript's attempt.
-- `submit` checks its arguments before it connects to the bus.
+- Before it connects to the bus, `submit` checks that exactly one of `prompt`
+  and `prompt_file` is given, each input's `storage`, and `start_by` and
+  `end_by`, and reads its input files. It checks the rest, such as the agent,
+  model and git host against the pool's terms, once connected.
 - `events` returns `events`, each
   `{attempt, kind, state, receiver, time, message}`, and
   `chunks`, each `{attempt, chunks}`.
@@ -107,9 +91,9 @@ defaults, `10m` and `2h`.
   for an empty line, and for a line that is not UTF-8, which has `raw_bytes`,
   its size, instead, and a line over 512 KiB, which has `unstored`,
   `{sha256, size}`.
-- A harness caps a tool's output; Claude Code's `MAX_MCP_OUTPUT_TOKENS`
-  defaults to about 25,000 tokens. A `logs` page fits it: it holds at
-  most `limit` lines, 100 by default and 500 at most (`wherry logs` prints
+- A harness caps a tool's output, as its documentation states, such as
+  [Claude Code's](https://docs.anthropic.com/en/docs/claude-code/mcp). A
+  `logs` page holds at most `limit` lines, 100 by default and 500 at most (`wherry logs` prints
   every line). A `limit` over 500 or a negative `offset` is refused with
   `INVALID_ARGUMENT`. The `logs` tool returns one page per call and has no
   follow mode. A page holds at most 24 KiB of
@@ -118,6 +102,39 @@ defaults, `10m` and `2h`.
   `truncated` true and `bytes` its full size, and `next_offset` passes it.
 - `skipped` counts the run's records that failed verification; for a
   `status` list, the records of every listed run.
+
+## The `wait` tool
+
+`wait` waits up to 45 seconds, and with a progress token sends a progress
+notification every 5 seconds. While the run is unfinished it returns the
+run's `state` with `retry_after`. For a run whose `task_started_by` passes
+with no status from a receiver, it returns at once with `state`
+`TASK_STATE_SUBMITTED`, the `message` `status` gives and no `retry_after`,
+and writes nothing.
+
+Once the run ends, `wait` writes the run's verified outputs as `wherry wait`
+does, to the default outputs directory. It downloads and verifies the S3
+outputs, then deletes the run's prefix, as `wherry wait` does. It returns no
+transcript; `logs` pages it.
+
+| Field | Content |
+| --- | --- |
+| `id` | the run the call named |
+| `state` | the run's state |
+| `model` | the run's placement's model, when it has one |
+| `retry_after` | 5, while the run is unfinished |
+| `message` | the status message's parts; for a [reply](a2a-extension-v1.md#the-reply) over 64 KiB, its first 64 KiB |
+| `reply` | for a reply over 64 KiB, `{path, sha256, size, cut}` of `reply.txt`, which `wait` writes among the run's outputs, with `cut` set when the reply was longer than the pool's `reply_limit`; `{rejected}` with the reason when the reply's chunks do not verify; absent for a reply within 64 KiB |
+| `artifacts` | the result's: `result`, then a [reference](a2a-extension-v1.md#reference-artifacts) for each returned output, the reply over 64 KiB and the transcript; each is `{artifact_id, parts}`, and each part has one of `text`, `data`, `url` or `raw_bytes` (the size of a binary part, which is not included), with `media_type` |
+| `outputs` | `{name, path, sha256, size}` for each output written, S3 outputs included |
+| `not_returned` | `{name, size, reason}` for each output the result lists as not returned and each one that fails verification |
+| `redacted` | each redaction marker's name and its count |
+| `skipped` | the run's records that failed verification |
+| `runs` | for a run resubmitted after `key-lost`, every run followed, the run whose outcome this is last |
+
+No expected output takes the name `reply.txt`.
+
+## Errors
 
 A failed call returns `{"code", "message"}`. The message never carries
 error text from the bus, the broker or the host key.

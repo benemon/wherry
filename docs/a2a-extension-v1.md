@@ -2,94 +2,11 @@
 
 URI: `https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md`
 
-**Change note, 2026-11-01 (custody coordination):** edited in place at
-version 1. An [advertisement](#advertisement) no longer carries
-`started_ms` or `stepping_down`, and a
-[custodian snapshot](#custodian-snapshot)'s `reason` is no longer
-`handover`: every custodian change publishes `takeover` or `contested`.
-A snapshot with reason `handover` is refused, as snapshots are decoded
-strictly; that is the change's one incompatibility. An earlier
-advertisement's `started_ms` or `stepping_down` is an unknown member,
-ignored as on any record, and has no effect. A host no longer refuses to
-submit when the current snapshot's custodian has no live advertisement:
-advertisements place tasks and custody follows the custodian group's
-session.
-
-**Change note, 2026-11-01 (pool key):** edited in place at version 1. A
-pool's key custodian replaces the seal exchange: the seal request a
-receiver wrote to the tenant feed and the seal its host answered with are
-removed, with the seal request's `expiry_at_ms`. A submission carries
-its credentials, presigned S3 URLs and redaction key in an `envelope`, with
-its content key in a submit `wrap` to the pool's current key
-([Submission](#submission)). A claimant writes an
-[open request](#open-request). The custodian answers it after the
-[claim check](#the-claim-check) with an [attempt wrap](#attempt-wrap) or an
-[open refusal](#open-refusal), in one transaction with a
-[claim decision](#claim-decision). A receiver holding a replaced pool key
-writes a [re-key wrap](#re-key-wrap) to the current key. The custodian
-publishes a [custodian snapshot](#custodian-snapshot) on the pool's
-`wherry.pool.<pool>.custodian` topic. A [resubmission](#resubmission)
-carries `replaces` and `s3_input_run`. Statuses add the kinds
-`released`, `adopting` and `reconciling`, and a `terminal` status the
-wherry event `key-lost`.
-
-**Change note, 2026-10-29 (A2A conformance):** edited in place at version 1.
-A run that ends for want of a credential ends `TASK_STATE_FAILED` with a
-[`credential` data part](#the-credential-data-part) for each credential,
-when its seal goes unanswered and when its agent reports
-`TASK_STATE_AUTH_REQUIRED`. wherry no longer treats
-`TASK_STATE_AUTH_REQUIRED` as terminal. A submission's message has `role`
-`ROLE_USER`. An output chunk's artifact has `name`, and its part
-`filename` and `mediaType`. Content a record does not carry, an input in a
-result's history or a transcript line over 512 KiB, is a
-[reference part](#reference-parts) in place of a `url` part
-`unstored:input` or `unstored:oversize`. Every run's transcript ends with a
-`lastChunk` chunk, an empty one when no line is left for the terminal
-transaction. The result's reply keeps the part type of the agent's outcome
-message, `data` or text, with no test for JSON. The agent contract states
-that an outcome message's other parts are dropped. The extension reserves
-the bare `metadata` keys wherry writes. New sections: [Binding](#binding),
-which maps A2A's operations and errors to records, and
-[Agent Card](#agent-card). A result's `artifacts` keep the `result`
-artifact and add a [reference artifact](#reference-artifacts) for each
-output it returns, its reply chunks and its transcript, so `result` and
-`transcript` are reserved output names. Tenant feeds and transcript topics
-take records of up to 2 MiB.
-
-**Change note, 2026-10-29:** edited in place at version 1. A reply over
-64 KiB once redacted travels as [reply chunks](#the-reply), output chunks with
-`artifactId` `.wherry/reply`, up to the pool's `reply_limit`. The result text
-and the status text carry its first 64 KiB, the result's metadata lists it as
-`reply`, and `[redacted text over 65536 bytes]` no longer replaces either. The
-outcome file is bounded by the pool's `output_limit`. A host reserves
-`reply.txt` among a run's outputs.
-
-**Change note, 2026-10-27:** edited in place at version 1. The term adapter
-is retired in favour of plugin, and the output reason `not streamed by the
-adapter` is renamed `not streamed by the plugin`.
-
-**Change note, 2026-10-27:** edited in place at version 1. Chunks and
-output chunks move from the tenant feed to the tenant's transcript topic,
-`wherry.tenant.<tenant>.transcript`, and a `terminal` status carries
-`transcript_chunks`. The `heartbeat` status kind is removed: a receiver
-records each held run's committed transcript offset as a
-[progress](#progress) record on its own progress topic,
-`wherry.receiver.<receiver>.progress`, and an adopter resumes from the
-highest of the run's `started` offsets and progress records.
-
-**Change note, 2026-10-25:** edited in place at version 1. The configured
-unit a run is routed to is a plugin profile, a named, configured use of a plugin.
-The member `adapter` of advertisement offers, start failures and result
-metadata is renamed `profile`. The receiver configuration on
-`wherry.operator` holds `profiles` in place of `adapters`, each with `plugin`
-in place of `type` and no `platform`. Messages that named the adapter name
-the profile.
-
 Hosts and receivers exchange A2A tasks over Kafka with no server between
 them. wherry is a partial custom A2A protocol binding over Kafka: it
 provides some of A2A's operations, as records ([Binding](#binding)). This
 extension fixes the record formats and the checks each reader applies. Five
-of the records carry [A2A v1.0](https://a2a-protocol.org/) objects:
+of the records carry [A2A v1.0](https://a2a-protocol.org/v1.0.0/specification/) objects:
 submissions, statuses, transcript chunks, output chunks and results hold
 one under its A2A field name, beside a `wherry` object of the run's
 placement and routing. Every `Message` and `Artifact` wherry writes
@@ -103,12 +20,10 @@ not. [Key concepts](concepts.md) explains the roles this document names, and
   duplicate names. A member added after wherry 1.0 states, beside it, what a
   reader that ignores it does.
 - Every payload has `v`, the payload version, which is `1`. Readers reject
-  any other version; a reader reports an [operator record](#operator-records)
-  with a higher version as written by a later release.
+  any other version, as [Operator records](#operator-records) details.
 - A2A objects use the
   [proto3 JSON mapping](https://protobuf.dev/programming-guides/json/) of
   the A2A v1.0 schema. wherry writes `bytes` as padded standard base64.
-  Readers accept standard or URL-safe base64, padded or not.
 - Every `TaskStatus` has `timestamp`, an RFC 3339 time. Receivers write it
   in UTC with milliseconds.
 - This extension reserves the bare `metadata` keys wherry writes: in a
@@ -196,14 +111,14 @@ algorithm `EdDSA` (Ed25519). The protected header holds:
 
 | Record | `typ` | Signer | Topic | Kafka key |
 | --- | --- | --- | --- | --- |
-| submission | `application/vnd.wherry.submission.v1+jws` | host | `wherry.pool.<pool>.tasks` | run ID |
+| submission | `application/vnd.wherry.submission.v1+jws` | host | `wherry.pool.<pool>.tasks.<agent>.<hex>`, the task topic of the profile signature the host placed it on | run ID |
 | cancel | `application/vnd.wherry.cancel.v1+jws` | host | `wherry.pool.<pool>.events` | run ID |
 | status | `application/vnd.wherry.status.v1+jws` | receiver | `wherry.pool.<pool>.events` and `wherry.tenant.<tenant>` | run ID |
 | chunk | `application/vnd.wherry.chunk.v1+jws` | receiver | `wherry.tenant.<tenant>.transcript` | run ID |
 | output chunk | `application/vnd.wherry.output.v1+jws` | receiver | `wherry.tenant.<tenant>.transcript` | run ID |
 | result | `application/vnd.wherry.result.v1+jws` | receiver | `wherry.tenant.<tenant>` | run ID |
 | echo | `application/vnd.wherry.echo.v1+jws` | receiver | `wherry.tenant.<tenant>` | run ID |
-| advertisement | `application/vnd.wherry.advertisement.v1+jws` | receiver | `wherry.receivers` | receiver ID |
+| advertisement | `application/vnd.wherry.advertisement.v1+jws` | receiver | `wherry.pool.<pool>.receivers` | receiver ID |
 | start failure | `application/vnd.wherry.start-failure.v1+jws` | receiver | `wherry.pool.<pool>.events` | run ID |
 | open request | `application/vnd.wherry.open-request.v1+jws` | receiver | `wherry.pool.<pool>.events` | run ID |
 | attempt wrap | `application/vnd.wherry.attempt-wrap.v1+jws` | receiver, the custodian | `wherry.pool.<pool>.events` | run ID |
@@ -238,7 +153,8 @@ A reader accepts a signed record only when all of these hold:
      ([Open request](#open-request)).
    - An echo on `wherry.tenant.<tenant>` names that tenant, and comes from a
      live member of the pool it names, to which the tenant is entitled.
-   - An advertisement comes from a live member of the pool it names.
+   - An advertisement on `wherry.pool.<pool>.receivers` names that pool, and
+     comes from a live member of it.
    - A [custodian snapshot](#custodian-snapshot) comes from the live member
      of the pool of its topic that it names as custodian.
 
@@ -313,7 +229,7 @@ A submission is the task of one run.
   delivered as its bytes under `filename`, and a `data` part as its JSON under
   `filename` with `.json` added. The delivered names are unique. The signed
   submission is at most the pool's recorded `record_limit` bytes, the
-  broker's record limit for the pool's tasks topic, and the `raw` and `data`
+  broker's record limit for the pool's task topics, and the `raw` and `data`
   parts together hold at most the smallest `inline_limit` the matching
   plugin profiles declare. Over either, a host carries the inputs as
   [S3 inputs](#s3-inputs-and-outputs) when the pool has storage and the host
@@ -349,7 +265,7 @@ A submission is the task of one run.
   `s3_inputs` number at most 256 together.
 - `git` is the run's [git input](#git-input), optional. With a `host_key`,
   no input file or S3 input is named `known_hosts`. A host fills its
-  `credential` and `host_key` from the [git entry](configuration.md#client-configuration)
+  `credential` and `host_key` from the [git entry](configuration-host.md#client-configuration)
   of its configuration that the remote falls under, and adds that credential
   to `credentials` at the file `git-credential`.
 
@@ -443,10 +359,12 @@ A `terminal` status's `wherry` object adds the attempt's chunk count:
 - `task_hash` is the hash of the run's submission.
 - `event_id` identifies the fact the status reports. Readers keep one
   status per event ID.
-- `task_offset` is the offset of the claimed submission on the pool's task
-  topic, whose one partition is 0, on `claimed` only, where it is required.
-  A status of another kind carrying it, or a `claimed` status without it,
-  fails validation.
+- `task_topic` and `task_offset` are the signature task topic the claimed
+  submission was read from and its offset on that topic, whose one partition
+  is 0, on `claimed` only, where both are required. `task_topic` matches
+  `^wherry\.pool\.<name>\.tasks\.<name>\.[0-9a-f]{64}$`, `<name>` the name
+  grammar. A status of another kind carrying either, or a `claimed` status
+  without both, fails validation.
 - `log_offset` is the agent output offset an adopter follows from, on
   `started` only. The transcript is published up to at least that offset.
   Later offsets go to the receiver's [progress](#progress) topic.
@@ -461,12 +379,13 @@ A `terminal` status's `wherry` object adds the attempt's chunk count:
 
 | `kind` | State | Written when | Extra |
 | --- | --- | --- | --- |
-| `claimed` | `TASK_STATE_WORKING` | the receiver admits the run | `task_offset` |
+| `claimed` | `TASK_STATE_WORKING` | the receiver admits the run | `task_topic`, `task_offset` |
+| `placing` | `TASK_STATE_WORKING` | the job is registered and the platform has not placed it; again when the platform's reason changes | the reason as message text |
 | `started` | `TASK_STATE_WORKING` | the job has started | |
 | `rejected` | `TASK_STATE_REJECTED` | the receiver refuses the submission | the reason as message text |
-| `terminal` | `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED` or `TASK_STATE_CANCELED` | the run has ended | the agent's message from its [outcome file](configuration.md#agent-contract), or the reason as message text |
+| `terminal` | `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED` or `TASK_STATE_CANCELED` | the run has ended | the agent's message from its [outcome file](configuration-receiver.md#agent-contract), or the reason as message text |
 | `released` | `TASK_STATE_SUBMITTED` | the receiver gives back its claim, before it returns the task to the pool | |
-| `adopting` | `TASK_STATE_WORKING` | the receiver found the run's job running or ended, before its [open request](#open-request) | |
+| `adopting` | `TASK_STATE_WORKING` | the receiver found the run's job running, ended or pending, before its [open request](#open-request) | |
 | `reconciling` | `TASK_STATE_WORKING` | the receiver, refused `key unavailable`, holds the claim while Lookup does not answer ([Open refusal](#open-refusal)) | |
 
 A receiver writes `released`, `adopting` and `reconciling` to the pool's
@@ -496,6 +415,9 @@ otherwise its preview. It travels as a `raw` part with media type
 `text/plain` when escaping it as a JSON string would make it longer than
 base64 does. The fixed texts are:
 
+- working: `waiting for placement (<reason>)`, with the platform's reason,
+  redacted, on one line of at most 512 bytes, or `waiting for placement`
+  when the platform gives no reason;
 - rejected: `agent is outside the pool terms`,
   `model not in the pool's terms`, `duplicate submission`,
   `the task carries no envelope`,
@@ -506,6 +428,8 @@ base64 does. The fixed texts are:
   `not ended by task_ended_by (<RFC 3339 time>)`,
   `task_ended_by is past task_started_by plus the 6h run cap`,
   `unsupported message part`, `run ID does not match its signer`,
+  `the host does not supply a required credential of the agent`,
+  `a task credential takes the target of one of the agent's credentials`,
   `git remote host <host> is not in pool <pool>'s vcs hosts`, and
   `pool <pool> has no storage for S3 inputs and outputs`;
 - failed: `not started by task_started_by (<RFC 3339 time>)`,
@@ -515,7 +439,7 @@ base64 does. The fixed texts are:
   `agent exited 137 (OOMKilled)`), `agent reported no outcome`,
   `an S3 input was not fetched, or did not match its size and SHA-256`,
   `cannot be opened: the pool's custodian changed and its key was lost`
-  ([Open refusal](#open-refusal)), the reason an opened envelope fails its
+  and `envelope invalid` ([Open refusal](#open-refusal)), the reason an opened envelope fails its
   check against the task, such as `envelope is bound to another task` or
   `the URL for S3 input <name> is not its object in the pool's storage`,
   `delivery budget exhausted`,
@@ -546,7 +470,7 @@ status message names each credential in a data part:
 `credential` is a credential name: at most 32 lowercase letters, digits and
 hyphens. The receiver writes one part for the credential an agent names when
 its
-[outcome file](configuration.md#agent-contract) reports
+[outcome file](configuration-receiver.md#agent-contract) reports
 `TASK_STATE_AUTH_REQUIRED`. The agent's credential name is redacted like any
 agent text. It names one of the credentials the prompt lists, including an
 optional one the prompt marks `(not supplied)`, or another the run needs and
@@ -769,8 +693,8 @@ An echo tells every host of a tenant where a run was admitted.
 
 A receiver writes the echo in the transaction that holds the run's
 `claimed` or `rejected` status, or its `terminal` status when the receiver
-ends at the [delivery budget](#delivery-budget) a run no ready plugin profile
-satisfies or a run it already failed to start. The echo's fields copy the
+ends at the [delivery budget](#delivery-budget) a run whose signature no
+ready plugin profile of the receiver has. The echo's fields copy the
 submission's, so the echo of a task rejected with `run ID does not match its
 signer` carries the `host` and `run_nonce` that do not derive its `run`. A
 host that has no record of the run takes the run's pool and submission hash
@@ -781,7 +705,8 @@ when its `task_hash` equals the hash of the run's submission.
 
 ## Advertisement
 
-An advertisement reports a receiver's liveness and capacity.
+An advertisement reports a receiver's liveness and capacity: the sum of its
+profiles' replicas (0 or absent counts as one).
 
 ```json
 {
@@ -793,7 +718,7 @@ An advertisement reports a receiver's liveness and capacity.
 }
 ```
 
-- `offers` lists the receiver's ready plugin profiles in routing order, each as
+- `offers` lists the receiver's ready plugin profiles in recorded order, each as
   `profile`, `agent` and, optionally, `inline_limit`, the bytes of `raw`
   and `data` parts the profile delivers, absent when it declares no limit
   and never negative. It is empty when no profile is ready. Readers take a
@@ -924,19 +849,14 @@ the receiver's log alone.
 
 `profile` is the profile the receiver routed the task to.
 
-A receiver delivered a task for which it holds its own start failure, with
-the task's `task_hash`, releases it without starting it, and fetches no
-task from the pool, in any of its slots, for the pool's lock duration, so
-the pool can deliver the task to another member. The release uses a
-delivery; at the [delivery budget](#delivery-budget) the receiver ends the
-run instead.
-
 ### Delivery budget
 
 From an attempt of the pool's `delivery_limit` minus 1, a receiver that
 would release a task to the pool ends the run `TASK_STATE_FAILED` with the
 message text `delivery budget exhausted`. The releases this covers are
-start failures, a dispatch whose outcome the receiver cannot resolve, a
+start failures, the release of a task no ready profile of the receiver has
+the signature of ([Admission](#admission) step 9), a dispatch whose outcome the receiver
+cannot resolve, a
 failed read of the pool's events or of the host's topic once the run is
 claimed, and a failure to find, stop or remove the run's job.
 
@@ -960,7 +880,9 @@ These releases are exempt:
   continues the run;
 - a denied receiver releases the task, since it cannot write;
 - a receiver that cannot build the run's transactional producer releases
-  the task, since it cannot write.
+  the task, since it cannot write;
+- a receiver that holds its pool suspended releases the task before
+  admission, since it claims nothing from a suspended pool.
 
 A receiver whose write of the terminal fails releases the task.
 
@@ -976,8 +898,9 @@ JSON:
 ```
 
 - Only that receiver writes its progress topic, so Kafka authenticates the
-  record, and no other principal can write a key that compaction would let
-  supersede it. The live members of its pool read it; hosts do not.
+  record, and no other host or receiver principal can write a key that
+  compaction would let supersede it. `wherry.operator` can, through its
+  prefixed grant on `wherry.` topics. The live members of its pool read it; hosts do not.
 - `log_offset` is the agent output offset the run's transcript is committed
   up to. The record commits in the transaction of the [chunks](#chunk) it
   covers, every 10 seconds while the job runs. An interval with no new
@@ -1080,14 +1003,14 @@ pool's events in a transaction of its own, after the run's `claimed` status.
   time plus 5 minutes and 120 seconds and the open bound passes. The open
   bound is `task_started_by` for a first start and `task_ended_by` for an
   adoption. With no answer it commits `released` and returns the task to the
-  pool, so the delivery budget bounds the cycle; at the open bound the run
+  pool, and the delivery budget bounds the cycle. At the open bound the run
   ends past its bound.
 - An adopter publishes nothing of the job until it opens. It holds the job's
   lines, at most 4 MiB, dropping the oldest, and logs how many it dropped and
-  the offset its transcript resumes at; the first chunk's `seq` shows the gap.
+  the offset its transcript resumes at. The first chunk's `seq` shows the gap.
 - The private key lives only in the receiver's memory and is gone once the
   wait ends. A redelivered or adopted attempt makes a new key and a new
-  request; a wrap answering an earlier request does not open for it.
+  request. A wrap answering an earlier request does not open for it.
 - A receiver giving back a claim it holds commits `released` before it
   returns the task to the pool. When `released` does not commit, it leaves
   the task unacknowledged, and the share group returns it when its
@@ -1102,13 +1025,15 @@ request only when:
 1. it verifies as the live member of the pool it names; otherwise it refuses
    `not the current claimant`;
 2. the run has no terminal status and no cancel (otherwise `terminal`), its
-   `task_hash` is the run's task, and the submission at the `task_offset` of
-   the requester's `claimed` status, read with one fetch, is under the run's
+   `task_hash` is the run's task, the requester's `claimed` status names a
+   `task_topic` under the pool's prefix `wherry.pool.<pool>.tasks.`, and the
+   submission at its `task_topic` and `task_offset`, read with one fetch,
+   never from a topic recomputed from the current terms, is under the run's
    Kafka key, passes the [signed-record checks](#signed-records), names the
    run under a run ID its signer derives, has the request's `task_hash`, and
    carries an `envelope` with bounds that hold at its append time as
    [Admission](#admission) states; otherwise `not the current claimant`. It
-   checks rules 1 and 3 before this one, and reads the task topic for no
+   checks rules 1 and 3 before this one, and reads a task topic for no
    other request;
 3. the run's latest ownership status, `claimed` or `released`, is the
    requester's `claimed` for the request's `attempt`; otherwise
@@ -1124,23 +1049,24 @@ request only when:
 6. when the claim changed receivers, it has no previous holder, or the
    previous holder has no live membership or its latest advertisement in the
    pool appended at or before the claim is more than 120 seconds old when the
-   custodian decides; otherwise `two live claimants`. The previous holder is
+   custodian decides; otherwise `two live claimants`. When the custodian
+   cannot read the advertisements, it counts the previous holder live. The previous holder is
    the receiver of the latest earlier `claimed` for the task whose claim
    decision served it and that the same receiver has not followed with its
    own `released`. A claim refused or never decided holds nothing, and a
    `released` ends only its own receiver's claim.
 
 The custodian decides rule 6 once for each claim and commits that decision as
-a [claim decision](#claim-decision) in the transaction of its answer; a later
+a [claim decision](#claim-decision) in the transaction of its answer. A later
 request for the same claim takes that decision. It then recovers the content
 key from the submit wrap or a [re-key wrap](#re-key-wrap) to a key it holds,
 opens the envelope and checks it against the task as [Submission](#submission)
-states; a check that fails refuses `envelope invalid`, so a spliced envelope
+states. A check that fails refuses `envelope invalid`, and a spliced envelope
 never releases its content key. With no key it waits for a holder's re-key
 wrap until the earlier of the request's append time plus 5 minutes and the
 open bound, then refuses `key unavailable`. Otherwise it commits an attempt
 wrap. Each answer is one transaction through the transactional ID
-`p.<pool>.custodian`, so a fenced custodian answers nothing; a request whose
+`p.<pool>.custodian`, and a fenced custodian answers nothing. A request whose
 answer's commit has an unknown outcome is answered again on a later pass only
 when the answer is not on the pool's events.
 
@@ -1255,7 +1181,8 @@ the [claim check](#the-claim-check).
   decided as if that holder never claimed, `unchanged` or `released`; it is
   `lease` only when the membership ended after the custodian read the events.
 - `advertisement` names the previous holder's advertisement the decision took,
-  by its offset on `wherry.receivers` and its append time, and is absent when
+  by its offset on the pool's receivers topic, `wherry.pool.<pool>.receivers`,
+  and its append time, and is absent when
   it took none.
 - A custodian counts the claims it serves to a new claimant in
   `wherry_claimant_changes_total` by `reason`.
@@ -1263,40 +1190,62 @@ the [claim check](#the-claim-check).
 ## Redaction
 
 Before it signs any transcript chunk, output chunk, result text or status
-message of the attempt, the receiver replaces every occurrence of each
-credential value its envelope delivered, task credentials and presigned URLs
-included, and of each URL's `X-Amz-Signature` value alone, with the value's
-marker: `[redacted:`, 16 base64url characters and `]`, 27 bytes. The characters
-are the first 96 bits of the HMAC-SHA256, under the run's redaction key, of
-`wherry-redaction-v1` followed by the value's name: the credential's name, or
-`s3-inputs/<name>` or `s3-outputs/<name>` for a URL and its signature. Every
-form of a value takes the same marker, and every attempt of the run the same
-markers. No marker maps to a credential name without the run's redaction key. When
-a form of any delivered value occurs within a marker, that marker is `[*]`
-instead, so a replacement cannot publish another value. The data passes through
-the replacement in pieces of 64 KiB. It replaces two forms of each value: its
-bytes without trailing CR and LF, since a credential file usually ends in a
-newline that transcripts and outputs drop, and those bytes escaped as a JSON
-string, as a transcript line carries them. The value's own bytes contain the
-first form, so its redaction leaves only the line ending. It redacts an output
-file whole before it splits it into chunks and computes its hash and size. In
-result metadata it replaces within JSON string values only, so the metadata
-stays valid. The marker can be longer than a value, so the limits hold for the
-redacted bytes: an output whose redacted form is over the pool's `output_limit`,
-or would take the run's outputs over it, is listed as `exceeds output limit`; a
-transcript line whose redacted form is over 512 KiB becomes a
-[reference part](#reference-parts) with that form's hash and size; a reply whose redacted
-form is over 64 KiB travels as its preview and [reply chunks](#the-reply), both
-cut from the redacted form; and a credential name whose
-redacted form is over 64 KiB is replaced by `[redacted text over 65536 bytes]`. A result whose agent fields are 16 KiB of
-8-byte values, each replaced by its 27-byte marker, still fits a default
-producer batch. A value shorter than 8 bytes once trimmed is not redacted; the
-receiver logs `credential <name> too short to redact` once for the attempt. A
-value in any other encoding, such as base64, is not replaced. An adopted attempt
-redacts the values of its own open of the envelope. Each form is replaced once, longest
-first, and a marker can join the bytes beside it into a value that was not there
-before: when a value starts with a marker's tail, such as `]`, and the rest of
-it follows a replaced value, the published text holds that value whole.
+message of the attempt, the receiver replaces values with markers.
+
+What it replaces:
+
+- every occurrence of each credential value its envelope delivered, task
+  credentials and presigned URLs included, and of each URL's
+  `X-Amz-Signature` value alone;
+- two forms of each value: its bytes without trailing CR and LF, since a
+  credential file usually ends in a newline that transcripts and outputs
+  drop, and those bytes escaped as a JSON string, as a transcript line
+  carries them. The value's own bytes contain the first form, so its
+  redaction leaves only the line ending.
+
+What it does not replace:
+
+- a value shorter than 8 bytes once trimmed. The receiver logs
+  `credential <name> too short to redact` once for the attempt;
+- a value in any other encoding, such as base64.
+
+The marker:
+
+- is `[redacted:`, 16 base64url characters and `]`, 27 bytes. The characters
+  are the first 96 bits of the HMAC-SHA256, under the run's redaction key,
+  of `wherry-redaction-v1` followed by the value's name: the credential's
+  name, or `s3-inputs/<name>` or `s3-outputs/<name>` for a URL and its
+  signature;
+- is the same for every form of a value, and every attempt of the run uses
+  the same markers. No marker maps to a credential name without the run's
+  redaction key;
+- is `[*]` when a form of any delivered value occurs within it, so a
+  replacement cannot publish another value.
+
+How it replaces:
+
+- The data passes through the replacement in pieces of 64 KiB.
+- Each form is replaced once, longest first. A marker can join the bytes
+  beside it into a value that was not there before: when a value starts
+  with a marker's tail, such as `]`, and the rest of it follows a replaced
+  value, the published text holds that value whole.
+- An output file is redacted whole before the receiver splits it into
+  chunks and computes its hash and size.
+- In result metadata it replaces within JSON string values only, so the
+  metadata stays valid.
+- An adopted attempt redacts the values of its own open of the envelope.
+
+The marker can be longer than a value, so the limits hold for the redacted
+bytes:
+
+- an output whose redacted form is over the pool's `output_limit`, or would
+  take the run's outputs over it, is listed as `exceeds output limit`;
+- a transcript line whose redacted form is over 512 KiB becomes a
+  [reference part](#reference-parts) with that form's hash and size;
+- a reply whose redacted form is over 64 KiB travels as its preview and
+  [reply chunks](#the-reply), both cut from the redacted form;
+- a credential name whose redacted form is over 64 KiB is replaced by
+  `[redacted text over 65536 bytes]`.
 
 ## Operator records
 
@@ -1307,30 +1256,41 @@ writes, each with `v`, `kind` and `at_ms` (Unix milliseconds).
 | --- | --- | --- |
 | `pool` | `pool`, `terms` | records or replaces the pool's terms |
 | `receiver` | `pool`, `receiver`, `config` | records or replaces the receiver's configuration |
+| `tenant` | `tenant` | records a new tenant |
 | `host` | `tenant`, `host` | records a host of the tenant |
 | `entitlement` | `tenant`, `pool` | entitles the tenant to the pool |
-| `end` | `receiver`, or `tenant` and `host` | records a membership end |
+| `end` | `receiver`; `tenant` and `host`; `tenant` and `pool`; or `tenant` alone | ends a principal, entitlement or tenant |
 | `revoking` | `receiver`, or `tenant` and `host` | records a revocation in progress: the principal is granted no ACL and stays a member until its `end` |
+| `suspend` | `pool` | suspends the pool ([Suspension](concepts.md#suspension)) |
+| `resume` | `pool` | resumes a suspended pool |
+| `rotate-key` | `pool` | asks the pool's key custodian for a new key ([Custodian snapshot](#custodian-snapshot)) |
 
-`terms` has the members of the [pool terms](configuration.md#pool-terms) file
-and `record_limit`, the tasks topic's record limit that `pool apply` reads
+`terms` has the members of the [pool terms](configuration-operator.md#pool-terms) file
+and `record_limit`, the lowest record limit of the pool's task topics that `pool apply` reads
 from the broker, with `start_by_limit_ms` and `lock_duration_ms` in milliseconds for its
 `start_by_limit` and `lock_duration`. `config` holds `receiver` and `pool`,
-which equal the record's, the receiver's `capacity`, and its `profiles` in
-routing order, the plugins in the order of their names. Each plugin profile is the
-[profile entry](configuration.md#receiver-configuration) as `name`, `plugin`
-naming its plugin, `agent`, `labels` when set, and the merged
-`config`, which keeps a `credential` name and never a credential value. An `end` names
-exactly one of `receiver`, or `tenant` and `host`. A `revoking` names exactly one of `receiver`, or
+which equal the record's, the receiver's `plugin_sha256`, the
+lowercase hex SHA-256 pinned for each plugin type, and its `profiles` in
+recorded order, the plugins in the order of their names. Each plugin profile is the
+[profile entry](configuration-receiver.md#receiver-configuration) as `name`, `plugin`
+naming its plugin, `agent`, optional `replicas` (omitted when 0), `labels` when
+set, and the merged `config`, which keeps a `credential` name and never a
+credential value. A value of 0 for `replicas` means one. An `end` names
+exactly one subject: `receiver`, `tenant` and `host`, `tenant` and `pool`, or `tenant` alone. Tenant and entitlement ends use keys `end.tenant.<T>` and `end.entitlement.<T>.<P>` and live outside principal revocation sets. A `revoking` names exactly one of `receiver`, or
 `tenant` and `host`, and no other member.
 Readers fold the records in order. A reader loads no state when:
 
 - a `receiver` record moves a receiver to another pool or names an unknown
   pool;
 - a `receiver` or `host` record follows that member's `end`;
-- an `entitlement` names an unknown pool;
+- an `entitlement`, `suspend`, `resume` or `rotate-key` record names an
+  unknown pool;
+- an entitlement or host precedes its tenant record or follows its tenant end;
+- a tenant record repeats a name, even an ended one;
+- a tenant or entitlement end names an absent subject;
+- a tenant end has a live entitlement or host, including a revoking host that has not ended (a revoking and ended host is allowed);
 - a record fails to decode;
-- two of the Kafka names that pools, receivers and hosts derive (topics,
+- two of the Kafka names that pools, receivers, hosts and tenants derive (topics,
   share groups, principals and transactional prefixes) collide.
 
 Readers ignore unknown members on a record and reject duplicate names. A
@@ -1342,7 +1302,10 @@ this one needs an upgrade; otherwise it reports that this release cannot read
 
 ## Admission
 
-A receiver that claims a submission:
+A receiver that holds its pool suspended, in its latest read of
+`wherry.operator`, releases every submission it claims before step 1,
+without reading it; the [delivery budget](#delivery-budget) exempts that
+release. Otherwise a receiver that claims a submission:
 
 1. acknowledges it and writes nothing when the pool's events already hold a
    status in a terminal state, `TASK_STATE_REJECTED` included, with its task
@@ -1359,8 +1322,8 @@ A receiver that claims a submission:
    live pool members: the first wins. Revoking the member that wrote that
    status makes the next one first;
 5. acknowledges it and writes nothing when the latest `claimed` status with
-   its task hash names another `task_offset`: it is a copy, byte for byte, of
-   the claimed submission. A redelivery of the claimed submission itself goes
+   its task hash names another `task_topic` or `task_offset`: it is a copy,
+   byte for byte, of the claimed submission. A redelivery of the claimed submission itself goes
    on;
 6. rejects it with `agent is outside the pool terms` when its agent is
    outside the pool's terms; with `model not in the pool's terms` when the agent has `models` and the
@@ -1380,24 +1343,36 @@ A receiver that claims a submission:
    `task_ended_by is past task_started_by plus the 6h run cap` when its
    `task_ended_by` is more than six hours after its `task_started_by`. Its
    `rejected` status names no run's task (step 4), so a later submission of
-   the run that passes is admitted;
-9. releases it when no ready plugin profile satisfies the placement, unless
-   a member has claimed the run and its `task_ended_by` has passed, or its
-   `task_started_by` has passed with no `started` event;
+   the run that passes is admitted. The custodian refuses the open of a
+   claimed run that fails these checks, and the key custodian's re-key scan
+   skips it;
+9. rejects it with `agent does not match the task topic` when the topic it
+   was read from is not a signature task topic or names another agent than
+   its placement; releases it, logged and with no start-failure record, when
+   the plugin profile whose claim loop read it is no longer ready; and rejects
+   it with `selector does not match the task topic` when that profile's
+   labels do not satisfy its selector. A run a member has claimed goes on
+   without a profile when its `task_ended_by` has passed, or when its
+   `task_started_by` has passed with no `started` event, so that the run
+   ends as below;
 10. rejects a run no pool member has claimed with
     `task_started_by is past the pool's start_by_limit` when its submission
-    reached the pool's task topic more than the pool's `start_by_limit_ms`
+    reached its task topic more than the pool's `start_by_limit_ms`
     ago;
-11. rejects it when the host of the run's [git input](#git-input) is not
+11. rejects it with `the host does not supply a required credential of the
+    agent` when the submission's `unsupplied_credentials` names a required
+    credential of the agent, and with `a task credential takes the target of
+    one of the agent's credentials` when one does;
+12. rejects it when the host of the run's [git input](#git-input) is not
     one of the pool's current VCS hosts, and with `pool <pool> has no
     storage for S3 inputs and outputs` when the run has S3 inputs or
     outputs and the pool's terms have no `storage`;
-12. rejects it with `unsupported message part` when a `url` part appears
+13. rejects it with `unsupported message part` when a `url` part appears
     in the message;
-13. writes the echo and the `claimed` status, its `task_offset` the
-    submission's offset.
+14. writes the echo and the `claimed` status, its `task_topic` and
+    `task_offset` the submission's topic and offset.
 
-A run a cancel covers skips steps 7, 11 and 12, and ends `TASK_STATE_CANCELED`
+A run a cancel covers skips steps 7, 11, 12 and 13, and ends `TASK_STATE_CANCELED`
 after its `claimed` status. A redelivered run that a member has claimed
 goes on to adoption past its bounds. When its `task_ended_by` has passed,
 the receiver stops the job it finds and ends the run `TASK_STATE_FAILED`
@@ -1407,9 +1382,9 @@ A claimed run whose job has not started by `task_started_by`, while it
 waits for its open or for the platform to place its job, ends
 `TASK_STATE_FAILED` with
 `not started by task_started_by (<RFC 3339 time>)`, and the receiver
-purges the job when one exists. A redelivered run with no `started` event
+stops or purges the job when one exists. A redelivered run with no `started` event
 past `task_started_by` ends the same way: the receiver stops a job its
-lookup reports running or ended, and purges one that never started. A job
+lookup reports pending, running or ended, and purges one that never started. A job
 that has started runs on past `task_started_by` until `task_ended_by`. A
 redelivered run whose lookup does not answer is held and asked again, with or
 without a `started` event, until `task_ended_by` passes, when it ends
@@ -1419,9 +1394,9 @@ job and material in place ([Open request](#open-request)).
 A run whose commit has an unknown outcome gives its task back
 unacknowledged. The task's next holder acknowledges it without running when
 the commit's terminal status is on the pool's events, and runs it again
-otherwise, so an ambiguous commit costs one redelivery cycle of latency. The
-job of a run whose terminal committed is not released by its holder; it is left
-to the plugin's sweep.
+otherwise: an ambiguous commit costs one redelivery cycle of latency. The
+holder does not release the job of a run whose terminal committed. The
+plugin's sweep removes it.
 
 ## Git input
 
@@ -1453,7 +1428,7 @@ hold `/`. It cannot hold `..` or `//`, or end in `/`, `.` or `.lock`.
 Readers reject a submission that breaks these rules.
 
 The remote's host must be one of the pool's
-[`vcs`](configuration.md#pool-terms) hosts: its host name in lowercase, with
+[`vcs`](configuration-operator.md#pool-terms) hosts: its host name in lowercase, with
 `:port` when the remote names a port other than its scheme's default, 443
 for `https` and 22 for `ssh`. A pool without `vcs` accepts no git input.
 Clients refuse a git input outside the VCS hosts before they publish, and
@@ -1508,7 +1483,7 @@ environment it configures the variables no value switches off
 redirect, record or trace the clone. The operator keeps the platform's own
 environment and the image's free of them.
 
-[Operations](operations.md#git-repositories) states the limits
+[Operations](operations-hosts.md#git-repositories) states the limits
 of these settings against an agent that runs commands.
 
 ## Inputs and outputs
@@ -1536,7 +1511,7 @@ directory, of each input file, of each credential file and of each expected
 output, with `(required)` after a required one, so an agent without a shell
 finds them, the environment variables that hold credentials, the commands of
 the [git input](#git-input), and the
-[outcome contract](configuration.md#agent-contract) with the run's credential
+[outcome contract](configuration-receiver.md#agent-contract) with the run's credential
 names, an optional credential its host did not supply marked
 `(not supplied)`. The lines name S3 inputs by path and carry no URL. The plugin reports the
 directories' paths as its agent sees them; a directory it does not report
@@ -1645,8 +1620,7 @@ a receiver acts on the cancel keeps the state it ended in.
 
 ## Binding
 
-wherry is a partial custom A2A protocol binding over Kafka, as A2A section 12
-allows. Its binding URI, which an `AgentInterface`'s `protocolBinding` would
+A2A section 12 allows a partial custom binding. wherry's binding URI, which an `AgentInterface`'s `protocolBinding` would
 name, is:
 
 ```
@@ -1660,7 +1634,7 @@ proto3 JSON form ([Encoding](#encoding)) inside the signed records.
 
 | A2A operation | wherry |
 | --- | --- |
-| `SendMessage` | a [submission](#submission) on the pool's tasks topic; the run ID is the task ID and the context ID. The run's records answer it |
+| `SendMessage` | a [submission](#submission) on the task topic of the signature the host placed it on; the run ID is the task ID and the context ID. The run's records answer it |
 | `CancelTask` | a [cancel](#cancel) on the pool's events topic |
 | `SubscribeToTask` | reading the tenant feed, `wherry.tenant.<tenant>`, for the run's statuses and result, and the tenant's transcript topic, `wherry.tenant.<tenant>.transcript`, for its chunks and output chunks |
 | `GetTask` | the run's latest [result](#result), or, before it has one, its latest [status](#status) |
@@ -1700,13 +1674,10 @@ attribute to a host and run with a `rejected` [status](#status) in
 | the record's Kafka key is not its `run` | dropped | none |
 | the run already has a terminal status with the submission's task hash | acknowledged, nothing written | none |
 
-A receiver drops a record it cannot verify because a status names a tenant,
-run and task hash taken from the record: writing one for an unverified record
-would let any principal that can write the tasks topic place statuses on a
-tenant's feed. A record that fails to decode, or decodes to an invalid
-payload, names no run a status could bind to. A dropped submission's host
-learns nothing from the pool and sees its run stay submitted until its
-`task_started_by` passes. A submission whose run already ended is a redelivery, and
+A receiver writes no status for a record it cannot verify, since a status
+names the tenant, run and task hash the record gives. A dropped
+submission's host learns nothing from the pool and sees its run stay
+submitted until its `task_started_by` passes. A submission whose run already ended is a redelivery, and
 the run's terminal status already answers it.
 
 A run that ends after admission ends `TASK_STATE_FAILED` or
@@ -1720,18 +1691,14 @@ ignored.
   is keyed by its run ID, so a run's records on one topic arrive in the order
   they were written. Records on different topics have no order between them.
 - A run's statuses and results carry `attempt`, the share-group delivery
-  count. Readers order them by `attempt`, and an earlier attempt's records do
-  not change the outcome of a later one.
+  count, and readers order them by it ([Status](#status)).
 - A run's transcript orders by `seq`, the line's offset in the agent's
   output. An adopted attempt can repeat a `seq`; a reader
   takes the latest attempt's lines ([Chunk](#chunk)).
 - The end transaction commits the run's last chunks, its output chunks and
-  reply chunks, its result and its `terminal` status together, across the
-  tenant feed, the transcript topic and the pool's events. A reader sees each
-  topic's commit separately, so a host that reads the `terminal` status reads
-  the transcript topic to its high watermark before it reports the
-  transcript or the outputs complete ([Status](#status)). The last chunk has
-  `lastChunk` true.
+  reply chunks, its result and its `terminal` status together.
+  [Status](#status) gives how a host reads them across topics. The last
+  chunk has `lastChunk` true.
 
 ## Agent Card
 
@@ -1752,3 +1719,5 @@ a submission a receiver admits. `params` names the binding URI. Activation
 is implicit: every `Message` and `Artifact` wherry writes lists the
 extension URI in its `extensions`, and readers reject one that does not, so
 no request activates the extension and no response confirms it.
+
+An entitlement end deletes both the pool key and any empty outer tenant key. It joins the ended entitlement set; a later entitlement removes it from that set. Repeated entitlement lifecycles are permitted. Tenant ends are final.

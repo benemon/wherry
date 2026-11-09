@@ -25,7 +25,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
-// brokerACLs lists every ACL the broker holds as principal, resource type, resource and operation.
+// brokerACLs lists every ACL the broker holds as principal, resource type, resource, pattern type and operation.
 func brokerACLs(t *testing.T, ctx context.Context, service *Service) []string {
 	t.Helper()
 	builder := kadm.NewACLs().AnyResource().Allow().AllowHosts().Operations(kadm.OpAny).ResourcePatternType(kadm.ACLPatternAny)
@@ -39,7 +39,7 @@ func brokerACLs(t *testing.T, ctx context.Context, service *Service) []string {
 			t.Fatal(result.Err)
 		}
 		for _, described := range result.Described {
-			acls = append(acls, described.Principal+" "+described.Type.String()+" "+described.Name+" "+described.Operation.String())
+			acls = append(acls, described.Principal+" "+described.Type.String()+" "+described.Name+" "+described.Pattern.String()+" "+described.Operation.String())
 		}
 	}
 	slices.Sort(acls)
@@ -54,10 +54,10 @@ func compromiseFixture(t *testing.T) (*kfake.Cluster, *Service, context.Context)
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
+	if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), service.Broker, filepath.Join(t.TempDir(), "receiver.yaml")); err != nil {
@@ -66,11 +66,11 @@ func compromiseFixture(t *testing.T) (*kfake.Cluster, *Service, context.Context)
 	return cluster, service, ctx
 }
 
-// Suspend withdraws the hosts' WRITE on the pool's task topic and nothing else: the receivers' READ, and an unrelated
-// principal's READ and WRITE on the topic, are kept; resume restores the WRITE.
+// Suspend withdraws the hosts' WRITE on the pool's task topic prefix and nothing else: the receivers' READ, and an
+// unrelated principal's READ and WRITE on a signature topic, are kept; resume restores the WRITE.
 func TestSuspendWithdrawsTaskTopicAccessOnlyAndResumeRestoresIt(t *testing.T) {
 	_, service, ctx := compromiseFixture(t)
-	unrelated := kadm.NewACLs().Topics(PoolTasksTopic("pool-a")).Allow("User:mirror").AllowHosts("*").Operations(kadm.OpRead, kadm.OpWrite).ResourcePatternType(kadm.ACLPatternLiteral)
+	unrelated := kadm.NewACLs().Topics(modelTopic("pool-a")).Allow("User:mirror").AllowHosts("*").Operations(kadm.OpRead, kadm.OpWrite).ResourcePatternType(kadm.ACLPatternLiteral)
 	created, err := kadm.NewClient(service.Operator).CreateACLs(ctx, unrelated)
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +82,7 @@ func TestSuspendWithdrawsTaskTopicAccessOnlyAndResumeRestoresIt(t *testing.T) {
 	}
 	before := brokerACLs(t, ctx, service)
 	for _, operation := range []string{"READ", "WRITE"} {
-		if !slices.Contains(before, "User:mirror TOPIC "+PoolTasksTopic("pool-a")+" "+operation) {
+		if !slices.Contains(before, "User:mirror TOPIC "+modelTopic("pool-a")+" LITERAL "+operation) {
 			t.Fatalf("unrelated %s ACL absent before suspend: %v", operation, before)
 		}
 	}
@@ -100,7 +100,7 @@ func TestSuspendWithdrawsTaskTopicAccessOnlyAndResumeRestoresIt(t *testing.T) {
 			withdrawn = append(withdrawn, acl)
 		}
 	}
-	want := []string{"User:" + TenantPrincipal("tenant-a", "host-a") + " TOPIC " + PoolTasksTopic("pool-a") + " WRITE"}
+	want := []string{"User:" + TenantPrincipal("tenant-a", "host-a") + " TOPIC " + PoolTasksPrefix("pool-a") + " PREFIXED WRITE"}
 	if !reflect.DeepEqual(withdrawn, want) || len(suspended) != len(before)-len(want) {
 		t.Fatalf("suspend withdrew %v, want exactly %v", withdrawn, want)
 	}
@@ -145,8 +145,13 @@ func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
+	// A second signature topic of the pool, as a receiver whose profile carries a zone label would have.
+	second := SignatureTopic("pool-a", "agent-a", map[string]string{"zone": "b"})
+	if err := service.createTaskTopics(ctx, 86400000, second); err != nil {
+		t.Fatal(err)
+	}
 	tasks := map[string]string{}
-	submit := func(run string, poolKey *ecdsa.PrivateKey) *kgo.Record {
+	submitTo := func(topic, run string, poolKey *ecdsa.PrivateKey) *kgo.Record {
 		contentKey := make([]byte, 32)
 		_, _ = rand.Read(contentKey)
 		binding := wire.SubmissionBinding{Tenant: "tenant-a", Host: "host-a", Pool: "pool-a", Run: run, Placement: wire.Placement{Agent: "agent-a", Selector: []wire.Requirement{}},
@@ -157,11 +162,14 @@ func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
 		binding.Wrap = string(mustBytes(t)(signed.WrapContentKey(contentKey, &poolKey.PublicKey)))
 		tasks[run] = binding.Envelope + binding.Wrap
 		submission := &wire.Submission{Message: wire.Message{MessageID: "msg-" + run, ContextID: run, TaskID: run, Role: wire.RoleUser, Parts: []wire.Part{{Text: "hi"}}, Extensions: []string{wire.ExtensionURI}}, Wherry: binding}
-		record := &kgo.Record{Topic: PoolTasksTopic("pool-a"), Key: []byte(run), Value: mustBytes(t)(wire.SignRecord(submission, hostKey))}
+		record := &kgo.Record{Topic: topic, Key: []byte(run), Value: mustBytes(t)(wire.SignRecord(submission, hostKey))}
 		if err := service.Operator.ProduceSync(ctx, record).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 		return record
+	}
+	submit := func(run string, poolKey *ecdsa.PrivateKey) *kgo.Record {
+		return submitTo(modelTopic("pool-a"), run, poolKey)
 	}
 	expired := submit("run-expired", current)
 	deleted, err := kadm.NewClient(service.Operator).DeleteRecords(ctx, kadm.Offsets{expired.Topic: {expired.Partition: {Topic: expired.Topic, Partition: expired.Partition, At: expired.Offset + 1}}})
@@ -173,6 +181,8 @@ func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
 	}
 	retained := submit("run-current", current)
 	submit("run-other", other)
+	// The second topic keeps its log start at 0, so the two topics' horizons differ.
+	elsewhere := submitTo(second, "run-elsewhere", current)
 	// The terms renaming the agent's credential come after run-current and run-other.
 	renamed := modelTerms()
 	renamed.Agents[0].Credentials[0].Name = "model-renamed"
@@ -231,12 +241,16 @@ func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
 		// Every terms record's credentials for the agent: a superset, never a miss across the terms change.
 		{"run-current", "tenant-a", currentID, []string{"deploy", "model", "model-renamed"}, retained.Timestamp.UnixMilli()},
 		{"run-late", "tenant-a", currentID, []string{"deploy", "model", "model-renamed"}, late.Timestamp.UnixMilli()},
+		{"run-elsewhere", "tenant-a", currentID, []string{"deploy", "model", "model-renamed"}, elsewhere.Timestamp.UnixMilli()},
 	}
-	if !reflect.DeepEqual(report.SuspectKeys, []string{currentID}) || !reflect.DeepEqual(report.Tasks, want) {
-		t.Fatalf("report %+v, want the current key's retained tasks %+v", report, want)
+	topics := slices.Sorted(slices.Values([]string{modelTopic("pool-a"), second}))
+	if !reflect.DeepEqual(report.SuspectKeys, []string{currentID}) || !reflect.DeepEqual(report.Topics, topics) ||
+		!reflect.DeepEqual(sortedTasks(report.Tasks), sortedTasks(want)) {
+		t.Fatalf("report %+v, want topics %v and the current key's retained tasks %+v", report, topics, want)
 	}
-	if report.Horizon[expired.Partition] != expired.Offset+1 || report.OldestMS != retained.Timestamp.UnixMilli() {
-		t.Fatalf("horizon %v from %d, want partition %d from offset %d, the oldest retained task's time", report.Horizon, report.OldestMS, expired.Partition, expired.Offset+1)
+	if want := map[string]int64{modelTopic("pool-a"): expired.Offset + 1, second: 0}; !reflect.DeepEqual(report.Horizon, want) || len(report.DeletedFrom) != 0 ||
+		report.OldestMS != retained.Timestamp.UnixMilli() {
+		t.Fatalf("horizon %v, deleted from %v, oldest %d; want %v by topic, from the oldest retained task's time", report.Horizon, report.DeletedFrom, report.OldestMS, want)
 	}
 	for _, task := range report.Tasks {
 		for _, value := range append([]string{"model-secret-value", "deploy-secret-value", tasks[task.Run]}, strings.Split(tasks[task.Run], ".")...) {
@@ -245,8 +259,8 @@ func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
 			}
 		}
 	}
-	if named := rotate([]string{otherID, currentID}, func() {}); len(named.Tasks) != 3 || rotations != 2 {
-		t.Fatalf("report under both keys %+v; want all three retained tasks", named)
+	if named := rotate([]string{otherID, currentID}, func() {}); len(named.Tasks) != 4 || rotations != 2 {
+		t.Fatalf("report under both keys %+v; want all four retained tasks", named)
 	}
 	// Retention moving the log start between its listing and the scan's fetch: the report states the start in effect
 	// and the offsets deleted during the scan.
@@ -260,10 +274,16 @@ func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
 		return true
 	}})
 	moved := rotate([]string{otherID, currentID}, func() {})
-	if moved.Horizon[retained.Partition] != retained.Offset+1 || moved.DeletedFrom[retained.Partition] != expired.Offset+1 ||
+	if want := map[string]int64{retained.Topic: retained.Offset + 1, second: 0}; !reflect.DeepEqual(moved.Horizon, want) ||
+		!reflect.DeepEqual(moved.DeletedFrom, map[string]int64{retained.Topic: expired.Offset + 1}) ||
 		slices.ContainsFunc(moved.Tasks, func(task SuspectTask) bool { return task.Run == "run-current" }) {
-		t.Fatalf("horizon %v, deleted from %v, tasks %+v; want the horizon past run-current, deleted from offset %d", moved.Horizon, moved.DeletedFrom, moved.Tasks, expired.Offset+1)
+		t.Fatalf("horizon %v, deleted from %v, tasks %+v; want the horizon past run-current on its topic alone, deleted from offset %d", moved.Horizon, moved.DeletedFrom, moved.Tasks, expired.Offset+1)
 	}
+}
+
+// sortedTasks is tasks by run: the report lists them in the order it reads the topics.
+func sortedTasks(tasks []SuspectTask) []SuspectTask {
+	return slices.SortedFunc(slices.Values(tasks), func(a, b SuspectTask) int { return strings.Compare(a.Run, b.Run) })
 }
 
 // signalWriter keeps what is written to it and signals the first write.

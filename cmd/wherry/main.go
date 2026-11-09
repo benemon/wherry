@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 )
@@ -16,6 +17,10 @@ func main() {
 		var code quietExit
 		if errors.As(err, &code) {
 			os.Exit(int(code))
+		}
+		// An explicit -h has printed its usage.
+		if errors.Is(err, flag.ErrHelp) {
+			return
 		}
 		fmt.Fprintln(os.Stderr, "wherry:", err)
 		os.Exit(exitCode(err))

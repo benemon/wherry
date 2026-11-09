@@ -1,22 +1,22 @@
 # Runbooks
 
-One section per rule of the shipped Prometheus alert rules. Each rule's
-`runbook_url` links its section. The rules and the Grafana dashboard live in
-[`contrib/observability`](https://github.com/benemon/wherry/tree/main/contrib/observability);
-[Metrics](operations.md#metrics) says how to scrape a receiver and load them,
-and [Metrics](commands.md#metrics) lists every family.
+Use the section named by the firing alert.
+The [shipped rules and dashboard](https://github.com/benemon/wherry/tree/main/contrib/observability) link to these sections.
+[Receiver metrics](operations-receivers.md#metrics) explains installation.
+[Metrics reference](metrics.md) lists the metric families.
 
-Each section says what the alert means, how to confirm it, and what to do.
-The receiver logs to standard output, one line per event, each prefixed
-`receiver: ` and a UTC timestamp; on Nomad, `nomad alloc logs` shows them,
-and under systemd, `journalctl -u` with the receiver's unit. The confirming
-commands run on a host of a tenant entitled to the pool, with its
-[client configuration](configuration.md#client-configuration), except
-`wherry operator` commands, which run in the
-[operator working directory](operations.md#set-up-wherry-operator) and
-connect as `wherry.operator`. When every one of them fails to log in, an
-interrupted `wherry operator init` left `operator.password` behind the
-broker's: run `init` again with the Kafka super user.
+Read receiver logs through your platform:
+
+| Platform | Command |
+| --- | --- |
+| Nomad | `nomad alloc logs` with the receiver allocation. |
+| Kubernetes or OpenShift | `kubectl logs` with the receiver pod. |
+| systemd | `journalctl -u` with the receiver unit. |
+
+Each receiver log line starts with `receiver: ` and a UTC timestamp.
+Run host checks from a tenant entitled to the pool.
+Use that host's [configuration](configuration-host.md#client-configuration).
+Run operator checks from the [operator working directory](operations-operator.md#set-up-wherry-operator).
 
 ## WherryReceiverNotAdvertising
 
@@ -33,7 +33,7 @@ for 5 minutes:
 - The process runs but has not read its configuration: `wherry_build_info`
   is served and `wherry_advertised_timestamp_seconds` is not.
 
-[A receiver that is not running](operations.md#a-receiver-that-is-not-running)
+[A receiver that is not running](operations-receivers.md#a-receiver-that-is-not-running)
 covers a receiver whose scrape target service discovery has dropped. An
 alert on the platform's series it lists follows this runbook.
 
@@ -64,16 +64,17 @@ Then:
 
 - For a stopped process, or a receiver the platform no longer runs, check
   the supervisor and restart the receiver, as in
-  [Run a receiver](operations.md#run-a-receiver).
+  [Run a receiver](operations-receivers.md#run-a-receiver).
 - For `waiting for configuration`, record the configuration, as in
-  [Add a receiver](operations.md#add-a-receiver).
+  [Add a receiver](operations-operator.md#add-a-receiver).
 - For write errors, follow [WherryBrokerUnreachable](#wherrybrokerunreachable).
   For `denied write`, run `wherry operator check`, which confirms that every
   ACL the state calls for exists.
 - For `plugin <type> exited`, fix the cause the plugin's lines give, such as
   an unreachable platform API or memory pressure on the receiver host. For
-  a protocol version mismatch, install the plugin release that matches the
-  receiver's, as in [Upgrade wherry](operations.md#upgrade-wherry). The
+  a protocol version mismatch, record the pin of the plugin release that
+  speaks the receiver's protocol and install it, as in
+  [Install plugins](operations-receivers.md#install-plugins). The
   runs the receiver held are adopted once their tasks are delivered again.
 - A receiver whose membership has ended stays ended. Provision a new
   receiver under a new name and stop the old process.
@@ -119,17 +120,17 @@ Then:
 
 ## WherryDeliveryBudgetExhausted
 
-Each start failure, and each member with no matching plugin profile, returns
-a task to the pool and spends one of its pool's `delivery_limit`
-deliveries. From attempt `delivery_limit` minus 1, a receiver ends the run
-`TASK_STATE_FAILED` with `delivery budget exhausted` instead.
+Each start failure returns a task to the pool and spends one of its pool's
+`delivery_limit` deliveries, as does each release of a task whose profile
+went unready between its claim's subscription and its fetch. From attempt
+`delivery_limit` minus 1, a receiver ends the run `TASK_STATE_FAILED` with
+`delivery budget exhausted` instead.
 `wherry_delivery_budget_exhausted_total` counts these runs by tenant and
 profile. The alert fires on any such run in the last hour, for each tenant
 and profile:
 
-- `profile="none"`: runs given back at the budget before any profile took
-  them, because no live receiver offered a profile matching their agent and
-  selector;
+- `profile="none"`: runs given back at the budget because the profile of
+  their signature went unready on the member that fetched them;
 - any other profile: runs the profile took and could not start, or
   returned to the pool after another failure, such as a failed job lookup
   or `Stop` call.
@@ -142,25 +143,67 @@ Confirm it:
    last start failure.
 2. Run `wherry events RUN_ID` to see each attempt and the receiver that
    made it.
-3. Run `wherry host receivers`. Check that a `live` receiver offers a profile
-   with `ready=true` for the run's agent, with labels that satisfy the run's
-   selector.
-4. Read the receivers' logs for
-   `run <id>: no current offer for agent <agent> satisfying its selector`,
+3. Read the receivers' logs for
+   `run <id>: no ready profile for topic <topic>; releasing`,
    `run <id>: dispatch failed: <text>` and
    `run <id>: job never started (<class>): <reason>`.
 
 Then:
 
-- For no matching offer, start or reconfigure a receiver with a profile for
-  the agent and the labels tasks select, or have the tenant change its
-  selector.
+- For releases of an unready profile, restore the profile's readiness, the
+  `readiness: not ready` lines name it.
 - For start failures, fix the cause the log names in the plugin's platform,
   such as a missing image, an unschedulable node pool or a full namespace
   quota.
-- Set `delivery_limit` to at least the number of receivers in the pool plus
-  a margin, as in [Create a pool](operations.md#create-a-pool).
+- Size `delivery_limit` by the attempts one task may burn plus a margin, as
+  in [Create a pool](operations-operator.md#create-a-pool), never by the
+  number of members.
 - Resubmit the failed runs once the cause is fixed.
+
+## A task unclaimed on a signature nobody serves
+
+A task waits on its signature's topic, spending no delivery, until a member
+with a ready profile of that signature fetches it. `wherry wait` reports one
+that none fetched by its `task_started_by` with
+`not started by task_started_by (<RFC 3339 time>): no receiver claimed the task`.
+
+1. Run `wherry host receivers` and check that a `live` receiver of the pool
+   has a profile with `ready=true` for the run's agent whose labels satisfy
+   its selector.
+2. Run `wherry operator receiver show RECEIVER` for that receiver: the
+   profile's `topic` is the signature topic it subscribes to.
+
+Then start or reconfigure a receiver with a profile of that signature, or
+resubmit with a selector a live signature satisfies. A replacement of a
+key-lost run keeps its original signature's topic.
+
+## A task unclaimed while a peer sits idle
+
+A task its host reports `not started by task_started_by` while another live
+receiver with a ready profile for its agent sat idle was on a signature that
+peer does not serve. Two members share a queue only when the profile's agent
+and every label are identical; one differing label, or a label one has and the
+other lacks, is a different signature, and queued tasks never overflow to
+another signature. A receiver whose labels changed through `receiver apply`
+has moved to a new signature, leaving the tasks queued on its old one.
+
+1. Run `wherry operator receiver show RECEIVER` for the receiver the task was
+   placed on and for the idle peer, and compare each profile's `signature`
+   and `topic`.
+2. To make the peers interchangeable, give their profiles identical labels
+   and run `receiver apply` for the one that differs.
+
+Then resubmit the unclaimed run.
+
+## `operator check` names a missing signature topic
+
+`wherry operator check` fails with
+`receiver <receiver> profile <profile>: signature topic <topic> is missing; pool apply <pool> with the same terms creates it`
+when the profile of a receiver whose membership has not ended has no task
+topic: a recorded profile's topic exists before its record, so it was deleted
+outside wherry. Run
+`wherry operator pool apply <pool>` with the pool's recorded terms, then
+`wherry operator check` again.
 
 ## WherryOpenRequestsUnanswered
 
@@ -177,7 +220,7 @@ Confirm it:
 1. Read the claiming receivers' logs for
    `run <id>: no answer to the open request for attempt <n>`.
 2. Find the pool's key custodian from its receivers' log lines, as in step 1
-   of [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian),
+   of [Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian),
    and check that it is `live` in `wherry host receivers`.
 3. Read the pool's receivers' logs for lines starting `custodian:`, such
    as `custodian: published pool <pool> key <id> (<reason>)`,
@@ -190,7 +233,7 @@ Then:
 - Start or restart a receiver of the pool, so that the custodian group
   assigns a live member and it publishes its snapshot.
 - Fix the broker access a denial names, as in
-  [Prepare Kafka](operations.md#prepare-kafka).
+  [Prepare Kafka](operations-operator.md#prepare-kafka).
 
 ## WherryCustodianTakeover
 
@@ -206,14 +249,14 @@ group still assigns it the partition re-initialises its transactional ID
 and republishes its snapshot as `contested`; a second fence within the
 45-second session timeout stands it down until it is assigned again. The
 alert fires on any increase of `wherry_custodian_takeovers_total` within 15
-minutes, by `reason`, `takeover` or `contested`. A `bootstrap` or `rotation`
-snapshot counts nothing.
+minutes, by `reason`, `takeover` or `contested`. `bootstrap` and `rotation`
+snapshots do not count.
 
 Every custodian change raises it, a planned drain's included, so expect it
-at each planned stop of a custodian. It is not suppressed for drains because
-it is also the signal of a compromised receiver taking custody through the
-custodian group ([What the pool key protects](security.md#what-the-pool-key-protects)):
-a takeover no planned stop or crash explains is that.
+at each planned stop of a custodian. It also signals a compromised receiver
+taking custody through the custodian group
+([What the pool key protects](security.md#what-the-pool-key-protects)).
+Treat a takeover that no planned stop or crash explains as a compromise.
 
 Confirm it:
 
@@ -227,26 +270,18 @@ Confirm it:
    and a stop with `drain_timeout` at `0s` logs
    `custodian: leaving pool <pool> with no drain timeout; keeping the pool keys to their deadlines`.
 3. Find the pool's key custodian from its receivers' log lines, as in step 1
-   of [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian),
+   of [Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian),
    and check that it is `live` in `wherry host receivers`.
 
 Then:
 
-- For a takeover after a planned stop whose previous custodian logged
-  `custodian: re-keyed <n> tasks to pool key <id> and deleted <n> pool keys`,
-  nothing more is needed.
-- For a takeover after a crash or a lost state directory, nothing more is
-  needed; the hosts of the lost tasks resubmit them when they next run.
-- For a takeover after a planned stop with no re-key, raise `drain_timeout`, so that the
-  stopping custodian waits for a successor's snapshot and re-keys its tasks, as in
-  [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian).
-- For a takeover with no planned stop, crash or lost state directory before
-  it, treat the new custodian as suspect and revoke it with
-  `wherry operator receiver remove`.
-- For a contested snapshot with no custodian change, find the writer that
-  initialised `p.<pool>.custodian`: every member of the pool holds that
-  transactional ID. Revoke a suspect receiver with
-  `wherry operator receiver remove`.
+| Cause | Action |
+| --- | --- |
+| a planned stop whose previous custodian logged `custodian: re-keyed <n> tasks to pool key <id> and deleted <n> pool keys` | none |
+| a crash or a lost state directory | none: the hosts of the lost tasks resubmit them when they next run |
+| a planned stop with no re-key | raise `drain_timeout`, so that the stopping custodian waits for a successor's snapshot and re-keys its tasks, as in [Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian) |
+| no planned stop, crash or lost state directory before the takeover | treat the new custodian as suspect and revoke it with `wherry operator receiver remove` |
+| a `contested` snapshot with no custodian change | find the writer that initialised `p.<pool>.custodian`, which every member of the pool can; revoke a suspect receiver with `wherry operator receiver remove` |
 
 ## WherryRunsKeyLost
 
@@ -281,9 +316,9 @@ Then:
   hand.
 - For losses at planned stops, set `drain_timeout` and the platform's stop
   window as in
-  [Drain timeout and the stop window](configuration.md#drain-timeout-and-the-stop-window),
+  [Drain timeout and the stop window](configuration-receiver.md#drain-timeout-and-the-stop-window),
   and stop a pool's receivers one at a time, as in
-  [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian),
+  [Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian),
   so that a stopping custodian has a live successor.
 
 ## WherryPlatformErrorsRising
@@ -308,7 +343,7 @@ Confirm it:
 Then:
 
 - `denied`: renew the platform credential at its source and restart the
-  receiver, as in [Add a receiver](operations.md#add-a-receiver), or
+  receiver, as in [Add a receiver](operations-operator.md#add-a-receiver), or
   restore the plugin's permissions.
 - `unavailable` and `timeout`: restore the platform API or the receiver
   host's route to it.
