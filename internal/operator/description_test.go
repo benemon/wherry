@@ -166,3 +166,11 @@ func TestValidateDescription(t *testing.T) {
 		}
 	}
 }
+
+func TestDuplicateAgentRefused(t *testing.T) {
+	terms := modelTerms()
+	terms.Agents = append(terms.Agents, terms.Agents[0])
+	if err := validateTerms(terms); err == nil || err.Error() != "agent agent-a is listed twice" {
+		t.Fatalf("duplicate agent: %v", err)
+	}
+}

@@ -50,7 +50,7 @@ ignored. Any other entry and a directory with no agent files are errors.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `agents` | list | required | Declare each agent's name, credentials and optional model restrictions. |
+| `agents` | list | required | Declare each agent's name, credentials and optional model restrictions. Each agent's name appears once. |
 | `default_agent` | string | the only agent, if there is one | Select the agent for a task that names none. |
 | `start_by_limit` | duration | `72h` | Bound how far after submission a run may start. |
 | `delivery_limit` | integer | `5` | Set the share group's delivery count limit. |
