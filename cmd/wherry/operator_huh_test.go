@@ -11,13 +11,13 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
 	"github.com/twmb/franz-go/pkg/kgo"
-	"golang.org/x/sys/unix"
 )
 
 func operatorAnswers(t *testing.T) map[string]string {
@@ -207,7 +207,7 @@ func TestOperatorSafePassword(t *testing.T) {
 						os.Mkdir(path, 0700)
 					case "fifo":
 						os.Remove(path)
-						unix.Mkfifo(path, 0600)
+						syscall.Mkfifo(path, 0600)
 					case "missing":
 						os.Remove(path)
 					}
@@ -215,12 +215,12 @@ func TestOperatorSafePassword(t *testing.T) {
 					t.Cleanup(func() { openFile = old })
 					answered := false
 					openFile = func(p string, flags int, mode os.FileMode) (*os.File, error) {
-						if flags&unix.O_NONBLOCK == 0 {
+						if flags&syscall.O_NONBLOCK == 0 {
 							t.Error("password open can block")
 						}
 						final := flag || answered
 						if final && kind == "unreadable" {
-							return nil, unix.EACCES
+							return nil, syscall.EACCES
 						}
 						if final && kind == "replacement" {
 							os.WriteFile(path+".replacement", []byte("replaced\n"), 0600)
@@ -484,7 +484,7 @@ func TestOperatorCAFileKinds(t *testing.T) {
 					os.Mkdir(path, 0700)
 				case "fifo":
 					os.Remove(path)
-					unix.Mkfifo(path, 0600)
+					syscall.Mkfifo(path, 0600)
 				case "oversized":
 					os.WriteFile(path, append([]byte(pem), bytes.Repeat([]byte("x"), 2<<20)...), 0600)
 				}

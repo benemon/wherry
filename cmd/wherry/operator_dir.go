@@ -352,11 +352,8 @@ type poolAgent struct {
 
 func promptPool(q *questions) (any, error) {
 	var file poolFile
-	input := func(label, initial string, validate func(string) error) (string, error) {
-		return q.ask(label, "", initial, "", validate)
-	}
 	validName := func(s string) error {
-		if !wire.ValidName(strings.TrimSpace(s)) {
+		if !wire.ValidName(s) {
 			return errors.New("invalid name")
 		}
 		return nil
@@ -365,13 +362,12 @@ func promptPool(q *questions) (any, error) {
 		return nil, err
 	}
 	for {
-		name, err := input("Agent name", "", validName)
+		name, err := q.ask("Agent name", "", "", "", validName)
 		if err != nil {
 			return nil, err
 		}
 		agent := poolAgent{Name: name, Credentials: []map[string]any{}}
 		for {
-			model := ""
 			model, err := q.input("Model (blank ends the list)", "Leave blank for the profiles' choice", "", "", func(string) error { return nil })
 			if err != nil {
 				return nil, err
@@ -402,7 +398,7 @@ func promptPool(q *questions) (any, error) {
 					return err
 				}
 				for _, c := range targets {
-					if c.Name == strings.TrimSpace(s) {
+					if c.Name == s {
 						return errors.New("duplicate credential name")
 					}
 				}
@@ -422,9 +418,9 @@ func promptPool(q *questions) (any, error) {
 			candidate := wire.TaskCredential{Name: credentialName}
 			target, err := q.input(label, "", "", "", func(s string) error {
 				if kind == "env" {
-					candidate.Env = strings.TrimSpace(s)
+					candidate.Env = s
 				} else {
-					candidate.File = strings.TrimSpace(s)
+					candidate.File = s
 				}
 				return wire.ValidateCredentials(append(slices.Clone(targets), candidate))
 			})
@@ -479,8 +475,8 @@ func promptPool(q *questions) (any, error) {
 	if err := q.answer("Default agent", file.DefaultAgent); err != nil {
 		return nil, err
 	}
-	_, err := input("Producer byte rate per host, bytes a second", "1048576", func(s string) error {
-		value, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	_, err := q.ask("Producer byte rate per host, bytes a second", "", "1048576", "", func(s string) error {
+		value, err := strconv.ParseInt(s, 10, 64)
 		if err != nil || value <= 0 {
 			return errors.New("producer byte rate must be greater than 0")
 		}
@@ -490,8 +486,8 @@ func promptPool(q *questions) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, err = input("Request percentage per host", "10", func(s string) error {
-		value, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	_, err = q.ask("Request percentage per host", "", "10", "", func(s string) error {
+		value, err := strconv.ParseFloat(s, 64)
 		if err != nil || !(value > 0) {
 			return errors.New("request percentage must be greater than 0")
 		}
@@ -501,8 +497,8 @@ func promptPool(q *questions) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	file.StartByLimit, err = input("Start-by limit", (time.Duration(operator.DefaultStartByLimitMS) * time.Millisecond).String(), func(s string) error {
-		value, err := time.ParseDuration(strings.TrimSpace(s))
+	file.StartByLimit, err = q.ask("Start-by limit", "", (time.Duration(operator.DefaultStartByLimitMS) * time.Millisecond).String(), "", func(s string) error {
+		value, err := time.ParseDuration(s)
 		if err != nil || value < 0 {
 			return errors.New("start-by limit must be a non-negative duration")
 		}
@@ -566,7 +562,7 @@ func receiverConfigAnswer(kind, answer string) (map[string]any, error) {
 func promptReceiver(q *questions, receiver string, state operator.State, broker string) (any, error) {
 	file := receiverFile{PluginSHA256: map[string]string{}, Plugins: map[string]receiverPlugin{}}
 	validName := func(s string) error {
-		if !wire.ValidName(strings.TrimSpace(s)) {
+		if !wire.ValidName(s) {
 			return errors.New("invalid name")
 		}
 		return nil
@@ -630,7 +626,7 @@ func promptReceiver(q *questions, receiver string, state operator.State, broker 
 	configLabel := fmt.Sprintf("%s plugin config, as a YAML flow mapping", kind)
 	answer, err := q.input(configLabel, "", "{}", "", func(s string) error {
 		var err error
-		plugin.Config, err = receiverConfigAnswer(kind, strings.TrimSpace(s))
+		plugin.Config, err = receiverConfigAnswer(kind, s)
 		return err
 	})
 	if err != nil {
@@ -648,8 +644,8 @@ func promptReceiver(q *questions, receiver string, state operator.State, broker 
 			if err := validName(s); err != nil {
 				return err
 			}
-			if slices.ContainsFunc(plugin.Profiles, func(p receiverProfile) bool { return p.Name == strings.TrimSpace(s) }) {
-				return fmt.Errorf("agent %s already has a profile", strings.TrimSpace(s))
+			if slices.ContainsFunc(plugin.Profiles, func(p receiverProfile) bool { return p.Name == s }) {
+				return fmt.Errorf("agent %s already has a profile", s)
 			}
 			return nil
 		})
@@ -660,7 +656,6 @@ func promptReceiver(q *questions, receiver string, state operator.State, broker 
 		var entered []string
 		for {
 			label, err := q.input("Label KEY=VALUE (blank ends the list)", "", "", "", func(s string) error {
-				s = strings.TrimSpace(s)
 				if s == "" {
 					return nil
 				}
@@ -676,7 +671,7 @@ func promptReceiver(q *questions, receiver string, state operator.State, broker 
 			if err != nil {
 				return nil, err
 			}
-			if label = strings.TrimSpace(label); label == "" {
+			if label == "" {
 				break
 			}
 			key, value, _ := strings.Cut(label, "=")

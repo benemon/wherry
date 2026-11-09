@@ -1038,9 +1038,10 @@ Choose Skip to leave a request for later, or Back in a nested list to return.
 In Git and Storage, Skip on a source returns to the host or S3 storage
 question; choose Skip there too to leave the setting for later.
 Blank Variable, File, Command or known_hosts returns; blank SSH prefix uses
-`ssh://git@<host>/`. Every answer is trimmed of surrounding spaces, so
+`ssh://git@<host>/`. Every answer is trimmed of surrounding whitespace, so
 whitespace-only input counts as blank. Tab accepts completion for paths,
-command words and variable names; Up/Down and ctrl+n/p cycle suggestions. Hidden paths can be typed explicitly.
+command words and variable names; Up/Down and ctrl+n/p cycle suggestions.
+Hidden paths can be typed explicitly.
 CA symlinks to regular files are accepted; certificates are limited to 1 MiB.
 
 Each question owns its input. Type after it appears: bytes typed before the

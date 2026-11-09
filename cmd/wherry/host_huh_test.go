@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -24,7 +25,6 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
-	"golang.org/x/sys/unix"
 )
 
 type signalledOutput struct {
@@ -411,7 +411,7 @@ func TestHostLabelsTargetsAndEscapes(t *testing.T) {
 func TestHostCARejectsUnsafeFiles(t *testing.T) {
 	dir := t.TempDir()
 	fifo := filepath.Join(dir, "fifo")
-	if err := unix.Mkfifo(fifo, 0600); err != nil {
+	if err := syscall.Mkfifo(fifo, 0600); err != nil {
 		t.Fatal(err)
 	}
 	link := filepath.Join(dir, "link")
@@ -500,7 +500,7 @@ func TestQuestionsTrimAndAsk(t *testing.T) {
 			t.Fatalf("validator saw untrimmed %q", s)
 		}
 	}
-	if !strings.Contains(out.String(), "? Name  value\n") || strings.Contains(out.String(), "\x1b under") {
+	if len(seen) == 0 || !strings.Contains(out.String(), "? Name  value\n") || !strings.Contains(out.String(), `Shown \x1b under`) || strings.Contains(out.String(), "\x1b under") {
 		t.Fatalf("ask output: %q", out.String())
 	}
 }
@@ -733,7 +733,7 @@ func TestHostClipboardIsDisabled(t *testing.T) {
 func TestHostReadablePathRejectsNonRegularFiles(t *testing.T) {
 	dir := t.TempDir()
 	fifo := filepath.Join(dir, "fifo")
-	if err := unix.Mkfifo(fifo, 0600); err != nil {
+	if err := syscall.Mkfifo(fifo, 0600); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{fifo, dir} {
@@ -767,11 +767,11 @@ func TestHostCADoesNotTrustPreOpenMetadata(t *testing.T) {
 	called := false
 	openFile = func(p string, flags int, mode os.FileMode) (*os.File, error) {
 		called = true
-		if flags&unix.O_NONBLOCK == 0 {
+		if flags&syscall.O_NONBLOCK == 0 {
 			t.Error("CA open can block")
 		}
 		os.Remove(p)
-		if err := unix.Mkfifo(p, 0600); err != nil {
+		if err := syscall.Mkfifo(p, 0600); err != nil {
 			return nil, err
 		}
 		return old(p, flags, mode)
@@ -1200,7 +1200,7 @@ func TestHostCAHiddenPathAndHostileName(t *testing.T) {
 	os.WriteFile(name, []byte(ca), 0600)
 	os.WriteFile(".hidden", []byte(ca), 0600)
 	os.Mkdir("directory", 0700)
-	if err := unix.Mkfifo("fifo", 0600); err != nil {
+	if err := syscall.Mkfifo("fifo", 0600); err != nil {
 		t.Fatal(err)
 	}
 	options := caOptions()
@@ -1256,7 +1256,7 @@ func TestHostSSHDoesNotSuggestFilesystemPaths(t *testing.T) {
 func TestHostSpecialFilesAreNotOpened(t *testing.T) {
 	dir := t.TempDir()
 	fifo := filepath.Join(dir, "fifo")
-	if err := unix.Mkfifo(fifo, 0600); err != nil {
+	if err := syscall.Mkfifo(fifo, 0600); err != nil {
 		t.Fatal(err)
 	}
 	old := openFile
