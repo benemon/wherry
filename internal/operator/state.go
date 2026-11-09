@@ -825,9 +825,12 @@ func validateTerms(terms Terms) error {
 			return err
 		}
 	}
-	for _, agent := range terms.Agents {
+	for i, agent := range terms.Agents {
 		if validateNames(agent.Name) != nil {
 			return errors.New("invalid agent name")
+		}
+		if slices.ContainsFunc(terms.Agents[:i], func(other AgentTerms) bool { return other.Name == agent.Name }) {
+			return fmt.Errorf("agent %s is listed twice", agent.Name)
 		}
 		if agent.DefaultModel != "" && !slices.Contains(agent.Models, agent.DefaultModel) {
 			return errors.New("an agent's default_model must be one of its models")

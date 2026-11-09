@@ -1075,6 +1075,17 @@ func TestPoolVCS(t *testing.T) {
 	}
 }
 
+func TestDuplicateAgentRefused(t *testing.T) {
+	terms := modelTerms()
+	terms.Agents = append(terms.Agents, terms.Agents[0])
+	if err := validateTerms(terms); err == nil || err.Error() != "agent agent-a is listed twice" {
+		t.Fatalf("duplicate agent: %v", err)
+	}
+	if _, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}); err == nil {
+		t.Fatal("duplicate agent encoded")
+	}
+}
+
 func TestPoolModels(t *testing.T) {
 	terms := modelTerms()
 	terms.Agents[0].Models, terms.Agents[0].DefaultModel = []string{"haiku", "sonnet"}, "haiku"

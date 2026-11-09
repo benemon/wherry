@@ -1105,21 +1105,3 @@ type metricsErrorPlugin struct{ pluginsdk.Plugin }
 func (p metricsErrorPlugin) Metrics(context.Context) ([]pluginsdk.Sample, error) {
 	return nil, errors.New("metrics failed")
 }
-
-func TestDuplicateAgentTermsKeepFallbackLazy(t *testing.T) {
-	f := counterZeroFixture(t)
-	terms := testTerms()
-	terms.Agents[1].Models = []string{"m1", "m2"}
-	terms.Agents = append(terms.Agents, operator.AgentTerms{Name: "codex", Models: []string{"later-model"}})
-	if err := f.service.PoolApply(f.ctx, testPool, terms, false); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.receiver.refresh(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	for key := range zeroSamples(t, f.receiver) {
-		if (strings.HasPrefix(key, "wherry_runs_total{") || strings.HasPrefix(key, "wherry_run_duration_seconds{")) && strings.Contains(key, `model="other"`) {
-			t.Errorf("fallback seeded from duplicate agent terms: %s", key)
-		}
-	}
-}
