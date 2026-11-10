@@ -71,6 +71,8 @@ jobs:
       - name: Build, sign and upload the draft release
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          # A stable tag can share its commit with the last prerelease; goreleaser would otherwise pick either.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
         run: goreleaser release --clean
       # Verify with:
       #   gh attestation verify wherry_<tag>_<os>_<arch>.tar.gz -R benemon/wherry
