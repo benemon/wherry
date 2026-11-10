@@ -96,6 +96,21 @@ entry clones anonymously, and an `ssh` one then returns `INVALID_ARGUMENT`. Add
 pushes only when your prompt asks it to, and only to the branch
 `wherry/<run>`.
 
+Pick the route by what this host can reach:
+
+- A public `https` repository: `git` with its `remote` and `ref`.
+- A private one: the same, under a `git` entry for its URL.
+- A private one no `git` entry covers, a host outside the pool's VCS hosts, or local or
+  unpushed work: bundle it (`git bundle create repo.bundle <ref>`), send the
+  bundle as an input, and tell the agent to clone it from its input directory
+  and leave `changes.bundle` in its output directory. Ask for that output and
+  `git fetch` it. No credential is involved.
+
+Get commits back with `changes` or a bundle output and push from this host.
+A profile's credentials, such as `github-token` as `GH_TOKEN`, serve the
+agent's own tools during the run; the clone uses only the matched `git`
+entry's credential. A missing optional one does not stop the run.
+
 To send files, add `inputs`: `{path}` for each regular file beneath one of the wherry
 MCP server's input roots (the directory it runs in, unless the user's wherry
 configuration lists `input_roots`), which the agent finds under their base
