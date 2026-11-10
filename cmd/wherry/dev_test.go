@@ -393,6 +393,7 @@ func TestDevRendering(t *testing.T) {
 		"bind_addr  = \"127.0.0.1\"\n",
 		"data_dir   = " + strconv.Quote(instance.env("nomad", "data")) + "\n",
 		"plugin \"raw_exec\" {\n  config {\n    enabled = true\n  }\n}\n",
+		"    \"fingerprint.denylist\" = \"env_aws,env_gce,env_azure,env_digitalocean\"\n",
 		"    volumes {\n      enabled = true\n    }\n",
 		"    gc {\n      image = false\n    }\n",
 		"    endpoint = \"unix:///var/run/docker.sock\"\n",
