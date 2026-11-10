@@ -462,7 +462,8 @@ func renderAgentHCL(env devEnv) string {
 	if env.driver == "podman" {
 		fmt.Fprintf(&b, "plugin_dir = %q\n", env.instance.cache("nomad-plugins"))
 	}
-	fmt.Fprintf(&b, "\nclient {\n  options {\n    \"env.denylist\" = %q\n  }\n}\n", strings.Join(env.denylist, ","))
+	// The cloud fingerprinters query metadata services, and a timeout there fails the agent's start.
+	fmt.Fprintf(&b, "\nclient {\n  options {\n    \"env.denylist\" = %q\n    \"fingerprint.denylist\" = \"env_aws,env_gce,env_azure,env_digitalocean\"\n  }\n}\n", strings.Join(env.denylist, ","))
 	b.WriteString("\nplugin \"raw_exec\" {\n  config {\n    enabled = true\n  }\n}\n")
 	if env.driver == "podman" {
 		fmt.Fprintf(&b, "\nplugin \"nomad-driver-podman\" {\n  config {\n    socket_path = %q\n  }\n}\n", env.socket)
