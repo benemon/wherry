@@ -1762,15 +1762,20 @@ func (f fixture) leftRunning(t *testing.T) {
 	// the run was claimed again, and that release is not the stopped receiver's.
 	statuses := f.eventStatuses(t)
 	var held int64
+	var kinds []string
 	for _, status := range statuses {
+		kinds = append(kinds, status.Wherry.Kind)
 		if status.Wherry.Kind == "claimed" {
 			held = max(held, status.Wherry.Attempt)
 		}
 	}
+	if held == 0 {
+		t.Fatalf("no claimed status for run-a: statuses %v", kinds)
+	}
 	if slices.ContainsFunc(statuses, func(status wire.RunStatus) bool {
 		return status.Wherry.Attempt == held && (status.Wherry.Kind == "released" || status.Wherry.Kind == "terminal")
 	}) {
-		t.Fatalf("stopped receiver acknowledged its held attempt %d: statuses %v", held, f.kinds(t))
+		t.Fatalf("stopped receiver acknowledged its held attempt %d: statuses %v", held, kinds)
 	}
 	if record, delivered := f.pollPool(t, testRun("run-a"), 30*time.Second); !delivered || record.DeliveryCount() < 2 {
 		t.Fatal("the held run's task was not delivered again")
