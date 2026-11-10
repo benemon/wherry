@@ -1508,6 +1508,11 @@ func TestHostOfflineAndANonCustodianRunsTheTask(t *testing.T) {
 	stream := []string{`{"type":"assistant","message":"token ` + testToken + `"}`, completedWith("used " + testToken)}
 	f := newFixture(t, stream)
 	f.quiet()
+	// The claimant waits for the custodian's answer for as long as the test runs: under the race detector one custodian
+	// pass can outlast shortIntervals' open window, and the run would go to a second attempt.
+	previous := openWait
+	openWait = time.Minute
+	t.Cleanup(func() { openWait = previous })
 	// The custodian keeps its place in the custodian group and serves opens, and claims nothing.
 	custody, stop := context.WithCancel(f.ctx)
 	var workers sync.WaitGroup
