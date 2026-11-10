@@ -995,6 +995,9 @@ func TestPendingRunClosesTheGate(t *testing.T) {
 	}
 	f.setPlugin(func(p *fakePlugin) { p.placedRuns[testRun("run-a")] = true })
 	f.await(t, testRun("run-a"), func(task wire.Task) bool { return task.Status.State == wire.TaskStateCompleted })
+	// run-a's result is committed before its slot stops counting it held and closes its share client, which counts as
+	// polling until it leaves; run-b's held client is then the only member.
+	waitFor(t, f, func() bool { return f.live() == 1 })
 	if most := f.mostMembers(2 * time.Second); most != 0 || joins() != 0 {
 		t.Fatalf("%d share group members and %d joins with one run still pending, want none", most, joins())
 	}

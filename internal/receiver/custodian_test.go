@@ -956,7 +956,8 @@ func TestCustodyFollowsTheGroupSessionNotAdvertisements(t *testing.T) {
 	if latest.snapshot.Reason != "takeover" {
 		t.Fatalf("reason %s, want takeover", latest.snapshot.Reason)
 	}
-	if got := scrapedValue(t, f.receiver, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"}`); got != 1 {
+	// The takeover is counted once the receiver reads its snapshot back, which may be after this read of it.
+	if got := awaitScraped(t, f.receiver, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"}`, 1); got != 1 {
 		t.Fatalf("takeovers = %v after a crash, want 1", got)
 	}
 }
@@ -1262,6 +1263,13 @@ func concurrentDrains(t *testing.T, lastOther, rebalancing bool) {
 	t.Cleanup(releaseJoins)
 	var held *atomic.Int32
 	if rebalancing {
+		// Every member has joined the custodian group and its rebalances have ended, so each rejoin held is one receiver-c's
+		// leave caused.
+		waitFor(t, f, func() bool {
+			described, err := kadm.NewClient(f.service.Operator).DescribeGroups(f.ctx, operator.CustodianGroup(testPool))
+			group := described[operator.CustodianGroup(testPool)]
+			return err == nil && group.Err == nil && group.State == "Stable" && len(group.Members) == len(members)
+		})
 		held = holdJoins(f, release)
 	}
 	if lastOther {
