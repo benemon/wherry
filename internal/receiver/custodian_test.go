@@ -788,6 +788,22 @@ func custodyUntilDrained(t *testing.T, ctx context.Context, r *Receiver) func() 
 	return stop
 }
 
+// serveOpensUntilStopped serves r's open requests every openInterval, as Run does, until the test ends, and waits for
+// the pass under way to return before the test's temporary directories are removed.
+func serveOpensUntilStopped(t *testing.T, ctx context.Context, r *Receiver) {
+	t.Helper()
+	ctx, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.every(ctx, openInterval, r.serveOpens)
+	}()
+	t.Cleanup(func() {
+		stop()
+		<-done
+	})
+}
+
 // awaitActing waits until r acts as custodian.
 func awaitActing(t *testing.T, f fixture, r *Receiver) {
 	t.Helper()
@@ -1458,7 +1474,7 @@ func taskAppendedAfterTheDrainScan(t *testing.T, emptyListing bool) {
 	f.receiver.drainTimeout = 15 * time.Second
 	drain := custodyUntilDrained(t, f.ctx, f.receiver)
 	// The drained custodian serves opens while its held runs end, as Run does.
-	go f.receiver.every(f.ctx, openInterval, f.receiver.serveOpens)
+	serveOpensUntilStopped(t, f.ctx, f.receiver)
 	f.awaitSnapshots(t, 1)
 	awaitActing(t, f, f.receiver)
 	successor, successorLogs := f.newReceiver(t, config("receiver-b"))
@@ -1559,7 +1575,7 @@ func lateTaskPastItsBound(t *testing.T, acquiredAfter bool) {
 	f := newBareFixture(t)
 	f.receiver.drainTimeout = 15 * time.Second
 	drain := custodyUntilDrained(t, f.ctx, f.receiver)
-	go f.receiver.every(f.ctx, openInterval, f.receiver.serveOpens)
+	serveOpensUntilStopped(t, f.ctx, f.receiver)
 	f.awaitSnapshots(t, 1)
 	awaitActing(t, f, f.receiver)
 	successor, successorLogs := f.newReceiver(t, testConfig("receiver-b"))
