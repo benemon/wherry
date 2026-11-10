@@ -229,6 +229,9 @@ func (service *Service) Probe(topic string) func(context.Context, string, string
 func (service *Service) WaitOperatorCredential(ctx context.Context, password string) error {
 	waitCtx, cancel := context.WithTimeout(ctx, topicWait)
 	defer cancel()
+	// A dial past the deadline fails with an i/o timeout before waitCtx's timer fires and sets waitCtx.Err(), so the
+	// allowance is spent once the clock reaches the deadline, not once waitCtx.Err() says so.
+	deadline, _ := waitCtx.Deadline()
 	brokers, err := kadm.NewClient(service.Operator).ListBrokers(waitCtx)
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -263,7 +266,7 @@ func (service *Service) WaitOperatorCredential(ctx context.Context, password str
 			}
 			if errors.Is(err, kerr.SaslAuthenticationFailed) {
 				refused = err
-			} else if refused == nil || waitCtx.Err() == nil {
+			} else if refused == nil || time.Now().Before(deadline) {
 				return fmt.Errorf("broker %d as %s: %w", id, OperatorPrincipal, err)
 			}
 			select {
