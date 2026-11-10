@@ -37,8 +37,7 @@ Call `receivers` first. For each receiver it returns:
   inline input bytes the profile delivers, when set, its `labels`, `credentials`,
   the agent's credentials by `name` with their target (`env`, the agent's
   environment variable, or `file`, in its credentials directory), `optional`
-  and `configured`, whether this host has a source for each (agent
-  credentials only: cloning uses the user's `git` entries), and `ready`, whether the
+  and `configured`, whether this host has a source for each, and `ready`, whether the
   receiver's live advertisement offers it now. A live receiver
   with no ready plugin profile lists every profile with `ready` false, and no task
   is placed on it.
@@ -99,20 +98,18 @@ pushes only when your prompt asks it to, and only to the branch
 
 Pick the route by what this host can reach:
 
-- A public repository: `git` with its `remote` and `ref`. It needs no credential.
-- A private repository whose URL a `git` entry covers: the same `git`. The
-  entry's credential is the only clone credential.
-- No `git` entry for it, or work that is local or not pushed: bundle it
-  (`git bundle create repo.bundle <ref>`), send the bundle as an input (with
-  `storage: "s3"` when it is over the inline limit), and tell the agent to
-  clone it from its input directory and leave `changes.bundle` in its
-  output directory. Ask for that output, then `git fetch` it. No credential
-  is involved, and you push from this host.
+- A public `https` repository: `git` with its `remote` and `ref`.
+- A private one: the same, under a `git` entry for its URL.
+- One no `git` entry covers, a host outside the pool's VCS hosts, or local or
+  unpushed work: bundle it (`git bundle create repo.bundle <ref>`), send the
+  bundle as an input, and tell the agent to clone it from its input directory
+  and leave `changes.bundle` in its output directory. Ask for that output and
+  `git fetch` it. No credential is involved.
 
-Prefer getting commits back with `changes` (or a bundle output) to asking
-the agent to push. Credentials a profile lists, such as `github-token` as
-`GH_TOKEN`, are the agent's own tools during the run; they never clone the
-repository, and a missing optional one does not stop a clone.
+Get commits back with `changes` or a bundle output and push from this host.
+A profile's credentials, such as `github-token` as `GH_TOKEN`, serve the
+agent's own tools during the run; the clone uses only the matched `git`
+entry's credential.
 
 To send files, add `inputs`: `{path}` for each regular file beneath one of the wherry
 MCP server's input roots (the directory it runs in, unless the user's wherry
