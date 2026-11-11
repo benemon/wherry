@@ -106,8 +106,8 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 		sleep(claiming, time.Second)
 		return nil
 	}
-	// While the task runs, the client's only acknowledgements are the renewer's.
-	var running atomic.Bool
+	// While a task runs, the client's only acknowledgements are the renewer's; running holds its run ID.
+	var running atomic.Pointer[string]
 	share, err := newClaimClient(r, profile,
 		kgo.ConsumeTopics(operator.SignatureTopic(r.config.Pool, profile.Agent, profile.Labels)),
 		kgo.ShareGroup(operator.PoolGroup(r.config.Pool)),
@@ -121,9 +121,9 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 				switch {
 				case authorisationError(result.Err):
 					r.deny(result.Err, capClaim)
-				case result.Err != nil && running.Load():
+				case result.Err != nil && running.Load() != nil:
 					r.metrics.renewalFailures.Inc()
-					r.logger.Printf("profile %s: renew: %v", profile.Name, result.Err)
+					r.logger.Printf("run %s: renew: %v", *running.Load(), result.Err)
 				}
 			}
 		}),
@@ -187,9 +187,9 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 	}
 	r.metrics.inFlight.WithLabelValues(routed).Inc()
 	defer r.metrics.inFlight.WithLabelValues(routed).Dec()
-	running.Store(true)
+	running.Store(&admitted.task.Wherry.Run)
 	status := r.execute(ctx, share, record, admitted, attemptOf(record))
-	running.Store(false)
+	running.Store(nil)
 	if status != 0 {
 		record.Ack(status)
 		return flush()
