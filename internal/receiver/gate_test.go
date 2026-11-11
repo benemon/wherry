@@ -18,6 +18,7 @@ import (
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"
@@ -609,5 +610,60 @@ func (f fixture) shareFetches(t *testing.T) func() ([]time.Time, []int32) {
 		mu.Lock()
 		defer mu.Unlock()
 		return slices.Clone(times), slices.Clone(epochs)
+	}
+}
+
+// A renewal the broker refuses counts as a failed renewal: FlushAcks does not report the broker's answer, only the claim
+// client's acknowledgement callback does.
+func TestRefusedRenewalCountsAsARenewalFailure(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.plugin.endDelay = 2 * time.Second
+	var refused sync.Once
+	f.cluster.ControlKey(kmsg.ShareAcknowledge.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		f.cluster.KeepControl()
+		ack := request.(*kmsg.ShareAcknowledgeRequest)
+		renew := false
+		for _, topic := range ack.Topics {
+			for _, partition := range topic.Partitions {
+				for _, batch := range partition.AcknowledgementBatches {
+					renew = renew || slices.Contains(batch.AcknowledgeTypes, int8(kgo.AckRenew))
+				}
+			}
+		}
+		handled := false
+		var response *kmsg.ShareAcknowledgeResponse
+		if renew {
+			refused.Do(func() {
+				handled = true
+				response = kmsg.NewPtrShareAcknowledgeResponse()
+				response.SetVersion(ack.GetVersion())
+				for _, topic := range ack.Topics {
+					refusedTopic := kmsg.ShareAcknowledgeResponseTopic{TopicID: topic.TopicID}
+					for _, partition := range topic.Partitions {
+						refusedTopic.Partitions = append(refusedTopic.Partitions, kmsg.ShareAcknowledgeResponseTopicPartition{
+							Partition: partition.Partition, ErrorCode: kerr.InvalidRecordState.Code,
+						})
+					}
+					response.Topics = append(response.Topics, refusedTopic)
+				}
+			})
+		}
+		if !handled {
+			return nil, nil, false
+		}
+		return response, nil, true
+	})
+	f.submit(t, f.host, nil)
+	f.run(t, f.ctx)
+	f.await(t, testRun("run-a"), func(task wire.Task) bool { return task.Status.State == wire.TaskStateCompleted })
+	var sample dto.Metric
+	if err := f.receiver.metrics.renewalFailures.Write(&sample); err != nil {
+		t.Fatal(err)
+	}
+	if got := sample.GetCounter().GetValue(); got < 1 {
+		t.Fatalf("renewal failures %v after a refused renewal, want at least 1; logs:\n%s", got, f.logs.String())
+	}
+	if !strings.Contains(f.logs.String(), "renew: ") {
+		t.Fatalf("no renew log line; logs:\n%s", f.logs.String())
 	}
 }

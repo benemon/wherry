@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -31,7 +32,6 @@ import (
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -106,6 +106,8 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 		sleep(claiming, time.Second)
 		return nil
 	}
+	// While the task runs, the client's only acknowledgements are the renewer's.
+	var running atomic.Bool
 	share, err := newClaimClient(r, profile,
 		kgo.ConsumeTopics(operator.SignatureTopic(r.config.Pool, profile.Agent, profile.Labels)),
 		kgo.ShareGroup(operator.PoolGroup(r.config.Pool)),
@@ -116,8 +118,12 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 		// FlushAcks does not return the broker's answer to an acknowledgement, a renewal included.
 		kgo.ShareAckCallback(func(_ *kgo.Client, results kgo.ShareAckResults) {
 			for _, result := range results {
-				if authorisationError(result.Err) {
+				switch {
+				case authorisationError(result.Err):
 					r.deny(result.Err, capClaim)
+				case result.Err != nil && running.Load():
+					r.metrics.renewalFailures.Inc()
+					r.logger.Printf("profile %s: renew: %v", profile.Name, result.Err)
 				}
 			}
 		}),
@@ -181,7 +187,10 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 	}
 	r.metrics.inFlight.WithLabelValues(routed).Inc()
 	defer r.metrics.inFlight.WithLabelValues(routed).Dec()
-	if status := r.execute(ctx, share, record, admitted, attemptOf(record)); status != 0 {
+	running.Store(true)
+	status := r.execute(ctx, share, record, admitted, attemptOf(record))
+	running.Store(false)
+	if status != 0 {
 		record.Ack(status)
 		return flush()
 	}
@@ -491,8 +500,9 @@ func inadmissible(submission runSubmission, terms operator.Terms) string {
 }
 
 // renewer keeps the share lock alive from claim until the final acknowledgement,
-// including while the platform places the job.
-func renewer(ctx context.Context, share *kgo.Client, record *kgo.Record, failures prometheus.Counter, logf func(string, ...any)) (stop func()) {
+// including while the platform places the job. The broker's answer to a renewal reaches the claim client's
+// acknowledgement callback; FlushAcks reports only its own context's end.
+func renewer(ctx context.Context, share *kgo.Client, record *kgo.Record) (stop func()) {
 	ctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -506,10 +516,7 @@ func renewer(ctx context.Context, share *kgo.Client, record *kgo.Record, failure
 				return
 			case <-ticker.C:
 				record.Ack(kgo.AckRenew)
-				if err := share.FlushAcks(ctx); err != nil && ctx.Err() == nil {
-					failures.Inc()
-					logf("renew: %v", err)
-				}
+				_ = share.FlushAcks(ctx)
 			}
 		}
 	}()
@@ -531,10 +538,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			ack = 0
 		}
 	}()
-	stopRenew := renewer(ctx, share, record, r.metrics.renewalFailures, func(format string, args ...any) {
-		r.logger.Printf("run %s: "+format, append([]any{runID}, args...)...)
-	})
-	defer stopRenew()
+	defer renewer(ctx, share, record)()
 
 	deadline := wire.PastBound(task.Wherry.TaskEndedBy)
 	runCtx, cancelRun := context.WithDeadline(ctx, deadline)
