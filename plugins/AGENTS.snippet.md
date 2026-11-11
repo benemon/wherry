@@ -29,9 +29,9 @@ clones itself.
    `--input FILE:s3` sends a larger file (5 GiB at most) through the pool's
    bucket, and `--output NAME:s3` returns one that way. Keep working.
 3. `wherry wait RUN_ID` blocks until the run ends (2 hours 10 minutes at
-   most by default), then prints the agent's reply and an
-   `output=<name> path=<path>` line for each output, and writes each returned
-   output, S3 outputs included. Its exit status is 0 for
+   most by default), then writes each returned output, S3 outputs included,
+   prints an `output=<name> path=<path>` line for each, and prints the
+   agent's reply last. Its exit status is 0 for
    `TASK_STATE_COMPLETED`, 2 failed, 3 canceled, 4 rejected,
    6 timed out and 1 when it could not wait or collect. Start it in the
    background right after submitting, where your harness reports background command completion: its
