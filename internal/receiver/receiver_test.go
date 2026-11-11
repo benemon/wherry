@@ -1069,7 +1069,7 @@ func (f fixture) admitted(t *testing.T, record *kgo.Record) *admission {
 
 func (f fixture) execute(t *testing.T, record *kgo.Record, attempt int64) kgo.AckStatus {
 	t.Helper()
-	return f.receiver.execute(f.ctx, f.service.Operator, record, f.admitted(t, record), attempt)
+	return f.receiver.execute(f.ctx, nil, record, f.admitted(t, record), attempt)
 }
 
 // run starts the receiver's Run, which the test's end stops, and returns the channel its error arrives on. Run serves
@@ -1904,7 +1904,7 @@ func TestHeldRunPastTheShutdownDeadlineIsLeftUnacknowledged(t *testing.T) {
 	running, release := context.WithCancel(f.ctx)
 	defer release()
 	done := make(chan kgo.AckStatus, 1)
-	go func() { done <- f.receiver.execute(running, f.service.Operator, record, admitted, 1) }()
+	go func() { done <- f.receiver.execute(running, nil, record, admitted, 1) }()
 	for f.plugin.deliveredCount() < len(resultStream) {
 		if f.ctx.Err() != nil {
 			t.Fatalf("the run never followed its job; logs:\n%s", f.logs.String())

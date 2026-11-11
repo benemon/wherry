@@ -462,10 +462,10 @@ read it.
 
 A holder renews its share record while executing. The broker can revoke
 acquired records as soon as a member's connection or session fails.
-Before each plugin call
-that acts on the run's job or material (Dispatch, Stop, Purge and Release),
-it requires a renewal answered without error within 2 seconds just before
-the call; that bound includes waiting for another renewal. Collect only
+Before each plugin call that acts on the run's job or material (Dispatch,
+Stop, Purge and Release), it requires a renewal answered without error
+within 2 seconds just before the call; that bound includes waiting for
+another renewal. Collect only
 reads and Sweep is the plugin's own cleanup. A call already sent cannot be
 recalled. Producer fencing protects Kafka writes, not plugin calls.
 

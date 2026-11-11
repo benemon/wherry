@@ -284,8 +284,8 @@ func TestClaimCheckDuringExecution(t *testing.T) {
 							failRenewal(t, f, 2, mode)
 						}
 					}
-					ctx := context.WithValue(claim.ctx, claimContextKey{}, claim)
-					ack := f.receiver.execute(ctx, claim.share, claim.record, admitted, 1)
+					ctx := claim.ctx
+					ack := f.receiver.execute(ctx, claim, claim.record, admitted, 1)
 					if ack != 0 || !errors.Is(context.Cause(ctx), errClaimLost) {
 						t.Fatalf("ack=%v cause=%v; logs:\n%s", ack, context.Cause(ctx), f.logs.String())
 					}
@@ -370,9 +370,9 @@ func TestClaimLossHaltsTranscript(t *testing.T) {
 	f.plugin.endDelay = time.Hour
 	// Avoid a progress tick flushing the pending transcript before the loss.
 	renewInterval = time.Hour
-	ctx := context.WithValue(claim.ctx, claimContextKey{}, claim)
+	ctx := claim.ctx
 	done := make(chan kgo.AckStatus, 1)
-	go func() { done <- f.receiver.execute(ctx, claim.share, claim.record, admitted, 1) }()
+	go func() { done <- f.receiver.execute(ctx, claim, claim.record, admitted, 1) }()
 	waitFor(t, f, func() bool {
 		f.plugin.mu.Lock()
 		defer f.plugin.mu.Unlock()

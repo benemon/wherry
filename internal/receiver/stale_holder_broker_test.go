@@ -248,7 +248,7 @@ func staleHolderBrokerVariant(t *testing.T, address string, interval time.Durati
 	served := make(chan time.Time, 1)
 	traceB := &staleHolderTrace{run: run, txn: trace.txn, adoptionTarget: trace, keys: keys}
 	later, logsB := makeReceiver(second, &staleHolderPlugin{fakePlugin: platform, finish: finishB, followed: served}, traceB)
-	// Existing factory seam: no change to the renewer or any production code.
+	// The claim-client factory seam; the test changes no production code.
 	var blocked atomic.Bool
 	var dropped atomic.Int64
 	oldClaim := newClaimClient

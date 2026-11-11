@@ -11,8 +11,6 @@ import (
 
 var errClaimLost = errors.New("claim lost")
 
-type claimContextKey struct{}
-
 // The gate permits one renewal in flight. Every check timeout ends the claim,
 // so no earlier answer is pending at a later check. With one record held, all
 // pending acknowledgements while executing are renewals of that record.

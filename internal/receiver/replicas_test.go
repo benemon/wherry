@@ -328,7 +328,7 @@ func TestRedeliveryAdoptsOtherProfile(t *testing.T) {
 	ctx, cancel := context.WithCancel(f.ctx)
 	defer cancel()
 	done := make(chan kgo.AckStatus, 1)
-	go func() { done <- f.receiver.execute(ctx, share, record, admitted, attemptOf(record)) }()
+	go func() { done <- f.receiver.execute(ctx, nil, record, admitted, attemptOf(record)) }()
 	waitFor(t, f, func() bool { _, _, follows, _ := a.counts(); return follows == 1 })
 	a.mu.Lock()
 	stops, purges := a.stops, a.purges

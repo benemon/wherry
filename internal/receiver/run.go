@@ -197,8 +197,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 	claim.share, claim.record = share, record
 	state, _, _ := r.snapshot()
 	claim.duration = state.Pools[r.config.Pool].LockDuration()
-	ctx = context.WithValue(ctx, claimContextKey{}, claim)
-	status := r.execute(ctx, share, record, admitted, attemptOf(record))
+	status := r.execute(ctx, claim, record, admitted, attemptOf(record))
 	// A renewal still in flight answers after execute returns; draining it here keeps its failure counted.
 	if !errors.Is(context.Cause(ctx), errClaimLost) {
 		_ = flush()
@@ -545,7 +544,8 @@ func (r *Receiver) newProducer(run string) (*kgo.Client, error) {
 
 // execute runs one task; it returns the final share acknowledgement, or 0 when fenced or when the receiver stops for a
 // denial or a plugin's exit, which leaves the task to the broker's redelivery and its job running for an adopter.
-func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.Record, admitted *admission, attempt int64) (ack kgo.AckStatus) {
+// claim is nil only for direct test calls of execute, which hold no share claim.
+func (r *Receiver) execute(ctx context.Context, claim *runClaim, record *kgo.Record, admitted *admission, attempt int64) (ack kgo.AckStatus) {
 	task := admitted.task
 	runID := task.Wherry.Run
 	defer func() {
@@ -553,7 +553,6 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			ack = 0
 		}
 	}()
-	claim, _ := ctx.Value(claimContextKey{}).(*runClaim)
 	if claim != nil {
 		defer claim.reportLoss(r, runID)
 		defer renewer(ctx, claim)()
@@ -730,7 +729,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		for _, input := range admitted.inputs {
 			promptInputs = append(promptInputs, input.Name)
 		}
-		if !run.claimHeld(startCtx) {
+		if !run.claimHeld(ctx) {
 			return kgo.AckRelease
 		}
 		dispatched, dispatchedHandle, err := named.Plugin.Dispatch(startCtx, pluginsdk.Run{
@@ -1693,7 +1692,7 @@ func (run *activeRun) purge(ctx context.Context) error {
 	deadline := time.Now().Add(purgeDeadline)
 	for {
 		if !run.claimHeld(ctx) {
-			return context.Cause(ctx)
+			return cmp.Or(context.Cause(ctx), errClaimLost)
 		}
 		err := run.profile.Plugin.Purge(ctx, run.task.Wherry.Run)
 		if err != nil {
@@ -1738,7 +1737,7 @@ func (run *activeRun) findJob(ctx, lookupCtx context.Context) (pluginsdk.Job, bo
 		}
 		if job.Profile != named.Name || job.Agent != run.task.Wherry.Placement.Agent {
 			if !run.claimHeld(ctx) {
-				return pluginsdk.Job{}, false, context.Cause(ctx)
+				return pluginsdk.Job{}, false, cmp.Or(context.Cause(ctx), errClaimLost)
 			}
 			if err := named.Plugin.Stop(ctx, job.Handle); err != nil {
 				r.metrics.stopFailures.WithLabelValues(named.Name).Inc()
@@ -1746,7 +1745,7 @@ func (run *activeRun) findJob(ctx, lookupCtx context.Context) (pluginsdk.Job, bo
 				return pluginsdk.Job{}, false, errMisplaced
 			}
 			if !run.claimHeld(ctx) {
-				return pluginsdk.Job{}, false, context.Cause(ctx)
+				return pluginsdk.Job{}, false, cmp.Or(context.Cause(ctx), errClaimLost)
 			}
 			if err := named.Plugin.Purge(ctx, runID); err != nil {
 				r.metrics.purgeFailures.WithLabelValues(named.Name).Inc()
