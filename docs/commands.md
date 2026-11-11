@@ -1278,6 +1278,11 @@ reads the run. It does not fail the submission.
 Publishes a signed cancel of the run to its pool's events and prints
 `run_id=<id>`.
 
+A run takes no new input after `submit`
+([Binding](a2a-extension-v1.md#binding)). To add a requirement to a run,
+cancel it and submit again with the requirement in the prompt, or let it
+finish and submit a follow-up that passes its outputs with `--input`.
+
 ### `wherry host wait RUN_ID`
 
 Waits for a run to finish and collects it. `--timeout` sets the wait,

@@ -210,6 +210,10 @@ same input, and start its `wait` as before.
 When you no longer need a run's result, call `cancel` with its id. The run
 ends in `TASK_STATE_CANCELED`.
 
+A run takes no new input after `submit`. When a requirement arrives
+mid-run, either cancel the run and submit again with the requirement in the
+prompt, or let it finish and submit a follow-up with its outputs as inputs.
+
 ## Errors
 
 A failed call returns `{"code": ..., "message": ...}`. `RUN_NOT_FOUND`,
