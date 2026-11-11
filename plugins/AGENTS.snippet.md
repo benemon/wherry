@@ -62,6 +62,9 @@ clones itself.
    pool, since its operator resumes it. Otherwise submit again after a few
    minutes.
 7. `wherry cancel RUN_ID` when the result is no longer needed.
+   A run takes no new input after `submit`: for a requirement that arrives
+   mid-run, cancel and submit again with it, or let the run finish and
+   submit a follow-up with its outputs as inputs.
 8. `wherry status RUN_ID` prints a run's state without waiting.
    `wherry status` alone lists every run this host can see, latest update
    first. `wherry logs RUN_ID` prints the agent's output lines, and
