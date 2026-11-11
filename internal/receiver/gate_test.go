@@ -674,11 +674,11 @@ func TestRefusedRenewalCountsAsARenewalFailure(t *testing.T) {
 		f.refuseAck(t, kgo.AckRenew)
 		f.submit(t, f.host, nil)
 		f.run(t, f.ctx)
-		f.await(t, testRun("run-a"), func(task wire.Task) bool { return task.Status.State == wire.TaskStateCompleted })
+		waitFor(t, f, func() bool { return strings.Contains(f.logs.String(), "claim lost:") })
 		if got := f.renewalFailures(t); got < 1 {
 			t.Fatalf("renewal failures %v after a refused renewal, want at least 1; logs:\n%s", got, f.logs.String())
 		}
-		if want := "run " + testRun("run-a") + ": renew: "; !strings.Contains(f.logs.String(), want) {
+		if want := "run " + testRun("run-a") + ": claim lost: "; !strings.Contains(f.logs.String(), want) {
 			t.Fatalf("no %q log line; logs:\n%s", want, f.logs.String())
 		}
 	})

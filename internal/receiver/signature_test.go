@@ -390,7 +390,7 @@ func TestClaimedRunPastItsBoundWithItsProfileUnreadyEnds(t *testing.T) {
 			if admitted.profile.Plugin != nil {
 				t.Fatalf("admitted with profile %q, want none before the job is found", admitted.profile.Name)
 			}
-			status := f.receiver.execute(f.ctx, f.service.Operator, record, admitted, 2)
+			status := f.receiver.execute(f.ctx, nil, record, admitted, 2)
 			f.plugin.mu.Lock()
 			stops, dispatches := f.plugin.stops, f.plugin.dispatches
 			f.plugin.mu.Unlock()

@@ -588,3 +588,29 @@ func TestConvergeWithdrawsAHostSpecificBinding(t *testing.T) {
 		t.Fatalf("the binding for every host was withdrawn: %v", err)
 	}
 }
+
+func TestPoolApplyPinsRenewalAnswers(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	pool := "pool-a"
+	alter := kmsg.NewPtrIncrementalAlterConfigsRequest()
+	alter.Resources = []kmsg.IncrementalAlterConfigsRequestResource{{ResourceType: kmsg.ConfigResourceTypeGroupConfig, ResourceName: PoolGroup(pool), Configs: []kmsg.IncrementalAlterConfigsRequestResourceConfig{{Name: "share.renew.acknowledge.enable", Value: kmsg.StringPtr("false"), Op: kmsg.IncrementalAlterConfigOpSet}}}}
+	if response, err := alter.RequestWith(context.Background(), service.Operator); err != nil || response.Resources[0].ErrorCode != 0 {
+		t.Fatalf("disable renewal answers: %v %v", response, err)
+	}
+	if err := service.PoolApply(context.Background(), pool, modelTerms(), false); err != nil {
+		t.Fatal(err)
+	}
+	request := kmsg.NewPtrDescribeConfigsRequest()
+	request.Resources = []kmsg.DescribeConfigsRequestResource{{ResourceType: kmsg.ConfigResourceTypeGroupConfig, ResourceName: PoolGroup(pool)}}
+	response, err := request.RequestWith(context.Background(), service.Operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, config := range response.Resources[0].Configs {
+		if config.Name == "share.renew.acknowledge.enable" && config.Value != nil && *config.Value == "true" {
+			return
+		}
+	}
+	t.Fatal("renewal answers not pinned")
+}

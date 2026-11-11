@@ -1248,7 +1248,7 @@ func retentionAtLeast(actual, minimum int64) bool {
 }
 
 func (service *Service) configureGroup(ctx context.Context, pool string, terms Terms) error {
-	values := map[string]string{"share.auto.offset.reset": "earliest", "share.delivery.count.limit": strconv.Itoa(int(terms.DeliveryLimit)), "share.record.lock.duration.ms": strconv.FormatInt(int64(terms.LockDurationMS), 10), "share.isolation.level": "read_committed"}
+	values := map[string]string{"share.renew.acknowledge.enable": "true", "share.auto.offset.reset": "earliest", "share.delivery.count.limit": strconv.Itoa(int(terms.DeliveryLimit)), "share.record.lock.duration.ms": strconv.FormatInt(int64(terms.LockDurationMS), 10), "share.isolation.level": "read_committed"}
 	resource := kmsg.NewIncrementalAlterConfigsRequestResource()
 	resource.ResourceType = kmsg.ConfigResourceTypeGroupConfig
 	resource.ResourceName = PoolGroup(pool)

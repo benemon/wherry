@@ -38,7 +38,7 @@ func (f fixture) executing(t *testing.T, ctx context.Context, record *kgo.Record
 	t.Helper()
 	admitted := f.admitted(t, record)
 	done := make(chan kgo.AckStatus, 1)
-	go func() { done <- f.receiver.execute(ctx, f.service.Operator, record, admitted, attempt) }()
+	go func() { done <- f.receiver.execute(ctx, nil, record, admitted, attempt) }()
 	return done
 }
 

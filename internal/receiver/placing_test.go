@@ -611,7 +611,7 @@ func TestContextEndingDuringTheExpiryStop(t *testing.T) {
 				return nil
 			}
 			admitted := f.admitted(t, record)
-			status := f.receiver.execute(ctx, f.service.Operator, record, admitted, 1)
+			status := f.receiver.execute(ctx, nil, record, admitted, 1)
 			kinds := f.kinds(t)
 			if strings.Contains(f.logs.String(), "write failed") {
 				t.Fatalf("a write was attempted after the context ended; logs:\n%s", f.logs.String())
@@ -774,7 +774,7 @@ func TestAnAdopterOfAPendingJob(t *testing.T) {
 		f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
 		admitted := f.admitted(t, record)
 		passed(bound)
-		if status := f.receiver.execute(f.ctx, f.service.Operator, record, admitted, 2); status != kgo.AckReject {
+		if status := f.receiver.execute(f.ctx, nil, record, admitted, 2); status != kgo.AckReject {
 			t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 		}
 		if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != wire.NotEndedBy(bound) || f.plugin.stops != 1 || f.plugin.purges != 0 {
