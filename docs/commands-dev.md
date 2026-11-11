@@ -105,7 +105,10 @@ returns once a run of the mock agent completes. Its steps:
    `env.denylist` holds Nomad's default list, the copied variables and
    every variable whose name ends `_TOKEN`, `_KEY`, `_SECRET` or
    `_PASSWORD` when `init` ran, so the agents' environment carries none of
-   them. On Linux without a Podman socket it starts `podman system
+   them. Its `fingerprint.denylist`,
+   `env_aws,env_gce,env_azure,env_digitalocean`, skips Nomad's cloud
+   fingerprinters, whose metadata timeouts can fail Nomad's start on a
+   cloud host. On Linux without a Podman socket it starts `podman system
    service` beside Nomad.
 6. `kafka` runs the broker as a Nomad job from the local tag and waits for
    a metadata request over SCRAM.

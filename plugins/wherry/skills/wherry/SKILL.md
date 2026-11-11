@@ -107,9 +107,9 @@ Pick the route by what this host can reach:
   `git fetch` it. No credential is involved.
 
 Get commits back with `changes` or a bundle output and push from this host.
-A profile's credentials, such as `github-token` as `GH_TOKEN`, serve the
+The agent's credentials, such as `github-token` as `GH_TOKEN`, serve the
 agent's own tools during the run; the clone uses only the matched `git`
-entry's credential. A missing optional one does not stop the run.
+entry's credential.
 
 To send files, add `inputs`: `{path}` for each regular file beneath one of the wherry
 MCP server's input roots (the directory it runs in, unless the user's wherry
