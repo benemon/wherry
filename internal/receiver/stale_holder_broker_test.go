@@ -108,7 +108,8 @@ func (s *staleHolderTrace) OnProduceRecordBuffered(r *kgo.Record) {
 				s.adopting.Store(true)
 			}
 		}
-		s.note(fmt.Sprintf("produce attempt topic=%s key=%s bytes=%d sha256=%x", r.Topic, r.Key, len(r.Value), sha256.Sum256(r.Value)), true)
+		// Evidence only: a record in a transaction the stale holder cannot commit is fenced; the committed EndTxn is the write.
+		s.note(fmt.Sprintf("produce attempt topic=%s key=%s bytes=%d sha256=%x", r.Topic, r.Key, len(r.Value), sha256.Sum256(r.Value)), false)
 	}
 }
 func (s *staleHolderTrace) OnProduceRecordUnbuffered(r *kgo.Record, err error) {
