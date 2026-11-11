@@ -358,9 +358,10 @@ Then:
 ## WherryBrokerUnreachable
 
 The receiver reads the pool's topics, claims tasks through its share group
-and renews each claim every 10 seconds. A receiver that cannot renew a
-claim loses it after the pool's `lock_duration`, and the broker hands the
-task to another member. The alert fires when, for 5 minutes, a receiver
+and renews each claim every 10 seconds. The broker can revoke a claim
+when the member's connection or session fails; otherwise an unrenewed lock
+expires after the pool's `lock_duration`. The task goes to another member.
+The alert fires when, for 5 minutes, a receiver
 counts 3 or more Kafka read or share group errors
 (`wherry_bus_errors_total` with `op` `read` or `share group`) or failed
 claim renewals (`wherry_renewal_failures_total`) in 5 minutes.
@@ -370,7 +371,7 @@ Confirm it:
 1. Run `wherry host receivers`. A receiver that cannot write its advertisements
    turns `stale`.
 2. Read the receiver's log for `periodic step: <error>`,
-   `run <id>: renew: <error>`, `run <id>: read events: <error>` and
+   `run <id>: claim lost: <error>`, `run <id>: read events: <error>` and
    `stopping: denied <op>: <error>`. At an authorisation error the receiver
    exits, naming the operation denied, and its supervisor restarts it; the
    runs it held are adopted from the pool once their tasks are delivered
@@ -390,3 +391,12 @@ Then:
   receiver restarts and exits again.
 - A task whose claim lapsed during the outage is redelivered, and its next
   holder adopts the running job.
+
+A `run <id>: claim lost: <error>` line and `wherry_claim_lost_total`
+mean the holder stopped acting on the run and left its task for redelivery,
+without a final acknowledgement, transcript shutdown write or `released`.
+Check broker connectivity and latency. Before each Dispatch, Stop, Purge
+(including retries) and Release, a renewal must answer successfully within
+2 seconds, including waiting for another renewal. A slow broker or process
+pause can therefore end a still-held run and spend a delivery. Parent
+cancellation and stopping the renewer do not count as claim loss.

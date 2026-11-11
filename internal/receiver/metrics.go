@@ -95,6 +95,7 @@ type metrics struct {
 	sweepFailures, collectionFailures, openWaits, redactions      *prometheus.CounterVec
 	busErrors, denials, dropped, budgetExhausted                  *prometheus.CounterVec
 	takeovers, claimantChanges                                    *prometheus.CounterVec
+	claimLost                                                     prometheus.Counter
 	renewalFailures, transactionAborts, ambiguousCommits, fenced  prometheus.Counter
 	ignoredWraps, keyLost                                         prometheus.Counter
 
@@ -170,6 +171,7 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	}
 	m.keyLost = counter("runs_key_lost_total", "Runs ended with the wherry event key-lost.")
 	m.ignoredWraps = counter("ignored_wraps_total", "Wraps whose key does not decrypt the task's envelope.")
+	m.claimLost = counter("claim_lost_total", "Claims lost while held.")
 	m.renewalFailures = counter("renewal_failures_total", "Failed claim renewals.")
 	m.transactionAborts = counter("transaction_aborts_total", "Transactions aborted after a failed produce.")
 	m.ambiguousCommits = counter("ambiguous_commits_total", "Transaction commits with an unknown outcome.")

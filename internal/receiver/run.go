@@ -106,8 +106,11 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 		sleep(claiming, time.Second)
 		return nil
 	}
-	// While a task runs, the client's only acknowledgements are the renewer's; running holds its run ID.
+	// While a task runs, the client acknowledges only renewals; running holds its run ID.
 	var running atomic.Pointer[string]
+	ctx, cancelClaim := context.WithCancelCause(ctx)
+	defer cancelClaim(nil)
+	claim := &runClaim{gate: make(chan struct{}, 1), cancel: cancelClaim, ctx: ctx}
 	share, err := newClaimClient(r, profile,
 		kgo.ConsumeTopics(operator.SignatureTopic(r.config.Pool, profile.Agent, profile.Labels)),
 		kgo.ShareGroup(operator.PoolGroup(r.config.Pool)),
@@ -118,12 +121,14 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 		// FlushAcks does not return the broker's answer to an acknowledgement, a renewal included.
 		kgo.ShareAckCallback(func(_ *kgo.Client, results kgo.ShareAckResults) {
 			for _, result := range results {
+				if running.Load() != nil {
+					claim.answer(result.Err)
+				}
 				switch {
 				case authorisationError(result.Err):
 					r.deny(result.Err, capClaim)
 				case result.Err != nil && running.Load() != nil:
 					r.metrics.renewalFailures.Inc()
-					r.logger.Printf("run %s: renew: %v", *running.Load(), result.Err)
 				}
 			}
 		}),
@@ -165,6 +170,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 		}
 		if records := fetches.Records(); len(records) > 0 {
 			record = records[0]
+			claim.anchor = time.Now()
 		}
 	}
 	// A slot holding a task releases it only after running ends, so it does not hold up the idle slots' close.
@@ -188,10 +194,19 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 	r.metrics.inFlight.WithLabelValues(routed).Inc()
 	defer r.metrics.inFlight.WithLabelValues(routed).Dec()
 	running.Store(&admitted.task.Wherry.Run)
+	claim.share, claim.record = share, record
+	state, _, _ := r.snapshot()
+	claim.duration = state.Pools[r.config.Pool].LockDuration()
+	ctx = context.WithValue(ctx, claimContextKey{}, claim)
 	status := r.execute(ctx, share, record, admitted, attemptOf(record))
 	// A renewal still in flight answers after execute returns; draining it here keeps its failure counted.
-	_ = flush()
+	if !errors.Is(context.Cause(ctx), errClaimLost) {
+		_ = flush()
+	}
 	running.Store(nil)
+	if claim.reportLoss(r, admitted.task.Wherry.Run) {
+		return nil
+	}
 	if status != 0 {
 		record.Ack(status)
 		return flush()
@@ -501,10 +516,7 @@ func inadmissible(submission runSubmission, terms operator.Terms) string {
 	return ""
 }
 
-// renewer keeps the share lock alive from claim until the final acknowledgement,
-// including while the platform places the job. The broker's answer to a renewal reaches the claim client's
-// acknowledgement callback; FlushAcks reports only its own context's end.
-func renewer(ctx context.Context, share *kgo.Client, record *kgo.Record) (stop func()) {
+func renewer(ctx context.Context, claim *runClaim) (stop func()) {
 	ctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -517,8 +529,9 @@ func renewer(ctx context.Context, share *kgo.Client, record *kgo.Record) (stop f
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				record.Ack(kgo.AckRenew)
-				_ = share.FlushAcks(ctx)
+				if !claim.renew(ctx, false) {
+					return
+				}
 			}
 		}
 	}()
@@ -540,7 +553,11 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			ack = 0
 		}
 	}()
-	defer renewer(ctx, share, record)()
+	claim, _ := ctx.Value(claimContextKey{}).(*runClaim)
+	if claim != nil {
+		defer claim.reportLoss(r, runID)
+		defer renewer(ctx, claim)()
+	}
 
 	deadline := wire.PastBound(task.Wherry.TaskEndedBy)
 	runCtx, cancelRun := context.WithDeadline(ctx, deadline)
@@ -556,7 +573,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 	defer producer.Close()
 	run := &activeRun{
-		receiver: r, producer: producer, task: task, taskHash: admitted.taskHash, history: admitted.history, attempt: attempt, profile: admitted.profile,
+		claim: claim, receiver: r, producer: producer, task: task, taskHash: admitted.taskHash, history: admitted.history, attempt: attempt, profile: admitted.profile,
 		expected: admitted.outputs, deadline: deadline, claimed: time.Now(),
 	}
 	defer func() {
@@ -713,6 +730,9 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		for _, input := range admitted.inputs {
 			promptInputs = append(promptInputs, input.Name)
 		}
+		if !run.claimHeld(startCtx) {
+			return kgo.AckRelease
+		}
 		dispatched, dispatchedHandle, err := named.Plugin.Dispatch(startCtx, pluginsdk.Run{
 			ID: runID, Profile: named.Name, Agent: task.Wherry.Placement.Agent, Model: task.Wherry.Placement.Model, Attempt: attempt,
 			Prompt: []byte(Preamble(named.Plugin.Directories(), append(promptInputs, inputNames...), credentials, admitted.unsupplied, admitted.outputs, admitted.git, runID,
@@ -789,6 +809,9 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			r.logger.Printf("run %s: profile %s returned a handle over %d bytes", runID, run.profile.Name, maxHandle)
 		} else {
 			r.logger.Printf("run %s: profile %s returned a job name over %d bytes", runID, run.profile.Name, wire.MaxJobName)
+		}
+		if !run.claimHeld(ctx) {
+			return kgo.AckRelease, true
 		}
 		if err := run.profile.Plugin.Stop(ctx, handle); err != nil {
 			r.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
@@ -1349,6 +1372,7 @@ func (run *activeRun) presigned(values signed.EnvelopeValues, inputs []wire.S3In
 }
 
 type activeRun struct {
+	claim    *runClaim
 	receiver *Receiver
 	producer *kgo.Client
 	task     *wire.Submission
@@ -1546,11 +1570,17 @@ func (run *activeRun) terms() operator.Terms {
 }
 
 func (run *activeRun) commit(ctx context.Context, records ...*kgo.Record) error {
+	if run.claim != nil && errors.Is(context.Cause(run.claim.ctx), errClaimLost) {
+		return errClaimLost
+	}
 	return run.receiver.transact(ctx, run.producer, records...)
 }
 
 // abandon stops all activity for a run whose writes failed; a fenced holder leaves the run to its adopter.
 func (run *activeRun) abandon(err error) kgo.AckStatus {
+	if errors.Is(err, errClaimLost) || run.claim != nil && errors.Is(context.Cause(run.claim.ctx), errClaimLost) {
+		return 0
+	}
 	if errors.Is(err, kerr.InvalidProducerEpoch) || errors.Is(err, kerr.ProducerFenced) {
 		run.receiver.metrics.fenced.Inc()
 		run.receiver.logger.Printf("run %s: fenced by a newer holder", run.task.Wherry.Run)
@@ -1563,6 +1593,9 @@ func (run *activeRun) abandon(err error) kgo.AckStatus {
 
 // stopAndFail and stopAndCancel write nothing once ctx has ended during the Stop: the task is released, or on a halt left.
 func (run *activeRun) stopAndFail(ctx context.Context, handle pluginsdk.Handle, reason string, pending []pluginsdk.Line) kgo.AckStatus {
+	if !run.claimHeld(ctx) {
+		return kgo.AckRelease
+	}
 	err := run.profile.Plugin.Stop(ctx, handle)
 	if ctx.Err() != nil {
 		return kgo.AckRelease
@@ -1576,6 +1609,9 @@ func (run *activeRun) stopAndFail(ctx context.Context, handle pluginsdk.Handle, 
 }
 
 func (run *activeRun) stopAndCancel(ctx context.Context, handle pluginsdk.Handle, pending []pluginsdk.Line) kgo.AckStatus {
+	if !run.claimHeld(ctx) {
+		return kgo.AckRelease
+	}
 	err := run.profile.Plugin.Stop(ctx, handle)
 	if ctx.Err() != nil {
 		return kgo.AckRelease
@@ -1656,6 +1692,9 @@ func (run *activeRun) startFailure(ctx context.Context, class, cause string) kgo
 func (run *activeRun) purge(ctx context.Context) error {
 	deadline := time.Now().Add(purgeDeadline)
 	for {
+		if !run.claimHeld(ctx) {
+			return context.Cause(ctx)
+		}
 		err := run.profile.Plugin.Purge(ctx, run.task.Wherry.Run)
 		if err != nil {
 			run.receiver.metrics.purgeFailures.WithLabelValues(run.profile.Name).Inc()
@@ -1698,10 +1737,16 @@ func (run *activeRun) findJob(ctx, lookupCtx context.Context) (pluginsdk.Job, bo
 			continue
 		}
 		if job.Profile != named.Name || job.Agent != run.task.Wherry.Placement.Agent {
+			if !run.claimHeld(ctx) {
+				return pluginsdk.Job{}, false, context.Cause(ctx)
+			}
 			if err := named.Plugin.Stop(ctx, job.Handle); err != nil {
 				r.metrics.stopFailures.WithLabelValues(named.Name).Inc()
 				r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
 				return pluginsdk.Job{}, false, errMisplaced
+			}
+			if !run.claimHeld(ctx) {
+				return pluginsdk.Job{}, false, context.Cause(ctx)
 			}
 			if err := named.Plugin.Purge(ctx, runID); err != nil {
 				r.metrics.purgeFailures.WithLabelValues(named.Name).Inc()
@@ -1768,6 +1813,9 @@ func (run *activeRun) budgetEnded() {
 // conclude ends the run whose job ended as terminal says: with the status its outcome file reports, or failed for how
 // it ended when it left no valid one. The outputs are collected first, whatever the exit, so the file is always read.
 func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pending []pluginsdk.Line, terminal pluginsdk.Terminal) kgo.AckStatus {
+	if !run.claimHeld(ctx) {
+		return kgo.AckRelease
+	}
 	stopped := true
 	if err := run.profile.Plugin.Stop(ctx, handle); err != nil {
 		run.receiver.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
@@ -2175,6 +2223,9 @@ func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result st
 
 func (run *activeRun) release(ctx context.Context) {
 	if run.profile.Plugin == nil || run.kept {
+		return
+	}
+	if !run.claimHeld(ctx) {
 		return
 	}
 	if err := run.profile.Plugin.Release(ctx, run.task.Wherry.Run); err != nil {

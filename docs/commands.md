@@ -266,7 +266,7 @@ and topics. A new pool has no receivers, so it creates no task topic:
 
 | Resource | Settings |
 | --- | --- |
-| share group `p-<pool>` | `share.auto.offset.reset=earliest`, `share.isolation.level=read_committed`, `share.delivery.count.limit` from `delivery_limit` (default 5), `share.record.lock.duration.ms` from `lock_duration` (default `15s`) |
+| share group `p-<pool>` | `share.renew.acknowledge.enable=true`, `share.auto.offset.reset=earliest`, `share.isolation.level=read_committed`, `share.delivery.count.limit` from `delivery_limit` (default 5), `share.record.lock.duration.ms` from `lock_duration` (default `15s`) |
 | every task topic under `wherry.pool.<pool>.tasks.` | `retention.ms` of `start_by_limit` plus six hours plus one day, unless it is already longer; `message.timestamp.type=LogAppendTime`, `cleanup.policy=delete`, `retention.bytes=-1`, `segment.ms=3600000` |
 | events topic `wherry.pool.<pool>.events` | the greatest task topic's `retention.ms`, unless it is already longer; the task topics' other settings |
 | snapshot topic `wherry.pool.<pool>.custodian` | `cleanup.policy=compact`, `message.timestamp.type=LogAppendTime`, `retention.ms=-1` |

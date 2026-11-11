@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -22,6 +23,7 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
@@ -52,6 +54,7 @@ type staleHolderTrace struct {
 	mu                                  sync.Mutex
 	run, txn                            string
 	adopted                             time.Time
+	held                                context.Context
 	cut, nextRenewalWrite, nextCallback time.Time
 	entries                             []string
 	forbidden                           []string
@@ -80,7 +83,7 @@ func (s *staleHolderTrace) note(action string, forbidden bool) {
 	}
 	entry := fmt.Sprintf("%s (%s): %s", now.UTC().Format(time.RFC3339Nano), since, action)
 	s.entries = append(s.entries, entry)
-	if forbidden && !s.adopted.IsZero() {
+	if forbidden && (!s.adopted.IsZero() || s.held != nil && errors.Is(context.Cause(s.held), errClaimLost)) {
 		s.forbidden = append(s.forbidden, entry)
 	}
 }
@@ -105,7 +108,7 @@ func (s *staleHolderTrace) OnProduceRecordBuffered(r *kgo.Record) {
 				s.adopting.Store(true)
 			}
 		}
-		s.note(fmt.Sprintf("produce attempt topic=%s key=%s bytes=%d sha256=%x", r.Topic, r.Key, len(r.Value), sha256.Sum256(r.Value)), false)
+		s.note(fmt.Sprintf("produce attempt topic=%s key=%s bytes=%d sha256=%x", r.Topic, r.Key, len(r.Value), sha256.Sum256(r.Value)), true)
 	}
 }
 func (s *staleHolderTrace) OnProduceRecordUnbuffered(r *kgo.Record, err error) {
@@ -138,6 +141,11 @@ func (p *staleHolderPlugin) Lookup(ctx context.Context, run string) (pluginsdk.J
 	return p.fakePlugin.Lookup(ctx, run)
 }
 func (p *staleHolderPlugin) Follow(ctx context.Context, h pluginsdk.Handle, from int64, lines chan<- pluginsdk.Line) (pluginsdk.Terminal, error) {
+	if p.trace != nil {
+		p.trace.mu.Lock()
+		p.trace.held = ctx
+		p.trace.mu.Unlock()
+	}
 	p.note("Follow "+h.Name, false)
 	if p.waiting != nil {
 		p.waiting.Store(true)
@@ -174,8 +182,7 @@ func (p *staleHolderPlugin) Collect(ctx context.Context, h pluginsdk.Handle, lim
 }
 
 // TestStaleHolderDoesNotActAfterAdoptionOnRealBroker demonstrates agb-w7i0.
-// The assertion describes the required behaviour; today's conclude calls Stop
-// before discovering producer fencing, so this test is expected to fail.
+// A partitioned holder must stop acting while the adopter serves the job.
 func TestStaleHolderDoesNotActAfterAdoptionOnRealBroker(t *testing.T) {
 	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
 	if address == "" {
@@ -369,8 +376,8 @@ func staleHolderBrokerVariant(t *testing.T, address string, interval time.Durati
 	case <-ctx.Done():
 		t.Errorf("B service check exceeded scenario deadline; A:\n%s\nB:\n%s", logsA.String(), logsB.String())
 	}
-	if !aWaiting.Load() {
-		t.Error("A ceased running during B service window")
+	if !aWaiting.Load() && !strings.Contains(logsA.String(), ": claim lost:") {
+		t.Error("A stopped without reporting claim loss")
 	}
 	trace.note("B service window ended; allowing A Follow to finish", false)
 	close(finishA)
@@ -382,6 +389,16 @@ func staleHolderBrokerVariant(t *testing.T, address string, interval time.Durati
 		timeline := trace.observationsLocked() + "\n" + strings.Join(trace.entries, "\n")
 		trace.mu.Unlock()
 		t.Fatalf("A did not finish; cut=%s adopted=%s dropped=%d; timeline:\n%s\nA:\n%s\nB:\n%s", blockedAt, adopted, dropped.Load(), timeline, logsA.String(), logsB.String())
+	}
+	for !strings.Contains(logsA.String(), ": claim lost:") && ctx.Err() == nil {
+		time.Sleep(10 * time.Millisecond)
+	}
+	var sample dto.Metric
+	if err := a.metrics.claimLost.Write(&sample); err != nil {
+		t.Fatal(err)
+	}
+	if sample.GetCounter().GetValue() != 1 || strings.Count(logsA.String(), ": claim lost:") != 1 {
+		t.Errorf("A did not report exactly one claim loss: count=%v logs:\n%s", sample.GetCounter().GetValue(), logsA.String())
 	}
 	if dropped.Load() == 0 {
 		t.Error("fault injection never intercepted a claim write")
