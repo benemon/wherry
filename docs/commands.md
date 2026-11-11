@@ -1295,9 +1295,9 @@ Waits for a run to finish and collects it. `--timeout` sets the wait,
 | `--timeout` | `2h10m` | how long to wait for the run to end |
 | `--outputs-dir` | `<state_dir>/runs/<run>/outputs/` | where the run's outputs go |
 
-Standard output carries the result: each part of the status message on its
-own line, then the `output=` lines. `wait` prints no transcript;
-[`wherry logs`](#wherry-host-logs-run-id) reads it, and `wherry logs ID > file`
+Standard output carries the result: the `output=` lines, then each part of
+the status message on its own line, so the reply is last. `wait` prints no
+transcript; [`wherry logs`](#wherry-host-logs-run-id) reads it, and `wherry logs ID > file`
 keeps it. Standard error carries errors and the diagnostics below.
 
 The status message's parts are the agent's answer or what went wrong, as its
