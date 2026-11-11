@@ -189,6 +189,8 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 	defer r.metrics.inFlight.WithLabelValues(routed).Dec()
 	running.Store(&admitted.task.Wherry.Run)
 	status := r.execute(ctx, share, record, admitted, attemptOf(record))
+	// A renewal still in flight answers after execute returns; draining it here keeps its failure counted.
+	_ = flush()
 	running.Store(nil)
 	if status != 0 {
 		record.Ack(status)
