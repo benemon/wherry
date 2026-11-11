@@ -75,8 +75,8 @@ in the background now, before anything else. The command:
 
 - blocks until the run ends, or for 2 hours 10 minutes (`--timeout` changes
   that);
-- prints the agent's reply and a line for each returned output, and writes
-  the outputs;
+- writes the outputs and prints a line for each, then the agent's reply,
+  last;
 - exits 0 for `TASK_STATE_COMPLETED`, 2 failed, 3 canceled, 4 rejected,
   6 timed out, and 1 when it could not wait or collect. It exits 1 at once
   when `task_started_by` passes with no receiver claiming the run.
@@ -209,6 +209,10 @@ same input, and start its `wait` as before.
 
 When you no longer need a run's result, call `cancel` with its id. The run
 ends in `TASK_STATE_CANCELED`.
+
+A run takes no new input after `submit`. When a requirement arrives
+mid-run, either cancel the run and submit again with the requirement in the
+prompt, or let it finish and submit a follow-up with its outputs as inputs.
 
 ## Errors
 

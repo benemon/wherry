@@ -523,9 +523,24 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 	if result.Unclaimed != "" {
 		return errors.New(result.Unclaimed)
 	}
+	if collectErr == nil {
+		for _, output := range collected.Outputs {
+			fmt.Fprintf(stdout, "output=%s path=%s sha256=%s size=%d\n", output.Name, output.Path, output.SHA256, output.Size)
+			switch output.Name {
+			case wire.GitPatch:
+				fmt.Fprintf(stderr, "apply with: git am %s\n", output.Path)
+			case wire.GitBundle:
+				fmt.Fprintf(stderr, "fetch with: git fetch %s HEAD\n", output.Path)
+			}
+		}
+		for _, output := range append(result.NotReturned, collected.Rejected...) {
+			fmt.Fprintf(stderr, "output %s not returned: %s\n", output.Name, output.Reason)
+		}
+	}
 	if result.Model != "" {
 		fmt.Fprintf(stderr, "model=%s\n", result.Model)
 	}
+	// The reply prints last, so a caller that keeps only the tail of a long output list still sees it.
 	if result.Status.Message != nil {
 		for _, part := range result.Status.Message.Parts {
 			if replyPreview(result, part) {
@@ -544,18 +559,6 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 	}
 	if collectErr != nil {
 		return collectErr
-	}
-	for _, output := range collected.Outputs {
-		fmt.Fprintf(stdout, "output=%s path=%s sha256=%s size=%d\n", output.Name, output.Path, output.SHA256, output.Size)
-		switch output.Name {
-		case wire.GitPatch:
-			fmt.Fprintf(stderr, "apply with: git am %s\n", output.Path)
-		case wire.GitBundle:
-			fmt.Fprintf(stderr, "fetch with: git fetch %s HEAD\n", output.Path)
-		}
-	}
-	for _, output := range append(result.NotReturned, collected.Rejected...) {
-		fmt.Fprintf(stderr, "output %s not returned: %s\n", output.Name, output.Reason)
 	}
 	warnRedacted(stderr, result.Redacted)
 	warnSkipped(stderr, result.Skipped)

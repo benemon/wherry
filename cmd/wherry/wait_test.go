@@ -22,7 +22,7 @@ func finishedRun(t *testing.T) (*bus, string) {
 	return b, runID
 }
 
-// wait prints the reply and the outputs, none of the transcript, and writes no transcript.jsonl.
+// wait prints the outputs and then the reply, none of the transcript, and writes no transcript.jsonl.
 func TestWaitPrintsTheReplyAndOutputs(t *testing.T) {
 	b, runID := finishedRun(t)
 	dir := t.TempDir()
@@ -30,7 +30,7 @@ func TestWaitPrintsTheReplyAndOutputs(t *testing.T) {
 	if err := runWait(b.ctx, b.client, []string{runID, "--outputs-dir", dir, "--timeout", "5s"}, &stdout, &stderr); err != nil {
 		t.Fatalf("wait: %v", err)
 	}
-	want := "done\noutput=report.md path=" + filepath.Join(dir, "report.md") + " sha256=" + hashOf("# Report\n") + " size=9\n"
+	want := "output=report.md path=" + filepath.Join(dir, "report.md") + " sha256=" + hashOf("# Report\n") + " size=9\ndone\n"
 	if stdout.String() != want || stderr.String() != "output notes.md not returned: missing\n" {
 		t.Fatalf("stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
 	}
