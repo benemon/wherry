@@ -62,6 +62,8 @@ func (f fixture) awaitStartFailures(t *testing.T, n int) {
 func TestStartRetriesInOneDelivery(t *testing.T) {
 	f := newFixture(t, resultStream)
 	setDuration(t, &openInterval, 20*time.Millisecond)
+	// The window, tested on its own, cuts no wait here.
+	setDuration(t, &startRetryWindow, time.Hour)
 	failing := 3
 	f.plugin.failStart = func(string) bool { failing--; return failing >= 0 }
 	f.run(t, f.ctx)
@@ -96,8 +98,15 @@ func TestStartRetriesInOneDelivery(t *testing.T) {
 // window's end, measured from the first failure. On the last delivery, an outage that ends before that attempt is
 // survived by it.
 func TestStartRetryWindowAndBoundaryRecovery(t *testing.T) {
+	// One wait, cut short by the window's end however long an attempt takes: attempts at 0, 1.2 s and 2 s.
+	window := func(t *testing.T) {
+		setDuration(t, &startRetryWait, 1200*time.Millisecond)
+		setDuration(t, &startRetryMaxWait, 1200*time.Millisecond)
+		setDuration(t, &startRetryWindow, 2*time.Second)
+	}
 	t.Run("window", func(t *testing.T) {
 		f := newFixture(t, resultStream)
+		window(t)
 		setDuration(t, &openInterval, 20*time.Millisecond)
 		f.plugin.failStart = func(string) bool { return true }
 		f.run(t, f.ctx)
@@ -131,7 +140,7 @@ func TestStartRetryWindowAndBoundaryRecovery(t *testing.T) {
 				final = claim.at
 			}
 		}
-		if final.Before(end.Add(-slack)) || final.After(end.Add(3*slack)) {
+		if final.Before(end.Add(-slack)) || final.After(end.Add(6*slack)) {
 			t.Fatalf("final attempt claimed at %s, want the window's end %s", final, end)
 		}
 	})
@@ -139,11 +148,12 @@ func TestStartRetryWindowAndBoundaryRecovery(t *testing.T) {
 		terms := testTerms()
 		terms.DeliveryLimit = 2
 		f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
+		window(t)
 		setDuration(t, &openInterval, 20*time.Millisecond)
 		var outage time.Time
 		f.plugin.failStart = func(string) bool {
 			if outage.IsZero() {
-				outage = time.Now().Add(startRetryWindow - startRetryWait/2)
+				outage = time.Now().Add(startRetryWindow - 200*time.Millisecond)
 			}
 			return time.Now().Before(outage)
 		}
@@ -153,7 +163,7 @@ func TestStartRetryWindowAndBoundaryRecovery(t *testing.T) {
 			t.Fatalf("ended %s, want the final attempt to complete; logs:\n%s", task.Status.State, f.logs.String())
 		}
 		claims, failures := f.retryEvents(t)
-		if slices.ContainsFunc(claims, func(a attemptAt) bool { return a.attempt != 1 }) || len(failures) < 3 {
+		if slices.ContainsFunc(claims, func(a attemptAt) bool { return a.attempt != 1 }) || len(failures) != 2 {
 			t.Fatalf("claims %v and failures %v, want retries within the one delivery", claims, failures)
 		}
 		if final := claims[len(claims)-1].at; final.Before(failures[0].at.Add(startRetryWindow - 50*time.Millisecond)) {

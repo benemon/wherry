@@ -230,6 +230,7 @@ func TestSlotRetriesAStartFailureOnItsDelivery(t *testing.T) {
 	config := testConfig(testReceiver)
 	config.Profiles[0].Replicas = 2
 	f := newFixtureWith(t, resultStream, testTerms(), config, map[string]*fakePlugin{"nomad": {stream: resultStream}})
+	setDuration(t, &startRetryWindow, time.Hour)
 	failing := 2
 	f.plugin.failStart = func(string) bool { failing--; return failing >= 0 }
 	f.submit(t, f.host, nil)
