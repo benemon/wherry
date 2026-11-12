@@ -120,9 +120,15 @@ Then:
 
 ## WherryDeliveryBudgetExhausted
 
-Each start failure returns a task to the pool and spends one of its pool's
-`delivery_limit` deliveries, as does each release of a task whose profile
-went unready between its claim's subscription and its fetch. From attempt
+A member that fails to start a task, for example because the agent image
+cannot be pulled, retries the start in place for 5 minutes, with waits of
+30 seconds, 60 seconds, then 120 seconds. It then returns the task to the
+pool, which spends one of its pool's `delivery_limit` deliveries. Each
+release of a task whose profile went unready between its claim's
+subscription and its fetch spends one too, at once, as does every other
+release. The registry holding the agent image is a runtime dependency of
+dispatch: an outage of up to 5 minutes delays a run's start on the member
+that holds it, and a longer one spends deliveries. From attempt
 `delivery_limit` minus 1, a receiver ends the run `TASK_STATE_FAILED` with
 `delivery budget exhausted` instead.
 `wherry_delivery_budget_exhausted_total` counts these runs by tenant and
@@ -140,7 +146,10 @@ Confirm it:
 1. Run `wherry status RUN_ID` for a failed run. Its message reads
    `delivery budget exhausted`, or
    `delivery budget exhausted after <n> attempts; last: <cause>` naming the
-   last start failure.
+   last start failure. A run whose start keeps failing more often ends with
+   `not started by task_started_by (<time>); last: <cause>`, since its
+   retries hold each delivery for about 5 minutes; that run is not counted
+   here.
 2. Run `wherry events RUN_ID` to see each attempt and the receiver that
    made it.
 3. Read the receivers' logs for

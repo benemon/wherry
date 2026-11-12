@@ -838,8 +838,10 @@ and report every run they follow.
 A start failure records that a receiver could not start a run's attempt.
 The receiver writes it to the pool's events. For every class but
 `input-too-large`, it then removes the run's job from the platform and
-releases the task to the pool. When it cannot remove the job, it retries
-for 5 minutes, then ends the run `TASK_STATE_FAILED` with the message text
+either retries the start in place or releases the task to the pool, as
+[In-place retries](#in-place-retries) describes. When it cannot remove the
+job, it retries the removal for 5 minutes, then ends the run
+`TASK_STATE_FAILED` with the message text
 `start failed and the job could not be removed`. An `input-too-large`
 start failure ends the run as its class describes.
 
@@ -874,6 +876,45 @@ the receiver's log alone.
 
 `profile` is the profile the receiver routed the task to.
 
+### In-place retries
+
+When a run has no `started` status, from this delivery or an earlier one,
+a receiver keeps the task of its start failure and dispatches it again
+within the same delivery. It keeps renewing its claim while it waits.
+The waits are 30 seconds, 60 seconds, then 120 seconds each. The window is
+5 minutes from the delivery's first start failure: the last wait is cut
+short so a final attempt starts when the window ends. An attempt that is
+still running at the window's end is the final attempt instead. When the
+final attempt fails too, the receiver releases the task, or ends the run at the
+[delivery budget](#delivery-budget).
+
+Each retry is a new execution of the same attempt. It writes a `claimed`
+status and an open request again, and one start failure record when it
+fails. The task's attempt number does not change, and a retry spends no
+delivery.
+
+A start failure after the run's `started` status, and every other release,
+returns the task to the pool at once.
+
+A wait ends early when:
+
+- the receiver stops or restarts for a configuration change: once its idle
+  claim clients have closed, it releases the task, whatever the delivery
+  budget, as a receiver shutting down does;
+- a host of the run's tenant cancelled the run: the run ends
+  `TASK_STATE_CANCELED`;
+- the run passes `task_started_by`: the run ends `TASK_STATE_FAILED` with
+  the message text `not started by task_started_by (<time>); last: <cause>`,
+  with `<cause>` as for the delivery budget below;
+- the receiver loses its claim: it stops acting on the run, as on any lost
+  claim.
+
+A task whose start keeps failing holds its member's slot for about 5
+minutes per delivery, plus the final attempt. Under the default 10 minute `task_started_by`, that is
+usually two deliveries, and the run usually ends with
+`not started by task_started_by (<time>); last: <cause>` rather than at the
+delivery budget.
+
 ### Delivery budget
 
 From an attempt of the pool's `delivery_limit` minus 1, a receiver that
@@ -885,8 +926,10 @@ cannot resolve, a
 failed read of the pool's events or of the host's topic once the run is
 claimed, and a failure to find, stop or remove the run's job.
 
-When the attempt's own start failure spends the budget, the text continues
-`after <attempt> attempts; last: <cause>`. The cause is
+When the attempt's own start failure spends the budget, after its
+[in-place retries](#in-place-retries), the text continues
+`after <attempt> attempts; last: <cause>`, for example
+`delivery budget exhausted after 4 attempts; last: job never started (driver): image pull failed`. The cause is
 `job never started (<class>): <reason>` with the platform's class and
 reason, `job never started`, or `profile <profile> created no job`. It
 carries the marker of each credential value delivered to a run the

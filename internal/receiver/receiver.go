@@ -95,6 +95,10 @@ type Receiver struct {
 	// pending holds each execution whose latest observation of its job found it not placed, keyed by execution so an
 	// old attempt clears only its own entry.
 	pending map[*activeRun]struct{}
+	// idleClosed, set by Run, closes once every idle slot's share client has closed; retrying counts the start retry
+	// waits begun before then, each of which releases its task after it closes.
+	idleClosed chan struct{}
+	retrying   sync.WaitGroup
 	// admissionMu serialises the admission transactional ID, which one producer at a time may hold.
 	admissionMu sync.Mutex
 	// cancelled holds the runs cancelled by a host of their tenant.
@@ -193,12 +197,14 @@ func (r *Receiver) Run(ctx context.Context) error {
 	running, stopRunning := context.WithCancelCause(context.WithoutCancel(ctx))
 	defer stopRunning(nil)
 	// running ends first, so custody is given up without a step-down.
+	idleClosed := make(chan struct{})
 	r.mu.Lock()
 	r.halt = func(err error) {
 		stopRunning(err)
 		stop(err)
 		releaseHeld()
 	}
+	r.idleClosed = idleClosed
 	r.mu.Unlock()
 	for i, named := range r.profiles {
 		if named.Exited != nil {
@@ -257,6 +263,11 @@ func (r *Receiver) Run(ctx context.Context) error {
 		}
 	}
 	idle.Wait()
+	r.mu.Lock()
+	close(idleClosed)
+	r.mu.Unlock()
+	// The held context outlives each waiting retry's release, which checks the claim.
+	r.retrying.Wait()
 	go func() {
 		slots.Wait()
 		releaseHeld()

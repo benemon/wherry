@@ -79,10 +79,21 @@ type fakePlugin struct {
 	follows     int
 	dispatches  int
 	dispatchErr error
+	// failStart, when set, decides whether Dispatch creates the run's job as one that never starts; until Purge removes
+	// that job, Dispatch converges on it again. dispatchTimes records when each Dispatch began.
+	failStart     func(run string) bool
+	failed        map[string]bool
+	dispatchTimes []time.Time
+	// purgeHook runs in each Purge, with the plugin locked.
+	purgeHook func()
 	// outcome is what Dispatch reports, OutcomeCreated when zero, or beside dispatchErr OutcomeUnknown when zero.
 	outcome pluginsdk.Outcome
 	// dispatchBlocks makes Dispatch wait until its context ends before it reports, as one returning at the bound.
 	dispatchBlocks bool
+	// releaseBlocks makes Release wait until its context ends, as a wedged plugin.
+	releaseBlocks bool
+	// releasedAt is when Release last returned.
+	releasedAt time.Time
 	// handleSize is the length of the handle data Dispatch and Lookup return.
 	handleSize int
 	// jobName is the handle name Dispatch and Lookup return, or else agent- and the run ID.
@@ -220,6 +231,7 @@ func (f *fakePlugin) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk
 		f.mu.Lock()
 	}
 	f.dispatches++
+	f.dispatchTimes = append(f.dispatchTimes, time.Now())
 	if hold := f.dispatchHold; hold != nil {
 		f.mu.Unlock()
 		select {
@@ -241,6 +253,12 @@ func (f *fakePlugin) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk
 		f.created = map[string]bool{}
 	}
 	f.created[run.ID] = true
+	if f.failStart != nil && f.failStart(run.ID) {
+		if f.failed == nil {
+			f.failed = map[string]bool{}
+		}
+		f.failed[run.ID] = true
+	}
 	// Dispatch's handle is as long as Lookup's.
 	handle := f.handle(run.ID)
 	handle.Data = append([]byte(dispatchedPrefix), handle.Data...)[:max(len(handle.Data), len(dispatchedPrefix))]
@@ -289,6 +307,8 @@ func (f *fakePlugin) Lookup(ctx context.Context, runID string) (pluginsdk.Job, e
 			job.State, job.Reason = pluginsdk.JobPending, f.placingReason
 		case len(f.reasons) > 0:
 			job.State, job.Reason, f.reasons = pluginsdk.JobPending, f.reasons[0], f.reasons[1:]
+		case f.failed[runID]:
+			job.State = pluginsdk.JobNeverStarted
 		default:
 			job.State = pluginsdk.JobRunning
 		}
@@ -305,7 +325,7 @@ func (f *fakePlugin) Lookup(ctx context.Context, runID string) (pluginsdk.Job, e
 		}
 	case pluginsdk.JobNeverStarted:
 		job.Class, job.Reason = f.neverClass, f.neverReason
-		if f.neverStarted {
+		if f.neverStarted || f.failed[runID] {
 			job.Class = cmp.Or(f.neverClass, "driver")
 		}
 	}
@@ -437,23 +457,36 @@ func (f *fakePlugin) Collect(ctx context.Context, handle pluginsdk.Handle, limit
 	return nil
 }
 
-func (f *fakePlugin) Purge(context.Context, string) error {
+func (f *fakePlugin) Purge(_ context.Context, runID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.purges++
 	f.calls = append(f.calls, "purge")
+	if f.purgeHook != nil {
+		f.purgeHook()
+	}
 	if f.purges <= f.purgeFailures {
 		return errors.New("purge failed")
+	}
+	if f.purgeErr == nil && f.failed[runID] {
+		delete(f.failed, runID)
+		delete(f.created, runID)
 	}
 	return f.purgeErr
 }
 
-func (f *fakePlugin) Release(_ context.Context, runID string) error {
+func (f *fakePlugin) Release(ctx context.Context, runID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.releaseBlocks {
+		f.mu.Unlock()
+		<-ctx.Done()
+		f.mu.Lock()
+	}
 	f.releases++
 	f.releaseIDs = append(f.releaseIDs, runID)
 	f.calls = append(f.calls, "release")
+	f.releasedAt = time.Now()
 	return f.releaseErr
 }
 
@@ -576,7 +609,10 @@ func shortIntervals(t *testing.T) {
 		*interval = 200 * time.Millisecond
 		t.Cleanup(func() { *interval = previous })
 	}
-	for interval, short := range map[*time.Duration]time.Duration{&openWait: time.Second, &openGrace: 500 * time.Millisecond} {
+	for interval, short := range map[*time.Duration]time.Duration{
+		&openWait: time.Second, &openGrace: 500 * time.Millisecond,
+		&startRetryWait: 100 * time.Millisecond, &startRetryMaxWait: 400 * time.Millisecond, &startRetryWindow: time.Second,
+	} {
 		previous := *interval
 		*interval = short
 		t.Cleanup(func() { *interval = previous })

@@ -62,6 +62,11 @@ var (
 	startPollInterval = 2 * time.Second
 	// purgeDeadline bounds the Purge retries of a start failure.
 	purgeDeadline = 5 * time.Minute
+	// A start failure is retried in place after startRetryWait, doubling to startRetryMaxWait, until startRetryWindow
+	// from the delivery's first start failure, when a final attempt starts.
+	startRetryWait    = 30 * time.Second
+	startRetryMaxWait = 120 * time.Second
+	startRetryWindow  = 5 * time.Minute
 	// followRetryInterval separates the Follows and Lookups of a run whose log stream failed.
 	followRetryInterval = time.Second
 	// collectTimeout bounds a plugin's collection of a run's outputs, during which the claim is renewed.
@@ -197,7 +202,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 	claim.share, claim.record = share, record
 	state, _, _ := r.snapshot()
 	claim.duration = state.Pools[r.config.Pool].LockDuration()
-	status := r.execute(ctx, claim, record, admitted, attemptOf(record))
+	status := r.executeDelivery(claiming, ctx, claim, record, admitted, attemptOf(record))
 	// A renewal still in flight answers after execute returns; draining it here keeps its failure counted.
 	if !errors.Is(context.Cause(ctx), errClaimLost) {
 		_ = flush()
@@ -545,7 +550,17 @@ func (r *Receiver) newProducer(run string) (*kgo.Client, error) {
 // execute runs one task; it returns the final share acknowledgement, or 0 when fenced or when the receiver stops for a
 // denial or a plugin's exit, which leaves the task to the broker's redelivery and its job running for an adopter.
 // claim is nil only for direct test calls of execute, which hold no share claim.
-func (r *Receiver) execute(ctx context.Context, claim *runClaim, record *kgo.Record, admitted *admission, attempt int64) (ack kgo.AckStatus) {
+func (r *Receiver) execute(ctx context.Context, claim *runClaim, record *kgo.Record, admitted *admission, attempt int64) kgo.AckStatus {
+	if claim != nil {
+		defer claim.reportLoss(r, admitted.task.Wherry.Run)
+		defer renewer(ctx, claim)()
+	}
+	return r.executeAttempt(ctx, claim, record, admitted, attempt, nil)
+}
+
+// executeAttempt is one execution of execute under the claim's renewer. With retries, a start failure before the run
+// started may return retryInPlace, leaving the run in retries.run with its producer open.
+func (r *Receiver) executeAttempt(ctx context.Context, claim *runClaim, record *kgo.Record, admitted *admission, attempt int64, retries *delivery) (ack kgo.AckStatus) {
 	task := admitted.task
 	runID := task.Wherry.Run
 	defer func() {
@@ -553,10 +568,6 @@ func (r *Receiver) execute(ctx context.Context, claim *runClaim, record *kgo.Rec
 			ack = 0
 		}
 	}()
-	if claim != nil {
-		defer claim.reportLoss(r, runID)
-		defer renewer(ctx, claim)()
-	}
 
 	deadline := wire.PastBound(task.Wherry.TaskEndedBy)
 	runCtx, cancelRun := context.WithDeadline(ctx, deadline)
@@ -570,11 +581,17 @@ func (r *Receiver) execute(ctx context.Context, claim *runClaim, record *kgo.Rec
 		r.logger.Printf("run %s: producer: %v", runID, err)
 		return kgo.AckRelease
 	}
-	defer producer.Close()
 	run := &activeRun{
 		claim: claim, receiver: r, producer: producer, task: task, taskHash: admitted.taskHash, history: admitted.history, attempt: attempt, profile: admitted.profile,
-		expected: admitted.outputs, deadline: deadline, claimed: time.Now(),
+		expected: admitted.outputs, deadline: deadline, claimed: time.Now(), retries: retries,
 	}
+	defer func() {
+		if ack == retryInPlace {
+			retries.run = run
+		} else {
+			producer.Close()
+		}
+	}()
 	defer func() {
 		r.liveMu.Lock()
 		delete(r.live, run)
@@ -626,13 +643,19 @@ func (r *Receiver) execute(ctx context.Context, claim *runClaim, record *kgo.Rec
 	}
 	offset, started := int64(0), false
 	if attempt > 1 {
-		r.metrics.redeliveries.WithLabelValues(task.Wherry.Tenant, admitted.profile.Name).Inc()
+		if retries == nil || retries.first.IsZero() {
+			r.metrics.redeliveries.WithLabelValues(task.Wherry.Tenant, admitted.profile.Name).Inc()
+		}
 		offset, started, err = r.lastOffset(ctx, task, run.taskHash)
 		if err != nil {
 			r.logger.Printf("run %s: read events: %v", runID, err)
 			return run.returnTask(ctx, nil)
 		}
 		run.next = offset
+	}
+	// A replacement job never follows a transcript an earlier job started.
+	if started {
+		run.retries = nil
 	}
 	// A claimed run is redelivered even past its bounds; its job is looked up all the same, so it is stopped. The
 	// lookup of a job not yet started waits no later than task_started_by.
@@ -927,6 +950,7 @@ func (r *Receiver) execute(ctx context.Context, claim *runClaim, record *kgo.Rec
 		}
 		return run.abandon(err)
 	}
+	run.retries = nil
 	// A failed Follow or Lookup is retried until the run passes task_ended_by.
 	var retry <-chan time.Time
 
@@ -1408,6 +1432,8 @@ type activeRun struct {
 	claimed time.Time
 	// startCause is the redacted cause of this attempt's start failure, empty without one.
 	startCause string
+	// retries is the delivery's in-place start retries, nil once the run started or when the delivery has none.
+	retries *delivery
 	// chunked counts the transcript chunks this attempt has committed.
 	chunked int64
 	// next is the log offset past the last line this attempt has made a chunk of, or that it resumed from.
@@ -1668,9 +1694,11 @@ func (run *activeRun) cancel(ctx context.Context, pending []pluginsdk.Line) kgo.
 
 const cancelReason = "canceled by user"
 
-// startFailure purges the run's job and returns the task to the pool for a member that can start it; cause is what the
-// run's terminal message names when the return spends the delivery budget.
+// startFailure purges the run's job and, inside its delivery's retry window, retries in place; else it returns the task
+// to the pool for a member that can start it. cause is what the run's terminal message names when it ends at the
+// delivery budget or task_started_by.
 func (run *activeRun) startFailure(ctx context.Context, class, cause string) kgo.AckStatus {
+	failed := time.Now()
 	run.startCause = logText(run.receiver.redactLive, errors.New(cause))
 	if err := run.commit(ctx, run.receiver.startFailure(run.task, run.taskHash, run.attempt, run.profile.Name, class)); err != nil {
 		return run.abandon(err)
@@ -1682,6 +1710,9 @@ func (run *activeRun) startFailure(ctx context.Context, class, cause string) kgo
 			return kgo.AckRelease
 		}
 		return run.fail(ctx, "start failed and the job could not be removed", nil)
+	}
+	if run.retries != nil && run.retries.retry(failed) {
+		return retryInPlace
 	}
 	run.release(ctx)
 	return run.returnTask(ctx, nil)

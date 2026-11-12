@@ -200,6 +200,39 @@ func TestALaterAttemptRequestsAgain(t *testing.T) {
 	}
 }
 
+// A holder retrying a start in place asks again under the same claim and attempt, with its claimed status published
+// again; the custodian serves every request.
+func TestRepeatedOpenForTheSameClaimAndAttemptIsServed(t *testing.T) {
+	f := newFixture(t, resultStream)
+	record := f.submit(t, f.host, nil)
+	admitted := f.admitted(t, record)
+	producer, err := f.receiver.newProducer(admitted.task.Wherry.Run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer producer.Close()
+	run := &activeRun{receiver: f.receiver, producer: producer, task: admitted.task, taskHash: admitted.taskHash, history: admitted.history, attempt: 1, profile: admitted.profile}
+	claim := func() {
+		t.Helper()
+		if err := run.commit(f.ctx, append([]*kgo.Record{run.feed(f.receiver.echo(run.task, run.taskHash))}, run.claimRecords(record.Topic, record.Offset)...)...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	claim()
+	for i := range 3 {
+		if i == 2 {
+			claim()
+		}
+		values, status, ok := run.awaitOpen(f.ctx, f.ctx, nil)
+		if !ok || string(values.Credentials[credentialName]) != testToken {
+			t.Fatalf("open %d not served (status %v); logs:\n%s", i+1, status, f.logs.String())
+		}
+	}
+	if requests := f.openRequests(t); len(requests) != 3 || slices.ContainsFunc(requests, func(request wire.OpenRequest) bool { return request.Attempt != 1 }) {
+		t.Fatalf("open requests %+v, want three at attempt 1", requests)
+	}
+}
+
 func TestAttemptKeyIsGoneAfterTheAttempt(t *testing.T) {
 	f := newFixture(t, resultStream)
 	var key weak.Pointer[ecdsa.PrivateKey]

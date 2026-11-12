@@ -135,9 +135,11 @@ as [Signatures](configuration-operator.md#pool-terms) describes.
 
 - `delivery_limit` bounds how often the broker delivers one task. A task
   reaches only members with a ready profile of its signature, so the limit
-  counts attempts, not hops. Each start failure returns a task to the pool and
-  uses a delivery, and the member that failed may be handed the task again
-  even when a peer with the same signature could start it. A profile that goes
+  counts attempts, not hops. A member that fails to start a task retries it in
+  place for 5 minutes, as [In-place retries](a2a-extension-v1.md#in-place-retries)
+  describes, then returns it to the pool, which uses a delivery. The member
+  that failed may be handed the task again even when a peer with the same
+  signature could start it. A profile that goes
   unready between a claim's subscription and its fetch has its task released.
   The unready profile's other replicas still polling may each acquire it once
   before they close their idle clients. For that readiness withdrawal, this
