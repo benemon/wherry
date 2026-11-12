@@ -203,7 +203,7 @@ func TestSubmitRefusesAnUnmetRequest(t *testing.T) {
 // requested credential is still delivered, an unrequested one still withheld though the host has a source for it, a
 // credential the terms add as optional or remove is not supplied, one they make required is, and one they make optional
 // after submit stays supplied.
-func TestAReplacementSuppliesFromTheOriginal(t *testing.T) {
+func TestAReplacementKeepsTheRequests(t *testing.T) {
 	vault := operator.AgentCredential{TaskCredential: wire.TaskCredential{Name: "vault-token", Env: "VAULT_TOKEN"}, Required: new(bool)}
 	for name, test := range map[string]struct {
 		requested []string

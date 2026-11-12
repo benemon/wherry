@@ -224,7 +224,7 @@ type admission struct {
 	profile  Named
 	history  []wire.Message
 	inputs   []pluginsdk.File
-	// agentCredentials are the agent's credentials of the terms the run's host supplies, and unsupplied the optional ones it
+	// agentCredentials are the credentials of the agent's terms that the run supplies, and unsupplied the optional ones it
 	// does not.
 	agentCredentials []wire.TaskCredential
 	unsupplied       []string
