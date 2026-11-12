@@ -65,7 +65,7 @@ func TestStartRetriesInOneDelivery(t *testing.T) {
 	// The window, tested on its own, cuts no wait here; the waits 100, 200, 400, then 500 ms reach the cap.
 	setDuration(t, &startRetryWindow, time.Hour)
 	setDuration(t, &startRetryMaxWait, 500*time.Millisecond)
-	failing := 5
+	failing := 6
 	f.plugin.failStart = func(string) bool { failing--; return failing >= 0 }
 	f.run(t, f.ctx)
 	f.submit(t, f.host, nil)
@@ -73,17 +73,17 @@ func TestStartRetriesInOneDelivery(t *testing.T) {
 		t.Fatalf("ended %s; logs:\n%s", task.Status.State, f.logs.String())
 	}
 	claims, failures := f.retryEvents(t)
-	if len(claims) != 6 || len(failures) != 5 || slices.ContainsFunc(append(claims, failures...), func(a attemptAt) bool { return a.attempt != 1 }) {
-		t.Fatalf("claims %v and start failures %v, want 6 and 5 at attempt 1", claims, failures)
+	if len(claims) != 7 || len(failures) != 6 || slices.ContainsFunc(append(claims, failures...), func(a attemptAt) bool { return a.attempt != 1 }) {
+		t.Fatalf("claims %v and start failures %v, want 7 and 6 at attempt 1", claims, failures)
 	}
-	if requests := f.openRequests(t); len(requests) != 6 || slices.ContainsFunc(requests, func(request wire.OpenRequest) bool { return request.Attempt != 1 }) {
-		t.Fatalf("open requests %d, want 6 at attempt 1", len(requests))
+	if requests := f.openRequests(t); len(requests) != 7 || slices.ContainsFunc(requests, func(request wire.OpenRequest) bool { return request.Attempt != 1 }) {
+		t.Fatalf("open requests %d, want 7 at attempt 1", len(requests))
 	}
 	f.plugin.mu.Lock()
 	dispatches, times, calls := f.plugin.dispatches, slices.Clone(f.plugin.dispatchTimes), slices.Clone(f.plugin.calls)
 	f.plugin.mu.Unlock()
-	if dispatches != 6 || !slices.Equal(calls, []string{"purge", "purge", "purge", "purge", "purge", "release"}) {
-		t.Fatalf("dispatches %d and calls %v, want 6 and a purge per failure then one release", dispatches, calls)
+	if dispatches != 7 || !slices.Equal(calls, []string{"purge", "purge", "purge", "purge", "purge", "purge", "release"}) {
+		t.Fatalf("dispatches %d and calls %v, want 7 and a purge per failure then one release", dispatches, calls)
 	}
 	wait := startRetryWait
 	for i := 1; i < len(times); i++ {
@@ -92,10 +92,12 @@ func TestStartRetriesInOneDelivery(t *testing.T) {
 		}
 		wait = min(2*wait, startRetryMaxWait)
 	}
-	if gap := times[5].Sub(times[4]); gap >= 2*startRetryMaxWait {
-		t.Fatalf("dispatch 6 followed 5 by %s, want the wait capped at %s", gap, startRetryMaxWait)
+	// Two capped waits give gaps that differ by less than the cap however long an attempt takes; uncapped, the second
+	// wait is 1.6 s longer than the first.
+	if last, previous := times[6].Sub(times[5]), times[5].Sub(times[4]); last-previous >= startRetryMaxWait {
+		t.Fatalf("dispatch 7 followed 6 by %s and 6 followed 5 by %s, want the wait capped at %s", last, previous, startRetryMaxWait)
 	}
-	scraped(t, f.receiver, `wherry_start_failures_total{class="platform",pool="pool-a",profile="nomad"} 5`)
+	scraped(t, f.receiver, `wherry_start_failures_total{class="platform",pool="pool-a",profile="nomad"} 6`)
 }
 
 // A delivery's start failures past the window release the task to one more delivery; the final attempt starts at the
