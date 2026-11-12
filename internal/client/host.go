@@ -248,6 +248,12 @@ func (h *Host) load(ctx context.Context) (view, error) {
 func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, error) {
 	h.resubmitLost(ctx)
 	// Checked before placement: an invalid key matches no offer and would read as no matching receiver.
+	for _, name := range input.Requested {
+		if !wire.ValidName(name) {
+			// Not echoed: a malformed name may be a pasted credential value.
+			return SubmitResult{}, fmt.Errorf("%w: a requested credential is not a valid credential name", ErrInvalidInput)
+		}
+	}
 	if err := wire.ValidateRequirements(input.Selector); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}

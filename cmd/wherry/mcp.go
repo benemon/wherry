@@ -178,7 +178,7 @@ type gitInput struct {
 }
 
 type credentialInput struct {
-	Name string `json:"name" jsonschema:"credential name in this host's wherry config"`
+	Name string `json:"name" jsonschema:"credential name in this host's wherry config; alone, the placed agent's credential to request"`
 	File string `json:"file,omitempty" jsonschema:"file name the agent finds it under in WHERRY_CREDENTIALS_DIR; at most one of file and env, neither to request the agent's own credential of that name at its target"`
 	Env  string `json:"env,omitempty" jsonschema:"environment variable the agent finds it in; at most one of file and env, neither to request the agent's own credential of that name at its target"`
 }

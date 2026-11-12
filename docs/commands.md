@@ -1094,8 +1094,12 @@ and receiver ID:
 ```
 receiver=<id> pool=<pool> capacity=<n> in_flight=<n> advertisement_age=<age> status=<status>
   profile=<name> plugin=<type> agent=<agent> ready=<bool> labels=<k=v,...> [inline_limit=<n>] [models=<m,...> default_model=<m>] [credentials=<name:env=VAR|name:file=FILE[(missing,optional)],...>]
-    credential=<name> description="<text>"
+    [credential=<name> description="<text>"]...
 ```
+
+Each credential with a description gets its own line under its profile. The
+description is quoted as a Go string: `"` and `\` are escaped, and a
+non-printable character appears as an escape such as `\u202e`.
 
 `status` is `live` when the latest advertisement is dated within 120
 seconds of now, either side, `stale` otherwise, `silent` when there is none,
@@ -1130,8 +1134,9 @@ a line of its own, as in `credential=github-token description="GitHub token for 
 Resolves a placement, a pool and a profile signature, signs the task and
 publishes it to the signature's task topic in the chosen pool. It prints
 `run_id=<id> pool=<pool>`, followed by `unrequested=<name,...>` when the
-placed agent has optional credentials the task did not request, or fails with `no matching live receiver` when no
-live signature satisfies the agent, model and selector.
+placed agent has optional credentials the task did not request, or fails
+with `no matching live receiver` when no live signature satisfies the
+agent, model and selector.
 
 Before it publishes, it folds the host's key topic and refuses when the host
 key is not the topic's current key, since receivers admit a task only under

@@ -54,6 +54,10 @@ field that names the credentials a run goes without,
 only what a v0.1.2 host puts in it changes. A host before v0.1.2 keeps
 delivering every optional credential it has a source for, whatever the
 receiver's version.
+A receiver before v0.1.2 behind a v0.1.2 host can name a credential as not
+supplied in the agent's prompt while it delivers a task credential of the
+same name, such as a git entry's `github-token`; the agent still gets the
+task credential.
 
 ## What happens to running work?
 

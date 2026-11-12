@@ -187,7 +187,7 @@ agents:
   - name: codex
     credentials:
       - {name: openai-api-key, env: CODEX_API_KEY}
-      # A run whose host has no source for it goes without it.
+      # A run gets it only when its task requests it.
       - {name: github-token, env: GH_TOKEN, required: false}
 default_agent: claude
 start_by_limit: 72h
@@ -268,7 +268,7 @@ credentials:
 name: codex
 credentials:
   - {name: openai-api-key, env: CODEX_API_KEY}
-  # A run whose host has no source for it goes without it.
+  # A run gets it only when its task requests it.
   - {name: github-token, env: GH_TOKEN, required: false}
 ```
 

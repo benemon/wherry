@@ -24,8 +24,9 @@ can read its credentials, and the platform's boundary enforces it, as each
 [plugin](plugins.md)'s README states.
 
 `wherry host receivers` lists each agent's credential names with their
-targets and descriptions, marking those this host has no source for, such as
-`credentials=openai-api-key:env=OPENAI_API_KEY,github-token:env=GH_TOKEN(missing,optional)`.
+targets, marking those this host has no source for, such as
+`credentials=openai-api-key:env=OPENAI_API_KEY,github-token:env=GH_TOKEN(missing,optional)`,
+and each credential's description on its own line.
 
 A required credential is delivered to every run of the agent. An optional
 credential is delivered only when the task requests it, with

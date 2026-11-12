@@ -177,6 +177,7 @@ func TestSubmitRefusesAnUnmetRequest(t *testing.T) {
 		"unconfigured":          {"github-token", "invalid input: auth required: credential github-token is not in this host's configuration"},
 		"another agent's":       {"model", "invalid input: requested credential model is not one of agent codex's credentials"},
 		"no agent's credential": {"vault-token", "invalid input: requested credential vault-token is not one of agent codex's credentials"},
+		"a pasted value":        {"ghp_NOT-A-REAL-TOKEN", "invalid input: a requested credential is not a valid credential name"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t)

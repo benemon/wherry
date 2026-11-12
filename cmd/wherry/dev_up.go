@@ -837,7 +837,7 @@ func createBucket(ctx context.Context, keys [2]string) error {
 	return poll(ctx, time.Minute, func() error { return store.MakeBucket(ctx, devBucket, minio.MakeBucketOptions{}) })
 }
 
-// devTerms are pool dev's terms: each agent with its credentials, every one optional.
+// devTerms are pool dev's terms: each agent with its credentials, required where dev up copied a source for one.
 func devTerms(agents []string, defaultAgent string, storage bool, copied map[string]credential.Source) operator.Terms {
 	optional := false
 	terms := operator.Terms{DefaultAgent: defaultAgent, DeliveryLimit: 2, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 10}
@@ -847,7 +847,7 @@ func devTerms(agents []string, defaultAgent string, storage bool, copied map[str
 		for _, credential := range devCredentials[agent] {
 			agentCredential := operator.AgentCredential{TaskCredential: wire.TaskCredential{Name: credential.name, Env: credential.target}}
 			// Claude Code prefers ANTHROPIC_API_KEY to its subscription token, so the key is required only without the token.
-			if _, required := copied[credential.name]; !required || credential.name == "anthropic-api-key" && token {
+			if _, required := copied[credential.name]; !required || agent == "claude" && credential.name == "anthropic-api-key" && token {
 				agentCredential.Required = &optional
 			}
 			agentTerms.Credentials = append(agentTerms.Credentials, agentCredential)
