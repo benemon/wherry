@@ -238,7 +238,8 @@ func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
 	var late *kgo.Record
 	report := rotate(nil, func() { late = submit("run-late", current) })
 	want := []SuspectTask{
-		// Every terms record's credentials for the agent: a superset, never a miss across the terms change.
+		// Every terms record's credentials for the agent, whatever the task names supplied (none here, as in a task written
+		// before supplied_credentials): a superset, never a miss across the terms change.
 		{"run-current", "tenant-a", currentID, []string{"deploy", "model", "model-renamed"}, retained.Timestamp.UnixMilli()},
 		{"run-late", "tenant-a", currentID, []string{"deploy", "model", "model-renamed"}, late.Timestamp.UnixMilli()},
 		{"run-elsewhere", "tenant-a", currentID, []string{"deploy", "model", "model-renamed"}, elsewhere.Timestamp.UnixMilli()},

@@ -4,6 +4,8 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"strings"
 	"testing"
 
@@ -113,12 +115,39 @@ func TestSubmissionResubmissionAndEnvelopeMembers(t *testing.T) {
 		"envelope and wrap":       {func(b *SubmissionBinding) { b.Envelope, b.Wrap = "e", "w" }, true},
 		"envelope without wrap":   {func(b *SubmissionBinding) { b.Envelope = "e" }, false},
 		"envelope over its bound": {func(b *SubmissionBinding) { b.Envelope, b.Wrap = strings.Repeat("e", signed.MaxEnvelope+1), "w" }, false},
+		"supplied credentials":    {func(b *SubmissionBinding) { b.Supplied = []string{"model", "github-token"} }, true},
+		"a duplicate supplied":    {func(b *SubmissionBinding) { b.Supplied = []string{"model", "model"} }, false},
+		"an invalid supplied":     {func(b *SubmissionBinding) { b.Supplied = []string{"Model Key"} }, false},
 	} {
 		submission := testRecords()["submission"].(*Submission)
 		test.mutate(&submission.Wherry)
 		if _, err := SignRecord(submission, key); (err == nil) != test.valid {
 			t.Errorf("%s: sign = %v, want valid %v", name, err, test.valid)
 		}
+	}
+}
+
+// A submission naming the agent credentials it does not supply, as one before supplied_credentials did, decodes as
+// supplying none.
+func TestUnsuppliedCredentialsDecodeAsSupplyingNone(t *testing.T) {
+	keys, host, _ := testKeys(t)
+	submission := testRecords()["submission"].(*Submission)
+	submission.V = 1
+	encoded, err := json.Marshal(submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := jsontext.Value(strings.Replace(string(encoded), `"task_started_by"`, `"unsupplied_credentials":["model"],"task_started_by"`, 1))
+	if !strings.Contains(string(payload), "unsupplied_credentials") {
+		t.Fatalf("payload %s carries no unsupplied_credentials", payload)
+	}
+	signedTask, err := signed.Sign(submission.jwsType(), signed.HostOwner("tenant-a", "host-a"), payload, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Submission
+	if err := ParseRecord(signedTask, keys, &decoded); err != nil || decoded.Wherry.Supplied != nil {
+		t.Fatalf("parse = %v, supplied %v; want the task supplying none", err, decoded.Wherry.Supplied)
 	}
 }
 

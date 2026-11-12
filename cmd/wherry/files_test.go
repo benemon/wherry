@@ -100,12 +100,12 @@ func TestSubmitRequestsAgentCredentials(t *testing.T) {
 		return stdout.String(), b.tasks(t, runID)[0].submission.Wherry
 	}
 	line, binding := submit("--credential", "deploy-key:env=DEPLOY_KEY")
-	if !strings.HasSuffix(line, " pool=pool-a unrequested=github-token\n") || !slices.Equal(binding.Unsupplied, []string{"github-token"}) {
-		t.Fatalf("submit printed %q with unsupplied %v; want github-token unrequested", line, binding.Unsupplied)
+	if !strings.HasSuffix(line, " pool=pool-a unrequested=github-token\n") || !slices.Equal(binding.Supplied, []string{"model"}) {
+		t.Fatalf("submit printed %q with supplied %v; want github-token unrequested and model alone supplied", line, binding.Supplied)
 	}
 	line, binding = submit("--credential", "github-token", "--credential", "model", "--credential", "deploy-key:env=DEPLOY_KEY")
-	if !strings.HasSuffix(line, " pool=pool-a\n") || len(binding.Unsupplied) != 0 || !slices.Equal(binding.Credentials, []wire.TaskCredential{{Name: "deploy-key", Env: "DEPLOY_KEY"}}) {
-		t.Fatalf("submit printed %q with unsupplied %v and task credentials %+v; want both requests met and the task credential alone", line, binding.Unsupplied, binding.Credentials)
+	if !strings.HasSuffix(line, " pool=pool-a\n") || !slices.Equal(binding.Supplied, []string{"model", "github-token"}) || !slices.Equal(binding.Credentials, []wire.TaskCredential{{Name: "deploy-key", Env: "DEPLOY_KEY"}}) {
+		t.Fatalf("submit printed %q with supplied %v and task credentials %+v; want both requests met and the task credential alone", line, binding.Supplied, binding.Credentials)
 	}
 }
 

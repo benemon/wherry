@@ -574,9 +574,9 @@ func TestMCPRequestsAgentCredentials(t *testing.T) {
 	if !slices.Equal(unrequested.Unrequested, []string{"github-token"}) || requested.Unrequested != nil {
 		t.Fatalf("unrequested %v and %v; want github-token, then none", unrequested.Unrequested, requested.Unrequested)
 	}
-	for runID, want := range map[string][]string{unrequested.ID: {"github-token"}, requested.ID: nil} {
-		if binding := b.tasks(t, runID)[0].submission.Wherry; !slices.Equal(binding.Unsupplied, want) || len(binding.Credentials) != 0 {
-			t.Fatalf("run %s unsupplied %v and task credentials %+v; want %v and none", runID, binding.Unsupplied, binding.Credentials, want)
+	for runID, want := range map[string][]string{unrequested.ID: {"model"}, requested.ID: {"model", "github-token"}} {
+		if binding := b.tasks(t, runID)[0].submission.Wherry; !slices.Equal(binding.Supplied, want) || len(binding.Credentials) != 0 {
+			t.Fatalf("run %s supplied %v and task credentials %+v; want %v and none", runID, binding.Supplied, binding.Credentials, want)
 		}
 	}
 	delete(b.credentials, "github-token")

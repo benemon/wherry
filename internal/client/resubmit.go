@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/minio/minio-go/v7"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -191,6 +192,13 @@ func (h *Host) resubmit(ctx context.Context, runID string, lost bool) (string, e
 	submission.Message.TaskID, submission.Message.ContextID, submission.Message.MessageID = local.Replacement, local.Replacement, wire.RandomID("msg-")
 	submission.Wherry.Run, submission.Wherry.RunNonce = local.Replacement, local.ReplacementNonce
 	submission.Wherry.Replaces, submission.Wherry.S3InputRun = runID, local.Task.Wherry.InputRun()
+	var agent operator.AgentTerms
+	if i := slices.IndexFunc(terms.Agents, func(agent operator.AgentTerms) bool { return agent.Name == submission.Wherry.Placement.Agent }); i >= 0 {
+		agent = terms.Agents[i]
+	}
+	if submission.Wherry.Supplied, err = h.supplied(agent, local.Task.Wherry.Supplied); err != nil {
+		return "", err
+	}
 	var store *minio.Client
 	if len(submission.Wherry.S3Inputs)+len(s3OutputNames(submission.Wherry.Outputs)) > 0 {
 		if store, err = h.bucket(ctx, local.Pool, terms.Storage); err != nil {

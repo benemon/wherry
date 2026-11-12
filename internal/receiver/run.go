@@ -224,7 +224,8 @@ type admission struct {
 	profile  Named
 	history  []wire.Message
 	inputs   []pluginsdk.File
-	// agentCredentials are the agent's credentials the run's host supplies, and unsupplied the optional ones it does not.
+	// agentCredentials are the agent's credentials of the terms the run's host supplies, and unsupplied the optional ones it
+	// does not.
 	agentCredentials []wire.TaskCredential
 	unsupplied       []string
 	// credentials, outputs, git and s3Inputs are what the run declares.
@@ -354,13 +355,17 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, profile Named)
 		return admitted, 0
 	}
 	declared := task.Wherry
+	// A supplied name the terms no longer declare is not delivered.
 	var supplied []wire.TaskCredential
+	var unsupplied []string
 	for _, credential := range terms.Agents[agent].Credentials {
 		switch {
-		case !slices.Contains(declared.Unsupplied, credential.Name):
+		case slices.Contains(declared.Supplied, credential.Name):
 			supplied = append(supplied, credential.TaskCredential)
 		case !credential.Optional():
 			return reject(rejectionReasonRequiredCredential)
+		default:
+			unsupplied = append(unsupplied, credential.Name)
 		}
 	}
 	for _, credential := range declared.Credentials {
@@ -381,7 +386,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, profile Named)
 		return reject(rejection)
 	}
 	admitted.inputs, admitted.credentials, admitted.outputs, admitted.git, admitted.s3Inputs = inputs, declared.Credentials, declared.Outputs, declared.Git, declared.S3Inputs
-	admitted.agentCredentials, admitted.unsupplied = supplied, declared.Unsupplied
+	admitted.agentCredentials, admitted.unsupplied = supplied, unsupplied
 	return admitted, 0
 }
 

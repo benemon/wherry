@@ -457,10 +457,10 @@ topics retain a task and the second when they retain none.
 
 The credential names are the task's own credentials and every credential
 any terms record of the pool on `wherry.operator` gives the task's agent,
-other than the task's `unsupplied_credentials`, the optional ones it did not
-request or had no source for. The
-list can name a credential the envelope did not hold; it never omits one it
-did, so rotating every listed credential covers the exposure.
+whatever the task's `supplied_credentials` names, so a task written before
+v0.1.2 is covered too. The list can name a credential the envelope did not
+hold; it never omits one it did, so rotating every listed credential covers
+the exposure.
 
 ### `wherry operator tenant add TENANT`
 
@@ -1248,11 +1248,12 @@ invalid input: auth required: credential openai-api-key is not in this host's co
 
 A required credential of the placed agent is delivered to every run. An
 optional one is delivered only when `--credential NAME` requests it;
-requesting a required one changes nothing. An optional credential the task
-does not request, whether or not the host has a source for it, is named in
-the submission's `unsupplied_credentials` and on the `unrequested=` of the
-output line; the run goes without it, and its
-[prompt](configuration-receiver.md#agent-contract) names it as not supplied.
+requesting a required one changes nothing. The submission's
+`supplied_credentials` names the agent's credentials delivered. An optional
+credential the task does not request, whether or not the host has a source
+for it, is named on the `unrequested=` of the output line; the run goes
+without it, and its [prompt](configuration-receiver.md#agent-contract) names
+it as not supplied.
 Request an optional credential only when the task needs it. `submit` refuses
 a request for a name that is not one of the placed agent's credentials:
 

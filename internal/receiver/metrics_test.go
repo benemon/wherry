@@ -860,7 +860,7 @@ func TestFixedMetricDomains(t *testing.T) {
 				task.Wherry.TaskStartedBy = time.Now().Add(96 * time.Hour).Unix()
 				task.Wherry.TaskEndedBy = task.Wherry.TaskStartedBy
 			}, ""},
-			{"the host does not supply a required credential of the agent", func(task *wire.Submission) { task.Wherry.Unsupplied = []string{credentialName} }, ""},
+			{"the host does not supply a required credential of the agent", func(task *wire.Submission) { task.Wherry.Supplied = []string{} }, ""},
 			{"a task credential takes the target of one of the agent's credentials", func(task *wire.Submission) {
 				task.Wherry.Credentials = []wire.TaskCredential{{Name: "deploy", Env: credentialEnv}}
 			}, ""},

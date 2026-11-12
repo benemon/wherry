@@ -180,7 +180,7 @@ A submission is the task of one run.
     "task_started_by": 1789998800,
     "task_ended_by": 1790000000,
     "credentials": [{"name": "deploy-key", "file": "git-credential"}, {"name": "vault-token", "env": "VAULT_TOKEN"}],
-    "unsupplied_credentials": ["github-token"],
+    "supplied_credentials": ["model-api-key"],
     "outputs": [{"name": "report.md", "required": true}, {"name": "plot.pdf", "storage": "s3"}],
     "s3_inputs": [{"name": "dataset.parquet", "size": 5242880, "sha256": "4f1c..."}],
     "git": {
@@ -249,16 +249,22 @@ A submission is the task of one run.
   gets it at both targets. A task credential is never a request for the
   agent's credential of the same name. The pool's terms do not otherwise
   govern task credentials.
-- `unsupplied_credentials` names the agent's optional credentials in the
-  pool's terms that the host does not deliver, each once: those the task did
-  not request, whether or not the host has a source for them; absent when
-  there are none. wherry's host delivers an optional credential only when the
-  task requests it, and a request for one it has no source for is refused
-  before publishing. The run goes without them, and the prompt names them as
-  not supplied, unless a task credential of the same name is delivered. A
-  receiver rejects a submission that names a required credential of the
-  agent here. Before v0.1.2 the host named only the optional credentials it
-  had no source for; the field and its handling are unchanged.
+- `supplied_credentials` names the agent's credentials the envelope holds,
+  each once: every credential of the agent in the pool's terms that is
+  required, and every optional one the task requested; absent when there are
+  none. wherry's host delivers an optional credential only when the task
+  requests it, and refuses before publishing when it has no source for a
+  credential it would supply. A receiver delivers the credentials of its
+  current terms named here. It rejects a submission that does not name a
+  required credential of the agent in its terms. A name its terms no longer
+  declare is not delivered and is not an error. The run goes without the
+  agent's credentials not named here, and the prompt names them as not
+  supplied, unless a task credential of the same name is delivered. A
+  resubmission supplies, of the agent's terms at resubmit, every required
+  credential and every one the original supplied: a credential the terms
+  removed is dropped, an optional one they added is not supplied, and one
+  they made optional after submit is still supplied. This field replaces
+  `unsupplied_credentials` of earlier versions, which a receiver ignores.
 - `outputs` lists at most 256 files the agent is asked to leave, each
   `{name, required, storage}`. `name` is a relative path of file names joined by
   `/`, at most 512 bytes, and appears once. `required` defaults to false.
@@ -299,9 +305,9 @@ A submission is the task of one run.
 - An envelope whose `binding` differs from its task's `run`, `tenant`,
   `pool`, `task_started_by` or `task_ended_by` is refused: by the custodian
   before it wraps the content key to a claimant, and by the claimant at open.
-- The envelope's credentials are exactly the agent's credentials in the
-  pool's terms other than `unsupplied_credentials`, and the task's
-  `credentials`, each once; its S3 inputs are exactly `s3_inputs` and its S3
+- The envelope's credentials are exactly `supplied_credentials` and the
+  task's `credentials`, each once, whatever the pool's terms say of the
+  agent's credentials when the envelope is opened; its S3 inputs are exactly `s3_inputs` and its S3
   outputs exactly the outputs with `storage` `s3`. Each URL is https, or
   http for a loopback storage endpoint, of the storage endpoint's scheme,
   host and port, with no user, opaque part or fragment, and the path of its
@@ -1437,8 +1443,8 @@ release. Otherwise a receiver that claims a submission:
     reached its task topic more than the pool's `start_by_limit_ms`
     ago;
 11. rejects it with `the host does not supply a required credential of the
-    agent` when the submission's `unsupplied_credentials` names a required
-    credential of the agent, and with `a task credential takes the target of
+    agent` when the submission's `supplied_credentials` does not name a
+    required credential of the agent in its terms, and with `a task credential takes the target of
     one of the agent's credentials` when one does;
 12. rejects it when the host of the run's [git input](#git-input) is not
     one of the pool's current VCS hosts, and with `pool <pool> has no
@@ -1589,9 +1595,9 @@ output, with `(required)` after a required one, so an agent without a shell
 finds them, the environment variables that hold credentials, the commands of
 the [git input](#git-input), and the
 [outcome contract](configuration-receiver.md#agent-contract) with the run's credential
-names, an optional credential its host did not supply, for want of a source
-or a request, marked `(not supplied)` unless a task credential of the same
-name is delivered. The lines name S3 inputs by path and carry no URL. The plugin reports the
+names, a credential of the agent in the receiver's terms that the submission's
+`supplied_credentials` does not name marked `(not supplied)` unless a task
+credential of the same name is delivered. The lines name S3 inputs by path and carry no URL. The plugin reports the
 directories' paths as its agent sees them; a directory it does not report
 appears as its variable. The lines hold no credential value.
 
@@ -1743,7 +1749,7 @@ attribute to a host and run with a `rejected` [status](#status) in
 | `task_started_by` is before the submission's append time | rejected | `task_started_by is before its append time` |
 | `task_ended_by` is before `task_started_by` | rejected | `task_ended_by is before task_started_by` |
 | `task_started_by` or `task_ended_by` has passed | rejected | `not started by task_started_by (<RFC 3339 time>)`, `not ended by task_ended_by (<RFC 3339 time>)` |
-| a required credential of the agent is unsupplied | rejected | `the host does not supply a required credential of the agent` |
+| a required credential of the agent is not in `supplied_credentials` | rejected | `the host does not supply a required credential of the agent` |
 | a task credential takes an agent credential's target | rejected | `a task credential takes the target of one of the agent's credentials` |
 | the git remote's host is not a VCS host of the pool | rejected | `git remote host <host> is not in pool <pool>'s vcs hosts` |
 | S3 inputs or outputs in a pool without storage | rejected | `pool <pool> has no storage for S3 inputs and outputs` |

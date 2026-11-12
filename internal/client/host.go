@@ -361,14 +361,14 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, fmt.Errorf("%w: requested credential %s is not one of agent %s's credentials", ErrInvalidInput, name, agent.Name)
 		}
 	}
-	var unsupplied []string
+	supplied, err := h.supplied(agent, input.Requested)
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	var unrequested []string
 	for _, credential := range agent.Credentials {
 		if credential.Optional() && !slices.Contains(input.Requested, credential.Name) {
-			unsupplied = append(unsupplied, credential.Name)
-			continue
-		}
-		if _, configured := h.credentials[credential.Name]; !configured {
-			return SubmitResult{}, fmt.Errorf("%w: auth required: credential %s is not in this host's configuration", ErrInvalidInput, credential.Name)
+			unrequested = append(unrequested, credential.Name)
 		}
 	}
 	for _, credential := range input.Credentials {
@@ -418,7 +418,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err != nil {
 		return SubmitResult{}, err
 	}
-	submission.Wherry.Credentials, submission.Wherry.Unsupplied, submission.Wherry.Outputs, submission.Wherry.Git = input.Credentials, unsupplied, outputs, input.Git
+	submission.Wherry.Credentials, submission.Wherry.Supplied, submission.Wherry.Outputs, submission.Wherry.Git = input.Credentials, supplied, outputs, input.Git
 	encoded, err := wire.SignRecord(submission, h.key)
 	if err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
@@ -465,7 +465,23 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		}
 		return SubmitResult{}, err
 	}
-	return SubmitResult{RunID: runID, Pool: pool, Unrequested: unsupplied}, nil
+	return SubmitResult{RunID: runID, Pool: pool, Unrequested: unrequested}, nil
+}
+
+// supplied names the credentials of agent's terms a task supplies: the required ones and those named in requested,
+// each of which needs a source in this host's configuration.
+func (h *Host) supplied(agent operator.AgentTerms, requested []string) ([]string, error) {
+	var supplied []string
+	for _, credential := range agent.Credentials {
+		if credential.Optional() && !slices.Contains(requested, credential.Name) {
+			continue
+		}
+		if _, configured := h.credentials[credential.Name]; !configured {
+			return nil, fmt.Errorf("%w: auth required: credential %s is not in this host's configuration", ErrInvalidInput, credential.Name)
+		}
+		supplied = append(supplied, credential.Name)
+	}
+	return supplied, nil
 }
 
 // poolKey returns the current key of pool: that of the latest committed record under the snapshot key on the pool's
@@ -505,14 +521,7 @@ func (h *Host) poolKey(ctx context.Context, v view, pool string) (*ecdsa.PublicK
 func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms operator.Terms, poolKey *ecdsa.PublicKey, store *minio.Client, redactionKey []byte) ([]byte, error) {
 	binding := submission.Wherry
 	values := signed.EnvelopeValues{Binding: binding.EnvelopeBinding(), Credentials: map[string][]byte{}, S3Inputs: map[string]string{}, S3Outputs: map[string]string{}, RedactionKey: redactionKey}
-	var names []string
-	if agent := slices.IndexFunc(terms.Agents, func(agent operator.AgentTerms) bool { return agent.Name == binding.Placement.Agent }); agent >= 0 {
-		for _, credential := range terms.Agents[agent].Credentials {
-			if !slices.Contains(binding.Unsupplied, credential.Name) {
-				names = append(names, credential.Name)
-			}
-		}
-	}
+	names := slices.Clone(binding.Supplied)
 	for _, credential := range binding.Credentials {
 		names = append(names, credential.Name)
 	}
