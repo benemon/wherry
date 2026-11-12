@@ -131,7 +131,8 @@ receiver renews its lock every 10 seconds; wherry does not check this. The
 broker bounds it between
 `group.share.min.record.lock.duration.ms` and
 `group.share.max.record.lock.duration.ms`. Every delivery counts against
-`delivery_limit`, including a release after a start failure. A task reaches
+`delivery_limit`, including a release after a start failure's
+[in-place retries](a2a-extension-v1.md#in-place-retries). A task reaches
 only members with a ready profile of its signature, so `delivery_limit` counts
 attempts, not hops between members, and is sized by the attempts one task may
 burn, never by the number of members. A member that failed to start a task

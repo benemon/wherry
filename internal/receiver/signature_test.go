@@ -224,32 +224,22 @@ func TestHeldProfileWithdrawalKeepsRenewingAndOtherMember(t *testing.T) {
 	}
 }
 
-// Gate: with an idle slot free, no run pending and the task eligible again, the slot that failed to start it joins again
-// within 1.5 s of the start failure; nothing waits out a lock duration.
-func TestSlotRejoinsPromptlyAfterAStartFailure(t *testing.T) {
+// Gate: with an idle slot free, the slot that failed to start a task keeps it and retries it in place; the task is not
+// delivered again.
+func TestSlotRetriesAStartFailureOnItsDelivery(t *testing.T) {
 	config := testConfig(testReceiver)
 	config.Profiles[0].Replicas = 2
-	f := newFixtureWith(t, resultStream, testTerms(), config, map[string]*fakePlugin{"nomad": {stream: resultStream, outcome: pluginsdk.OutcomeNothingCreated}})
+	f := newFixtureWith(t, resultStream, testTerms(), config, map[string]*fakePlugin{"nomad": {stream: resultStream}})
+	failing := 2
+	f.plugin.failStart = func(string) bool { failing--; return failing >= 0 }
 	f.submit(t, f.host, nil)
 	f.run(t, f.ctx)
-	var failed time.Time
-	for failed.IsZero() {
-		for _, record := range f.records(t, operator.PoolEventsTopic(testPool)) {
-			if recordType(record.Value) == wire.StartFailureType {
-				failed = record.Timestamp
-				break
-			}
-		}
-		if f.ctx.Err() != nil {
-			t.Fatalf("no start failure; logs:\n%s", f.logs.String())
-		}
-		time.Sleep(10 * time.Millisecond)
+	if task := f.await(t, testRun("run-a"), anyTask); task.Status.State != wire.TaskStateCompleted {
+		t.Fatalf("ended %s; logs:\n%s", task.Status.State, f.logs.String())
 	}
-	for len(f.joinedSince(failed)) == 0 {
-		if waited := time.Since(failed); waited > joinBudget {
-			t.Fatalf("no member joined within %s of the start failure; logs:\n%s", joinBudget, f.logs.String())
-		}
-		time.Sleep(5 * time.Millisecond)
+	claims, failures := f.retryEvents(t)
+	if len(failures) != 2 || slices.ContainsFunc(claims, func(a attemptAt) bool { return a.attempt != 1 }) {
+		t.Fatalf("claims %v and start failures %v, want every claim on the first delivery", claims, failures)
 	}
 }
 

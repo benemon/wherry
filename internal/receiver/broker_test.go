@@ -394,7 +394,8 @@ func (b brokerPool) noRedelivery(t *testing.T, ctx context.Context, topic, run s
 
 // TestAllAttemptsFailEndAtTheBudgetOnRealBroker runs two members of one signature whose plugins both fail to start,
 // whichever receives each delivery: the task ends in one budget terminal at the third attempt under a delivery limit of
-// 4, with one start failure and one dispatch per attempt, and is not delivered again.
+// 4, with one dispatch per start failure and several start failures per delivery, retried in place, and is not delivered
+// again.
 func TestAllAttemptsFailEndAtTheBudgetOnRealBroker(t *testing.T) {
 	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
 	if address == "" {
@@ -427,8 +428,8 @@ func TestAllAttemptsFailEndAtTheBudgetOnRealBroker(t *testing.T) {
 	}
 	firstDispatches, _, _, _ := firstPlugin.counts()
 	laterDispatches, _, _, _ := laterPlugin.counts()
-	if len(failed) != 3 || firstDispatches+laterDispatches != 3 {
-		t.Fatalf("start failures by %v and dispatches %d and %d, want one of each per attempt", failed, firstDispatches, laterDispatches)
+	if len(failed) <= 3 || firstDispatches+laterDispatches != len(failed) {
+		t.Fatalf("start failures by %v and dispatches %d and %d, want several per attempt and one dispatch per failure", failed, firstDispatches, laterDispatches)
 	}
 	t.Logf("attempts by %v", failed)
 }
