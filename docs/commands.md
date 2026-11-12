@@ -457,9 +457,10 @@ topics retain a task and the second when they retain none.
 
 The credential names are the task's own credentials and every credential
 any terms record of the pool on `wherry.operator` gives the task's agent,
-other than the task's `unsupplied_credentials`. The
-list can name a credential the envelope did not hold; it never omits one it
-did, so rotating every listed credential covers the exposure.
+whatever the task's `supplied_credentials` names, so a task written before
+v0.1.2 is covered too. The list can name a credential the envelope did not
+hold; it never omits one it did, so rotating every listed credential covers
+the exposure.
 
 ### `wherry operator tenant add TENANT`
 
@@ -1093,7 +1094,12 @@ and receiver ID:
 ```
 receiver=<id> pool=<pool> capacity=<n> in_flight=<n> advertisement_age=<age> status=<status>
   profile=<name> plugin=<type> agent=<agent> ready=<bool> labels=<k=v,...> [inline_limit=<n>] [models=<m,...> default_model=<m>] [credentials=<name:env=VAR|name:file=FILE[(missing,optional)],...>]
+    [credential=<name> description="<text>"]...
 ```
+
+Each credential with a description gets its own line under its profile. The
+description is quoted as a Go string: `"` and `\` are escaped, and a
+non-printable character appears as an escape such as `\u202e`.
 
 `status` is `live` when the latest advertisement is dated within 120
 seconds of now, either side, `stale` otherwise, `silent` when there is none,
@@ -1108,15 +1114,17 @@ the agent's credentials in the pool's terms, each with its target, the
 agent's environment variable or the file in its credentials directory,
 marking `missing` each this host's configuration has no
 [source](configuration-host.md#client-configuration) for and `optional` each a run
-goes without, as in
+goes without unless the task requests it, as in
 `credentials=openai-api-key:env=OPENAI_API_KEY,github-token:env=GH_TOKEN(missing,optional)`.
+Each credential with a description in the pool's terms follows its profile on
+a line of its own, as in `credential=github-token description="GitHub token for gh"`.
 
 `--json` prints a JSON array, one object per receiver:
 
 | Member | Content |
 | --- | --- |
 | `receiver_id`, `pool` | strings |
-| `profiles` | `{name, plugin, agent, inline_limit, models, default_model, credentials, labels, ready}`, `credentials` holding `{name, env, file, optional, configured}`, `env` or `file` the target; optional values are omitted when unset |
+| `profiles` | `{name, plugin, agent, inline_limit, models, default_model, credentials, labels, ready}`, `credentials` holding `{name, env, file, description, optional, configured}`, `env` or `file` the target; optional values are omitted when unset |
 | `capacity`, `in_flight` | integers from the latest advertisement |
 | `last_advertised` | RFC 3339 time of the latest advertisement; omitted when there is none |
 | `status` | `live`, `stale`, `silent` or `ended` |
@@ -1125,8 +1133,10 @@ goes without, as in
 
 Resolves a placement, a pool and a profile signature, signs the task and
 publishes it to the signature's task topic in the chosen pool. It prints
-`run_id=<id> pool=<pool>`, or fails with `no matching live receiver` when no
-live signature satisfies the agent, model and selector.
+`run_id=<id> pool=<pool>`, followed by `unrequested=<name,...>` when the
+placed agent has optional credentials the task did not request, or fails
+with `no matching live receiver` when no live signature satisfies the
+agent, model and selector.
 
 Before it publishes, it folds the host's key topic and refuses when the host
 key is not the topic's current key, since receivers admit a task only under
@@ -1145,6 +1155,7 @@ and needs `wherry host init` on a re-provisioned host.
 | `--git-path` | the repository name | checkout directory, relative to the agent's working directory |
 | `--git-changes patch\|bundle` | | ask for the agent's commits back as the output `changes.patch` or `changes.bundle` |
 | `--input FILE[:s3]` | | file the agent gets in `WHERRY_INPUT_DIR` under its base name; `:s3` uploads it, at most 5 GiB, to the pool's bucket; repeatable |
+| `--credential NAME` | | request the placed agent's credential `NAME` at the target the pool's terms give it; an optional credential is delivered only when requested; repeatable |
 | `--credential NAME:file=FILE` or `--credential NAME:env=VAR` | | credential `NAME` from `credentials` in the client configuration, which the agent gets as the file `FILE` in `WHERRY_CREDENTIALS_DIR` or in the environment variable `VAR`; repeatable |
 | `--output NAME[:required][:s3]` | | file the agent is asked to leave in `WHERRY_OUTPUT_DIR`; `:required` fails the run without it, and `:s3` returns it through the pool's bucket, in either order; repeatable |
 | `--start-by` | `10m` | `task_started_by`: an RFC 3339 time, or a Go duration from now, by which the agent's job must start |
@@ -1223,20 +1234,36 @@ targets, and none takes the target of one of the agent's credentials:
 invalid input: task credential deploy-key takes the environment variable GH_TOKEN of one of agent codex's credentials
 ```
 
-A task credential named as one of the agent's travels once in the envelope
-and is delivered at both targets.
+A task credential named as one of the agent's credentials that the run
+gets, a required or a requested one, travels once in the envelope and is
+delivered at both targets.
 
-`submit` refuses, before it publishes, a task credential or a required
-credential of the placed agent that the client configuration has no
-[source](configuration-host.md#client-configuration) for:
+`submit` refuses, before it publishes, a task credential, a required
+credential of the placed agent, or a requested one, that the client
+configuration has no [source](configuration-host.md#client-configuration) for:
 
 ```
 invalid input: auth required: credential openai-api-key is not in this host's configuration
 ```
 
-An optional credential of the agent without a source is named in the
-submission's `unsupplied_credentials`; the run goes without it, and its
-[prompt](configuration-receiver.md#agent-contract) names it as not supplied.
+A required credential of the placed agent is delivered to every run. An
+optional one is delivered only when `--credential NAME` requests it;
+requesting a required one changes nothing. The submission's
+`supplied_credentials` names the agent's credentials delivered. An optional
+credential the task does not request, whether or not the host has a source
+for it, is named on the `unrequested=` of the output line; the run goes
+without it, and its [prompt](configuration-receiver.md#agent-contract) names
+it as not supplied.
+Request an optional credential only when the task needs it. `submit` refuses
+a request for a name that is not one of the placed agent's credentials:
+
+```
+invalid input: requested credential vault-token is not one of agent claude's credentials
+```
+
+A task credential with a target is not a request: a `github-token` task
+credential, such as a git entry's, does not also deliver the agent's
+`github-token` at its target unless `--credential github-token` asks for it.
 
 `--input FILE:s3` and `--output NAME:s3` use the pool's [S3 lane](a2a-extension-v1.md#s3-inputs-and-outputs).
 `submit` refuses them, before it uploads or publishes anything, when the

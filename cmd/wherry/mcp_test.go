@@ -309,7 +309,7 @@ func TestMCPSubmitWaitRoundTrip(t *testing.T) {
 	callTool(t, ctx, session, "receivers", map[string]any{}, &receivers)
 	if len(receivers.Receivers) != 1 || receivers.Receivers[0].ReceiverID != "receiver-a" || receivers.Receivers[0].Pool != "pool-a" || receivers.Receivers[0].Status != "live" ||
 		!reflect.DeepEqual(receivers.Receivers[0].Profiles, []busclient.Profile{{Name: "lab", Plugin: "nomad", Agent: "claude", InlineLimit: 49152,
-			Credentials: []busclient.Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true}, {Name: "github-token", Env: "GH_TOKEN", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: true}}) {
+			Credentials: []busclient.Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true}, {Name: "github-token", Env: "GH_TOKEN", Description: "GitHub token for gh", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: true}}) {
 		t.Fatalf("receivers %#v", receivers)
 	}
 	var submitted submitOutput
@@ -550,6 +550,44 @@ func TestMCPStatusAndEventsShowPlacing(t *testing.T) {
 	}
 	if len(events.Events) != 3 || events.Events[0].Kind != "claimed" || !reflect.DeepEqual(events.Events[1:], want) {
 		t.Fatalf("events %#v, want claimed then both placing statuses", events.Events)
+	}
+}
+
+// A credential by name alone requests one of the placed agent's credentials; submit lists the optional ones left out, and
+// refuses an unmet request with the CLI's message.
+func TestMCPRequestsAgentCredentials(t *testing.T) {
+	b := newBus(t)
+	session := mcpSession(t, b.connect(t), nil)
+	tools, err := session.ListTools(b.ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range tools.Tools {
+		if want := map[string]string{"receivers": "delivers only when its credentials name it", "submit": "an optional agent credential is delivered only when requested"}[tool.Name]; !strings.Contains(tool.Description, want) {
+			t.Errorf("%s description %q lacks %q", tool.Name, tool.Description, want)
+		}
+	}
+	var unrequested, requested submitOutput
+	callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "work"}, &unrequested)
+	b.credentials["github-token"] = b.credentials["model"]
+	callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "work", "credentials": []any{map[string]any{"name": "github-token"}}}, &requested)
+	if !slices.Equal(unrequested.Unrequested, []string{"github-token"}) || requested.Unrequested != nil {
+		t.Fatalf("unrequested %v and %v; want github-token, then none", unrequested.Unrequested, requested.Unrequested)
+	}
+	for runID, want := range map[string][]string{unrequested.ID: {"model"}, requested.ID: {"model", "github-token"}} {
+		if binding := b.tasks(t, runID)[0].submission.Wherry; !slices.Equal(binding.Supplied, want) || len(binding.Credentials) != 0 {
+			t.Fatalf("run %s supplied %v and task credentials %+v; want %v and none", runID, binding.Supplied, binding.Credentials, want)
+		}
+	}
+	delete(b.credentials, "github-token")
+	for name, want := range map[string]string{
+		"github-token": "auth required: credential github-token is not in this host's configuration",
+		"vault-token":  "requested credential vault-token is not one of agent claude's credentials",
+	} {
+		failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "work", "credentials": []any{map[string]any{"name": name}}})
+		if failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, want) {
+			t.Errorf("request %s: %+v; want INVALID_ARGUMENT %q", name, failure, want)
+		}
 	}
 }
 

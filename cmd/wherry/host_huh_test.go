@@ -1104,7 +1104,7 @@ func TestHostNarrowDescriptionKeepsScopeWarning(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := strings.Join(strings.Fields(strings.ReplaceAll(ansi.Strip(out.String()), "┃", "")), " ")
-	for _, part := range []string{"An environment source sends what the variable holds", "every pool that names token, now or later.", "It is read where submits run, including the MCP server your harness starts."} {
+	for _, part := range []string{"An environment source sends what the variable holds", "every pool that names token, now or later.", "Where it is optional, a run gets it only when its task requests it.", "It is read where submits run, including the MCP server your harness starts."} {
 		if !strings.Contains(text, part) {
 			t.Fatalf("missing %q: %s", part, text)
 		}

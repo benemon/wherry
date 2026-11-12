@@ -43,18 +43,18 @@ func TestSubmitFileFlags(t *testing.T) {
 		flags []string
 		want  string
 	}{
-		"credential without a target": {[]string{"--credential", "deploy-key"}, "want NAME:file=FILE or NAME:env=VAR"},
-		"credential of another kind":  {[]string{"--credential", "deploy-key:path=id"}, "want NAME:file=FILE or NAME:env=VAR"},
-		"unconfigured credential":     {[]string{"--credential", "absent:file=token"}, "auth required: credential absent is not in this host's configuration"},
-		"agent credential target":     {[]string{"--credential", "deploy-key:env=MODEL_API_KEY"}, "task credential deploy-key takes the environment variable MODEL_API_KEY of one of agent claude's credentials"},
-		"reserved env target":         {[]string{"--credential", "deploy-key:env=HOME"}, "credential deploy-key: env must match"},
-		"shared target":               {[]string{"--credential", "deploy-key:env=TOKEN", "--credential", "vault-token:env=TOKEN"}, "credentials deploy-key and vault-token share a target"},
-		"inputs over the limit":       {[]string{"--input", large}, "inline inputs are over profile lab's 49152-byte limit"},
-		"output escaping":             {[]string{"--output", "../report.md"}, "expected outputs must be unique relative paths of portable file names"},
-		"output in the outcome dir":   {[]string{"--output", ".wherry/outcome.json"}, "expected outputs must be unique relative paths of portable file names"},
-		"credential file escaping":    {[]string{"--credential", "deploy-key:file=../id"}, "credential deploy-key: file must be a portable file name"},
-		"unknown output suffix":       {[]string{"--output", "report.md:needed"}, "want NAME[:required][:s3]"},
-		"repeated output suffix":      {[]string{"--output", "report.md:required:required"}, "want NAME[:required][:s3]"},
+		"request outside the agent":  {[]string{"--credential", "deploy-key"}, "requested credential deploy-key is not one of agent claude's credentials"},
+		"credential of another kind": {[]string{"--credential", "deploy-key:path=id"}, "want NAME, NAME:file=FILE or NAME:env=VAR"},
+		"unconfigured credential":    {[]string{"--credential", "absent:file=token"}, "auth required: credential absent is not in this host's configuration"},
+		"agent credential target":    {[]string{"--credential", "deploy-key:env=MODEL_API_KEY"}, "task credential deploy-key takes the environment variable MODEL_API_KEY of one of agent claude's credentials"},
+		"reserved env target":        {[]string{"--credential", "deploy-key:env=HOME"}, "credential deploy-key: env must match"},
+		"shared target":              {[]string{"--credential", "deploy-key:env=TOKEN", "--credential", "vault-token:env=TOKEN"}, "credentials deploy-key and vault-token share a target"},
+		"inputs over the limit":      {[]string{"--input", large}, "inline inputs are over profile lab's 49152-byte limit"},
+		"output escaping":            {[]string{"--output", "../report.md"}, "expected outputs must be unique relative paths of portable file names"},
+		"output in the outcome dir":  {[]string{"--output", ".wherry/outcome.json"}, "expected outputs must be unique relative paths of portable file names"},
+		"credential file escaping":   {[]string{"--credential", "deploy-key:file=../id"}, "credential deploy-key: file must be a portable file name"},
+		"unknown output suffix":      {[]string{"--output", "report.md:needed"}, "want NAME[:required][:s3]"},
+		"repeated output suffix":     {[]string{"--output", "report.md:required:required"}, "want NAME[:required][:s3]"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -82,6 +82,30 @@ func TestSubmitFileFlags(t *testing.T) {
 	}
 	if strings.Contains(stdout.String()+stderr.String(), "deploy-key-value") {
 		t.Fatal("submit printed the credential")
+	}
+}
+
+// --credential NAME requests the agent's credential at its target, beside task credentials with targets, and the submit
+// line names the agent's optional credentials left unrequested.
+func TestSubmitRequestsAgentCredentials(t *testing.T) {
+	b := newBus(t)
+	b.credentials["github-token"], b.credentials["deploy-key"] = b.credentials["model"], b.credentials["model"]
+	submit := func(flags ...string) (string, wire.SubmissionBinding) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if err := runSubmit(b.ctx, b.client, append([]string{"--prompt", "work"}, flags...), &stdout, &stderr); err != nil {
+			t.Fatal(err)
+		}
+		runID, _, _ := strings.Cut(strings.TrimPrefix(stdout.String(), "run_id="), " ")
+		return stdout.String(), b.tasks(t, runID)[0].submission.Wherry
+	}
+	line, binding := submit("--credential", "deploy-key:env=DEPLOY_KEY")
+	if !strings.HasSuffix(line, " pool=pool-a unrequested=github-token\n") || !slices.Equal(binding.Supplied, []string{"model"}) {
+		t.Fatalf("submit printed %q with supplied %v; want github-token unrequested and model alone supplied", line, binding.Supplied)
+	}
+	line, binding = submit("--credential", "github-token", "--credential", "model", "--credential", "deploy-key:env=DEPLOY_KEY")
+	if !strings.HasSuffix(line, " pool=pool-a\n") || !slices.Equal(binding.Supplied, []string{"model", "github-token"}) || !slices.Equal(binding.Credentials, []wire.TaskCredential{{Name: "deploy-key", Env: "DEPLOY_KEY"}}) {
+		t.Fatalf("submit printed %q with supplied %v and task credentials %+v; want both requests met and the task credential alone", line, binding.Supplied, binding.Credentials)
 	}
 }
 

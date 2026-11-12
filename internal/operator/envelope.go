@@ -88,18 +88,16 @@ func CheckEnvelope(terms Terms, task *wire.Submission, values signed.EnvelopeVal
 	return nil
 }
 
-// envelopeCredentials names the credentials a task's envelope holds under terms: the agent's supplied credentials and the
-// task's.
+// envelopeCredentials names the credentials a task's envelope holds: the agent's supplied credentials and the task's.
+// They come from the binding alone, so a change of the agent's credentials in terms between seal and open does not fail
+// the check.
 func envelopeCredentials(terms Terms, binding wire.SubmissionBinding) (map[string]bool, error) {
-	agent := slices.IndexFunc(terms.Agents, func(agent AgentTerms) bool { return agent.Name == binding.Placement.Agent })
-	if agent < 0 {
+	if !slices.ContainsFunc(terms.Agents, func(agent AgentTerms) bool { return agent.Name == binding.Placement.Agent }) {
 		return nil, errors.New("agent is outside the pool terms")
 	}
 	names := map[string]bool{}
-	for _, credential := range terms.Agents[agent].Credentials {
-		if !slices.Contains(binding.Unsupplied, credential.Name) {
-			names[credential.Name] = true
-		}
+	for _, name := range binding.Supplied {
+		names[name] = true
 	}
 	for _, credential := range binding.Credentials {
 		names[credential.Name] = true

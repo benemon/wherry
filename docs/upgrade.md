@@ -27,6 +27,59 @@ Restart a pool's receivers one at a time.
 A stopping key custodian needs a live successor to re-key its tasks.
 Follow [Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian).
 
+## Optional credentials from v0.1.2
+
+From v0.1.2 a host delivers an optional agent credential, one the pool's
+terms mark `required: false`, only when the task requests it: with
+`wherry host submit --credential NAME`, or through MCP with a `credentials`
+entry of its name alone. Before v0.1.2 a host delivered every optional
+credential it had a source for. Runs that relied on that automatic delivery
+now go without the credential, and their prompt names it as not supplied.
+
+- Request the credential in each task that needs it. `submit` prints
+  `unrequested=<name,...>`, and the MCP `submit` tool returns
+  `unrequested`, naming the optional credentials a task left out.
+- Make a credential every run needs required in the pool's terms, by
+  removing `required: false`, and apply the terms with
+  `wherry operator pool apply`.
+- `wherry dev up` makes each credential it copies required, except
+  `anthropic-api-key` beside `claude-oauth-token`; see
+  [`wherry dev`](commands-dev.md). A dev run that needs the API key while
+  the subscription token is present requests it with
+  `--credential anthropic-api-key`.
+
+From v0.1.2 a submission names the agent credentials it delivers, in
+`supplied_credentials`, in place of the ones it does not, in
+`unsupplied_credentials`. A receiver ignores the old field, so hosts and
+receivers of different versions do not work together, and every mismatch
+fails closed:
+
+- A run from a v0.1.2 host on a receiver before v0.1.2 fails `envelope invalid`
+  when the task does not request every optional credential of the agent, and
+  works otherwise.
+- A run from a host before v0.1.2 on a v0.1.2 receiver is rejected with `the
+  host does not supply a required credential of the agent` when the agent has
+  a required credential. Otherwise it fails `envelope invalid` when the old
+  host sealed any of the agent's credentials.
+
+Upgrade hosts and receivers together, and let queued tasks drain first.
+
+A v0.1.2 host cannot read a run record that a host before v0.1.2 wrote with
+`unsupplied_credentials` in its state directory: `wherry host runs` skips
+it, and `status`, `wait` and resubmission of the run fail. Let runs finish,
+or wait them out, before you upgrade a host.
+
+A run that loses its pool key before it starts is resubmitted with the
+credentials of the agent's terms at resubmission: every required one, and
+every one the original run supplied. A credential the terms removed is
+dropped, and an optional one they added is not delivered. A credential the
+terms made optional after the submit is still delivered, as it was to the
+original run. When the terms made a credential required and the host has no
+source for it, the resubmission is refused `auth required`, the run's status
+is unchanged and the host logs the refusal on each pass until the run's
+`task_started_by`. A later pass resubmits it once the credential is
+configured.
+
 ## What happens to running work?
 
 On `SIGINT` or `SIGTERM`, a receiver stops claiming and closes idle claims.

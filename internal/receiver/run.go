@@ -224,7 +224,8 @@ type admission struct {
 	profile  Named
 	history  []wire.Message
 	inputs   []pluginsdk.File
-	// agentCredentials are the agent's credentials the run's host supplies, and unsupplied the optional ones it does not.
+	// agentCredentials are the credentials of the agent's terms that the run supplies, and unsupplied the optional ones it
+	// does not.
 	agentCredentials []wire.TaskCredential
 	unsupplied       []string
 	// credentials, outputs, git and s3Inputs are what the run declares.
@@ -354,13 +355,17 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, profile Named)
 		return admitted, 0
 	}
 	declared := task.Wherry
+	// A supplied name the terms no longer declare is not delivered.
 	var supplied []wire.TaskCredential
+	var unsupplied []string
 	for _, credential := range terms.Agents[agent].Credentials {
 		switch {
-		case !slices.Contains(declared.Unsupplied, credential.Name):
+		case slices.Contains(declared.Supplied, credential.Name):
 			supplied = append(supplied, credential.TaskCredential)
 		case !credential.Optional():
 			return reject(rejectionReasonRequiredCredential)
+		default:
+			unsupplied = append(unsupplied, credential.Name)
 		}
 	}
 	for _, credential := range declared.Credentials {
@@ -381,7 +386,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, profile Named)
 		return reject(rejection)
 	}
 	admitted.inputs, admitted.credentials, admitted.outputs, admitted.git, admitted.s3Inputs = inputs, declared.Credentials, declared.Outputs, declared.Git, declared.S3Inputs
-	admitted.agentCredentials, admitted.unsupplied = supplied, declared.Unsupplied
+	admitted.agentCredentials, admitted.unsupplied = supplied, unsupplied
 	return admitted, 0
 }
 
@@ -2593,7 +2598,9 @@ func Preamble(directories pluginsdk.Directories, inputs []string, credentials []
 		lines = append(lines, "Credential environment variables: "+strings.Join(variables, ", ")+". Never print or copy their values.")
 	}
 	for _, name := range unsupplied {
-		names = append(names, name+" (not supplied)")
+		if !slices.Contains(names, name) {
+			names = append(names, name+" (not supplied)")
+		}
 	}
 	if len(outputs) > 0 {
 		paths := make([]string, 0, len(outputs))

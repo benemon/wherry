@@ -883,17 +883,23 @@ func (f fixture) seal(t *testing.T, submission *wire.Submission) {
 }
 
 // sealTask puts in submission an envelope of the values a host resolves for it under terms, testToken for each
-// credential and URLs in the pool's storage, edited by edit, under a fresh content key wrapped to poolKey.
+// supplied credential and URLs in the pool's storage, edited by edit, under a fresh content key wrapped to poolKey. A
+// submission with no supplied credentials set supplies the placed agent's required ones under terms.
 func sealTask(t *testing.T, submission *wire.Submission, terms operator.Terms, poolKey *ecdsa.PublicKey, edit func(*wire.Submission, *signed.EnvelopeValues)) {
 	t.Helper()
-	binding := submission.Wherry
-	values := signed.EnvelopeValues{Binding: binding.EnvelopeBinding(), Credentials: map[string][]byte{}, S3Inputs: map[string]string{}, S3Outputs: map[string]string{}, RedactionKey: testRedactionKey}
-	for _, agent := range terms.Agents {
-		for _, credential := range agent.Credentials {
-			if agent.Name == binding.Placement.Agent && !slices.Contains(binding.Unsupplied, credential.Name) {
-				values.Credentials[credential.Name] = []byte(testToken)
+	if submission.Wherry.Supplied == nil {
+		for _, agent := range terms.Agents {
+			for _, credential := range agent.Credentials {
+				if agent.Name == submission.Wherry.Placement.Agent && !credential.Optional() {
+					submission.Wherry.Supplied = append(submission.Wherry.Supplied, credential.Name)
+				}
 			}
 		}
+	}
+	binding := submission.Wherry
+	values := signed.EnvelopeValues{Binding: binding.EnvelopeBinding(), Credentials: map[string][]byte{}, S3Inputs: map[string]string{}, S3Outputs: map[string]string{}, RedactionKey: testRedactionKey}
+	for _, name := range binding.Supplied {
+		values.Credentials[name] = []byte(testToken)
 	}
 	for _, credential := range binding.Credentials {
 		values.Credentials[credential.Name] = []byte(testToken)

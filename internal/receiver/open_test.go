@@ -1079,10 +1079,10 @@ func TestInvalidEnvelopeIsRefusedBeforeAnyWrap(t *testing.T) {
 	}
 }
 
-// The custodian checks an envelope's credentials against the terms its pass read, not the receiver's snapshot, which can
-// lag a terms change: an envelope sealed under new terms that drop an optional credential is served, and one that still
-// carries the dropped credential is refused.
-func TestCustodianChecksEnvelopesUnderThePassTerms(t *testing.T) {
+// The custodian checks an envelope's credentials against the task's binding, not any terms: an envelope supplying a
+// credential that terms applied after the seal drop is served, whatever the receiver's snapshot holds, and one carrying a
+// credential the task does not supply is refused.
+func TestCustodianChecksEnvelopesAgainstTheBinding(t *testing.T) {
 	withOptional := func() operator.Terms {
 		terms := testTerms()
 		terms.Agents[0].Credentials = append(terms.Agents[0].Credentials,
@@ -1090,11 +1090,15 @@ func TestCustodianChecksEnvelopesUnderThePassTerms(t *testing.T) {
 		return terms
 	}
 	for name, test := range map[string]struct {
-		sealedUnder operator.Terms
-		answer      string
+		supplied []string
+		edit     func(*wire.Submission, *signed.EnvelopeValues)
+		answer   string
 	}{
-		"sealed under the new terms":      {testTerms(), "wrap"},
-		"carrying the dropped credential": {withOptional(), wire.RefusedEnvelopeInvalid},
+		"not supplying the dropped credential": {[]string{credentialName}, nil, "wrap"},
+		"supplying the dropped credential":     {[]string{credentialName, "github-token"}, nil, "wrap"},
+		"carrying a credential not supplied": {[]string{credentialName}, func(_ *wire.Submission, values *signed.EnvelopeValues) {
+			values.Credentials["github-token"] = []byte(testToken)
+		}, wire.RefusedEnvelopeInvalid},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixtureWith(t, resultStream, withOptional(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
@@ -1104,14 +1108,12 @@ func TestCustodianChecksEnvelopesUnderThePassTerms(t *testing.T) {
 				t.Fatal(err)
 			}
 			record := f.submit(t, f.host, func(submission *wire.Submission) {
-				sealTask(t, submission, test.sealedUnder, f.poolKey(t), nil)
+				submission.Wherry.Supplied = test.supplied
+				sealTask(t, submission, withOptional(), f.poolKey(t), test.edit)
 			})
 			f.statusAs(t, record, "receiver-b", keyB, "claimed", 1)
 			if answer := f.answered(t, f.openAs(t, record, "receiver-b", keyB, 1)); answer != test.answer {
 				t.Fatalf("answer %q, want %q; logs:\n%s", answer, test.answer, f.logs.String())
-			}
-			if state, _, _ := f.receiver.snapshot(); len(state.Pools[testPool].Agents[0].Credentials) != 2 {
-				t.Fatal("the receiver's snapshot read the new terms; the check no longer covers a stale snapshot")
 			}
 		})
 	}

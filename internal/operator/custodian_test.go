@@ -320,7 +320,7 @@ func TestCheckEnvelope(t *testing.T) {
 	terms := withDefaults(modelTerms())
 	terms.Storage = &Storage{Endpoint: "https://s3.example.test", Bucket: "bucket-a"}
 	task := &wire.Submission{Wherry: wire.SubmissionBinding{Tenant: "tenant-a", Run: "run-b", Replaces: "run-a", S3InputRun: "run-a", Placement: wire.Placement{Agent: "agent-a"},
-		Credentials: []wire.TaskCredential{{Name: "deploy-key", File: "id"}}, S3Inputs: []wire.S3Input{{Name: "data.bin"}},
+		Supplied: []string{"model"}, Credentials: []wire.TaskCredential{{Name: "deploy-key", File: "id"}}, S3Inputs: []wire.S3Input{{Name: "data.bin"}},
 		Outputs: []wire.ExpectedOutput{{Name: "out/report.pdf", Storage: wire.StorageS3}, {Name: "notes.md"}}}}
 	values := func() signed.EnvelopeValues {
 		return signed.EnvelopeValues{
@@ -332,6 +332,18 @@ func TestCheckEnvelope(t *testing.T) {
 	}
 	if err := CheckEnvelope(terms, task, values()); err != nil {
 		t.Fatalf("check of a valid envelope: %v", err)
+	}
+	// The binding names the agent's credentials the envelope holds, so terms that change them after the seal agree.
+	changed := withDefaults(modelTerms())
+	changed.Storage = terms.Storage
+	changed.Agents[0].Credentials = []AgentCredential{{TaskCredential: wire.TaskCredential{Name: "vault-token", Env: "VAULT_TOKEN"}, Required: new(bool)}}
+	if err := CheckEnvelope(changed, task, values()); err != nil {
+		t.Fatalf("check under terms that drop model and add an optional credential: %v", err)
+	}
+	other := *task
+	other.Wherry.Placement.Agent = "agent-z"
+	if err := CheckEnvelope(terms, &other, values()); err == nil || !strings.Contains(err.Error(), "agent is outside the pool terms") {
+		t.Fatalf("check of a task whose agent is outside the terms = %v", err)
 	}
 	for name, test := range map[string]struct {
 		mutate func(*signed.EnvelopeValues)

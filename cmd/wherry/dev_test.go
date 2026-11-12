@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/benemon/wherry/internal/credential"
 	"github.com/hashicorp/nomad/api"
 	"github.com/sigstore/sigstore-go/pkg/root"
 )
@@ -465,7 +466,7 @@ func TestDevProfilesAndTerms(t *testing.T) {
 	if !strings.Contains(string(mock), `"driver":"raw_exec"`) || !strings.Contains(string(mock), instance.cache("wherry")+`' dev mock`) {
 		t.Fatalf("mock profile %s", mock)
 	}
-	terms := devTerms(agents, "claude", true)
+	terms := devTerms(agents, "claude", true, nil)
 	if terms.Storage == nil || terms.Storage.Endpoint != "http://127.0.0.1:18080" || terms.Storage.Secure() {
 		t.Fatalf("storage %+v; want plain http on 127.0.0.1:18080", terms.Storage)
 	}
@@ -473,7 +474,7 @@ func TestDevProfilesAndTerms(t *testing.T) {
 	for _, agent := range terms.Agents {
 		for _, credential := range agent.Credentials {
 			if !credential.Optional() {
-				t.Errorf("agent %s credential %s is required", agent.Name, credential.Name)
+				t.Errorf("agent %s credential %s is required though dev up copied none", agent.Name, credential.Name)
 			}
 			names[agent.Name] = append(names[agent.Name], credential.Name+"="+credential.Env)
 		}
@@ -483,6 +484,30 @@ func TestDevProfilesAndTerms(t *testing.T) {
 		"codex":  {"openai-api-key=CODEX_API_KEY"}, "gemini": {"gemini-api-key=GEMINI_API_KEY"}, "mock": {"mock-token=MOCK_TOKEN"},
 	}; !reflect.DeepEqual(names, want) {
 		t.Fatalf("credentials %v; want %v", names, want)
+	}
+	for _, test := range []struct {
+		copied []string
+		want   []string
+	}{
+		{[]string{"claude-oauth-token", "anthropic-api-key", "mock-token"}, []string{"claude-oauth-token", "mock-token"}},
+		{[]string{"anthropic-api-key", "openai-api-key"}, []string{"anthropic-api-key", "openai-api-key"}},
+		{[]string{"claude-oauth-token"}, []string{"claude-oauth-token"}},
+	} {
+		copied := map[string]credential.Source{}
+		for _, name := range test.copied {
+			copied[name] = credential.Source{File: name}
+		}
+		var required []string
+		for _, agent := range devTerms(agents, "claude", true, copied).Agents {
+			for _, credential := range agent.Credentials {
+				if !credential.Optional() {
+					required = append(required, credential.Name)
+				}
+			}
+		}
+		if !reflect.DeepEqual(required, test.want) {
+			t.Errorf("dev up copied %v: required %v; want %v", test.copied, required, test.want)
+		}
 	}
 }
 

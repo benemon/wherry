@@ -228,13 +228,14 @@ func optionalTerms() operator.Terms {
 	return terms
 }
 
-// A run whose host has no source for an optional credential goes without it, its preamble naming it not supplied, and
-// an agent that reports AUTH_REQUIRED for it ends the run FAILED naming it.
+// A run that does not supply an optional credential goes without it, its preamble naming it not supplied, and an agent
+// that reports AUTH_REQUIRED for it ends the run FAILED naming it. The task supplies what a host sealed under terms
+// without the credential, as when the terms add it between seal and open.
 func TestAnUnsuppliedOptionalCredentialIsNamedInThePreamble(t *testing.T) {
 	outcome := `{"state":"TASK_STATE_AUTH_REQUIRED","message":{"role":"ROLE_AGENT","parts":[{"text":"gh needs a token"},{"data":{"credential":"github-token"}}]}}`
 	fake := &fakePlugin{stream: noResultStream, outputs: []pluginsdk.Output{outcomeOutput(outcome)}}
 	f := newFixtureWith(t, noResultStream, optionalTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": fake})
-	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Unsupplied = []string{"github-token"} })
+	record := f.submit(t, f.host, nil)
 	if ack := f.execute(t, record, 1); ack != kgo.AckReject {
 		t.Fatalf("ack %v; logs:\n%s", ack, f.logs.String())
 	}
@@ -251,9 +252,63 @@ func TestAnUnsuppliedOptionalCredentialIsNamedInThePreamble(t *testing.T) {
 	}
 }
 
+// A task credential named as an optional agent credential not supplied, as a git entry's github-token is, is delivered
+// at its own target alone, and the preamble does not call it not supplied.
+func TestATaskCredentialNamedAsAnUnsuppliedOneIsSupplied(t *testing.T) {
+	f := newFixtureWith(t, resultStream, optionalTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
+	f.envelope = sealing(map[string][]byte{credentialName: []byte(testToken), "github-token": []byte(deployValue)})
+	record := f.submit(t, f.host, func(task *wire.Submission) {
+		task.Wherry.Credentials = []wire.TaskCredential{{Name: "github-token", File: "gh-token"}}
+	})
+	if ack := f.execute(t, record, 1); ack != kgo.AckAccept {
+		t.Fatalf("ack %v; logs:\n%s", ack, f.logs.String())
+	}
+	run := f.lastRun()
+	want := []pluginsdk.Secret{{Name: credentialName, Env: credentialEnv, Value: []byte(testToken)}, {Name: "github-token", File: "gh-token", Value: []byte(deployValue)}}
+	if !reflect.DeepEqual(run.Credentials, want) {
+		t.Fatalf("dispatched credentials %+v; want the task credential at its file alone", run.Credentials)
+	}
+	if prompt := string(run.Prompt); !strings.Contains(prompt, "This run's credentials are "+credentialName+", github-token.") || strings.Contains(prompt, "not supplied") || strings.Contains(prompt, "GH_TOKEN") {
+		t.Fatalf("prompt %q; want github-token named once as supplied", prompt)
+	}
+}
+
+// A credential the host supplied under terms that the receiver's terms no longer declare is neither delivered nor an
+// error: the run is admitted, its envelope opens at the custodian and the claimant, and it completes without it.
+func TestASuppliedCredentialTheTermsDropIsNotDelivered(t *testing.T) {
+	f := newFixture(t, resultStream)
+	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Supplied = []string{credentialName, "github-token"} })
+	if ack := f.execute(t, record, 1); ack != kgo.AckAccept {
+		t.Fatalf("ack %v; logs:\n%s", ack, f.logs.String())
+	}
+	run := f.lastRun()
+	if len(run.Credentials) != 1 || run.Credentials[0].Name != credentialName {
+		t.Fatalf("dispatched credentials %+v; want %s alone", run.Credentials, credentialName)
+	}
+	if prompt := string(run.Prompt); strings.Contains(prompt, "github-token") {
+		t.Fatalf("prompt %q names the credential the terms dropped", prompt)
+	}
+	if status := f.lastTask(t).Status; status.State != wire.TaskStateCompleted {
+		t.Fatalf("ended %s, want COMPLETED", status.State)
+	}
+}
+
+// An envelope without a supplied credential fails envelope invalid: no run is dispatched with an empty value for it.
+func TestASuppliedCredentialMissingFromTheEnvelopeIsNotDelivered(t *testing.T) {
+	f := newFixtureWith(t, resultStream, optionalTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
+	f.envelope = sealing(map[string][]byte{credentialName: []byte(testToken)})
+	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Supplied = []string{credentialName, "github-token"} })
+	if ack := f.execute(t, record, 1); ack != kgo.AckReject {
+		t.Fatalf("ack %v; logs:\n%s", ack, f.logs.String())
+	}
+	if dispatches, _, _, _ := f.plugin.counts(); dispatches != 0 || f.answeredWith(t, wire.RefusedEnvelopeInvalid) != 1 {
+		t.Fatalf("dispatches %d; want none and the envelope refused invalid; logs:\n%s", dispatches, f.logs.String())
+	}
+}
+
 func TestAdmissionRefusesCredentialsOutsideTheAgentsTerms(t *testing.T) {
 	for name, mutate := range map[string]func(*wire.Submission){
-		"a required credential unsupplied": func(task *wire.Submission) { task.Wherry.Unsupplied = []string{credentialName} },
+		"a required credential unsupplied": func(task *wire.Submission) { task.Wherry.Supplied = []string{"github-token"} },
 		"a task credential on an agent target": func(task *wire.Submission) {
 			task.Wherry.Credentials = []wire.TaskCredential{{Name: "deploy-key", Env: credentialEnv}}
 		},

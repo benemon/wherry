@@ -31,7 +31,7 @@ import (
 func testSubmission(tenant, host, pool, run string) *wire.Submission {
 	return &wire.Submission{
 		Message: wire.Message{MessageID: "message-" + run, ContextID: run, TaskID: run, Role: wire.RoleUser, Parts: []wire.Part{{Text: "hello"}}, Extensions: []string{wire.ExtensionURI}},
-		Wherry:  wire.SubmissionBinding{Tenant: tenant, Host: host, Pool: pool, Run: run, Placement: wire.Placement{Agent: "agent-a"}},
+		Wherry:  wire.SubmissionBinding{Tenant: tenant, Host: host, Pool: pool, Run: run, Placement: wire.Placement{Agent: "agent-a"}, Supplied: []string{"model"}},
 	}
 }
 

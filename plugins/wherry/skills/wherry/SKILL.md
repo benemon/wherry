@@ -108,8 +108,8 @@ Pick the route by what this host can reach:
 
 Get commits back with `changes` or a bundle output and push from this host.
 The agent's credentials, such as `github-token` as `GH_TOKEN`, serve the
-agent's own tools during the run; the clone uses only the matched `git`
-entry's credential.
+agent's own tools during the run; the clone and a push use only the matched
+`git` entry's credential, not the agent's.
 
 To send files, add `inputs`: `{path}` for each regular file beneath one of the wherry
 MCP server's input roots (the directory it runs in, unless the user's wherry
@@ -125,7 +125,14 @@ add `credentials`: `{name, file}` or `{name, env}` with `name` a credential in
 the user's wherry configuration and `file` the name it gets in
 `WHERRY_CREDENTIALS_DIR`, or `env` the environment variable it gets; you never
 see the value. Two credentials cannot share a target, nor can one take the
-target of an agent's own credential. To get files back, add
+target of an agent's own credential. An optional credential of the agent
+(`optional` in `receivers`, with its `description`) reaches the agent only
+when you request it with a `credentials` entry of its name alone, `{name}`,
+which delivers it at the agent's own target. Request one only when the task
+needs it, for example `github-token` for the agent's own `gh` calls, and leave
+billing credentials such as an API key unrequested unless the user asks for
+them. `submit` returns `unrequested`, the optional credentials you left out.
+To get files back, add
 `outputs`: `{name, required}` for each file the agent should leave in
 `WHERRY_OUTPUT_DIR`. The prompt the agent receives names all of them.
 
@@ -189,8 +196,11 @@ with `truncated` set and its full size in `bytes`.
 
 `submit` returns `INVALID_ARGUMENT` with `auth required: credential NAME is not
 in this host's configuration` when the host has no source for a credential the
-agent requires or the task names. An optional credential the host lacks is not
-delivered, and the agent's prompt names it as not supplied.
+agent requires or the task names or requests. An optional credential is not
+delivered unless requested, and the agent's prompt names it as not supplied.
+When a run ends naming an optional credential it went without and
+`receivers` shows it `configured`, request it in a new `submit` rather than
+asking the user to add a source.
 
 `submit` resolves the run's credentials and encrypts them in the task, so the run
 needs nothing more from this host. When a source fails to resolve, it returns

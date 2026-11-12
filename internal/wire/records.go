@@ -95,11 +95,12 @@ type SubmissionBinding struct {
 	TaskStartedBy int64            `json:"task_started_by"`
 	TaskEndedBy   int64            `json:"task_ended_by"`
 	Credentials   []TaskCredential `json:"credentials,omitzero"`
-	// Unsupplied names the agent's optional credentials this host has no source for, which the run goes without.
-	Unsupplied []string         `json:"unsupplied_credentials,omitzero"`
-	Outputs    []ExpectedOutput `json:"outputs,omitzero"`
-	Git        *GitInput        `json:"git,omitzero"`
-	S3Inputs   []S3Input        `json:"s3_inputs,omitzero"`
+	// Supplied names the placed agent's credentials the envelope holds: the required ones and those the task requested,
+	// and on a resubmission also one made optional since.
+	Supplied []string         `json:"supplied_credentials,omitzero"`
+	Outputs  []ExpectedOutput `json:"outputs,omitzero"`
+	Git      *GitInput        `json:"git,omitzero"`
+	S3Inputs []S3Input        `json:"s3_inputs,omitzero"`
 	// Replaces names the run a resubmission replaces, and S3InputRun the run whose input prefix holds its S3 inputs.
 	Replaces   string `json:"replaces,omitzero"`
 	S3InputRun string `json:"s3_input_run,omitzero"`
@@ -595,9 +596,9 @@ func (value *Submission) validate() error {
 	if err := ValidateCredentials(binding.Credentials); err != nil {
 		return err
 	}
-	for i, name := range binding.Unsupplied {
-		if !ValidName(name) || slices.Contains(binding.Unsupplied[:i], name) {
-			return errors.New("unsupplied credentials are unique credential names")
+	for i, name := range binding.Supplied {
+		if !ValidName(name) || slices.Contains(binding.Supplied[:i], name) {
+			return errors.New("supplied credentials are unique credential names")
 		}
 	}
 	if len(binding.Outputs) > MaxOutputs {

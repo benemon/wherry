@@ -64,6 +64,8 @@ type SubmitInput struct {
 	Parts []wire.Part
 	// Credentials name credentials this host configures, each delivered to the agent at its target.
 	Credentials []wire.TaskCredential
+	// Requested names the placed agent's credentials the task asks for; an optional one is delivered only when named.
+	Requested []string
 	// Outputs are the files the agent is asked to leave.
 	Outputs []wire.ExpectedOutput
 	// Git is the repository the agent clones; its credential and host key come from the host's git configuration.
@@ -103,6 +105,8 @@ func ParseBound(text string, now time.Time) (time.Time, error) {
 type SubmitResult struct {
 	RunID string
 	Pool  string
+	// Unrequested names the placed agent's optional credentials the task did not request, which the run goes without.
+	Unrequested []string
 }
 
 // CancelResult describes a produced cancel.
@@ -138,13 +142,15 @@ type Profile struct {
 }
 
 // Credential is one of an agent's credentials: its target, the agent's environment variable Env or credentials-directory
-// file File; whether a run goes without it when its host has no source for it; and whether this host has one.
+// file File; its description from the pool's terms; whether a run goes without it unless the task requests it; and
+// whether this host has a source for it.
 type Credential struct {
-	Name       string `json:"name"`
-	Env        string `json:"env,omitzero"`
-	File       string `json:"file,omitzero"`
-	Optional   bool   `json:"optional,omitzero"`
-	Configured bool   `json:"configured"`
+	Name        string `json:"name"`
+	Env         string `json:"env,omitzero"`
+	File        string `json:"file,omitzero"`
+	Description string `json:"description,omitzero"`
+	Optional    bool   `json:"optional,omitzero"`
+	Configured  bool   `json:"configured"`
 }
 
 // Host implements the operations of a tenant's host principal.
@@ -242,6 +248,12 @@ func (h *Host) load(ctx context.Context) (view, error) {
 func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, error) {
 	h.resubmitLost(ctx)
 	// Checked before placement: an invalid key matches no offer and would read as no matching receiver.
+	for _, name := range input.Requested {
+		if !wire.ValidName(name) {
+			// Not echoed: a malformed name may be a pasted credential value.
+			return SubmitResult{}, fmt.Errorf("%w: a requested credential is not a valid credential name", ErrInvalidInput)
+		}
+	}
 	if err := wire.ValidateRequirements(input.Selector); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
@@ -344,15 +356,20 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	}
 	agents := v.state.Pools[pool].Agents
 	agent := agents[slices.IndexFunc(agents, func(agent operator.AgentTerms) bool { return agent.Name == placement.Agent })]
-	var unsupplied []string
+	for _, name := range input.Requested {
+		if !slices.ContainsFunc(agent.Credentials, func(credential operator.AgentCredential) bool { return credential.Name == name }) {
+			return SubmitResult{}, fmt.Errorf("%w: requested credential %s is not one of agent %s's credentials", ErrInvalidInput, name, agent.Name)
+		}
+	}
+	supplied, err := h.supplied(agent, input.Requested)
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	var unrequested []string
 	for _, credential := range agent.Credentials {
-		if _, configured := h.credentials[credential.Name]; configured {
-			continue
+		if credential.Optional() && !slices.Contains(input.Requested, credential.Name) {
+			unrequested = append(unrequested, credential.Name)
 		}
-		if !credential.Optional() {
-			return SubmitResult{}, fmt.Errorf("%w: auth required: credential %s is not in this host's configuration", ErrInvalidInput, credential.Name)
-		}
-		unsupplied = append(unsupplied, credential.Name)
 	}
 	for _, credential := range input.Credentials {
 		if slices.ContainsFunc(agent.Targets(), func(target wire.TaskCredential) bool { return target.Target() == credential.Target() }) {
@@ -401,7 +418,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err != nil {
 		return SubmitResult{}, err
 	}
-	submission.Wherry.Credentials, submission.Wherry.Unsupplied, submission.Wherry.Outputs, submission.Wherry.Git = input.Credentials, unsupplied, outputs, input.Git
+	submission.Wherry.Credentials, submission.Wherry.Supplied, submission.Wherry.Outputs, submission.Wherry.Git = input.Credentials, supplied, outputs, input.Git
 	encoded, err := wire.SignRecord(submission, h.key)
 	if err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
@@ -448,7 +465,23 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		}
 		return SubmitResult{}, err
 	}
-	return SubmitResult{RunID: runID, Pool: pool}, nil
+	return SubmitResult{RunID: runID, Pool: pool, Unrequested: unrequested}, nil
+}
+
+// supplied names the credentials of agent's terms a task supplies: the required ones and those named in requested,
+// each of which needs a source in this host's configuration.
+func (h *Host) supplied(agent operator.AgentTerms, requested []string) ([]string, error) {
+	var supplied []string
+	for _, credential := range agent.Credentials {
+		if credential.Optional() && !slices.Contains(requested, credential.Name) {
+			continue
+		}
+		if _, configured := h.credentials[credential.Name]; !configured {
+			return nil, fmt.Errorf("%w: auth required: credential %s is not in this host's configuration", ErrInvalidInput, credential.Name)
+		}
+		supplied = append(supplied, credential.Name)
+	}
+	return supplied, nil
 }
 
 // poolKey returns the current key of pool: that of the latest committed record under the snapshot key on the pool's
@@ -488,14 +521,7 @@ func (h *Host) poolKey(ctx context.Context, v view, pool string) (*ecdsa.PublicK
 func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms operator.Terms, poolKey *ecdsa.PublicKey, store *minio.Client, redactionKey []byte) ([]byte, error) {
 	binding := submission.Wherry
 	values := signed.EnvelopeValues{Binding: binding.EnvelopeBinding(), Credentials: map[string][]byte{}, S3Inputs: map[string]string{}, S3Outputs: map[string]string{}, RedactionKey: redactionKey}
-	var names []string
-	if agent := slices.IndexFunc(terms.Agents, func(agent operator.AgentTerms) bool { return agent.Name == binding.Placement.Agent }); agent >= 0 {
-		for _, credential := range terms.Agents[agent].Credentials {
-			if !slices.Contains(binding.Unsupplied, credential.Name) {
-				names = append(names, credential.Name)
-			}
-		}
-	}
+	names := slices.Clone(binding.Supplied)
 	for _, credential := range binding.Credentials {
 		names = append(names, credential.Name)
 	}
@@ -722,7 +748,7 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 				listed.Models, listed.DefaultModel = agents[index].Models, agents[index].DefaultModel
 				for _, credential := range agents[index].Credentials {
 					_, configured := h.credentials[credential.Name]
-					listed.Credentials = append(listed.Credentials, Credential{Name: credential.Name, Env: credential.Env, File: credential.File, Optional: credential.Optional(), Configured: configured})
+					listed.Credentials = append(listed.Credentials, Credential{Name: credential.Name, Env: credential.Env, File: credential.File, Description: credential.Description, Optional: credential.Optional(), Configured: configured})
 				}
 			}
 			receiver.Profiles = append(receiver.Profiles, listed)

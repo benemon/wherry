@@ -230,9 +230,18 @@ func (service *Service) PoolRotateKey(ctx context.Context, pool string, suspects
 		for _, credential := range task.Wherry.Credentials {
 			names[credential.Name] = true
 		}
+		for _, name := range task.Wherry.Supplied {
+			names[name] = true
+		}
+		// Every credential any terms record gives the agent, whatever the task names supplied: a task written before
+		// supplied_credentials is not under-reported.
 		for _, terms := range history {
-			if agent, err := envelopeCredentials(terms, task.Wherry); err == nil {
-				maps.Copy(names, agent)
+			for _, agent := range terms.Agents {
+				if agent.Name == task.Wherry.Placement.Agent {
+					for _, credential := range agent.Credentials {
+						names[credential.Name] = true
+					}
+				}
 			}
 		}
 		report.Tasks = append(report.Tasks, SuspectTask{task.Wherry.Run, task.Wherry.Tenant, kid, slices.Sorted(maps.Keys(names)), record.Timestamp.UnixMilli()})

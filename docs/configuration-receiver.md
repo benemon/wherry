@@ -504,7 +504,7 @@ The prompt tells every agent to write, when it finishes, whatever happened,
 an A2A `TaskStatus` JSON object to `$WHERRY_OUTPUT_DIR/.wherry/outcome.json`.
 It names each credential file's path and each credential environment variable,
 and lists the run's credential names, marking each optional credential the
-host did not supply, as in
+host did not supply because the task did not request it, as in
 `This run's credentials are openai-api-key, github-token (not supplied).`
 It then says that the answer goes in the message text, that long or
 structured content belongs in files in the output directory, and that a reply
