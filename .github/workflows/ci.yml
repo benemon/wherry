@@ -46,10 +46,12 @@ jobs:
           echo "$BUF_SHA256  $RUNNER_TEMP/buf" | sha256sum -c -
           chmod +x "$RUNNER_TEMP/buf"
       # The plugin protocol is released with the pluginsdk module, so the previous release is the newest pluginsdk/v*
-      # tag reachable from HEAD.
+      # tag reachable from the base: a pull request's head may itself carry the new protocol's pluginsdk tag.
       - name: Check the plugin protocol for breaking changes
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || 'HEAD' }}
         run: |
-          against=$(git describe --tags --abbrev=0 --match 'pluginsdk/v*')
+          against=$(git describe --tags --abbrev=0 --match 'pluginsdk/v*' "$BASE")
           "$RUNNER_TEMP/buf" breaking pluginsdk --against ".git#tag=$against,subdir=pluginsdk"
 
   # promtool checks the shipped alert rules and runs routing.test.yml and counter-zero.test.yml in
