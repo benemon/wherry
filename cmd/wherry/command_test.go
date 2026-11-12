@@ -112,7 +112,7 @@ func newBus(t *testing.T) *bus {
 	optional := false
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{
 		{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}},
-		{TaskCredential: wire.TaskCredential{Name: "github-token", Env: "GH_TOKEN"}, Required: &optional},
+		{TaskCredential: wire.TaskCredential{Name: "github-token", Env: "GH_TOKEN"}, Description: "GitHub token for gh", Required: &optional},
 	}}}, DefaultAgent: "claude", DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
 		VCS: []string{"git.example.test"}}
 	if err := b.service.PoolApply(ctx, "pool-a", terms, false); err != nil {
@@ -384,6 +384,9 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 	if rows[0]["receiver_id"] != "receiver-a" || rows[0]["status"] != "live" || rows[0]["pool"] != "pool-a" {
 		t.Fatalf("unexpected JSON row: %#v", rows[0])
 	}
+	if !strings.Contains(stdout.String(), `{"name":"github-token","env":"GH_TOKEN","description":"GitHub token for gh","optional":true,"configured":false}`) {
+		t.Fatalf("receivers JSON %s, want the credential's description", stdout.String())
+	}
 	stdout.Reset()
 	if err := runReceivers(b.ctx, b.client, nil, &stdout, &stderr); err != nil {
 		t.Fatal(err)
@@ -394,6 +397,9 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 	// The agent's credentials by name and target, with whether this host has a source for each.
 	if output := stdout.String(); !strings.Contains(output, " credentials=model:env=MODEL_API_KEY,github-token:env=GH_TOKEN(missing,optional)\n") {
 		t.Fatalf("receivers output %q, want the agent's credentials with their targets, marked configured or missing", output)
+	}
+	if output := stdout.String(); !strings.Contains(output, "\n    credential=github-token description=\"GitHub token for gh\"\n") || strings.Contains(output, "credential=model ") {
+		t.Fatalf("receivers output %q, want the description of each credential that has one", output)
 	}
 }
 

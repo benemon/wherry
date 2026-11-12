@@ -268,6 +268,11 @@ func runReceivers(ctx context.Context, client *busclient.Host, args []string, st
 					fmt.Fprintf(stdout, " credentials=%s", strings.Join(names, ","))
 				}
 				fmt.Fprintln(stdout)
+				for _, credential := range profile.Credentials {
+					if credential.Description != "" {
+						fmt.Fprintf(stdout, "    credential=%s description=%q\n", credential.Name, credential.Description)
+					}
+				}
 			}
 		}
 	}
@@ -325,16 +330,19 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return nil
 	})
 	var credentials []wire.TaskCredential
-	flags.Func("credential", "NAME:file=FILE or NAME:env=VAR: deliver configured credential NAME as file FILE in the agent's credentials directory or in its environment variable VAR (repeatable)", func(value string) error {
-		name, target, _ := strings.Cut(value, ":")
+	var requested []string
+	flags.Func("credential", "NAME, NAME:file=FILE or NAME:env=VAR: request the agent's credential NAME at its target, or deliver configured credential NAME as file FILE in the agent's credentials directory or in its environment variable VAR (repeatable)", func(value string) error {
+		name, target, targeted := strings.Cut(value, ":")
 		kind, at, _ := strings.Cut(target, "=")
 		switch {
+		case !targeted:
+			requested = append(requested, name)
 		case kind == "file" && at != "":
 			credentials = append(credentials, wire.TaskCredential{Name: name, File: at})
 		case kind == "env" && at != "":
 			credentials = append(credentials, wire.TaskCredential{Name: name, Env: at})
 		default:
-			return errors.New("want NAME:file=FILE or NAME:env=VAR")
+			return errors.New("want NAME, NAME:file=FILE or NAME:env=VAR")
 		}
 		return nil
 	})
@@ -346,7 +354,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry host submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE@REF [--git-path PATH] [--git-changes patch|bundle]] [--input FILE[:s3]]... [--credential NAME:file=FILE|NAME:env=VAR]... [--output NAME[:required][:s3]]... [--start-by TIME|DURATION] [--end-by TIME|DURATION]")
+		return errors.New("usage: wherry host submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE@REF [--git-path PATH] [--git-changes patch|bundle]] [--input FILE[:s3]]... [--credential NAME|NAME:file=FILE|NAME:env=VAR]... [--output NAME[:required][:s3]]... [--start-by TIME|DURATION] [--end-by TIME|DURATION]")
 	}
 	parts, err := inputParts(inputs)
 	if err != nil {
@@ -411,13 +419,17 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	}
 	defer closeClient()
 	result, err := client.Submit(ctx, busclient.SubmitInput{
-		Agent: *agent, Model: *model, Selector: selector, Prompt: *prompt, Parts: parts, Credentials: credentials, Outputs: outputs, Git: git, GitChanges: *gitChanges,
+		Agent: *agent, Model: *model, Selector: selector, Prompt: *prompt, Parts: parts, Credentials: credentials, Requested: requested, Outputs: outputs, Git: git, GitChanges: *gitChanges,
 		S3Inputs: stored, StartBy: startTime, EndBy: endTime,
 	})
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "run_id=%s pool=%s\n", result.RunID, result.Pool)
+	fmt.Fprintf(stdout, "run_id=%s pool=%s", result.RunID, result.Pool)
+	if len(result.Unrequested) > 0 {
+		fmt.Fprintf(stdout, " unrequested=%s", strings.Join(result.Unrequested, ","))
+	}
+	fmt.Fprintln(stdout)
 	return nil
 }
 

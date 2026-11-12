@@ -45,7 +45,7 @@ func devProvision(t *testing.T, instance devInstance) (string, string) {
 		t.Fatal(err)
 	}
 	defer service.Operator.Close()
-	if err := devBootstrap(ctx, env, devAgents(manifest, nil), *service); err != nil {
+	if err := devBootstrap(ctx, env, devAgents(manifest, nil), nil, *service); err != nil {
 		t.Fatal(err)
 	}
 	_, config, err := placeHost(ctx, &env, nil, io.Discard)

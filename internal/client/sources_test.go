@@ -2,6 +2,7 @@ package client
 
 import (
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -102,6 +103,125 @@ func TestSubmitGoesWithoutAnOptionalCredential(t *testing.T) {
 	}
 	if task := receiver.claim(t, f.ctx, submitted.RunID)[0]; !slices.Equal(task.submission.Wherry.Unsupplied, []string{"github-token"}) {
 		t.Fatalf("unsupplied %v, want github-token", task.submission.Wherry.Unsupplied)
+	}
+}
+
+// codexTask is input for agent codex, whose openai credential is required and github-token optional.
+func codexTask(input SubmitInput) SubmitInput {
+	input.Agent, input.Selector, input.Prompt = "codex", []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, "p"
+	input.StartBy, input.EndBy = time.Now().Add(time.Minute), time.Now().Add(time.Minute)
+	return input
+}
+
+// An optional agent credential is delivered only when the task requests it, whether or not the host has a source for
+// it; a required one is delivered unrequested, and a task credential with a target is not a request.
+func TestAnOptionalCredentialIsDeliveredOnlyOnRequest(t *testing.T) {
+	gh := []wire.TaskCredential{{Name: "github-token", File: "gh"}}
+	for name, test := range map[string]struct {
+		input       SubmitInput
+		unrequested []string
+		enveloped   []string
+	}{
+		"unrequested":                        {SubmitInput{}, []string{"github-token"}, []string{"openai"}},
+		"requested":                          {SubmitInput{Requested: []string{"github-token"}}, nil, []string{"github-token", "openai"}},
+		"requested twice":                    {SubmitInput{Requested: []string{"github-token", "github-token"}}, nil, []string{"github-token", "openai"}},
+		"a required one requested":           {SubmitInput{Requested: []string{"openai"}}, []string{"github-token"}, []string{"openai"}},
+		"a task credential of the name":      {SubmitInput{Credentials: gh}, []string{"github-token"}, []string{"github-token", "openai"}},
+		"requested beside a task credential": {SubmitInput{Credentials: gh, Requested: []string{"github-token"}}, nil, []string{"github-token", "openai"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			f.host.credentials["github-token"] = credential.Source{File: f.secret}
+			receiver := f.addReceiver(t, "receiver-a", "pool-a")
+			receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = bothOffers() })
+			submitted, err := f.host.Submit(f.ctx, codexTask(test.input))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(submitted.Unrequested, test.unrequested) {
+				t.Fatalf("unrequested %v; want %v", submitted.Unrequested, test.unrequested)
+			}
+			task := receiver.claim(t, f.ctx, submitted.RunID)[0]
+			if binding := task.submission.Wherry; !slices.Equal(binding.Unsupplied, test.unrequested) || !slices.Equal(binding.Credentials, test.input.Credentials) {
+				t.Fatalf("unsupplied %v and task credentials %v; want %v and %v", binding.Unsupplied, binding.Credentials, test.unrequested, test.input.Credentials)
+			}
+			_, values, err := open(t, f, submitted.RunID, f.poolKeys["pool-a"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if names := slices.Sorted(maps.Keys(values.Credentials)); !slices.Equal(names, test.enveloped) {
+				t.Fatalf("enveloped %v; want %v", names, test.enveloped)
+			}
+			local, err := f.host.localRun(submitted.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var taskCredentials []string
+			for _, credential := range test.input.Credentials {
+				taskCredentials = append(taskCredentials, credential.Name)
+			}
+			if !slices.Equal(local.TaskCredentials, taskCredentials) {
+				t.Fatalf("local record task credentials %v; want %v", local.TaskCredentials, taskCredentials)
+			}
+		})
+	}
+}
+
+// A request for a credential the host has no source for is refused as a required one is, and a request for a name that
+// is not one of the placed agent's credentials, even one the host configures, is refused naming the agent.
+func TestSubmitRefusesAnUnmetRequest(t *testing.T) {
+	for name, test := range map[string]struct {
+		requested string
+		want      string
+	}{
+		"unconfigured":          {"github-token", "invalid input: auth required: credential github-token is not in this host's configuration"},
+		"another agent's":       {"model", "invalid input: requested credential model is not one of agent codex's credentials"},
+		"no agent's credential": {"vault-token", "invalid input: requested credential vault-token is not one of agent codex's credentials"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			f.host.credentials["vault-token"] = credential.Source{File: f.secret}
+			f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = bothOffers() })
+			_, err := f.host.Submit(f.ctx, codexTask(SubmitInput{Requested: []string{test.requested}}))
+			if !errors.Is(err, ErrInvalidInput) || err.Error() != test.want {
+				t.Fatalf("submit = %v; want %q", err, test.want)
+			}
+			if records, _ := readTasks(f.ctx, f.service.Operator, "pool-a"); len(records) != 0 {
+				t.Fatal("published a task with an unmet request")
+			}
+		})
+	}
+}
+
+// A replacement copies the original's unsupplied credentials: a requested optional credential is still delivered and an
+// unrequested one still withheld, though the host has a source for both.
+func TestAReplacementKeepsTheRequests(t *testing.T) {
+	for name, requested := range map[string][]string{"requested": {"github-token"}, "unrequested": nil} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			f.host.credentials["github-token"] = credential.Source{File: f.secret}
+			receiver := f.addReceiver(t, "receiver-a", "pool-a")
+			receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = bothOffers() })
+			submitted, err := f.host.Submit(f.ctx, codexTask(SubmitInput{Requested: requested}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			task := receiver.claim(t, f.ctx, submitted.RunID)[0]
+			receiver.feed(t, f.ctx, submitted.RunID, receiver.echo(t, task), receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil))
+			receiver.keyLost(t, f.ctx, task)
+			status, err := f.host.Status(f.ctx, submitted.RunID)
+			if err != nil || status.Replacement == "" {
+				t.Fatalf("status %+v, %v; want a replacement", status, err)
+			}
+			replacement, values, err := open(t, f, status.Replacement, f.poolKeys["pool-a"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, delivered := values.Credentials["github-token"]
+			if !slices.Equal(replacement.Wherry.Unsupplied, task.submission.Wherry.Unsupplied) || delivered != (requested != nil) {
+				t.Fatalf("replacement unsupplied %v, github-token enveloped %t; want %v as the original's", replacement.Wherry.Unsupplied, delivered, task.submission.Wherry.Unsupplied)
+			}
+		})
 	}
 }
 

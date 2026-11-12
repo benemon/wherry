@@ -179,8 +179,8 @@ type gitInput struct {
 
 type credentialInput struct {
 	Name string `json:"name" jsonschema:"credential name in this host's wherry config"`
-	File string `json:"file,omitempty" jsonschema:"file name the agent finds it under in WHERRY_CREDENTIALS_DIR; exactly one of file and env"`
-	Env  string `json:"env,omitempty" jsonschema:"environment variable the agent finds it in; exactly one of file and env"`
+	File string `json:"file,omitempty" jsonschema:"file name the agent finds it under in WHERRY_CREDENTIALS_DIR; at most one of file and env, neither to request the agent's own credential of that name at its target"`
+	Env  string `json:"env,omitempty" jsonschema:"environment variable the agent finds it in; at most one of file and env, neither to request the agent's own credential of that name at its target"`
 }
 
 type fileInput struct {
@@ -202,16 +202,17 @@ type submitInput struct {
 	Selector    []wire.Requirement `json:"selector,omitempty" jsonschema:"labels the profile must carry, each {key, operator, values}; operator is In or NotIn (with values), Exists or DoesNotExist (without); keys are arbitrary operator labels such as gpu or example.com/segment"`
 	Git         *gitInput          `json:"git,omitempty" jsonschema:"repository the agent clones itself; its host must be one of the pool's vcs hosts, and its credential and an ssh remote's host key come from the git entry of this host's wherry config whose url is the longest prefix of the remote"`
 	Inputs      []fileInput        `json:"inputs,omitempty" jsonschema:"local files delivered to the agent's WHERRY_INPUT_DIR under their base names"`
-	Credentials []credentialInput  `json:"credentials,omitempty" jsonschema:"configured credentials delivered to the agent, each as a file in WHERRY_CREDENTIALS_DIR or in an environment variable; no two share a target, and none takes the target of one of the agent's own credentials"`
+	Credentials []credentialInput  `json:"credentials,omitempty" jsonschema:"configured credentials delivered to the agent, each as a file in WHERRY_CREDENTIALS_DIR or in an environment variable, or by name alone a request for one of the placed agent's credentials at its target, which an optional one needs to be delivered; no two share a target, and none takes the target of one of the agent's own credentials"`
 	Outputs     []outputInput      `json:"outputs,omitempty" jsonschema:"files the agent is asked to leave in WHERRY_OUTPUT_DIR; wait writes the returned ones locally"`
 	StartBy     string             `json:"start_by,omitempty" jsonschema:"task_started_by, by which the agent's job starts or the task fails: an RFC 3339 time or a Go duration from now such as 30m; default 10m"`
 	EndBy       string             `json:"end_by,omitempty" jsonschema:"task_ended_by, by which the task ends or fails: an RFC 3339 time or a Go duration from now such as 90m; default 2h"`
 }
 
 type submitOutput struct {
-	ID   string `json:"id" jsonschema:"run id"`
-	Pool string `json:"pool" jsonschema:"pool the task was placed in"`
-	Wait string `json:"wait" jsonschema:"shell command that waits for the run to end and prints its reply; run it in the background"`
+	ID          string   `json:"id" jsonschema:"run id"`
+	Pool        string   `json:"pool" jsonschema:"pool the task was placed in"`
+	Wait        string   `json:"wait" jsonschema:"shell command that waits for the run to end and prints its reply; run it in the background"`
+	Unrequested []string `json:"unrequested,omitempty" jsonschema:"the placed agent's optional credentials the task did not request, which the run goes without"`
 }
 
 type runInput struct {
@@ -361,7 +362,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "receivers",
-		Description: "List the receivers of the pools this tenant may use: each receiver's status (live, stale, silent or ended) and capacity, and each profile's plugin type, agent and labels as wherry.operator records them, its inline_limit from the offer, and its agent's models, default_model and credentials from the pool's terms, each credential with its target (env, the agent's environment variable, or file, in its credentials directory), optional and configured, whether this host has a source for it (the agent's credentials, delivered into the run; a git clone uses the host's git entries), with ready set when the receiver's live advertisement offers the profile. A live receiver with no ready profile lists every profile with ready false. Read it to choose an agent and selector before submit.",
+		Description: "List the receivers of the pools this tenant may use: each receiver's status (live, stale, silent or ended) and capacity, and each profile's plugin type, agent and labels as wherry.operator records them, its inline_limit from the offer, and its agent's models, default_model and credentials from the pool's terms, each credential with its target (env, the agent's environment variable, or file, in its credentials directory), its description from the pool's terms, optional, which submit delivers only when its credentials name it, and configured, whether this host has a source for it (the agent's credentials, delivered into the run; a git clone uses the host's git entries), with ready set when the receiver's live advertisement offers the profile. A live receiver with no ready profile lists every profile with ready false. Read it to choose an agent and selector before submit.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ receiversInput) (*mcp.CallToolResult, receiversOutput, error) {
 		client, err := connect()
@@ -377,7 +378,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "submit",
-		Description: "Sign and publish a task to the task topic of a signature, an agent and all the labels of the profiles that carry it, that live receivers offer matching the selector, preferring the default agent, then the greatest spare capacity, then the lowest topic name. Returns the run id at once; collect the result with wait, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR or in environment variables; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which wait writes locally. Submit encrypts the agent's and the task's configured credentials into the task's envelope under the pool's key; the run needs nothing more from this host. Submit refuses with auth required when this host has no source for a credential the agent requires or the task names.",
+		Description: "Sign and publish a task to the task topic of a signature, an agent and all the labels of the profiles that carry it, that live receivers offer matching the selector, preferring the default agent, then the greatest spare capacity, then the lowest topic name. Returns the run id at once; collect the result with wait, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR or in environment variables, or, by name alone, requests for the placed agent's own credentials at their targets: an optional agent credential is delivered only when requested, so request one only when the task needs it, and unrequested lists those left out; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which wait writes locally. Submit encrypts the agent's and the task's configured credentials into the task's envelope under the pool's key; the run needs nothing more from this host. Submit refuses with auth required when this host has no source for a credential the agent requires or the task names, and refuses a request for a credential the placed agent does not declare.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input submitInput) (*mcp.CallToolResult, submitOutput, error) {
 		submission, err := submitFromInput(input, readInput, openInput)
 		if err != nil {
@@ -398,7 +399,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			return nil, submitOutput{}, failure(err)
 		}
-		return nil, submitOutput{ID: result.RunID, Pool: result.Pool, Wait: waitCommand(result.RunID)}, nil
+		return nil, submitOutput{ID: result.RunID, Pool: result.Pool, Wait: waitCommand(result.RunID), Unrequested: result.Unrequested}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -656,6 +657,10 @@ func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part
 		submission.GitChanges = input.Git.Changes
 	}
 	for _, credential := range input.Credentials {
+		if credential.Env == "" && credential.File == "" {
+			submission.Requested = append(submission.Requested, credential.Name)
+			continue
+		}
 		submission.Credentials = append(submission.Credentials, wire.TaskCredential{Name: credential.Name, Env: credential.Env, File: credential.File})
 	}
 	for _, output := range input.Outputs {

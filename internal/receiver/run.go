@@ -2593,7 +2593,9 @@ func Preamble(directories pluginsdk.Directories, inputs []string, credentials []
 		lines = append(lines, "Credential environment variables: "+strings.Join(variables, ", ")+". Never print or copy their values.")
 	}
 	for _, name := range unsupplied {
-		names = append(names, name+" (not supplied)")
+		if !slices.Contains(names, name) {
+			names = append(names, name+" (not supplied)")
+		}
 	}
 	if len(outputs) > 0 {
 		paths := make([]string, 0, len(outputs))

@@ -272,7 +272,7 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 	defer service.Operator.Close()
 
 	step("bootstrap")
-	if err := devBootstrap(ctx, env, agents, *service); err != nil {
+	if err := devBootstrap(ctx, env, agents, sources, *service); err != nil {
 		return err
 	}
 
@@ -838,15 +838,19 @@ func createBucket(ctx context.Context, keys [2]string) error {
 }
 
 // devTerms are pool dev's terms: each agent with its credentials, every one optional.
-func devTerms(agents []string, defaultAgent string, storage bool) operator.Terms {
+func devTerms(agents []string, defaultAgent string, storage bool, copied map[string]credential.Source) operator.Terms {
 	optional := false
 	terms := operator.Terms{DefaultAgent: defaultAgent, DeliveryLimit: 2, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 10}
+	_, token := copied["claude-oauth-token"]
 	for _, agent := range agents {
 		agentTerms := operator.AgentTerms{Name: agent, Credentials: []operator.AgentCredential{}}
 		for _, credential := range devCredentials[agent] {
-			agentTerms.Credentials = append(agentTerms.Credentials, operator.AgentCredential{
-				TaskCredential: wire.TaskCredential{Name: credential.name, Env: credential.target}, Required: &optional,
-			})
+			agentCredential := operator.AgentCredential{TaskCredential: wire.TaskCredential{Name: credential.name, Env: credential.target}}
+			// Claude Code prefers ANTHROPIC_API_KEY to its subscription token, so the key is required only without the token.
+			if _, required := copied[credential.name]; !required || credential.name == "anthropic-api-key" && token {
+				agentCredential.Required = &optional
+			}
+			agentTerms.Credentials = append(agentTerms.Credentials, agentCredential)
 		}
 		terms.Agents = append(terms.Agents, agentTerms)
 	}
@@ -896,9 +900,9 @@ func devOperator(ctx context.Context, instance devInstance, broker string) (*ope
 }
 
 // devBootstrap writes the development instance configuration and bundles.
-func devBootstrap(ctx context.Context, env devEnv, agents []string, service operator.Service) error {
+func devBootstrap(ctx context.Context, env devEnv, agents []string, sources map[string]credential.Source, service operator.Service) error {
 	instance, dir := env.instance, env.instance.env("operator")
-	if err := service.PoolApply(ctx, devPool, devTerms(agents, env.manifest.DefaultAgent, env.storage()), false); err != nil {
+	if err := service.PoolApply(ctx, devPool, devTerms(agents, env.manifest.DefaultAgent, env.storage(), sources), false); err != nil {
 		return fmt.Errorf("pool apply: %w", err)
 	}
 	if err := service.TenantAdd(ctx, devTenant); err != nil {

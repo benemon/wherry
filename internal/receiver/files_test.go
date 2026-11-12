@@ -251,6 +251,28 @@ func TestAnUnsuppliedOptionalCredentialIsNamedInThePreamble(t *testing.T) {
 	}
 }
 
+// A task credential named as an unsupplied optional agent credential, as a git entry's github-token is, is delivered at
+// its own target alone, and the preamble does not call it not supplied.
+func TestATaskCredentialNamedAsAnUnsuppliedOneIsSupplied(t *testing.T) {
+	f := newFixtureWith(t, resultStream, optionalTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
+	f.envelope = sealing(map[string][]byte{credentialName: []byte(testToken), "github-token": []byte(deployValue)})
+	record := f.submit(t, f.host, func(task *wire.Submission) {
+		task.Wherry.Unsupplied = []string{"github-token"}
+		task.Wherry.Credentials = []wire.TaskCredential{{Name: "github-token", File: "gh-token"}}
+	})
+	if ack := f.execute(t, record, 1); ack != kgo.AckAccept {
+		t.Fatalf("ack %v; logs:\n%s", ack, f.logs.String())
+	}
+	run := f.lastRun()
+	want := []pluginsdk.Secret{{Name: credentialName, Env: credentialEnv, Value: []byte(testToken)}, {Name: "github-token", File: "gh-token", Value: []byte(deployValue)}}
+	if !reflect.DeepEqual(run.Credentials, want) {
+		t.Fatalf("dispatched credentials %+v; want the task credential at its file alone", run.Credentials)
+	}
+	if prompt := string(run.Prompt); !strings.Contains(prompt, "This run's credentials are "+credentialName+", github-token.") || strings.Contains(prompt, "not supplied") || strings.Contains(prompt, "GH_TOKEN") {
+		t.Fatalf("prompt %q; want github-token named once as supplied", prompt)
+	}
+}
+
 func TestAdmissionRefusesCredentialsOutsideTheAgentsTerms(t *testing.T) {
 	for name, mutate := range map[string]func(*wire.Submission){
 		"a required credential unsupplied": func(task *wire.Submission) { task.Wherry.Unsupplied = []string{credentialName} },

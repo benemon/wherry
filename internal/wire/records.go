@@ -95,7 +95,8 @@ type SubmissionBinding struct {
 	TaskStartedBy int64            `json:"task_started_by"`
 	TaskEndedBy   int64            `json:"task_ended_by"`
 	Credentials   []TaskCredential `json:"credentials,omitzero"`
-	// Unsupplied names the agent's optional credentials this host has no source for, which the run goes without.
+	// Unsupplied names the agent's optional credentials not delivered, for want of a source or a request, which the run
+	// goes without.
 	Unsupplied []string         `json:"unsupplied_credentials,omitzero"`
 	Outputs    []ExpectedOutput `json:"outputs,omitzero"`
 	Git        *GitInput        `json:"git,omitzero"`
