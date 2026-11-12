@@ -170,33 +170,47 @@ func TestWorkingHungReadDoesNotDelayACancel(t *testing.T) {
 	}
 }
 
-// A read that returns after the run's terminal status publishes nothing.
+// Nothing publishes after the run's terminal status: neither a line read before the job ended and not yet published,
+// nor a read that returns after the terminal.
 func TestWorkingNothingAfterTheTerminal(t *testing.T) {
-	f := workingFixture(t)
-	hold, late := make(chan struct{}), make(chan struct{})
-	f.plugin.followHold = hold
-	var once sync.Once
-	f.plugin.readWorking = func(context.Context) ([]byte, error) {
-		f.plugin.mu.Lock()
-		reads := f.plugin.workingReads
-		f.plugin.mu.Unlock()
-		if reads == 1 {
-			return []byte("step one"), nil
-		}
-		once.Do(func() { close(hold) })
-		<-late
-		return []byte("late step"), nil
-	}
-	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
-		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
-	}
-	close(late)
-	time.Sleep(5 * renewInterval)
-	if kinds := f.kinds(t); !slices.Equal(kinds, []string{"claimed", "started", "working", "terminal"}) {
-		t.Fatalf("statuses %v, want nothing after the terminal", kinds)
-	}
-	if texts := workingTexts(f.feedStatuses(t)); !slices.Equal(texts, []string{"step one"}) {
-		t.Fatalf("working %q, want step one alone", texts)
+	for name, late := range map[string]func(end func()) []byte{
+		"read before the end": func(end func()) []byte {
+			time.AfterFunc(renewInterval/4, end)
+			return []byte("late step")
+		},
+		"read after the end": func(end func()) []byte {
+			end()
+			time.Sleep(2 * renewInterval)
+			return []byte("late step")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := workingFixture(t)
+			hold := make(chan struct{})
+			f.plugin.followHold = hold
+			var once sync.Once
+			f.plugin.readWorking = func(context.Context) ([]byte, error) {
+				f.plugin.mu.Lock()
+				reads := f.plugin.workingReads
+				f.plugin.mu.Unlock()
+				if reads == 1 {
+					return []byte("step one"), nil
+				}
+				var data []byte
+				once.Do(func() { data = late(func() { close(hold) }) })
+				return data, nil
+			}
+			if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
+				t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+			}
+			time.Sleep(5 * renewInterval)
+			if kinds := f.kinds(t); !slices.Equal(kinds, []string{"claimed", "started", "working", "terminal"}) {
+				t.Fatalf("statuses %v, want nothing after the terminal", kinds)
+			}
+			if texts := workingTexts(f.feedStatuses(t)); !slices.Equal(texts, []string{"step one"}) {
+				t.Fatalf("working %q, want step one alone", texts)
+			}
+		})
 	}
 }
 
