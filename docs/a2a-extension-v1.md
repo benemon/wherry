@@ -883,8 +883,9 @@ a receiver keeps the task of its start failure and dispatches it again
 within the same delivery. It keeps renewing its claim while it waits.
 The waits are 30 seconds, 60 seconds, then 120 seconds each. The window is
 5 minutes from the delivery's first start failure: the last wait is cut
-short so a final attempt starts when the window ends. When that attempt
-fails too, the receiver releases the task, or ends the run at the
+short so a final attempt starts when the window ends. An attempt that is
+still running at the window's end is the final attempt instead. When the
+final attempt fails too, the receiver releases the task, or ends the run at the
 [delivery budget](#delivery-budget).
 
 Each retry is a new execution of the same attempt. It writes a `claimed`
@@ -908,8 +909,8 @@ A wait ends early when:
 - the receiver loses its claim: it stops acting on the run, as on any lost
   claim.
 
-A task whose start keeps failing holds its member's slot for up to about 5
-minutes per delivery. Under the default 10 minute `task_started_by`, that is
+A task whose start keeps failing holds its member's slot for about 5
+minutes per delivery, plus the final attempt. Under the default 10 minute `task_started_by`, that is
 usually two deliveries, and the run usually ends with
 `not started by task_started_by (<time>); last: <cause>` rather than at the
 delivery budget.

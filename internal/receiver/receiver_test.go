@@ -90,6 +90,10 @@ type fakePlugin struct {
 	outcome pluginsdk.Outcome
 	// dispatchBlocks makes Dispatch wait until its context ends before it reports, as one returning at the bound.
 	dispatchBlocks bool
+	// releaseBlocks makes Release wait until its context ends, as a wedged plugin.
+	releaseBlocks bool
+	// releasedAt is when Release last returned.
+	releasedAt time.Time
 	// handleSize is the length of the handle data Dispatch and Lookup return.
 	handleSize int
 	// jobName is the handle name Dispatch and Lookup return, or else agent- and the run ID.
@@ -471,12 +475,18 @@ func (f *fakePlugin) Purge(_ context.Context, runID string) error {
 	return f.purgeErr
 }
 
-func (f *fakePlugin) Release(_ context.Context, runID string) error {
+func (f *fakePlugin) Release(ctx context.Context, runID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.releaseBlocks {
+		f.mu.Unlock()
+		<-ctx.Done()
+		f.mu.Lock()
+	}
 	f.releases++
 	f.releaseIDs = append(f.releaseIDs, runID)
 	f.calls = append(f.calls, "release")
+	f.releasedAt = time.Now()
 	return f.releaseErr
 }
 

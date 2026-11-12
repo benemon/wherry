@@ -62,9 +62,10 @@ func (f fixture) awaitStartFailures(t *testing.T, n int) {
 func TestStartRetriesInOneDelivery(t *testing.T) {
 	f := newFixture(t, resultStream)
 	setDuration(t, &openInterval, 20*time.Millisecond)
-	// The window, tested on its own, cuts no wait here.
+	// The window, tested on its own, cuts no wait here; the waits 100, 200, 400, then 500 ms reach the cap.
 	setDuration(t, &startRetryWindow, time.Hour)
-	failing := 3
+	setDuration(t, &startRetryMaxWait, 500*time.Millisecond)
+	failing := 5
 	f.plugin.failStart = func(string) bool { failing--; return failing >= 0 }
 	f.run(t, f.ctx)
 	f.submit(t, f.host, nil)
@@ -72,17 +73,17 @@ func TestStartRetriesInOneDelivery(t *testing.T) {
 		t.Fatalf("ended %s; logs:\n%s", task.Status.State, f.logs.String())
 	}
 	claims, failures := f.retryEvents(t)
-	if len(claims) != 4 || len(failures) != 3 || slices.ContainsFunc(append(claims, failures...), func(a attemptAt) bool { return a.attempt != 1 }) {
-		t.Fatalf("claims %v and start failures %v, want 4 and 3 at attempt 1", claims, failures)
+	if len(claims) != 6 || len(failures) != 5 || slices.ContainsFunc(append(claims, failures...), func(a attemptAt) bool { return a.attempt != 1 }) {
+		t.Fatalf("claims %v and start failures %v, want 6 and 5 at attempt 1", claims, failures)
 	}
-	if requests := f.openRequests(t); len(requests) != 4 || slices.ContainsFunc(requests, func(request wire.OpenRequest) bool { return request.Attempt != 1 }) {
-		t.Fatalf("open requests %d, want 4 at attempt 1", len(requests))
+	if requests := f.openRequests(t); len(requests) != 6 || slices.ContainsFunc(requests, func(request wire.OpenRequest) bool { return request.Attempt != 1 }) {
+		t.Fatalf("open requests %d, want 6 at attempt 1", len(requests))
 	}
 	f.plugin.mu.Lock()
 	dispatches, times, calls := f.plugin.dispatches, slices.Clone(f.plugin.dispatchTimes), slices.Clone(f.plugin.calls)
 	f.plugin.mu.Unlock()
-	if dispatches != 4 || !slices.Equal(calls, []string{"purge", "purge", "purge", "release"}) {
-		t.Fatalf("dispatches %d and calls %v, want 4 and a purge per failure then one release", dispatches, calls)
+	if dispatches != 6 || !slices.Equal(calls, []string{"purge", "purge", "purge", "purge", "purge", "release"}) {
+		t.Fatalf("dispatches %d and calls %v, want 6 and a purge per failure then one release", dispatches, calls)
 	}
 	wait := startRetryWait
 	for i := 1; i < len(times); i++ {
@@ -91,18 +92,22 @@ func TestStartRetriesInOneDelivery(t *testing.T) {
 		}
 		wait = min(2*wait, startRetryMaxWait)
 	}
-	scraped(t, f.receiver, `wherry_start_failures_total{class="platform",pool="pool-a",profile="nomad"} 3`)
+	if gap := times[5].Sub(times[4]); gap >= 2*startRetryMaxWait {
+		t.Fatalf("dispatch 6 followed 5 by %s, want the wait capped at %s", gap, startRetryMaxWait)
+	}
+	scraped(t, f.receiver, `wherry_start_failures_total{class="platform",pool="pool-a",profile="nomad"} 5`)
 }
 
 // A delivery's start failures past the window release the task to one more delivery; the final attempt starts at the
 // window's end, measured from the first failure. On the last delivery, an outage that ends before that attempt is
 // survived by it.
 func TestStartRetryWindowAndBoundaryRecovery(t *testing.T) {
-	// One wait, cut short by the window's end however long an attempt takes: attempts at 0, 1.2 s and 2 s.
+	// One wait, cut short by the window's end while an attempt takes under 1.6 s, as on a loaded race run: attempts at 0,
+	// 2.4 s and 4 s.
 	window := func(t *testing.T) {
-		setDuration(t, &startRetryWait, 1200*time.Millisecond)
-		setDuration(t, &startRetryMaxWait, 1200*time.Millisecond)
-		setDuration(t, &startRetryWindow, 2*time.Second)
+		setDuration(t, &startRetryWait, 2400*time.Millisecond)
+		setDuration(t, &startRetryMaxWait, 2400*time.Millisecond)
+		setDuration(t, &startRetryWindow, 4*time.Second)
 	}
 	t.Run("window", func(t *testing.T) {
 		f := newFixture(t, resultStream)
@@ -116,7 +121,9 @@ func TestStartRetryWindowAndBoundaryRecovery(t *testing.T) {
 			_, failures := f.retryEvents(t)
 			return len(slices.DeleteFunc(failures, func(a attemptAt) bool { return a.attempt != 2 })) >= 2
 		})
-		scraped(t, f.receiver, `wherry_redeliveries_total{pool="pool-a",profile="nomad",tenant="tenant-a"} 1`)
+		if got := scrapedValue(t, f.receiver, `wherry_redeliveries_total{pool="pool-a",profile="nomad",tenant="tenant-a"}`); got != 1 {
+			t.Fatalf("redeliveries %v, want 1", got)
+		}
 		claims, failures := f.retryEvents(t)
 		var first []attemptAt
 		for _, failure := range failures {
@@ -225,11 +232,16 @@ func TestStartRetryWaitEnds(t *testing.T) {
 // A stop or configuration change during a wait releases the task once the idle slots have closed, with the run's
 // material released: at replicas 2, the task's next delivery is its second.
 func TestStartRetryStopWaitsForIdleClose(t *testing.T) {
-	for _, change := range []string{"stop", "configuration"} {
+	for _, change := range []string{"stop", "configuration", "stop on the last delivery"} {
 		t.Run(change, func(t *testing.T) {
 			config := testConfig(testReceiver)
 			config.Profiles[0].Replicas = 2
-			f := newFixtureWith(t, resultStream, testTerms(), config, map[string]*fakePlugin{"nomad": {stream: resultStream}})
+			terms := testTerms()
+			if change == "stop on the last delivery" {
+				// The release does not spend the budget: the task goes back for its next delivery.
+				terms.DeliveryLimit = 2
+			}
+			f := newFixtureWith(t, resultStream, terms, config, map[string]*fakePlugin{"nomad": {stream: resultStream}})
 			longWait(t, time.Minute)
 			f.plugin.failStart = func(string) bool { return true }
 			ctx, stop := context.WithCancel(f.ctx)
@@ -237,7 +249,7 @@ func TestStartRetryStopWaitsForIdleClose(t *testing.T) {
 			done := f.run(t, ctx)
 			record := f.submit(t, f.host, nil)
 			f.awaitStartFailures(t, 1)
-			if change == "stop" {
+			if change != "configuration" {
 				stop()
 			} else {
 				config.Profiles[0].Replicas = 3
@@ -250,14 +262,11 @@ func TestStartRetryStopWaitsForIdleClose(t *testing.T) {
 			if dispatches, _, _, releases := f.plugin.counts(); dispatches != 1 || releases != 1 {
 				t.Fatalf("dispatches %d and releases %d, want 1 and 1", dispatches, releases)
 			}
-			var released time.Time
-			for _, record := range f.records(t, operator.PoolEventsTopic(testPool)) {
-				var status wire.RunStatus
-				if wire.ParseRecord(record.Value, f.keys(), &status) == nil && status.Wherry.Kind == "released" {
-					released = record.Timestamp
-				}
-			}
-			// Only the holder's own client leaves after the release.
+			// The plugin's release, timed to the nanosecond unlike a record, follows every idle client's leave; only the
+			// holder's own client leaves after it.
+			f.plugin.mu.Lock()
+			released := f.plugin.releasedAt
+			f.plugin.mu.Unlock()
 			if members := slices.DeleteFunc(f.members.all(), func(member shareMember) bool { return member.left.Before(released) }); len(members) != 1 {
 				t.Fatalf("members %+v left after the release at %s, want the holder alone", members, released)
 			}
@@ -274,10 +283,30 @@ func TestStartRetryStopWaitsForIdleClose(t *testing.T) {
 	}
 }
 
+// A Release that never answers during a stopped wait does not hold Run past the shutdown bound.
+func TestStartRetryStopBoundsAHungRelease(t *testing.T) {
+	f := newFixture(t, resultStream)
+	longWait(t, time.Minute)
+	setDuration(t, &shutdownTimeout, time.Second)
+	f.plugin.failStart = func(string) bool { return true }
+	ctx, stop := context.WithCancel(f.ctx)
+	defer stop()
+	done := f.run(t, ctx)
+	f.submit(t, f.host, nil)
+	f.awaitStartFailures(t, 1)
+	f.plugin.mu.Lock()
+	f.plugin.releaseBlocks = true
+	f.plugin.mu.Unlock()
+	stop()
+	f.stopped(t, done, 10*time.Second)
+}
+
 // A claim lost during a wait halts the run: nothing more is dispatched, released or published.
 func TestStartRetryLostClaimHalts(t *testing.T) {
 	f, claim := claimFixture(t)
 	longWait(t, 3*time.Second)
+	// Only the loss itself can end the wait within a second.
+	setDuration(t, &stateCheckInterval, 10*time.Second)
 	f.plugin.failStart = func(string) bool { return true }
 	admitted := f.admitted(t, claim.record)
 	done := make(chan kgo.AckStatus, 1)
@@ -289,7 +318,7 @@ func TestStartRetryLostClaimHalts(t *testing.T) {
 		if ack != 0 || !errors.Is(context.Cause(claim.ctx), errClaimLost) {
 			t.Fatalf("ack %v with cause %v, want a halt on the lost claim", ack, context.Cause(claim.ctx))
 		}
-	case <-time.After(startRetryWait):
+	case <-time.After(time.Second):
 		t.Fatal("the wait outlived its lost claim")
 	}
 	if dispatches, _, _, releases := f.plugin.counts(); dispatches != 1 || releases != 0 || slices.Contains(f.kinds(t), "released") {

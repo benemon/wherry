@@ -88,7 +88,10 @@ func (run *activeRun) awaitRetry(claiming, ctx context.Context, wait time.Durati
 			if halted(ctx) {
 				return 0, false
 			}
-			run.release(ctx)
+			// Run waits for this release after the drain timeout, so a plugin that never answers must not hold it.
+			releaseCtx, cancel := r.shutdownContext(ctx)
+			run.release(releaseCtx)
+			cancel()
 			return run.released(ctx), false
 		case run.cancelHeld():
 			return run.cancel(ctx, nil), false

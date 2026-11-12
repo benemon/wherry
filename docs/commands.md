@@ -917,7 +917,9 @@ never started is a `platform` start failure. Otherwise the run fails with
 A receiver with no ready profile advertises with no offers, so it stays
 `live` with every profile `ready=false`, and placement passes over it. A
 job its plugin reports never started is a `platform` start failure: the
-receiver purges the job and returns the task to the pool. A job that never
+receiver purges the job and retries it in place
+([In-place retries](a2a-extension-v1.md#in-place-retries)), then returns the
+task to the pool. A job that never
 started with class `fetch` instead ends the run `TASK_STATE_FAILED` with
 `an S3 input was not fetched, or did not match its size and SHA-256`.
 
