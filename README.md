@@ -146,6 +146,34 @@ unpublished, writes the archives into `dist` locally:
 goreleaser release --snapshot --clean --skip=sign
 ```
 
+### Changing the plugin protocol
+
+wherry's `dev` lanes acquire a signed nomad plugin release that speaks the
+current protocol, and wherry-plugins' receiver lanes run a wherry release, so a
+protocol change releases in this order, and no required check is ever merged
+red:
+
+1. Open the wherry pull request that changes the protocol, and tag
+   `pluginsdk/vX.Y.Z-rc.N` on its head. The tag publishes nothing. A module
+   proxy keeps a tag once it has served it, so a later change to `pluginsdk`
+   needs a new rc tag and step 2 again.
+2. In wherry-plugins, require that pluginsdk tag in every plugin's `go.mod`
+   and set `WHERRY_REF` in `ci.yml` and `e2e.yml` to the full SHA the tag
+   names. The receiver lanes then build wherry from that commit instead of
+   running `WHERRY_VERSION`. Merge when green, and cut plugin prereleases
+   (`nomad/vA.B.C-rc.N` and the others); their release workflow refuses a
+   stable tag while `WHERRY_REF` is set.
+3. Re-run the wherry pull request's `dev` lanes. They acquire the plugin
+   prerelease and pass; merge it.
+4. Tag `pluginsdk/vX.Y.Z` and the wherry release from `main`.
+5. In wherry-plugins, move to the final pluginsdk tag, set `WHERRY_VERSION` to
+   the wherry release, remove `WHERRY_REF`, and release the plugins.
+
+The order stops being needed once plugin protocol negotiation accepts the
+previous protocol (go-plugin's versioned plugins, deferred to the first
+protocol change after 1.0): a pull request at the new protocol then passes
+its `dev` lanes against the existing plugin release.
+
 The documentation site embeds the wherry-plugins examples at the commit
 `WHERRY_PLUGINS_REF` names in `.github/workflows/pages.yml`. After a
 wherry-plugins release, set `WHERRY_PLUGINS_REF` to the full SHA of the
