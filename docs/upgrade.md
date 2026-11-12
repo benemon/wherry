@@ -27,6 +27,34 @@ Restart a pool's receivers one at a time.
 A stopping key custodian needs a live successor to re-key its tasks.
 Follow [Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian).
 
+## Optional credentials from v0.1.2
+
+From v0.1.2 a host delivers an optional agent credential, one the pool's
+terms mark `required: false`, only when the task requests it: with
+`wherry host submit --credential NAME`, or through MCP with a `credentials`
+entry of its name alone. Before v0.1.2 a host delivered every optional
+credential it had a source for. Runs that relied on that automatic delivery
+now go without the credential, and their prompt names it as not supplied.
+
+- Request the credential in each task that needs it. `submit` prints
+  `unrequested=<name,...>`, and the MCP `submit` tool returns
+  `unrequested`, naming the optional credentials a task left out.
+- Make a credential every run needs required in the pool's terms, by
+  removing `required: false`, and apply the terms with
+  `wherry operator pool apply`.
+- `wherry dev up` makes each credential it copies required, except
+  `anthropic-api-key` beside `claude-oauth-token`; see
+  [`wherry dev`](commands-dev.md). A dev run that needs the API key while
+  the subscription token is present requests it with
+  `--credential anthropic-api-key`.
+
+Hosts and receivers of different versions work together. The submission
+field that names the credentials a run goes without,
+`unsupplied_credentials`, is unchanged, and a receiver handles it as before;
+only what a v0.1.2 host puts in it changes. A host before v0.1.2 keeps
+delivering every optional credential it has a source for, whatever the
+receiver's version.
+
 ## What happens to running work?
 
 On `SIGINT` or `SIGTERM`, a receiver stops claiming and closes idle claims.

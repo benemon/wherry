@@ -171,8 +171,9 @@ as [Signatures](configuration-operator.md#pool-terms) describes.
 - An agent's `credentials` lists the credentials it takes, each
   `{name, env}` or `{name, file}`: the environment variable, or the file in
   the directory `WHERRY_CREDENTIALS_DIR` names, the agent finds it at.
-  `required: false` lets a run go without it when the submitting host has no
-  source for it. `pool apply` refuses a duplicate name, two credentials on
+  `required: false` makes it optional: a run gets it only when its task
+  requests it, and goes without it otherwise. A credential every run needs
+  stays required, the default. `pool apply` refuses a duplicate name, two credentials on
   one target, both or neither of `env` and `file`, and an `env` a plugin
   sets itself, such as `HOME` or `WHERRY_CREDENTIALS_DIR`:
 

@@ -99,9 +99,10 @@ names, and no two share a target. `pool apply` refuses terms that break a
 rule, naming the agent and credential.
 
 `submit` refuses a task when its host has no source for a required
-credential of the placed agent. A run goes without an optional credential
-its host has no source for, and its [prompt](configuration-receiver.md#agent-contract) names it as not
-supplied. Every plugin profile of the agent delivers the agent's credentials, each at
+credential of the placed agent. A run gets an optional credential only when
+its task requests it, and the host must then have a source for it; otherwise
+the run goes without it, and its [prompt](configuration-receiver.md#agent-contract) names it as not
+supplied. Make a credential every run needs required, the default. Every plugin profile of the agent delivers the agent's credentials, each at
 its target.
 
 Each entry of `vcs` is a lowercase host name, with an optional `:port` from 1 to 65535. Each entry appears once.

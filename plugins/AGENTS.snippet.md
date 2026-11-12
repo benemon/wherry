@@ -24,7 +24,12 @@ clones itself.
    record limit or a matching profile's limit go through S3 when the pool
    and host have storage, and otherwise submit refuses before publishing.
    Add `--credential NAME:file=FILE` or `--credential NAME:env=VAR` for each
-   configured credential it needs as a file or an environment variable, and `--output NAME[:required]` for each file you want back. Where the
+   configured credential it needs as a file or an environment variable, and
+   `--credential NAME` for each optional credential of the agent the task
+   needs (`wherry host receivers` marks them `optional`): an optional
+   credential reaches the agent only when requested, and the `submit` line's
+   `unrequested=` names those left out. Leave billing credentials such as an
+   API key unrequested unless the user asks for them. Add `--output NAME[:required]` for each file you want back. Where the
    pool has storage and your configuration a storage credential for it,
    `--input FILE:s3` sends a larger file (5 GiB at most) through the pool's
    bucket, and `--output NAME:s3` returns one that way. Keep working.
@@ -40,7 +45,11 @@ clones itself.
    host's configuration` when the host has no source for a credential the
    agent requires or the task names, and names the credential when its
    source fails. A run whose agent needs a credential it lacks ends
-   `TASK_STATE_FAILED`, and its message names the credential. Tell the user which credential it names, and to run
+   `TASK_STATE_FAILED`, and its message names the credential. When it is an
+   optional credential the run was not given because the task did not
+   request it, and `wherry host receivers` shows it without `missing`,
+   submit again with `--credential NAME` rather than adding a source.
+   Otherwise tell the user which credential it names, and to run
    `wherry host init`, which asks for a source for it (a file, an environment
    variable or a command), or to add one under `credentials` in their wherry
    configuration. Never handle the value

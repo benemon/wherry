@@ -120,7 +120,13 @@ returns once a run of the mock agent completes. Its steps:
 8. `bootstrap` makes the operator's calls through that directory: pool
    `dev`, tenant `dev`, host `dev` and receiver `dev-1` with a plugin
    profile per agent, their bundles under `env/operator/bundles/`. The
-   receiver's `config.yaml` names the instance CA as `ca_file`.
+   receiver's `config.yaml` names the instance CA as `ca_file`. Pool `dev`'s
+   terms make each credential step 2 copied required, so every run gets it
+   without asking, and the rest optional. For `claude`,
+   `anthropic-api-key` stays optional when `claude-oauth-token` was copied,
+   so a run uses the subscription token and never the API key unless its
+   task requests it with `--credential anthropic-api-key`; the API key is
+   required only when it is the only credential copied for `claude`.
 9. `host` writes the host's `config.yaml`, bundle and key, and registers
    the key. For instance `default`, unless `WHERRY_CONFIG` is set, they go
    at the standard [host paths](configuration-host.md#client-configuration);

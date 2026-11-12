@@ -11,7 +11,7 @@ The defaults are `10m` and `2h`.
 | Tool | Input | Output |
 | --- | --- | --- |
 | `receivers` | none | `receivers`, the objects `wherry host receivers --json` prints |
-| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by` | `id`, `pool`, `wait` |
+| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by` | `id`, `pool`, `wait`, `unrequested` |
 | `status` | `id`, optional | `runs`, `skipped` |
 | `wait` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `reply`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped`, `runs` |
 | `cancel` | `id` | `id`, `skipped` |
@@ -32,8 +32,8 @@ The defaults are `10m` and `2h`.
   `{remote, ref, path, changes}`, as `--git`, `--git-path` and `--git-changes`
   take them, with `remote` and `ref` required; its credential and host key come
   from the client configuration's `git` entries, as for `submit`. `inputs` is
-  an array of `{path, storage}`, `credentials` an array of `{name, file}`
-  or `{name, env}` and `outputs` an array of `{name, required, storage}`,
+  an array of `{path, storage}`, `credentials` an array of `{name}`,
+  `{name, file}` or `{name, env}` and `outputs` an array of `{name, required, storage}`,
   as `--input`, `--credential` and `--output` take them;
   `storage` is `s3` or absent, and `s3` is `:s3`. An input must resolve, through any
   symbolic links, to a regular file beneath one of the
@@ -47,6 +47,16 @@ The defaults are `10m` and `2h`.
   input root. With the default `state_dir`, `~/.local/state/wherry`, a root of `~`,
   `~/.local`, `~/.local/state` or `~/.local/state/wherry` holds it; `XDG_STATE_HOME`
   moves it.
+- A `credentials` entry with a name alone requests one of the placed agent's
+  credentials at the target the pool's terms give it. An optional agent
+  credential is delivered only when requested; `receivers` lists each
+  credential with its `description`, `optional` and `configured`, so read it
+  before asking for one. `submit` returns `unrequested`, the placed agent's
+  optional credentials the task did not request, whether or not the host has
+  a source for them; the run goes without them. A request for a name that is
+  not one of the placed agent's credentials, or for one the host has no
+  source for, fails with `INVALID_ARGUMENT` and the message `wherry host submit`
+  gives.
 - `status` returns the latest verified state of a run without
   waiting. `runs` holds one entry for the run `id` names, or,
   without `id`, one per run `wherry status` lists, latest update first.

@@ -41,7 +41,7 @@ func sourceDescription(name string, uses []credentialUse) string {
 		}
 		lines = append(lines, display(fmt.Sprintf("pool %s: %s, %s", use.pool, use.as(), required)))
 	}
-	lines = append(lines, display("An environment source sends what the variable holds to every pool that names "+name+", now or later. It is read where submits run, including the MCP server your harness starts."))
+	lines = append(lines, display("An environment source sends what the variable holds to every pool that names "+name+", now or later. Where it is optional, a run gets it only when its task requests it. It is read where submits run, including the MCP server your harness starts."))
 	return strings.Join(lines, "\n")
 }
 func targetVariables(uses []credentialUse) []string {

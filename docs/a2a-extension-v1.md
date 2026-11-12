@@ -244,14 +244,21 @@ A submission is the task of one run.
   (`pluginsdk.ReservedEnv`), and `file` follows the file name rules. No two
   credentials share a target, and no task credential takes the target of one
   of the agent's credentials in the pool's terms. A task credential may
-  share its name with one of the agent's credentials; the envelope carries the
-  value once and the agent gets it at both targets. The pool's terms do not
-  otherwise govern task credentials.
+  share its name with one of the agent's credentials; when the run gets the
+  agent's credential too, the envelope carries the value once and the agent
+  gets it at both targets. A task credential is never a request for the
+  agent's credential of the same name. The pool's terms do not otherwise
+  govern task credentials.
 - `unsupplied_credentials` names the agent's optional credentials in the
-  pool's terms for which the host has no source, each once; absent when there
-  are none. The run goes without them, and the prompt names them as not
-  supplied. A receiver rejects a submission that names a required credential
-  of the agent here.
+  pool's terms that the host does not deliver, each once: those the task did
+  not request, whether or not the host has a source for them; absent when
+  there are none. wherry's host delivers an optional credential only when the
+  task requests it, and a request for one it has no source for is refused
+  before publishing. The run goes without them, and the prompt names them as
+  not supplied, unless a task credential of the same name is delivered. A
+  receiver rejects a submission that names a required credential of the
+  agent here. Before v0.1.2 the host named only the optional credentials it
+  had no source for; the field and its handling are unchanged.
 - `outputs` lists at most 256 files the agent is asked to leave, each
   `{name, required, storage}`. `name` is a relative path of file names joined by
   `/`, at most 512 bytes, and appears once. `required` defaults to false.
@@ -501,7 +508,9 @@ agent text. It names one of the credentials the prompt lists, including an
 optional one the prompt marks `(not supplied)`, or another the run needs and
 was not given. The run has ended and is not resumed. `TASK_STATE_AUTH_REQUIRED`
 is not a terminal state in wherry, and no record a receiver writes holds it.
-The host submits a new run once it holds the credential.
+The host submits a new run once it holds the credential: for an optional
+credential marked `(not supplied)` that the host has a source for, a new run
+that requests it; otherwise once the host has a source for it.
 
 ## Chunk
 
@@ -1580,8 +1589,9 @@ output, with `(required)` after a required one, so an agent without a shell
 finds them, the environment variables that hold credentials, the commands of
 the [git input](#git-input), and the
 [outcome contract](configuration-receiver.md#agent-contract) with the run's credential
-names, an optional credential its host did not supply marked
-`(not supplied)`. The lines name S3 inputs by path and carry no URL. The plugin reports the
+names, an optional credential its host did not supply, for want of a source
+or a request, marked `(not supplied)` unless a task credential of the same
+name is delivered. The lines name S3 inputs by path and carry no URL. The plugin reports the
 directories' paths as its agent sees them; a directory it does not report
 appears as its variable. The lines hold no credential value.
 

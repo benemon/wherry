@@ -24,13 +24,20 @@ can read its credentials, and the platform's boundary enforces it, as each
 [plugin](plugins.md)'s README states.
 
 `wherry host receivers` lists each agent's credential names with their
-targets, marking those this host has no source for, such as
-`credentials=openai-api-key:env=OPENAI_API_KEY,github-token:env=GH_TOKEN(missing,optional)`. `wherry
+targets and descriptions, marking those this host has no source for, such as
+`credentials=openai-api-key:env=OPENAI_API_KEY,github-token:env=GH_TOKEN(missing,optional)`.
+
+A required credential is delivered to every run of the agent. An optional
+credential is delivered only when the task requests it, with
+`--credential NAME` or, through MCP, a `credentials` entry with a name alone;
+`submit` names the optional credentials left out as `unrequested`. A
+credential every run needs belongs in the pool's terms as required. `wherry
 submit` refuses a task at once, with
 `auth required: credential <name> is not in this host's configuration`,
-when the host has no source for a required credential of the placed agent
-or for a task credential. An optional credential the host has no source for
-is not delivered, and the prompt names it as not supplied.
+when the host has no source for a required credential of the placed agent,
+for a requested one, or for a task credential. An optional credential that is
+not requested is not delivered, even when the host has a source for it, and
+the prompt names it as not supplied.
 
 A host resolves each credential's [source](#credential-sources) and
 presigns the run's S3 links when it submits, and encrypts them, with the run's
@@ -226,7 +233,8 @@ pool whose terms list the agent's credentials.
    credential as `missing`.
 
 3. Submit the task. Give each task credential its target with
-   `--credential NAME:file=FILE` or `--credential NAME:env=VAR`. `submit`
+   `--credential NAME:file=FILE` or `--credential NAME:env=VAR`, and request
+   each optional agent credential the task needs with `--credential NAME`. `submit`
    resolves each source and refuses the task, naming the credential, when
    one fails.
 
@@ -286,7 +294,8 @@ per-workspace keys.
 
    The credential is required unless the entry sets `required: false`, so
    `wherry submit` refuses a task for the agent from a host with no source
-   for it.
+   for it. An optional credential reaches only the runs whose task requests
+   it.
 
 5. On each host, run `wherry host receivers` and check that the agent lists
    `build-anthropic-api-key` without `missing`.
@@ -371,7 +380,8 @@ it. The scope warning appears under the question.
 
 A source belongs to the credential name across pools: whatever the variable
 holds goes to the agents of every pool that names the credential, now or
-later. It is read where submits run, including the MCP server your harness
+later, and, where the credential is optional, to the runs whose task requests
+it. It is read where submits run, including the MCP server your harness
 starts. A shell variable may have more reach than an agent needs; check its
 scope before choosing it. Init displays variable names, never their values,
 and does not resolve sources. Ctrl-V clipboard commands are disabled in
