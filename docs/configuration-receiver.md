@@ -530,10 +530,11 @@ nothing and is not an error.
 While the job runs, the receiver reads the file through its plugin's
 [`ReadWorking`](plugin-protocol.md#readworking) call every 10 seconds, and
 not within 60 seconds of its last publish. It redacts the whole file,
-replaces invalid UTF-8 with U+FFFD, a carriage return with a line break,
-each other control character with a space and each URL with
-`[redacted-url]`, redacts the result again, takes its first line and cuts
-it at 512 bytes. When that line
+turns each CRLF into a line break and redacts again, replaces invalid UTF-8
+with U+FFFD, a carriage return with a line break, each other control
+character with a space and each URL with `[redacted-url]`, redacts the
+result again, takes its first line, trims surrounding spaces and cuts it at
+512 bytes. A file of spaces publishes nothing. When that line
 differs from the one it last published, it publishes the line as a status of
 kind `working` with state `TASK_STATE_WORKING` ([Status](a2a-extension-v1.md#status)),
 at most one a minute. A file emptied later leaves the last line in place.

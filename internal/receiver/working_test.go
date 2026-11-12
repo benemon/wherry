@@ -138,17 +138,17 @@ func TestWorkingAnAdopterCutsALineRedactionLengthens(t *testing.T) {
 }
 
 // A credential that normalising forms, one with a space the file holds as a tab, and one that normalising would hide,
-// one holding a tab, are both redacted, and a line near the wire bound still signs.
+// one holding a tab and written with CRLF line ends, are both redacted, and a line near the wire bound still signs.
 func TestWorkingRedactsWhatNormalisingForms(t *testing.T) {
 	f := workingFixture(t)
-	f.envelope = sealing(map[string][]byte{credentialName: []byte("pass word secret"), "deploy-key": []byte("tok-id\ttok-secret-value")})
-	readsInTurn(f, []byte(strings.Repeat("x", 495)+"pass\tword secret"), []byte("using tok-id\ttok-secret-value now"))
+	f.envelope = sealing(map[string][]byte{credentialName: []byte("pass word secret"), "deploy-key": []byte("tok-id\ttok-secret-value\nsecond-line-secret\n")})
+	readsInTurn(f, []byte(strings.Repeat("x", 495)+"pass\tword secret"), []byte("using tok-id\ttok-secret-value\r\nsecond-line-secret\r\n"))
 	if status := f.execute(t, f.submit(t, f.host, withDeployKey), 1); status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
 	texts := workingTexts(f.feedStatuses(t))
 	if len(texts) != 2 || slices.ContainsFunc(texts, func(text string) bool {
-		return strings.Contains(text, "word secret") || strings.Contains(text, "tok-secret") || len(text) > wire.MaxWorkingText
+		return strings.Contains(text, "word secret") || strings.Contains(text, "tok-") || len(text) > wire.MaxWorkingText
 	}) {
 		t.Fatalf("working %q, want two lines within the bound without the credentials", texts)
 	}

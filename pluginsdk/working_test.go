@@ -2,6 +2,7 @@ package pluginsdk
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,13 +35,16 @@ func TestReadWorkingFileReadsARegularFile(t *testing.T) {
 	}
 }
 
-// A missing file or directory reads as nothing, without an error.
+// A missing file, directory or root, as after a purge, reads as nothing, without an error.
 func TestReadWorkingFileMissingIsNothing(t *testing.T) {
 	root := t.TempDir()
 	for _, name := range []string{workingName, "missing/" + WorkingFile} {
 		if data, err := ReadWorkingFile(root, name); err != nil || data != nil {
 			t.Fatalf("read missing %s = %q, %v; want nothing", name, data, err)
 		}
+	}
+	if data, err := ReadWorkingFile(filepath.Join(root, "purged"), workingName); err != nil || data != nil {
+		t.Fatalf("read under a missing root = %q, %v; want nothing", data, err)
 	}
 }
 
@@ -131,7 +135,7 @@ func TestReadWorkingFileRefusesLinksAndEscapes(t *testing.T) {
 		if err := plant(root); err != nil {
 			t.Fatal(err)
 		}
-		if data, err := ReadWorkingFile(root, workingName); err == nil || data != nil {
+		if data, err := ReadWorkingFile(root, workingName); !errors.Is(err, ErrRefused) || data != nil {
 			t.Fatalf("%s: read = %q, %v; want refused", name, data, err)
 		}
 	}
@@ -155,13 +159,13 @@ func TestReadWorkingFileRefusesSpecialFiles(t *testing.T) {
 	}()
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Fatal("read a FIFO")
+		if !errors.Is(err, ErrRefused) {
+			t.Fatalf("read a FIFO: %v, want refused", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("read of a FIFO with no writer blocked")
 	}
-	if data, err := ReadWorkingFile("/dev", "null"); err == nil || data != nil {
+	if data, err := ReadWorkingFile("/dev", "null"); !errors.Is(err, ErrRefused) || data != nil {
 		t.Fatalf("read a device = %q, %v; want refused", data, err)
 	}
 }

@@ -1331,9 +1331,9 @@ type workingRead struct {
 
 // workingLine is the agent's working file as its working status carries it: nothing for a file over
 // pluginsdk.MaxWorking bytes, and otherwise its first line, without URLs or control characters, once the whole file is
-// redacted, cut at wire.MaxWorkingText bytes. The whole file is redacted before normalising, which would hide a value
-// holding a control character or invalid UTF-8, and again after, which can form a value; redacting it whole redacts a
-// value that spans lines or the cut.
+// redacted, cut at wire.MaxWorkingText bytes. The whole file is redacted before each step of normalising that can hide
+// a value (folding CRLF; replacing control characters and invalid UTF-8) and after the last, which can form one;
+// redacting it whole redacts a value that spans lines or the cut.
 func (run *activeRun) workingLine(data []byte) string {
 	if len(data) > pluginsdk.MaxWorking {
 		return ""
@@ -1346,7 +1346,7 @@ func (run *activeRun) workingLine(data []byte) string {
 			return ' '
 		}
 		return r
-	}, strings.ToValidUTF8(run.redactText(string(data)), "\uFFFD"))
+	}, strings.ToValidUTF8(run.redactText(strings.ReplaceAll(run.redactText(string(data)), "\r\n", "\n")), "\uFFFD"))
 	line, _, _ := strings.Cut(run.redactText(reasonURL.ReplaceAllString(text, "[redacted-url]")), "\n")
 	return wire.CutUTF8(strings.TrimSpace(line), wire.MaxWorkingText)
 }

@@ -126,11 +126,14 @@ one of two things:
 
 - It reads the file inside the agent's own task, with the agent's
   privileges, so the read reaches nothing the agent could not already print.
-- It opens the file itself within a per-run root the agent cannot replace and
-  that holds nothing the agent cannot read, such as the run's directory, refuses a symbolic link in any component
-  beneath that root, opens without blocking so a FIFO cannot hold the call,
-  and refuses anything that is not a regular file with one link once opened.
-  `pluginsdk.ReadWorkingFile` does this on a local file system.
+- It opens the file itself within a per-run root the agent cannot replace
+  and that holds nothing the agent cannot read, such as the run's directory.
+  It refuses a symbolic link in any component beneath that root, opens
+  without blocking so a FIFO cannot hold the call, and refuses anything that
+  is not a regular file with at most one link once opened.
+  `pluginsdk.ReadWorkingFile` does this on a local file system. A refusal it
+  returns wraps `pluginsdk.ErrRefused`, which a plugin reads as nothing
+  rather than counting as a platform failure.
 
 Either way, it reads at most 1025 bytes whatever the file's size, returns
 nothing for a file over 1 KiB, never a cut prefix, and returns nothing, and
