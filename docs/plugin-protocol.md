@@ -120,22 +120,23 @@ follows, at most once at a time for a run, under a 5-second deadline, and
 publishes the line as a status of kind `working`. The receiver redacts what
 the call returns; the plugin does not.
 
-The agent controls the file, so `ReadWorking` reads it defensively:
+The agent controls the file, and can change it while the plugin reads it,
+so `ReadWorking` never reads with more access than the agent has. It does
+one of two things:
 
-- It opens the file within a per-run root the agent cannot replace, such as
-  the run's directory, and refuses a symbolic link in any component beneath
-  that root.
-- It opens the file without blocking, so a FIFO cannot hold the call, and
-  refuses anything that is not a regular file with one link once opened.
-- It reads at most 1025 bytes whatever the file's size, and returns nothing
-  for a file over 1 KiB, never a cut prefix.
-- It returns nothing, and no error, when the file or a directory above it is
-  missing.
+- It reads the file inside the agent's own task, with the agent's
+  privileges, so the read reaches nothing the agent could not already print.
+- It opens the file itself within a per-run root the agent cannot replace,
+  such as the run's directory, refuses a symbolic link in any component
+  beneath that root, opens without blocking so a FIFO cannot hold the call,
+  and refuses anything that is not a regular file with one link once opened.
+  `pluginsdk.ReadWorkingFile` does this on a local file system.
 
-On a platform whose agent files the plugin reaches on a local file system,
-`pluginsdk.ReadWorkingFile` does all of this. A plugin reading through a
-platform API checks each component's type before it reads, and states what
-the API leaves open. A plugin returns a failed read as a `pluginsdk.Error`,
+Either way, it reads at most 1025 bytes whatever the file's size, returns
+nothing for a file over 1 KiB, never a cut prefix, and returns nothing, and
+no error, when the file or a directory above it is missing. A platform API
+that checks a path and then opens it again by name does not qualify: an
+agent that swaps the file between the two reaches outside its run. A plugin returns a failed read as a `pluginsdk.Error`,
 and counts it in `wherry_plugin_platform_errors_total` as for its other
 calls. The receiver logs a failed read once for each class.
 
