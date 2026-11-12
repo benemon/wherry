@@ -718,6 +718,41 @@ func TestStatusShowsPlacing(t *testing.T) {
 	}
 }
 
+// workingLine is a working status's text, the agent's report of its current step.
+const workingLine = "running the receiver tests"
+
+// workingRun admits a run whose job started and whose agent reported workingLine, and returns the working status's
+// timestamp.
+func workingRun(t *testing.T) (*bus, string, string) {
+	t.Helper()
+	b := newBus(t)
+	admitted := b.admitted(t)
+	runID := admitted.submission.Wherry.Run
+	status := now(wire.TaskStateWorking)
+	status.Message = &wire.Message{MessageID: "msg-working-1", Role: wire.RoleAgent, Parts: []wire.Part{{Text: workingLine}}, Extensions: []string{wire.ExtensionURI}}
+	b.feed(t, runID, b.status(t, admitted, "started-1", "started", now(wire.TaskStateWorking)), b.status(t, admitted, "working-1", "working", status))
+	return b, runID, status.Timestamp
+}
+
+func TestStatusAndEventsShowTheWorkingLine(t *testing.T) {
+	b, runID, timestamp := workingRun(t)
+	var stdout, stderr bytes.Buffer
+	if err := runStatus(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if want := "TASK_STATE_WORKING\n" + workingLine + "\n"; stdout.String() != want || stderr.Len() != 0 {
+		t.Fatalf("status stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
+	}
+	stdout.Reset()
+	if err := runEvents(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if want := "attempt=1 kind=working state=TASK_STATE_WORKING receiver=receiver-a time=" + timestamp + " message=\"" + workingLine + "\""; len(lines) != 3 || lines[2] != want || stderr.Len() != 0 {
+		t.Fatalf("events stdout %q stderr %q, want the working status last as %q", stdout.String(), stderr.String(), want)
+	}
+}
+
 func TestEventsListPlacing(t *testing.T) {
 	b, runID, times := placingRun(t)
 	var stdout, stderr bytes.Buffer

@@ -216,7 +216,19 @@ type Plugin interface {
 	// Metrics reports the profile's samples of the families the core declares for plugins. The core drops a sample
 	// outside them, and gives every sample's profile label the profile's own name.
 	Metrics(ctx context.Context) ([]Sample, error)
+	// ReadWorking reads WorkingFile beneath a running job's output directory, which its agent may replace with a line
+	// naming its current step. It reads at most MaxWorking+1 bytes whatever the file's size, and returns nothing for a
+	// missing file or one over MaxWorking bytes. It opens the file within a root the agent cannot replace, refusing a
+	// symbolic link in any component beneath it and anything but a regular file, without blocking on the open, as
+	// ReadWorkingFile does. The core calls it with Follow's handle, at most once at a time per run.
+	ReadWorking(ctx context.Context, handle Handle) ([]byte, error)
 }
+
+// WorkingFile is where, beneath its output directory, an agent reports its current step.
+const WorkingFile = ".wherry/working"
+
+// MaxWorking bounds WorkingFile in bytes; a longer file reports nothing.
+const MaxWorking = 1 << 10
 
 // Kind is the kind of a Sample's value.
 type Kind int

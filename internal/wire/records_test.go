@@ -236,6 +236,49 @@ func TestPlacingStatus(t *testing.T) {
 	}
 }
 
+// A working status is a placing status's shape, its text at most 512 bytes whether it travels as text or raw.
+func TestWorkingStatus(t *testing.T) {
+	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	keys := signed.Keys{"receiver-a": signed.KeyState{Current: key.Public().(ed25519.PublicKey)}}
+	text := func(parts ...Part) *Message {
+		return &Message{MessageID: "msg-a", Role: RoleAgent, Parts: parts, Extensions: []string{ExtensionURI}}
+	}
+	step := Part{Text: "running the receiver tests"}
+	for name, test := range map[string]struct {
+		state   TaskState
+		message *Message
+		offset  *int64
+		valid   bool
+	}{
+		"working with its text":         {TaskStateWorking, text(step), nil, true},
+		"512 bytes of text":             {TaskStateWorking, text(Part{Text: strings.Repeat("x", MaxWorkingText)}), nil, true},
+		"512 bytes raw":                 {TaskStateWorking, text(Part{Raw: StdBytes(strings.Repeat(`"`, MaxWorkingText)), MediaType: "text/plain"}), nil, true},
+		"513 bytes of text":             {TaskStateWorking, text(Part{Text: strings.Repeat("x", MaxWorkingText+1)}), nil, false},
+		"513 bytes raw":                 {TaskStateWorking, text(Part{Raw: StdBytes(strings.Repeat(`"`, MaxWorkingText+1)), MediaType: "text/plain"}), nil, false},
+		"with a log offset":             {TaskStateWorking, text(step), new(int64(0)), false},
+		"completed":                     {TaskStateCompleted, text(step), nil, false},
+		"without a message":             {TaskStateWorking, nil, nil, false},
+		"with two parts":                {TaskStateWorking, text(step, step), nil, false},
+		"with a data part":              {TaskStateWorking, text(Part{Data: []byte(`{}`), MediaType: "application/json"}), nil, false},
+		"with a raw part of other type": {TaskStateWorking, text(Part{Raw: StdBytes("x"), MediaType: "application/octet-stream"}), nil, false},
+	} {
+		status := &RunStatus{StatusUpdate: TaskStatusUpdateEvent{TaskID: "run-a", ContextID: "run-a", Status: TaskStatus{State: test.state, Timestamp: testTime, Message: test.message}},
+			Wherry: StatusBinding{ReceiverBinding: testBinding(), EventID: "event-a", Kind: "working", TaskHash: testHash, LogOffset: test.offset}}
+		encoded, err := SignRecord(status, key)
+		if (err == nil) != test.valid {
+			t.Errorf("%s: sign = %v, want valid %v", name, err, test.valid)
+			continue
+		}
+		if !test.valid {
+			continue
+		}
+		var decoded RunStatus
+		if err := ParseRecord(encoded, keys, &decoded); err != nil || decoded.Wherry.Kind != "working" || decoded.StatusUpdate.Status.State != TaskStateWorking {
+			t.Errorf("%s: decoded %+v, %v; want the working status", name, decoded, err)
+		}
+	}
+}
+
 func TestRecordTypesAreNotInterchangeable(t *testing.T) {
 	keys, _, receiver := testKeys(t)
 	encoded, err := SignRecord(testRecords()["status"], receiver)

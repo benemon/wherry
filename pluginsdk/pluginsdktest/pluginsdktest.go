@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,9 +30,13 @@ var Credentials = []pluginsdk.Secret{
 	{Name: "conformance-file", File: "conformance-key", Value: []byte("conformance-file-value")},
 }
 
+// Working is the line the completing job reports in pluginsdk.WorkingFile.
+const Working = "conformance working"
+
 // Run checks the profiles factory, the one a plugin hands Serve, builds against the plugin contract on their
-// platform, giving it a logger that discards. completes configures a profile whose job runs for at least ten seconds
-// and exits 0; neverStarts one whose job the platform ends before its agent starts; pending, optional, one whose job
+// platform, giving it a logger that discards. completes configures a profile whose job, as it starts, writes Working
+// and a newline to pluginsdk.WorkingFile beneath its output directory by renaming a file over it, runs for at least
+// ten seconds and exits 0; neverStarts one whose job the platform ends before its agent starts; pending, optional, one whose job
 // the platform never places and says why, which zero Settings skip. Every job the suite creates is purged.
 // inlineLimit is the cap every configured profile reports. The completing job's run carries Credentials.
 func Run(t *testing.T, factory func(pluginsdk.Settings, hclog.Logger) (pluginsdk.Plugin, error), completes, neverStarts, pending pluginsdk.Settings, inlineLimit int64) {
@@ -89,6 +95,9 @@ func Run(t *testing.T, factory func(pluginsdk.Settings, hclog.Logger) (pluginsdk
 		if job.Attempt != run.Attempt || job.Profile != run.Profile || job.Agent != run.Agent || job.Handle.Name != handle.Name {
 			t.Fatalf("lookup metadata %+v; want attempt %d, profile %s, agent %s, job %s", job, run.Attempt, run.Profile, run.Agent, handle.Name)
 		}
+		if data, err := readWorking(ctx, running, job.Handle); err != nil || string(data) != Working+"\n" {
+			t.Fatalf("working file of the running job = %q, %v; want %q within %s", data, err, Working+"\n", PollDeadline)
+		}
 		terminal, end := follow(t, ctx, running, job.Handle, 0)
 		if !terminal.Started || terminal.ExitCode != 0 {
 			t.Fatalf("terminal %+v; want started with exit code 0", terminal)
@@ -96,9 +105,16 @@ func Run(t *testing.T, factory func(pluginsdk.Settings, hclog.Logger) (pluginsdk
 		if job, err := running.Lookup(ctx, run.ID); err != nil || job.State != pluginsdk.JobEnded {
 			t.Fatalf("lookup after the job ended = %+v, %v; want ended", job, err)
 		}
-		outputs := make(chan pluginsdk.Output, 1)
-		if err := running.Collect(ctx, job.Handle, pluginsdk.Limits{Files: 256, FileBytes: 1 << 20, TotalBytes: 1 << 20}, outputs); err != nil || len(outputs) != 0 {
-			t.Fatalf("collect from a job that wrote no outputs = %d outputs, %v; want none", len(outputs), err)
+		outputs := make(chan pluginsdk.Output, 256)
+		err = running.Collect(ctx, job.Handle, pluginsdk.Limits{Files: 256, FileBytes: 1 << 20, TotalBytes: 1 << 20}, outputs)
+		close(outputs)
+		for output := range outputs {
+			if !strings.HasPrefix(output.Name, ".wherry/") {
+				err = errors.Join(err, errors.New("collected "+output.Name))
+			}
+		}
+		if err != nil {
+			t.Fatalf("collect from a job that wrote no outputs but its working file: %v", err)
 		}
 		if replay, _ := follow(t, ctx, running, job.Handle, end); replay != terminal {
 			t.Fatalf("follow from offset %d after the end = %+v; want the terminal %+v", end, replay, terminal)
@@ -112,6 +128,9 @@ func Run(t *testing.T, factory func(pluginsdk.Settings, hclog.Logger) (pluginsdk
 		idempotent(t, ctx, running, run.ID, handle)
 		if job, err := running.Lookup(ctx, run.ID); err != nil || job.State != pluginsdk.JobAbsent {
 			t.Fatalf("lookup after purge = %+v, %v; want absent", job, err)
+		}
+		if data, _ := running.ReadWorking(ctx, job.Handle); len(data) != 0 {
+			t.Fatalf("working file of a purged job = %q; want nothing", data)
 		}
 	})
 
@@ -188,6 +207,24 @@ func poll(ctx context.Context, a pluginsdk.Plugin, runID string, want pluginsdk.
 		select {
 		case <-ctx.Done():
 			return job, ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+// readWorking repeats ReadWorking on a running job until it returns Working and a newline, or an error, or
+// PollDeadline passes.
+func readWorking(ctx context.Context, a pluginsdk.Plugin, handle pluginsdk.Handle) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, PollDeadline)
+	defer cancel()
+	for {
+		data, err := a.ReadWorking(ctx, handle)
+		if err != nil || string(data) == Working+"\n" {
+			return data, err
+		}
+		select {
+		case <-ctx.Done():
+			return data, ctx.Err()
 		case <-time.After(pollInterval):
 		}
 	}

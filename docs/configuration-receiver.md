@@ -520,6 +520,25 @@ over the pool's `reply_limit` bytes is cut:
 as the [`credential` data part](a2a-extension-v1.md#the-credential-data-part)
 defines it.
 
+While it works, the agent may report its current step in
+`$WHERRY_OUTPUT_DIR/.wherry/working`, which the prompt names by its full
+path. It replaces the file with one line of at most 1 KiB, writing a
+temporary file in `.wherry` and renaming it over the file, and the prompt
+says that a longer file reports nothing. A missing or empty file reports
+nothing and is not an error.
+
+While the job runs, the receiver reads the file through its plugin's
+[`ReadWorking`](plugin-protocol.md#readworking) call every 10 seconds, and
+not within 60 seconds of its last publish. It redacts the whole file, takes
+its first line, replaces each URL with `[redacted-url]` and each control
+character with a space, and cuts the line at 512 bytes. When that line
+differs from the one it last published, it publishes the line as a status of
+kind `working` with state `TASK_STATE_WORKING` ([Status](a2a-extension-v1.md#status)),
+at most one a minute. A file emptied later leaves the last line in place.
+A receiver that adopts the run publishes the run's last line again, with its
+time, after its `started` status. `wherry host status`, `wherry host events`
+and the MCP `status`, `events` and `wait` tools show it.
+
 The run ends when the job ends. The receiver stops the job, collects its
 outputs whatever its exit, and reads the outcome file:
 

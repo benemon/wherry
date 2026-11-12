@@ -272,7 +272,7 @@ type waitReply struct {
 	State       string                  `json:"state"`
 	Model       string                  `json:"model,omitempty" jsonschema:"model the run's placement names"`
 	RetryAfter  int                     `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished: seconds to wait before calling wait again"`
-	Message     string                  `json:"message,omitempty" jsonschema:"status message: the agent's answer or what went wrong, a credential the run could not obtain, or this host's note that task_started_by passed and no receiver claimed the task; an answer over 64 KiB is cut to its first 64 KiB, and reply names the whole"`
+	Message     string                  `json:"message,omitempty" jsonschema:"status message: the agent's answer or what went wrong, a credential the run could not obtain, the step the agent last reported while the run is unfinished, or this host's note that task_started_by passed and no receiver claimed the task; an answer over 64 KiB is cut to its first 64 KiB, and reply names the whole"`
 	Reply       *replyFile              `json:"reply,omitempty" jsonschema:"set when the agent's answer is over 64 KiB"`
 	Artifacts   []resultArtifact        `json:"artifacts,omitempty"`
 	Outputs     []outputReply           `json:"outputs,omitempty" jsonschema:"the run's outputs, verified and written locally"`
@@ -435,7 +435,8 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "wait",
 		Description: fmt.Sprintf("Wait up to %d seconds for a run to finish. Returns the result, a failed, canceled or rejected state "+
-			"with its message, or {id, state, retry_after} while the run is unfinished: call wait again. "+
+			"with its message, or {id, state, message, retry_after} while the run is unfinished, message the latest status message, "+
+			"such as the step the agent last reported: call wait again. "+
 			"A run whose task_started_by passed with no receiver claiming it returns its state and a message saying so, without retry_after. "+
 			"A finished run's outputs are verified and written under this host's state directory; outputs lists their paths and hashes. "+
 			"Use status to check a run without waiting.", int(waitBound.Seconds())),
@@ -454,7 +455,10 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 			if err != nil {
 				return nil, waitReply{}, failure(err)
 			}
-			return nil, waitReply{ID: input.ID, State: string(status.Status.State), Model: status.Model, RetryAfter: retryAfter, Skipped: status.Skipped}, nil
+			return nil, waitReply{
+				ID: input.ID, State: string(status.Status.State), Model: status.Model, Message: cmp.Or(statusText(status.Status), status.Unclaimed),
+				RetryAfter: retryAfter, Skipped: status.Skipped,
+			}, nil
 		}
 		if err != nil {
 			return nil, waitReply{}, failure(err)

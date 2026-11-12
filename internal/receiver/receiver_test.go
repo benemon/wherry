@@ -187,6 +187,10 @@ type fakePlugin struct {
 	metricsHang bool
 	// exited stands for the plugin process's Exited.
 	exited chan struct{}
+	// working is what ReadWorking returns, unless readWorking is set; workingReads counts the calls.
+	working      []byte
+	readWorking  func(context.Context) ([]byte, error)
+	workingReads int
 }
 
 func (f *fakePlugin) Directories() pluginsdk.Directories {
@@ -400,6 +404,20 @@ func (f *fakePlugin) Follow(ctx context.Context, handle pluginsdk.Handle, from i
 		return *ended, nil
 	}
 	return pluginsdk.Terminal{Started: true, Node: "node-1"}, nil
+}
+
+func (f *fakePlugin) ReadWorking(ctx context.Context, handle pluginsdk.Handle) ([]byte, error) {
+	if !f.lookupHandle(handle) {
+		return nil, errors.New("read working: the handle is Dispatch's")
+	}
+	f.mu.Lock()
+	f.workingReads++
+	working, read := f.working, f.readWorking
+	f.mu.Unlock()
+	if read != nil {
+		return read(ctx)
+	}
+	return working, nil
 }
 
 func (f *fakePlugin) Stop(context.Context, pluginsdk.Handle) error {

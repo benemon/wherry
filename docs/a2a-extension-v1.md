@@ -395,6 +395,7 @@ A `terminal` status's `wherry` object adds the attempt's chunk count:
 | `claimed` | `TASK_STATE_WORKING` | the receiver admits the run | `task_topic`, `task_offset` |
 | `placing` | `TASK_STATE_WORKING` | the job is registered and the platform has not placed it; again when the platform's reason changes | the reason as message text |
 | `started` | `TASK_STATE_WORKING` | the job has started | |
+| `working` | `TASK_STATE_WORKING` | the agent's [working file](configuration-receiver.md#agent-contract) holds a line other than the one last published, at most once a minute; and an adopter's last line again after its `started` | the line as message text |
 | `rejected` | `TASK_STATE_REJECTED` | the receiver refuses the submission | the reason as message text |
 | `terminal` | `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED` or `TASK_STATE_CANCELED` | the run has ended | the agent's message from its [outcome file](configuration-receiver.md#agent-contract), or the reason as message text |
 | `released` | `TASK_STATE_SUBMITTED` | the receiver gives back its claim, before it returns the task to the pool | |
@@ -428,7 +429,7 @@ otherwise its preview. It travels as a `raw` part with media type
 `text/plain` when escaping it as a JSON string would make it longer than
 base64 does. The fixed texts are:
 
-- working: `waiting for placement (<reason>)`, with the platform's reason,
+- kind `placing`, `TASK_STATE_WORKING`: `waiting for placement (<reason>)`, with the platform's reason,
   redacted, on one line of at most 512 bytes, or `waiting for placement`
   when the platform gives no reason;
 - rejected: `agent is outside the pool terms`,
@@ -467,6 +468,15 @@ base64 does. The fixed texts are:
   and ended by a signal or a non-zero exit. The text carries credential
   names and no values;
 - canceled: `canceled by user`.
+
+A status of kind `working` carries the agent's own line, not a fixed text:
+the first line of its working file once the whole file is redacted, with
+each URL replaced by `[redacted-url]` and each control character by a space,
+of at most 512 bytes. A status of kind `placing` or `working` has state
+`TASK_STATE_WORKING`, one text part and no `log_offset`, and fails validation
+otherwise; a status of kind `working` also fails it when its text, or its
+`raw` part's bytes, are over 512 bytes. A reader older than this kind rejects
+the status as it rejects any unknown kind, and warns on each read.
 
 The `wherry` CLI and MCP server pass the message text through and do not
 read it.

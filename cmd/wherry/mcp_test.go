@@ -477,6 +477,23 @@ func TestMCPWaitBoundedRetry(t *testing.T) {
 	}
 }
 
+// An unfinished run's wait reply carries its latest status message, as status does: the agent's working line.
+func TestMCPWaitUnfinishedCarriesTheWorkingLine(t *testing.T) {
+	t.Parallel()
+	b, runID, _ := workingRun(t)
+	session := mcpSession(t, b.connect(t), nil)
+	var reply map[string]any
+	callTool(t, b.ctx, session, "wait", map[string]any{"id": runID}, &reply)
+	if want := map[string]any{"id": runID, "state": string(wire.TaskStateWorking), "message": workingLine, "retry_after": float64(retryAfter)}; !reflect.DeepEqual(reply, want) {
+		t.Fatalf("wait %#v, want %#v", reply, want)
+	}
+	var status statusOutput
+	callTool(t, b.ctx, session, "status", map[string]any{"id": runID}, &status)
+	if len(status.Runs) != 1 || status.Runs[0].Message != workingLine {
+		t.Fatalf("status %#v, want the working line", status)
+	}
+}
+
 func TestMCPWaitAndStatusReportAnUnclaimedRunPastItsStartBy(t *testing.T) {
 	b := newBus(t)
 	ctx := b.ctx

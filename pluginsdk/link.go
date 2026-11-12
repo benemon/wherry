@@ -23,7 +23,7 @@ var handshake = plugin.HandshakeConfig{
 // runs the newest version both sides list and refuses a plugin that lists none of Launch's. It is a variable so tests
 // can stand in for a set of several versions.
 var versionedPlugins = func(p *grpcPlugin) map[int]plugin.PluginSet {
-	return map[int]plugin.PluginSet{11: {pluginName: p}}
+	return map[int]plugin.PluginSet{12: {pluginName: p}}
 }
 
 // Protocols returns the plugin protocol versions Launch accepts, ascending.

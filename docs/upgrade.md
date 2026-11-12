@@ -23,6 +23,10 @@ For compatible record formats, upgrade in place:
 4. Restart the harness sessions that run `wherry host mcp`.
    Replacing the binary does not restart an existing MCP process.
 
+Upgrade hosts with their receivers.
+A host older than its receivers rejects each status of a kind it does not know, and warns on each read.
+Kind `working`, which a receiver publishes from an agent's [working file](configuration-receiver.md#agent-contract), is one.
+
 Restart a pool's receivers one at a time.
 A stopping key custodian needs a live successor to re-key its tasks.
 Follow [Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian).

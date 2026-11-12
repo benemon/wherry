@@ -25,6 +25,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/benemon/wherry/internal/operator"
@@ -71,6 +72,10 @@ var (
 	followRetryInterval = time.Second
 	// collectTimeout bounds a plugin's collection of a run's outputs, during which the claim is renewed.
 	collectTimeout = 2 * time.Minute
+	// workingFloor is the least time between a run's working statuses, and workingTimeout bounds one read of its agent's
+	// working file.
+	workingFloor   = 60 * time.Second
+	workingTimeout = 5 * time.Second
 )
 
 // clock is the receiver's clock for placement: when Dispatch returned and when each Lookup of the await-start phase
@@ -948,7 +953,18 @@ func (r *Receiver) executeAttempt(ctx context.Context, claim *runClaim, record *
 		}
 		return kgo.AckRelease
 	}
-	if err := run.commit(ctx, run.statusRecords("started", taskStatus(wire.TaskStateWorking, ""), &offset, nil)...); err != nil {
+	// published is the last working line this execution published, at publishedAt; line is one read since, which the
+	// next tick publishes. An adopter publishes again the run's last line, with its time, after its started status.
+	var published, line string
+	var publishedAt time.Time
+	records := run.statusRecords("started", taskStatus(wire.TaskStateWorking, ""), &offset, nil)
+	if last := lastWorking(events.statuses[runID], run.taskHash); adopted && last != nil {
+		status := taskStatus(wire.TaskStateWorking, workingText(*last))
+		status.Timestamp = last.StatusUpdate.Status.Timestamp
+		records = append(records, run.statusRecords("working", status, nil, nil)...)
+		published, publishedAt = workingText(*last), time.Now()
+	}
+	if err := run.commit(ctx, records...); err != nil {
 		if ctx.Err() != nil {
 			pending = held
 			return shutdown()
@@ -956,6 +972,11 @@ func (r *Receiver) executeAttempt(ctx context.Context, claim *runClaim, record *
 		return run.abandon(err)
 	}
 	run.retries = nil
+	// One read of the working file runs at a time, off the loop, and the run's end cancels it.
+	readCtx, stopReads := context.WithCancel(runCtx)
+	defer stopReads()
+	reads, reading := make(chan workingRead, 1), false
+	readFailures := map[string]bool{}
 	// A failed Follow or Lookup is retried until the run passes task_ended_by.
 	var retry <-chan time.Time
 
@@ -1074,6 +1095,16 @@ func (r *Receiver) executeAttempt(ctx context.Context, claim *runClaim, record *
 			if status, stop := stopHeld(); stop {
 				return status
 			}
+		case read := <-reads:
+			reading = false
+			if read.err != nil {
+				if class := failureClass(read.err); !readFailures[class] {
+					readFailures[class] = true
+					r.logger.Printf("run %s: read working in profile %s failed (%s)", runID, run.profile.Name, logText(run.redactText, read.err))
+				}
+			} else if text := run.workingLine(read.data); text != "" && text != published {
+				line = text
+			}
 		case <-progress.C:
 			if ctx.Err() != nil {
 				stopFollow()
@@ -1090,20 +1121,41 @@ func (r *Receiver) executeAttempt(ctx context.Context, claim *runClaim, record *
 				at, held = pending[len(pending)-1].Offset, 1
 			}
 			// A tick with nothing to flush and the offset last reported adds nothing an adopter reads.
-			if len(pending) == held && at == reported {
-				continue
+			flush := len(pending) > held || at != reported
+			var records []*kgo.Record
+			if flush {
+				// The progress record commits with the chunks it covers.
+				records = append(run.chunks(pending[:len(pending)-held], false), run.progress(at))
 			}
-			// The progress record commits with the chunks it covers.
-			records := append(run.chunks(pending[:len(pending)-held], false), run.progress(at))
-			if err := run.commit(ctx, records...); err != nil {
-				if ctx.Err() != nil {
-					return shutdown()
+			if line != "" {
+				records = append(records, run.statusRecords("working", taskStatus(wire.TaskStateWorking, line), nil, nil)...)
+			}
+			if len(records) > 0 {
+				if err := run.commit(ctx, records...); err != nil {
+					if ctx.Err() != nil {
+						return shutdown()
+					}
+					return run.abandon(err)
 				}
-				return run.abandon(err)
 			}
-			run.chunked += int64(len(pending) - held)
-			pending = pending[len(pending)-held:]
-			reported = at
+			if flush {
+				run.chunked += int64(len(pending) - held)
+				pending = pending[len(pending)-held:]
+				reported = at
+			}
+			if line != "" {
+				published, publishedAt, line = line, time.Now(), ""
+			}
+			// A read within workingFloor of the last publish could not publish.
+			if !reading && time.Since(publishedAt) >= workingFloor {
+				reading = true
+				go func(handle pluginsdk.Handle) {
+					ctx, cancel := context.WithTimeout(readCtx, workingTimeout)
+					defer cancel()
+					data, err := run.profile.Plugin.ReadWorking(ctx, handle)
+					reads <- workingRead{data, err}
+				}(handle)
+			}
 		}
 	}
 }
@@ -1220,15 +1272,9 @@ func (run *activeRun) awaitStart(ctx, startCtx context.Context, handle pluginsdk
 		job := result.job
 		switch {
 		case result.err != nil || !slices.Contains([]pluginsdk.JobState{pluginsdk.JobAbsent, pluginsdk.JobRunning, pluginsdk.JobEnded, pluginsdk.JobNeverStarted, pluginsdk.JobPending}, job.State):
-			class := "error"
-			var failure *pluginsdk.Error
-			switch {
-			case result.err == nil:
-				class = "state " + strconv.Itoa(int(job.State))
-			case errors.Is(result.err, pluginsdk.ErrLinkLost):
-				class = "link lost"
-			case errors.As(result.err, &failure):
-				class = "class " + failure.Class
+			class := "state " + strconv.Itoa(int(job.State))
+			if result.err != nil {
+				class = failureClass(result.err)
 			}
 			if !logged[class] {
 				logged[class] = true
@@ -1263,6 +1309,61 @@ func (run *activeRun) awaitStart(ctx, startCtx context.Context, handle pluginsdk
 			return pluginsdk.Job{}, run.startFailure(ctx, startClassPlatform, "job removed before it started"), true
 		}
 	}
+}
+
+// failureClass is the class of a plugin call's error under which the receiver logs it once.
+func failureClass(err error) string {
+	var failure *pluginsdk.Error
+	switch {
+	case errors.Is(err, pluginsdk.ErrLinkLost):
+		return "link lost"
+	case errors.As(err, &failure):
+		return "class " + failure.Class
+	}
+	return "error"
+}
+
+// workingRead is one read of the agent's working file.
+type workingRead struct {
+	data []byte
+	err  error
+}
+
+// workingLine is the agent's working file as its working status carries it: nothing for a file over
+// pluginsdk.MaxWorking bytes, and otherwise its first line once the whole file is redacted, without URLs or control
+// characters, cut at wire.MaxWorkingText bytes. Redacting the whole file first redacts a value that spans lines or the
+// cut.
+func (run *activeRun) workingLine(data []byte) string {
+	if len(data) > pluginsdk.MaxWorking {
+		return ""
+	}
+	line, _, _ := strings.Cut(run.redactText(string(data)), "\n")
+	line = reasonURL.ReplaceAllString(strings.ToValidUTF8(line, "\uFFFD"), "[redacted-url]")
+	line = strings.TrimSpace(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, line))
+	return wire.CutUTF8(line, wire.MaxWorkingText)
+}
+
+// lastWorking is the last of statuses that is a working status of the run's submission hash, nil without one.
+func lastWorking(statuses []wire.RunStatus, hash string) *wire.RunStatus {
+	for i := len(statuses) - 1; i >= 0; i-- {
+		if statuses[i].Wherry.Kind == "working" && statuses[i].Wherry.TaskHash == hash {
+			return &statuses[i]
+		}
+	}
+	return nil
+}
+
+// workingText is a working status's line, which travels raw when escaping would make it longer.
+func workingText(status wire.RunStatus) string {
+	if part := status.StatusUpdate.Status.Message.Parts[0]; part.Raw != nil {
+		return string(part.Raw)
+	}
+	return status.StatusUpdate.Status.Message.Parts[0].Text
 }
 
 // placing publishes the run's placing status for reason, unless this attempt's last one has the same normalised text;
@@ -2620,6 +2721,8 @@ func Preamble(directories pluginsdk.Directories, inputs []string, credentials []
 	if len(names) > 0 {
 		listed = "This run's credentials are " + strings.Join(names, ", ") + "."
 	}
+	lines = append(lines, "While you work, you may report your current step in "+output+"/"+pluginsdk.WorkingFile+", creating its directory: write one line of at most "+
+		strconv.Itoa(pluginsdk.MaxWorking)+" bytes to a temporary file in that directory and rename it over this file. A longer file reports nothing.")
 	lines = append(lines, "When you finish, whatever happened, write an A2A TaskStatus JSON object to "+output+"/"+wire.OutcomeFile+", creating its directory: "+
 		`{"state": "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_AUTH_REQUIRED", "message": {"role": "ROLE_AGENT", "parts": [{"text": "<the answer, or what went wrong>"}]}}. `+
 		`For TASK_STATE_AUTH_REQUIRED, add the part {"data": {"credential": "<name>"}} naming the credential you need. `+listed,
