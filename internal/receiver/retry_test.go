@@ -240,6 +240,17 @@ func TestStartRetryStopWaitsForIdleClose(t *testing.T) {
 			if dispatches, _, _, releases := f.plugin.counts(); dispatches != 1 || releases != 1 {
 				t.Fatalf("dispatches %d and releases %d, want 1 and 1", dispatches, releases)
 			}
+			var released time.Time
+			for _, record := range f.records(t, operator.PoolEventsTopic(testPool)) {
+				var status wire.RunStatus
+				if wire.ParseRecord(record.Value, f.keys(), &status) == nil && status.Wherry.Kind == "released" {
+					released = record.Timestamp
+				}
+			}
+			// Only the holder's own client leaves after the release.
+			if members := slices.DeleteFunc(f.members.all(), func(member shareMember) bool { return member.left.Before(released) }); len(members) != 1 {
+				t.Fatalf("members %+v left after the release at %s, want the holder alone", members, released)
+			}
 			share, err := f.receiver.newClient(kgo.ConsumeTopics(record.Topic), kgo.ShareGroup(operator.PoolGroup(testPool)), kgo.ShareMaxRecords(1), kgo.ShareMaxRecordsStrict())
 			if err != nil {
 				t.Fatal(err)
