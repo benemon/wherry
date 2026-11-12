@@ -1444,8 +1444,9 @@ release. Otherwise a receiver that claims a submission:
     ago;
 11. rejects it with `the host does not supply a required credential of the
     agent` when the submission's `supplied_credentials` does not name a
-    required credential of the agent in its terms, and with `a task credential takes the target of
-    one of the agent's credentials` when one does;
+    required credential of the agent in its terms. It rejects it with `a task
+    credential takes the target of one of the agent's credentials` when a
+    task credential has the target of one of the agent's credentials;
 12. rejects it when the host of the run's [git input](#git-input) is not
     one of the pool's current VCS hosts, and with `pool <pool> has no
     storage for S3 inputs and outputs` when the run has S3 inputs or

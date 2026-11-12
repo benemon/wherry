@@ -55,7 +55,8 @@ receivers of different versions do not work together, and every mismatch
 fails closed:
 
 - A run from a v0.1.2 host on a receiver before v0.1.2 fails `envelope invalid`
-  when the agent has an optional credential, and works otherwise.
+  when the task does not request every optional credential of the agent, and
+  works otherwise.
 - A run from a host before v0.1.2 on a v0.1.2 receiver is rejected with `the
   host does not supply a required credential of the agent` when the agent has
   a required credential. Otherwise it fails `envelope invalid` when the old

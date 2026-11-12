@@ -340,6 +340,11 @@ func TestCheckEnvelope(t *testing.T) {
 	if err := CheckEnvelope(changed, task, values()); err != nil {
 		t.Fatalf("check under terms that drop model and add an optional credential: %v", err)
 	}
+	other := *task
+	other.Wherry.Placement.Agent = "agent-z"
+	if err := CheckEnvelope(terms, &other, values()); err == nil || !strings.Contains(err.Error(), "agent is outside the pool terms") {
+		t.Fatalf("check of a task whose agent is outside the terms = %v", err)
+	}
 	for name, test := range map[string]struct {
 		mutate func(*signed.EnvelopeValues)
 		want   string
