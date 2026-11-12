@@ -167,7 +167,7 @@ red:
    prerelease and pass; merge it.
 4. Tag `pluginsdk/vX.Y.Z` and the wherry release from `main`.
 5. In wherry-plugins, move to the final pluginsdk tag, set `WHERRY_VERSION` to
-   the wherry release, remove `WHERRY_REF`, and release the plugins.
+   the wherry release, set `WHERRY_REF` back to `''`, and release the plugins.
 
 The order stops being needed once plugin protocol negotiation accepts the
 previous protocol (go-plugin's versioned plugins, deferred to the first
