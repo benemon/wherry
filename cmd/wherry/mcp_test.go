@@ -494,6 +494,22 @@ func TestMCPWaitUnfinishedCarriesTheWorkingLine(t *testing.T) {
 	}
 }
 
+func TestMCPWaitUnfinishedCountsRedactionsInTheWorkingLine(t *testing.T) {
+	t.Parallel()
+	b := newBus(t)
+	admitted := b.admitted(t)
+	runID := admitted.submission.Wherry.Run
+	line := "using " + b.redactionMarker(t, runID, "model")
+	status := now(wire.TaskStateWorking)
+	status.Message = &wire.Message{MessageID: "msg-working-1", Role: wire.RoleAgent, Parts: []wire.Part{{Text: line}}, Extensions: []string{wire.ExtensionURI}}
+	b.feed(t, runID, b.status(t, admitted, "started-1", "started", now(wire.TaskStateWorking)), b.status(t, admitted, "working-1", "working", status))
+	var reply waitReply
+	callTool(t, b.ctx, mcpSession(t, b.connect(t), nil), "wait", map[string]any{"id": runID}, &reply)
+	if reply.Message != "using [redacted:model]" || !reflect.DeepEqual(reply.Redacted, map[string]int{"model": 1}) {
+		t.Fatalf("wait %#v, want the working line with its redaction counted", reply)
+	}
+}
+
 func TestMCPWaitAndStatusReportAnUnclaimedRunPastItsStartBy(t *testing.T) {
 	b := newBus(t)
 	ctx := b.ctx

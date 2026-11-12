@@ -49,9 +49,10 @@ func ReadWorkingFile(root, name string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A hard link reaches a file outside the run; a file renamed into place has one link.
-	if stat, ok := info.Sys().(*syscall.Stat_t); !info.Mode().IsRegular() || !ok || stat.Nlink != 1 {
-		return nil, fmt.Errorf("working file %s is not a regular file with one link", name)
+	// A hard link reaches a file outside the run. A file renamed into place has one link, and none once a later rename
+	// replaces it after the open.
+	if stat, ok := info.Sys().(*syscall.Stat_t); !info.Mode().IsRegular() || !ok || stat.Nlink > 1 {
+		return nil, fmt.Errorf("working file %s is not a regular file with at most one link", name)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, MaxWorking+1))
 	if err != nil || len(data) > MaxWorking {

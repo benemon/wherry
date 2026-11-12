@@ -218,9 +218,10 @@ type Plugin interface {
 	Metrics(ctx context.Context) ([]Sample, error)
 	// ReadWorking reads WorkingFile beneath a running job's output directory, which its agent may replace with a line
 	// naming its current step. It reads at most MaxWorking+1 bytes whatever the file's size, and returns nothing for a
-	// missing file or one over MaxWorking bytes. It opens the file within a root the agent cannot replace, refusing a
-	// symbolic link in any component beneath it and anything but a regular file, without blocking on the open, as
-	// ReadWorkingFile does. The core calls it with Follow's handle, at most once at a time per run.
+	// missing file or one over MaxWorking bytes. It reads with no more access than the agent: inside the agent's own task,
+	// or within a root holding nothing the agent cannot read, refusing a symbolic link in any component beneath it and
+	// anything but a regular file, without blocking on the open, as ReadWorkingFile does. The core calls it with Follow's
+	// handle, at most once at a time per run; a call can race the job's end.
 	ReadWorking(ctx context.Context, handle Handle) ([]byte, error)
 }
 

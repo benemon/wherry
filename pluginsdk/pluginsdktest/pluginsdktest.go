@@ -2,6 +2,7 @@
 package pluginsdktest
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -212,19 +213,19 @@ func poll(ctx context.Context, a pluginsdk.Plugin, runID string, want pluginsdk.
 	}
 }
 
-// readWorking repeats ReadWorking on a running job until it returns Working and a newline, or an error, or
-// PollDeadline passes.
+// readWorking repeats ReadWorking on a running job until it returns Working and a newline, or PollDeadline passes,
+// returning the last error then: the receiver retries a failed read, so a transient one does not fail the suite.
 func readWorking(ctx context.Context, a pluginsdk.Plugin, handle pluginsdk.Handle) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, PollDeadline)
 	defer cancel()
 	for {
 		data, err := a.ReadWorking(ctx, handle)
-		if err != nil || string(data) == Working+"\n" {
-			return data, err
+		if err == nil && string(data) == Working+"\n" {
+			return data, nil
 		}
 		select {
 		case <-ctx.Done():
-			return data, ctx.Err()
+			return data, cmp.Or(err, ctx.Err())
 		case <-time.After(pollInterval):
 		}
 	}

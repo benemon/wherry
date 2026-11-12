@@ -105,18 +105,52 @@ func TestWorkingIsRedactedWhole(t *testing.T) {
 	}
 }
 
-// A credential that normalising forms, here one with a space the file holds as a tab, is redacted, and a line near the
-// wire bound still signs: redacting after normalising could otherwise grow it past the bound.
+// An adopter redacts an earlier attempt's line with its own values: a line that grows past the wire bound is cut, not
+// signed over it (which would end the receiver, and every adopter after it).
+func TestWorkingAnAdopterCutsALineRedactionLengthens(t *testing.T) {
+	const short = "short-value-9"
+	f := newFixture(t, []string{completedWith("done")})
+	f.plugin.job = pluginsdk.JobRunning
+	f.envelope = sealing(map[string][]byte{credentialName: []byte(short)})
+	record := f.submit(t, f.host, nil)
+	hold := make(chan struct{})
+	f.plugin.followHold = hold
+	earlier := taskStatus(wire.TaskStateWorking, strings.Repeat("x", wire.MaxWorkingText-len(short))+short)
+	f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
+	f.publishStatus(t, record, testReceiver, f.receiver.signing, "started", wire.TaskStateWorking, nil)
+	f.publishStatus(t, record, testReceiver, f.receiver.signing, "working", wire.TaskStateWorking, func(status *wire.RunStatus) {
+		status.StatusUpdate.Status = earlier
+	})
+	done := f.executing(t, f.ctx, record, 2)
+	time.Sleep(5 * renewInterval)
+	close(hold)
+	if status := <-done; status != kgo.AckAccept {
+		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+	}
+	for _, status := range f.eventStatuses(t) {
+		if status.Wherry.Attempt != 2 || status.Wherry.Kind != "working" {
+			continue
+		}
+		if text := workingText(status); len(text) > wire.MaxWorkingText || strings.Contains(text, short) {
+			t.Fatalf("republished %d bytes %q", len(text), text)
+		}
+	}
+}
+
+// A credential that normalising forms, one with a space the file holds as a tab, and one that normalising would hide,
+// one holding a tab, are both redacted, and a line near the wire bound still signs.
 func TestWorkingRedactsWhatNormalisingForms(t *testing.T) {
 	f := workingFixture(t)
-	f.envelope = sealing(map[string][]byte{credentialName: []byte("pass word secret")})
-	readsInTurn(f, []byte(strings.Repeat("x", 495)+"pass\tword secret"))
-	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
+	f.envelope = sealing(map[string][]byte{credentialName: []byte("pass word secret"), "deploy-key": []byte("tok-id\ttok-secret-value")})
+	readsInTurn(f, []byte(strings.Repeat("x", 495)+"pass\tword secret"), []byte("using tok-id\ttok-secret-value now"))
+	if status := f.execute(t, f.submit(t, f.host, withDeployKey), 1); status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
 	texts := workingTexts(f.feedStatuses(t))
-	if len(texts) != 1 || strings.Contains(texts[0], "word secret") || len(texts[0]) > wire.MaxWorkingText {
-		t.Fatalf("working %q, want one line within the bound without the credential", texts)
+	if len(texts) != 2 || slices.ContainsFunc(texts, func(text string) bool {
+		return strings.Contains(text, "word secret") || strings.Contains(text, "tok-secret") || len(text) > wire.MaxWorkingText
+	}) {
+		t.Fatalf("working %q, want two lines within the bound without the credentials", texts)
 	}
 }
 
@@ -150,6 +184,35 @@ func TestWorkingPublishesAtMostOncePerFloor(t *testing.T) {
 
 // A read that hangs runs off the run's loop: a held cancel ends the run at its next check, and the run's end cancels
 // the read.
+// A read that outlasts several ticks is the only one in flight: a slow plugin gets no second call until it answers.
+func TestWorkingOneReadAtATime(t *testing.T) {
+	f := workingFixture(t)
+	setDuration(t, &workingTimeout, time.Minute)
+	hold := make(chan struct{})
+	f.plugin.followHold = hold
+	release := make(chan struct{})
+	f.plugin.readWorking = func(ctx context.Context) ([]byte, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return []byte("step"), nil
+	}
+	done := f.executing(t, f.ctx, f.submit(t, f.host, nil), 1)
+	time.Sleep(10 * renewInterval)
+	f.plugin.mu.Lock()
+	reads := f.plugin.workingReads
+	f.plugin.mu.Unlock()
+	close(release)
+	close(hold)
+	if status := <-done; status != kgo.AckAccept {
+		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+	}
+	if reads != 1 {
+		t.Fatalf("%d reads started while the first was in flight, want 1", reads)
+	}
+}
+
 func TestWorkingHungReadDoesNotDelayACancel(t *testing.T) {
 	f := workingFixture(t)
 	setDuration(t, &workingTimeout, time.Minute)

@@ -435,7 +435,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "wait",
 		Description: fmt.Sprintf("Wait up to %d seconds for a run to finish. Returns the result, a failed, canceled or rejected state "+
-			"with its message, or {id, state, message, retry_after} while the run is unfinished, message the latest status message, "+
+			"with its message, or {id, state, message, redacted, retry_after} while the run is unfinished, message the latest status message, "+
 			"such as the step the agent last reported: call wait again. "+
 			"A run whose task_started_by passed with no receiver claiming it returns its state and a message saying so, without retry_after. "+
 			"A finished run's outputs are verified and written under this host's state directory; outputs lists their paths and hashes. "+

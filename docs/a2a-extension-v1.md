@@ -470,9 +470,11 @@ base64 does. The fixed texts are:
 - canceled: `canceled by user`.
 
 A status of kind `working` carries the agent's own line, not a fixed text:
-the first line of its working file once the whole file is redacted, with
-each URL replaced by `[redacted-url]` and each control character by a space,
-of at most 512 bytes. A status of kind `placing` or `working` has state
+the first line of its working file, redacted whole before and after each URL
+is replaced by `[redacted-url]`, invalid UTF-8 by U+FFFD, a carriage return
+by a line break and each other control character by a space, of at most 512
+bytes. An adopter republishes the run's last line with its original time, so
+a run's latest update can be earlier than its `started` status. A status of kind `placing` or `working` has state
 `TASK_STATE_WORKING`, one text part and no `log_offset`, and fails validation
 otherwise; a status of kind `working` also fails it when its text, or its
 `raw` part's bytes, are over 512 bytes. A reader older than this kind rejects

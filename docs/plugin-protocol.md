@@ -126,8 +126,8 @@ one of two things:
 
 - It reads the file inside the agent's own task, with the agent's
   privileges, so the read reaches nothing the agent could not already print.
-- It opens the file itself within a per-run root the agent cannot replace,
-  such as the run's directory, refuses a symbolic link in any component
+- It opens the file itself within a per-run root the agent cannot replace and
+  that holds nothing the agent cannot read, such as the run's directory, refuses a symbolic link in any component
   beneath that root, opens without blocking so a FIFO cannot hold the call,
   and refuses anything that is not a regular file with one link once opened.
   `pluginsdk.ReadWorkingFile` does this on a local file system.
@@ -136,9 +136,9 @@ Either way, it reads at most 1025 bytes whatever the file's size, returns
 nothing for a file over 1 KiB, never a cut prefix, and returns nothing, and
 no error, when the file or a directory above it is missing. A platform API
 that checks a path and then opens it again by name does not qualify: an
-agent that swaps the file between the two reaches outside its run. A plugin returns a failed read as a `pluginsdk.Error`,
-and counts it in `wherry_plugin_platform_errors_total` as for its other
-calls. The receiver logs a failed read once for each class.
+agent that swaps the file between the two reaches outside its run. A plugin
+returns a failed read as a `pluginsdk.Error`, and counts it in
+`wherry_plugin_platform_errors_total` as for its other calls. The receiver logs a failed read once for each class.
 
 ## Readiness
 

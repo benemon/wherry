@@ -1331,8 +1331,9 @@ type workingRead struct {
 
 // workingLine is the agent's working file as its working status carries it: nothing for a file over
 // pluginsdk.MaxWorking bytes, and otherwise its first line, without URLs or control characters, once the whole file is
-// redacted, cut at wire.MaxWorkingText bytes. The file is normalised before it is redacted, so normalising cannot form a
-// credential redaction did not see, and redacting the whole file redacts a value that spans lines or the cut.
+// redacted, cut at wire.MaxWorkingText bytes. The whole file is redacted before normalising, which would hide a value
+// holding a control character or invalid UTF-8, and again after, which can form a value; redacting it whole redacts a
+// value that spans lines or the cut.
 func (run *activeRun) workingLine(data []byte) string {
 	if len(data) > pluginsdk.MaxWorking {
 		return ""
@@ -1345,7 +1346,7 @@ func (run *activeRun) workingLine(data []byte) string {
 			return ' '
 		}
 		return r
-	}, strings.ToValidUTF8(string(data), "\uFFFD"))
+	}, strings.ToValidUTF8(run.redactText(string(data)), "\uFFFD"))
 	line, _, _ := strings.Cut(run.redactText(reasonURL.ReplaceAllString(text, "[redacted-url]")), "\n")
 	return wire.CutUTF8(strings.TrimSpace(line), wire.MaxWorkingText)
 }
@@ -2372,7 +2373,18 @@ func (run *activeRun) release(ctx context.Context) {
 }
 
 func (run *activeRun) status(kind string, status wire.TaskStatus, offset *int64, metadata jsontext.Value) *wire.RunStatus {
-	value := run.receiver.status(run.task, run.taskHash, run.attempt, kind, run.redactStatus(status), offset)
+	status = run.redactStatus(status)
+	if kind == "working" && status.Message != nil {
+		// Redacting again can lengthen the agent's line, as when an adopter redacts an earlier attempt's line with other
+		// values; it is cut, not signed over the wire bound.
+		for i, part := range status.Message.Parts {
+			status.Message.Parts[i].Text = wire.CutUTF8(part.Text, wire.MaxWorkingText)
+			if part.Raw != nil {
+				status.Message.Parts[i].Raw = wire.StdBytes(wire.CutUTF8(string(part.Raw), wire.MaxWorkingText))
+			}
+		}
+	}
+	value := run.receiver.status(run.task, run.taskHash, run.attempt, kind, status, offset)
 	value.StatusUpdate.Metadata = metadata
 	return value
 }
