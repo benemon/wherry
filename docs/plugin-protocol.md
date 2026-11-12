@@ -126,7 +126,7 @@ The agent controls the file, so `ReadWorking` reads it defensively:
   the run's directory, and refuses a symbolic link in any component beneath
   that root.
 - It opens the file without blocking, so a FIFO cannot hold the call, and
-  refuses anything that is not a regular file once opened.
+  refuses anything that is not a regular file with one link once opened.
 - It reads at most 1025 bytes whatever the file's size, and returns nothing
   for a file over 1 KiB, never a cut prefix.
 - It returns nothing, and no error, when the file or a directory above it is

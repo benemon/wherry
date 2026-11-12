@@ -105,6 +105,21 @@ func TestWorkingIsRedactedWhole(t *testing.T) {
 	}
 }
 
+// A credential that normalising forms, here one with a space the file holds as a tab, is redacted, and a line near the
+// wire bound still signs: redacting after normalising could otherwise grow it past the bound.
+func TestWorkingRedactsWhatNormalisingForms(t *testing.T) {
+	f := workingFixture(t)
+	f.envelope = sealing(map[string][]byte{credentialName: []byte("pass word secret")})
+	readsInTurn(f, []byte(strings.Repeat("x", 495)+"pass\tword secret"))
+	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
+		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+	}
+	texts := workingTexts(f.feedStatuses(t))
+	if len(texts) != 1 || strings.Contains(texts[0], "word secret") || len(texts[0]) > wire.MaxWorkingText {
+		t.Fatalf("working %q, want one line within the bound without the credential", texts)
+	}
+}
+
 // After a publish, no read runs within workingFloor, so a later change publishes nothing in it.
 func TestWorkingPublishesAtMostOncePerFloor(t *testing.T) {
 	f := newFixture(t, resultStream)

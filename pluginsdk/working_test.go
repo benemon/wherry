@@ -94,6 +94,7 @@ func TestReadWorkingFileRefusesLinksAndEscapes(t *testing.T) {
 	}
 	for name, plant := range map[string]func(root string) error{
 		"final link outside": func(root string) error { return os.Symlink(outside, filepath.Join(root, workingName)) },
+		"hard link outside":  func(root string) error { return os.Link(outside, filepath.Join(root, workingName)) },
 		"final link inside": func(root string) error {
 			if err := os.WriteFile(filepath.Join(root, "outputs", "other"), []byte("inside\n"), 0o600); err != nil {
 				return err

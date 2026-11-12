@@ -1330,22 +1330,24 @@ type workingRead struct {
 }
 
 // workingLine is the agent's working file as its working status carries it: nothing for a file over
-// pluginsdk.MaxWorking bytes, and otherwise its first line once the whole file is redacted, without URLs or control
-// characters, cut at wire.MaxWorkingText bytes. Redacting the whole file first redacts a value that spans lines or the
-// cut.
+// pluginsdk.MaxWorking bytes, and otherwise its first line, without URLs or control characters, once the whole file is
+// redacted, cut at wire.MaxWorkingText bytes. The file is normalised before it is redacted, so normalising cannot form a
+// credential redaction did not see, and redacting the whole file redacts a value that spans lines or the cut.
 func (run *activeRun) workingLine(data []byte) string {
 	if len(data) > pluginsdk.MaxWorking {
 		return ""
 	}
-	line, _, _ := strings.Cut(run.redactText(string(data)), "\n")
-	line = reasonURL.ReplaceAllString(strings.ToValidUTF8(line, "\uFFFD"), "[redacted-url]")
-	line = strings.TrimSpace(strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+	text := strings.Map(func(r rune) rune {
+		switch {
+		case r == '\r':
+			return '\n'
+		case r != '\n' && unicode.IsControl(r):
 			return ' '
 		}
 		return r
-	}, line))
-	return wire.CutUTF8(line, wire.MaxWorkingText)
+	}, strings.ToValidUTF8(string(data), "\uFFFD"))
+	line, _, _ := strings.Cut(run.redactText(reasonURL.ReplaceAllString(text, "[redacted-url]")), "\n")
+	return wire.CutUTF8(strings.TrimSpace(line), wire.MaxWorkingText)
 }
 
 // lastWorking is the last of statuses that is a working status of the run's submission hash, nil without one.

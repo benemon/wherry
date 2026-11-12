@@ -457,7 +457,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 			}
 			return nil, waitReply{
 				ID: input.ID, State: string(status.Status.State), Model: status.Model, Message: cmp.Or(statusText(status.Status), status.Unclaimed),
-				RetryAfter: retryAfter, Skipped: status.Skipped,
+				Redacted: status.Redacted, RetryAfter: retryAfter, Skipped: status.Skipped,
 			}, nil
 		}
 		if err != nil {
