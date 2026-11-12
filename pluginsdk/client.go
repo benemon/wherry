@@ -481,3 +481,15 @@ func (r *remote) Metrics(ctx context.Context) ([]Sample, error) {
 	}
 	return samples, nil
 }
+
+func (r *remote) ReadWorking(ctx context.Context, handle Handle) ([]byte, error) {
+	rpc, err := r.plugin.link()
+	if err != nil {
+		return nil, err
+	}
+	resp, err := rpc.ReadWorking(ctx, &pluginv1.ReadWorkingRequest{Profile: r.name, Handle: handleMessage(handle)})
+	if err != nil {
+		return nil, callError(ctx, err)
+	}
+	return resp.GetData(), nil
+}

@@ -1,4 +1,4 @@
-// The plugin protocol, version 11: the receiver core calls a plugin's profiles
+// The plugin protocol, version 12: the receiver core calls a plugin's profiles
 // over this service, and every request names its profile.
 syntax = "proto3";
 
@@ -22,6 +22,8 @@ service Plugin {
   rpc Sweep(SweepRequest) returns (SweepResponse);
   // Metrics reports the profile's samples of the families the core declares for plugins.
   rpc Metrics(MetricsRequest) returns (MetricsResponse);
+  // ReadWorking reads a running job's working file, the agent's report of its current step.
+  rpc ReadWorking(ReadWorkingRequest) returns (ReadWorkingResponse);
 }
 
 // Outcome numbers match pluginsdk.Outcome.
@@ -236,6 +238,16 @@ message MetricsRequest {
 
 message MetricsResponse {
   repeated Sample samples = 1;
+}
+
+message ReadWorkingRequest {
+  string profile = 1;
+  Handle handle = 2;
+}
+
+// ReadWorkingResponse carries the working file's content, empty when the file is missing, empty or over 1 KiB.
+message ReadWorkingResponse {
+  bytes data = 1;
 }
 
 // Kind numbers match pluginsdk.Kind.

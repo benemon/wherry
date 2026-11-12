@@ -171,6 +171,18 @@ func (p decidesOnce) Lookup(ctx context.Context, runID string) (pluginsdk.Job, e
 	return pluginsdk.Job{}, ctx.Err()
 }
 
+// readsNothing reports no working file.
+type readsNothing struct{ pluginsdk.Plugin }
+
+func (readsNothing) ReadWorking(context.Context, pluginsdk.Handle) ([]byte, error) { return nil, nil }
+
+// readsStale reports the working line whatever the job's state.
+type readsStale struct{ pluginsdk.Plugin }
+
+func (readsStale) ReadWorking(context.Context, pluginsdk.Handle) ([]byte, error) {
+	return []byte(pluginsdktest.Working + "\n"), nil
+}
+
 // bounded is the subtest a blocking Lookup fails, which must fail no sooner than at and before before.
 type bounded struct {
 	subtest    string
@@ -186,6 +198,8 @@ var broken = map[string]struct {
 	"forgets":        {func(p pluginsdk.Plugin) pluginsdk.Plugin { return forgets{p} }, "after the end = {Started:false", nil},
 	"drifts":         {func(p pluginsdk.Plugin) pluginsdk.Plugin { return drifts{p, new(int)} }, "second lookup while running", nil},
 	"pendingForever": {func(p pluginsdk.Plugin) pluginsdk.Plugin { return pendingForever{p} }, "lookup while running = {State:4", nil},
+	"readsNothing":   {func(p pluginsdk.Plugin) pluginsdk.Plugin { return readsNothing{p} }, `working file of the running job = "", context deadline exceeded`, nil},
+	"readsStale":     {func(p pluginsdk.Plugin) pluginsdk.Plugin { return readsStale{p} }, "working file of a purged job", nil},
 	// Its Lookup blocks after three delays of the poll, so a deadline per Lookup ends Completes past the bound.
 	"startsNever": {
 		func(p pluginsdk.Plugin) pluginsdk.Plugin { return startsNever{p, new(int)} },

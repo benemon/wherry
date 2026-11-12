@@ -18,6 +18,11 @@ Its releases use `pluginsdk/v*` tags.
 starts and, optionally, one whose job the platform never places and says why.
 Zero `Settings` skip the pending profile. The suite repeats `Lookup` until a
 job runs or never starts, within `pluginsdktest.PollDeadline`, 2 minutes.
+The completing job writes `pluginsdktest.Working` and a newline to
+`.wherry/working` beneath its output directory as it starts, by renaming a
+file over it, and runs for at least 10 seconds. The suite repeats
+`ReadWorking` on the running job until it returns that line, within the same
+deadline, and expects nothing from it once the job is purged.
 
 The factory receives a logger.
 The receiver relays its JSON log lines at their original level.
@@ -27,9 +32,9 @@ The receiver logs your plugin's version at startup.
 
 The receiver and plugin use gRPC over [go-plugin](https://github.com/hashicorp/go-plugin).
 Each start creates a certificate pair for mutual TLS.
-The protocol version is 11.
+The protocol version is 12.
 The receiver refuses other protocol versions and plugins without a TLS certificate.
-A protocol 11 plugin refuses a protocol 10 receiver, so upgrade a receiver and its plugins together.
+A protocol 12 plugin refuses a protocol 11 receiver, so upgrade a receiver and its plugins together.
 Every call names its profile.
 The maximum plugin message size is 64 MiB.
 
@@ -104,6 +109,39 @@ that reported the job running or ended. A plugin's `Follow` may fail at any
 time. The receiver recovers the stream, so a plugin need not. A plugin's
 `Follow` on an ended job reads the rest of the log and returns its
 `Terminal`.
+
+### ReadWorking
+
+The agent may report its current step in `.wherry/working` beneath its
+output directory, `pluginsdk.WorkingFile`, as one line of at most 1 KiB,
+`pluginsdk.MaxWorking` bytes ([Agent contract](configuration-receiver.md#agent-contract)).
+While the job runs, the receiver calls `ReadWorking` with the handle it
+follows, at most once at a time for a run, under a 5-second deadline, and
+publishes the line as a status of kind `working`. The receiver redacts what
+the call returns; the plugin does not.
+
+The agent controls the file, and can change it while the plugin reads it,
+so `ReadWorking` never reads with more access than the agent has. It does
+one of two things:
+
+- It reads the file inside the agent's own task, with the agent's
+  privileges, so the read reaches nothing the agent could not already print.
+- It opens the file itself within a per-run root the agent cannot replace
+  and that holds nothing the agent cannot read, such as the run's directory.
+  It refuses a symbolic link in any component beneath that root, opens
+  without blocking so a FIFO cannot hold the call, and refuses anything that
+  is not a regular file with at most one link once opened.
+  `pluginsdk.ReadWorkingFile` does this on a local file system. A refusal it
+  returns wraps `pluginsdk.ErrRefused`, which a plugin reads as nothing
+  rather than counting as a platform failure.
+
+Either way, it reads at most 1025 bytes whatever the file's size, returns
+nothing for a file over 1 KiB, never a cut prefix, and returns nothing, and
+no error, when the file or a directory above it is missing. A platform API
+that checks a path and then opens it again by name does not qualify: an
+agent that swaps the file between the two reaches outside its run. A plugin
+returns a failed read as a `pluginsdk.Error`, and counts it in
+`wherry_plugin_platform_errors_total` as for its other calls. The receiver logs a failed read once for each class.
 
 ## Readiness
 

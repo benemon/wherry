@@ -364,3 +364,15 @@ func (s *server) Metrics(ctx context.Context, req *pluginv1.MetricsRequest) (*pl
 	}
 	return resp, nil
 }
+
+func (s *server) ReadWorking(ctx context.Context, req *pluginv1.ReadWorkingRequest) (*pluginv1.ReadWorkingResponse, error) {
+	profile, err := s.profile(req.Profile)
+	if err != nil {
+		return nil, err
+	}
+	data, err := profile.ReadWorking(ctx, handleOf(req.Handle))
+	if err != nil {
+		return nil, callStatus(err)
+	}
+	return &pluginv1.ReadWorkingResponse{Data: data}, nil
+}

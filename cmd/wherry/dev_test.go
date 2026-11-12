@@ -939,7 +939,7 @@ func TestAcquirePluginFallsBack(t *testing.T) {
 	}
 
 	// A wrong core protocol is not a plugin protocol to skip.
-	core := pluginRelease(t, "nomad/v0.1.8", []byte("#!/bin/sh\necho '2|11|tcp|127.0.0.1:1|grpc'\nsleep 10\n"), bodies)
+	core := pluginRelease(t, "nomad/v0.1.8", []byte("#!/bin/sh\necho '2|12|tcp|127.0.0.1:1|grpc'\nsleep 10\n"), bodies)
 	bodies[pluginReleases], _ = json.Marshal([]map[string]any{core, releases[3]})
 	fake = fakeHTTP(t, bodies)
 	if _, err := acquirePlugin(context.Background(), t.TempDir(), "wherry-plugin-nomad", nil, io.Discard); err == nil || !strings.HasPrefix(err.Error(), "nomad/v0.1.8 handshake: ") || !strings.Contains(err.Error(), "incompatible core API version with plugin. Plugin version: 2") {
@@ -961,7 +961,7 @@ func TestAcquirePluginFallsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = acquirePlugin(context.Background(), cache, filepath.Join("plugins", "wherry-plugin-nomad"), nil, &progress)
-	if want := "no nomad plugin release speaks plugin protocols [11]; nomad/v0.1.5 and older speak 1 or lower; a plugin release must follow the protocol change"; err == nil || err.Error() != want {
+	if want := "no nomad plugin release speaks plugin protocols [12]; nomad/v0.1.5 and older speak 1 or lower; a plugin release must follow the protocol change"; err == nil || err.Error() != want {
 		t.Fatalf("acquire past an older protocol: %v; want %q", err, want)
 	}
 	if !strings.Contains(progress.String(), "plugin: nomad/v0.3.0 speaks another protocol; trying the next older release\n") {

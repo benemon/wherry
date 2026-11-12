@@ -383,7 +383,8 @@ func TestPreambleNamesFilesAndTheOutcomeContract(t *testing.T) {
 		"Credential environment variables: GH_TOKEN. Never print or copy their values.",
 		"/local/outputs/report.md (required), /local/outputs/notes/extra.txt.",
 		"write an A2A TaskStatus JSON object to /local/outputs/.wherry/outcome.json", `"TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_AUTH_REQUIRED"`,
-		`"role": "ROLE_AGENT"`, `{"data": {"credential": "<name>"}}`, "This run's credentials are deploy-key, github-token, vault-token (not supplied)."} {
+		`"role": "ROLE_AGENT"`, `{"data": {"credential": "<name>"}}`, "This run's credentials are deploy-key, github-token, vault-token (not supplied).",
+		"report your current step in /local/outputs/.wherry/working, creating its directory: write one line of at most 1024 bytes to a temporary file in that directory and rename it over this file. A longer file reports nothing."} {
 		if !strings.Contains(got, want) {
 			t.Errorf("preamble %q lacks %q", got, want)
 		}

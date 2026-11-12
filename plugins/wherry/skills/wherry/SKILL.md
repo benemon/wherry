@@ -167,7 +167,8 @@ seconds and returns one of:
   `not started by task_started_by (<time>): no receiver claimed the task` and
   no `retry_after`: no receiver took the run before its `task_started_by` and
   none will. Check `receivers` for a live one that fits, then `submit` again.
-- `retry_after` with the current `state`: the run has not finished. Wait
+- `retry_after` with the current `state`: the run has not finished. Its
+  `message`, when it has one, is the step the agent last reported. Wait
   that many seconds, or do other work, then call `wait` again.
 
 A run whose pool lost its key before the run started ends
@@ -178,7 +179,10 @@ it followed, the run whose result it returns last. `status` returns the new
 run's ID as `replaced_by`. Use the last run ID for `status`, `events`,
 `logs` and `cancel`. Do not submit the task again yourself.
 
-`status` with the id returns the run's latest state without waiting. Without
+`status` with the id returns the run's latest state without waiting. While
+the run works, its `message` is the step the agent last reported, when it has
+reported one: one line of at most 512 bytes. Read it to see what a run is
+doing rather than paging its `logs`. Without
 an id it lists every run this host can see, latest update first, each with
 its `pool`, `state` and `updated` time; use it to find a run whose
 id you no longer hold. `events` returns the run's status history.

@@ -199,6 +199,9 @@ const MaxOutputs = 256
 // MaxText bounds a result's text and a status's text, once redacted; a longer reply travels as reply chunks.
 const MaxText = 64 << 10
 
+// MaxWorkingText bounds the text of a working status, the agent's report of its current step, once redacted.
+const MaxWorkingText = 512
+
 // MaxJobName bounds a handle's name: a DNS subdomain, over the plugins' longest, wherry-agent-<12 hex>-<run>.service, 97.
 const MaxJobName = 253
 

@@ -65,6 +65,8 @@ type config struct {
 	Placed  string `json:"placed"`
 	// Hang makes Ready stop the process without it exiting, so it answers nothing more, go-plugin's pings included.
 	Hang bool `json:"hang"`
+	// Working is what ReadWorking returns; a kept job reads as working while it runs, and as nothing otherwise.
+	Working string `json:"working"`
 }
 
 type record struct {
@@ -283,6 +285,25 @@ func (f *fake) Sweep(context.Context) error {
 	}
 	return nil
 }
+
+func (f *fake) ReadWorking(_ context.Context, handle pluginsdk.Handle) ([]byte, error) {
+	f.panics("ReadWorking")
+	if !f.config.Jobs {
+		return []byte(f.config.Working), nil
+	}
+	if err := f.lookupHandle("read working", handle); err != nil {
+		return nil, err
+	}
+	f.jobsMu.Lock()
+	defer f.jobsMu.Unlock()
+	if job := f.jobs[string(handle.Data)]; job == nil || job.State != pluginsdk.JobRunning {
+		return nil, nil
+	}
+	return []byte(working + "\n"), nil
+}
+
+// working is the line the conformance suite's completing job reports.
+const working = "conformance working"
 
 // Metrics reports a gauge labelled with the profile's name and a histogram.
 func (f *fake) Metrics(context.Context) ([]pluginsdk.Sample, error) {

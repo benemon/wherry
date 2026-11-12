@@ -117,7 +117,8 @@ The defaults are `10m` and `2h`.
 
 `wait` waits up to 45 seconds, and with a progress token sends a progress
 notification every 5 seconds. While the run is unfinished it returns the
-run's `state` with `retry_after`. For a run whose `task_started_by` passes
+run's `state` with `retry_after`, and the `message` `status` gives, such as
+the step the agent last reported. For a run whose `task_started_by` passes
 with no status from a receiver, it returns at once with `state`
 `TASK_STATE_SUBMITTED`, the `message` `status` gives and no `retry_after`,
 and writes nothing.
@@ -133,7 +134,7 @@ transcript; `logs` pages it.
 | `state` | the run's state |
 | `model` | the run's placement's model, when it has one |
 | `retry_after` | 5, while the run is unfinished |
-| `message` | the status message's parts; for a [reply](a2a-extension-v1.md#the-reply) over 64 KiB, its first 64 KiB |
+| `message` | the status message's parts; for a [reply](a2a-extension-v1.md#the-reply) over 64 KiB, its first 64 KiB; while the run is unfinished, its latest status message |
 | `reply` | for a reply over 64 KiB, `{path, sha256, size, cut}` of `reply.txt`, which `wait` writes among the run's outputs, with `cut` set when the reply was longer than the pool's `reply_limit`; `{rejected}` with the reason when the reply's chunks do not verify; absent for a reply within 64 KiB |
 | `artifacts` | the result's: `result`, then a [reference](a2a-extension-v1.md#reference-artifacts) for each returned output, the reply over 64 KiB and the transcript; each is `{artifact_id, parts}`, and each part has one of `text`, `data`, `url` or `raw_bytes` (the size of a binary part, which is not included), with `media_type` |
 | `outputs` | `{name, path, sha256, size}` for each output written, S3 outputs included |
