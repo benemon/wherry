@@ -1414,8 +1414,9 @@ A run this host submitted that ends with the wherry event `key-lost` before
 its `task_started_by` never started: its pool key was lost
 ([Lost pool keys](concepts.md#lost-pool-keys)). `wait` resubmits it under a
 new run ID, or produces the replacement this host already stored, and
-follows the replacement to its outcome, through every later replacement. It
-prints one line on standard error per replacement:
+follows the replacement to its outcome, through every later replacement. A
+run cancelled before its resubmission is not resubmitted. It prints one line
+on standard error per replacement:
 
 ```
 run <id> lost its pool key before it started; resubmitted as run <id>
