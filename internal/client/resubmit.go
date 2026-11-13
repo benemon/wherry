@@ -153,6 +153,10 @@ func (h *Host) resubmit(ctx context.Context, runID string, lost bool) (string, e
 			return local.Replacement, nil
 		}
 	}
+	// A cancel recorded on the run is not carried to a replacement.
+	if local.CancelRequestedMS != 0 {
+		return "", nil
+	}
 	now := time.Now()
 	if !now.Before(wire.PastBound(local.TaskStartedBy)) {
 		return "", nil
