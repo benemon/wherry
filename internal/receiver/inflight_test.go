@@ -1,17 +1,14 @@
 package receiver
 
 import (
-	"encoding/json/v2"
 	"errors"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
-	jose "github.com/go-jose/go-jose/v4"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -21,16 +18,7 @@ func (f fixture) advertised(t *testing.T) wire.Advertisement {
 	if err := f.receiver.advertise(f.ctx); err != nil {
 		t.Fatal(err)
 	}
-	records := f.records(t, operator.PoolReceiversTopic(testPool))
-	parsed, err := jose.ParseSignedCompact(string(records[len(records)-1].Value), []jose.SignatureAlgorithm{jose.EdDSA})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var ad wire.Advertisement
-	if err := json.Unmarshal(parsed.UnsafePayloadWithoutVerification(), &ad); err != nil {
-		t.Fatal(err)
-	}
-	return ad
+	return f.advertisedOffers(t)
 }
 
 // offerUse maps each offer of ad to its in_flight and replicas.
