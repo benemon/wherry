@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	json "encoding/json/v2"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -361,5 +362,118 @@ func TestACancelRacingAResubmissionCancelsTheReplacement(t *testing.T) {
 	}
 	if local, err := f.host.localRun(replacement); err != nil || local.CancelRequestedMS == 0 || !local.Produced {
 		t.Fatalf("replacement record %#v, %v; want it produced and its cancel recorded", local, err)
+	}
+}
+
+// A cancel recorded before a run that ended key-lost is resubmitted stops the resubmission, so no replacement runs the
+// cancelled task.
+func TestACancelBeforeAResubmissionStopsIt(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	receiver.keyLost(t, f.ctx, task)
+	if result, err := f.host.Cancel(f.ctx, runID); err != nil || result.RunID != runID {
+		t.Fatalf("cancel %#v, %v", result, err)
+	}
+	if replacement, err := f.host.resubmit(f.ctx, runID, true); err != nil || replacement != "" {
+		t.Fatalf("resubmit = %q, %v; want no replacement of a cancelled run", replacement, err)
+	}
+	if status, err := f.host.Status(f.ctx, runID); err != nil || status.Replacement != "" {
+		t.Fatalf("status %#v, %v; want no replacement", status, err)
+	}
+	if local, err := f.host.localRun(runID); err != nil || local.Replacement != "" {
+		t.Fatalf("record %#v, %v; want no replacement recorded", local, err)
+	}
+	if replacements := f.replacements(t, "pool-a", runID); len(replacements) != 0 {
+		t.Fatalf("%d replacements produced, want none", len(replacements))
+	}
+}
+
+// A cancel issued once the replacement's record is written, while the resubmission produces it, waits for the run it
+// replaces, so neither write loses the other's: the replacement stays produced and keeps its cancel.
+func TestACancelDuringAReplacementsProduceKeepsBoth(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	receiver.keyLost(t, f.ctx, task)
+	produce := produceReplacement
+	cancelled := make(chan error, 1)
+	produceReplacement = func(ctx context.Context, h *Host, topic string, binding wire.SubmissionBinding, encoded []byte) error {
+		go func() {
+			_, err := h.Cancel(ctx, runID)
+			cancelled <- err
+		}()
+		// A cancel holding only the replacement's lock would finish here, writing the record before it is produced.
+		select {
+		case err := <-cancelled:
+			cancelled <- err
+		case <-time.After(time.Second):
+		}
+		return produce(ctx, h, topic, binding, encoded)
+	}
+	t.Cleanup(func() { produceReplacement = produce })
+	replacement, err := f.host.resubmit(f.ctx, runID, true)
+	if err != nil || replacement == "" {
+		t.Fatalf("resubmit = %q, %v", replacement, err)
+	}
+	if err := <-cancelled; err != nil {
+		t.Fatal(err)
+	}
+	if local, err := f.host.localRun(replacement); err != nil || !local.Produced || local.CancelRequestedMS == 0 {
+		t.Fatalf("replacement record %#v, %v; want it produced and its cancel recorded", local, err)
+	}
+	if replacements := f.replacements(t, "pool-a", runID); len(replacements) != 1 {
+		t.Fatalf("%d replacements produced, want one", len(replacements))
+	}
+}
+
+// When the advertisements cannot be read, status, the run list and wait past task_started_by still answer, without a
+// reason; the run list reads them only for a run that waits.
+func TestAQueuedRunsStatusWithoutAdvertisements(t *testing.T) {
+	f := newFixture(t)
+	f.admitted(t)
+	reads := 0
+	read := liveAds
+	liveAds = func(context.Context, *Host, view) (map[string]wire.Advertisement, error) {
+		reads++
+		return nil, errors.New("receivers topic unreadable")
+	}
+	t.Cleanup(func() { liveAds = read })
+	if runs, err := f.host.Runs(f.ctx); err != nil || len(runs.Runs) != 1 || reads != 0 {
+		t.Fatalf("runs %#v, %v after %d reads; want the claimed run without reading advertisements", runs, err, reads)
+	}
+	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(2 * time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := submitted.RunID
+	if status, err := f.host.Status(f.ctx, runID); err != nil || status.Status.State != wire.TaskStateSubmitted || status.Waiting != "" {
+		t.Fatalf("status %#v, %v; want it submitted without a reason", status, err)
+	}
+	if runs, err := f.host.Runs(f.ctx); err != nil || len(runs.Runs) != 2 || reads != 2 {
+		t.Fatalf("runs %#v, %v after %d reads; want both runs", runs, err, reads)
+	}
+	awaited, err := f.host.Await(f.ctx, runID, 20*time.Second)
+	if err != nil || !strings.HasSuffix(awaited.Unclaimed, ": no receiver claimed the task") {
+		t.Fatalf("await %#v, %v; want the unclaimed text without a reason", awaited, err)
+	}
+}
+
+// LastStatus reads the last run of a resubmission chain, which shows the waiting reason and the pending cancel.
+func TestLastStatusFollowsTheChain(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	receiver.keyLost(t, f.ctx, task)
+	replacement, err := f.host.resubmit(f.ctx, runID, true)
+	if err != nil || replacement == "" {
+		t.Fatalf("resubmit = %q, %v", replacement, err)
+	}
+	if _, err := f.host.Cancel(f.ctx, runID); err != nil {
+		t.Fatal(err)
+	}
+	status, err := f.host.LastStatus(f.ctx, runID)
+	if err != nil || status.RunID != replacement || status.Waiting == "" || !strings.HasPrefix(status.CancelRequested, "cancel requested ") {
+		t.Fatalf("last status %#v, %v; want the replacement %s's reason and pending cancel", status, err, replacement)
 	}
 }
