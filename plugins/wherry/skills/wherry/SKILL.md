@@ -180,7 +180,7 @@ seconds and returns one of:
   claiming (<gated>)`, `queued: pool <pool> is suspended`,
   `queued: <profile> on <receiver> advertises room` (a claim is due), or
   `no live profile offers the run's signature`. It is worked out from
-  advertisements up to about 30 seconds old. A queued run is not broken:
+  advertisements up to 120 seconds old. A queued run is not broken:
   wait that many seconds, or do other work, then call `wait` again.
 - `cancel requested <time>; applies when a receiver claims the task` in the
   `message` after `cancel`: the cancel is published and takes effect when a

@@ -1314,7 +1314,8 @@ reads the run. It does not fail the submission.
 Publishes a signed cancel of the run to its pool's events and prints
 `run_id=<id> cancel=requested`. For a run this host resubmitted after it
 lost its pool key, the cancel goes to the last replacement, and `run_id` names
-it.
+it. A run cancelled after it lost its pool key, before this host resubmitted
+it, is not resubmitted.
 
 A receiver applies the cancel when it holds the run or claims it. Until a
 receiver reports a status of the run, `status` and `wait` show
@@ -1406,7 +1407,8 @@ on standard error any pending cancel.
 
 When `--timeout` passes before a receiver reports a status of a run this host
 submitted, `wait` prints the waiting reason, and any pending cancel, on
-standard error before it exits with status 6.
+standard error before it exits with status 6. For a resubmitted run they are
+the last replacement's, the run `cancel` names.
 
 A run this host submitted that ends with the wherry event `key-lost` before
 its `task_started_by` never started: its pool key was lost
@@ -1485,8 +1487,9 @@ state. It fails when the run is not found or the read fails.
 For a run this host submitted that no receiver has reported a status of, the
 host says why it waits, from its record of the run's pool and signature topic
 and the live advertisements of the pool's receivers. It reads them at each
-call and stores nothing, so the reason is as of the call, and a receiver
-advertises every 30 seconds, so the numbers can be that old. The reason is
+call and stores nothing, so the reason is as of the call. A receiver
+advertises every 30 seconds and its advertisement counts as live for 120
+seconds, so the numbers can be up to 120 seconds old. The reason is
 the first of:
 
 | Reason | When |

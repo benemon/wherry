@@ -132,7 +132,8 @@ The defaults are `10m` and `2h`.
 `wait` waits up to 45 seconds, and with a progress token sends a progress
 notification every 5 seconds. While the run is unfinished it returns the
 run's `state` with `retry_after`, and the `message` `status` gives, such as
-the step the agent last reported. For a run whose `task_started_by` passes
+the step the agent last reported; for a resubmitted run, those of the last
+replacement, the run `cancel` names. For a run whose `task_started_by` passes
 with no status from a receiver, it returns at once with `state`
 `TASK_STATE_SUBMITTED`, the `message` `status` gives and no `retry_after`,
 and writes nothing.
