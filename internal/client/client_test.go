@@ -777,16 +777,16 @@ func TestSubmitIgnoresStaleOrUnauthorisedAdvertisements(t *testing.T) {
 func TestSubmitChoosesPoolOfMostSpareMember(t *testing.T) {
 	f := newFixture(t)
 	f.pool(t, "pool-b")
-	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity, ad.InFlight = 4, 3 })
-	f.addReceiver(t, "receiver-b", "pool-b").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity, ad.InFlight = 4, 1 })
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].Replicas, ad.Offers[0].InFlight = 4, 3 })
+	f.addReceiver(t, "receiver-b", "pool-b").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].Replicas, ad.Offers[0].InFlight = 4, 1 })
 	f.addReceiver(t, "receiver-c", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) {
-		ad.Capacity, ad.InFlight = 9, 0
 		ad.Offers = bothOffers()[1:]
+		ad.Offers[0].Replicas = 9
 	})
 	if result := f.submit(t, defaultSelector()); result.Pool != "pool-b" {
 		t.Fatalf("pool %q, want pool-b through its member with most spare capacity", result.Pool)
 	}
-	f.receivers["receiver-a"].advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity, ad.InFlight = 4, 1 })
+	f.receivers["receiver-a"].advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].Replicas, ad.Offers[0].InFlight = 4, 1 })
 	if result := f.submit(t, defaultSelector()); result.Pool != "pool-a" {
 		t.Fatalf("pool %q, want pool-a through the lower topic on equal spare capacity", result.Pool)
 	}
@@ -1028,11 +1028,11 @@ func TestSubmitCountsOnlyLiveSpareForASignature(t *testing.T) {
 	us := operator.ProfileSettings{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "us"}}
 	config := operator.ReceiverConfig{Receiver: "receiver-b", Pool: "pool-a", Profiles: []operator.ProfileSettings{us}, PluginSHA256: map[string]string{"nomad": strings.Repeat("ab", 32)}}
 	receiver := f.addReceiverConfig(t, config)
-	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity = 2 })
-	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity = 1 })
+	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].Replicas = 2 })
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].Replicas = 1 })
 	// A stale advertisement for eu's signature, with spare enough to win were it live.
 	f.addReceiver(t, "receiver-c", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) {
-		ad.Capacity, ad.AtMS = 50, time.Now().Add(-10*liveness).UnixMilli()
+		ad.Offers[0].Replicas, ad.AtMS = 50, time.Now().Add(-10*liveness).UnixMilli()
 	})
 	want := operator.SignatureTopic("pool-a", "claude", us.Labels)
 	result := f.submit(t, defaultSelector())
@@ -1369,7 +1369,7 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	f.pool(t, "pool-b")
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) {
 		ad.Capacity, ad.InFlight = 3, 1
-		ad.Offers[0].InlineLimit = 49152
+		ad.Offers[0].InlineLimit, ad.Offers[0].Replicas, ad.Offers[0].InFlight = 49152, 2, 1
 	})
 	f.addReceiver(t, "receiver-b", "pool-b").advertise(t, f.ctx, func(ad *wire.Advertisement) {
 		ad.Capacity, ad.InFlight, ad.AtMS = 4, 2, time.Now().Add(-121*time.Second).UnixMilli()
@@ -1397,7 +1397,7 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	}
 	if a := got["receiver-a"]; a.Status != "live" || a.Capacity != 3 || a.InFlight != 1 ||
 		!reflect.DeepEqual(a.Profiles, []Profile{
-			{Name: "lab", Plugin: "nomad", Agent: "claude", InlineLimit: 49152, Credentials: []Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true},
+			{Name: "lab", Plugin: "nomad", Agent: "claude", InlineLimit: 49152, Credentials: []Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true, Replicas: 2, InFlight: 1},
 			{Name: "cloud", Plugin: "aws", Agent: "codex", Credentials: []Credential{{Name: "openai", Env: "OPENAI_API_KEY", Configured: true}, {Name: "github-token", Env: "GH_TOKEN", Description: "GitHub token for gh", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
 		}) {
 		t.Fatalf("live receiver %#v", a)
