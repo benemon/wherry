@@ -1517,7 +1517,7 @@ func largestRecords() ([]feedRecord, error) {
 	for i := range pointers {
 		pointers[i] = wire.Part{Data: pointer, Filename: fmt.Sprintf("%0255d", i), MediaType: wire.ReferenceMediaType}
 	}
-	message := wire.Message{MessageID: "msg-" + strings.Repeat("0", 32), ContextID: run, TaskID: run, Role: wire.RoleUser, Extensions: []string{wire.ExtensionURI}}
+	message := wire.Message{MessageID: "msg-" + strings.Repeat("0", 32), ContextID: run, TaskID: run, Role: wire.RoleUser, Extensions: []string{wire.ExtensionURI}, ReferenceTaskIDs: []string{run}}
 	binding := wire.ReceiverBinding{Receiver: name, Tenant: name, Pool: name, Run: run, Attempt: math.MaxInt64}
 	outputName := strings.Repeat("a/", 255) + "aa"
 	// A result lists at most 256 collected entries and the expected outputs missing among them. An S3 output is an
