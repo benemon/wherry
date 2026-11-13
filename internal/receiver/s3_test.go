@@ -2,18 +2,24 @@ package receiver
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -402,6 +408,57 @@ func TestS3OutputUploadFollowsNoRedirect(t *testing.T) {
 				t.Fatalf("status %+v", status)
 			}
 		})
+	}
+}
+
+// A store that drops the connection ends the output with the failure's class, never the request's URL.
+func TestS3OutputUploadNamesTheTransportFailure(t *testing.T) {
+	s := newStore(t)
+	s.handle = func(w http.ResponseWriter, r *http.Request) {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		conn.Close()
+	}
+	f := s3Fixture(t, s, resultStream, []pluginsdk.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
+	done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
+	<-done
+	if listed := manifest(t, f.lastTask(t)); !slices.Equal(listed.NotReturned, []wire.UnreturnedOutput{{Name: "report.pdf", Size: 6, Reason: "not uploaded: request failed (connection closed)"}}) {
+		t.Fatalf("not returned %+v", listed.NotReturned)
+	}
+	if !strings.Contains(f.logs.String(), "request failed (connection closed)") || strings.Contains(f.logs.String(), s3Signature) {
+		t.Fatalf("logs:\n%s", f.logs.String())
+	}
+}
+
+func TestUploadFailureClasses(t *testing.T) {
+	wrap := func(err error) error {
+		return &url.Error{Op: "Put", URL: "https://store.example/b/k?X-Amz-Signature=" + s3Signature, Err: err}
+	}
+	caused, cancel := context.WithCancelCause(context.Background())
+	cancel(errors.New("receiver stopping"))
+	for _, c := range []struct {
+		want string
+		ctx  context.Context
+		err  error
+	}{
+		{"canceled", context.Background(), wrap(context.Canceled)},
+		{"canceled", caused, wrap(errors.New("receiver stopping"))},
+		{"timeout", context.Background(), wrap(context.DeadlineExceeded)},
+		{"dns", context.Background(), wrap(&net.OpError{Op: "dial", Err: &net.DNSError{Err: "no such host", Name: "store.example"}})},
+		{"tls", context.Background(), wrap(&tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}})},
+		{"tls", context.Background(), wrap(&net.OpError{Op: "remote error", Err: errors.New("tls: certificate required")})},
+		{"connection refused", context.Background(), wrap(&net.OpError{Op: "dial", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)})},
+		{"connection closed", context.Background(), wrap(&net.OpError{Op: "write", Err: os.NewSyscallError("write", syscall.EPIPE)})},
+		{"connection closed", context.Background(), wrap(&net.OpError{Op: "write", Err: net.ErrClosed})},
+		{"connection closed", context.Background(), wrap(io.ErrUnexpectedEOF)},
+		{"other", context.Background(), wrap(errors.New("something else"))},
+	} {
+		if got := uploadFailure(c.ctx, c.err); got != c.want {
+			t.Errorf("uploadFailure(%v) = %q, want %q", c.err, got, c.want)
+		}
 	}
 }
 

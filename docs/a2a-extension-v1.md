@@ -728,7 +728,8 @@ extension reserves its keys ([Encoding](#encoding)):
 | `not uploaded: no upload URL` | the attempt holds no PUT URL for the S3 output |
 | `not uploaded: redirected` | the store answered the PUT with a redirect, which the receiver does not follow |
 | `not uploaded: status <code>` | the store answered the PUT with another status than 200 |
-| `not uploaded: request failed`, `not uploaded: invalid request` | the PUT did not complete, or could not be built |
+| `not uploaded: request failed (<class>)` | the PUT did not complete; `<class>` is `canceled`, `timeout`, `dns`, `tls`, `connection refused`, `connection closed` or `other`, and the error itself, which quotes the URL, is not given; a failure reading the plugin's stream shows here too |
+| `not uploaded: invalid request` | the PUT could not be built |
 
 `outputs`, `s3_outputs` and `not_returned` are present on a result of a run
 whose job ended after its agent started, and absent when they would be

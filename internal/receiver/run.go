@@ -4,6 +4,8 @@ import (
 	"cmp"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +17,7 @@ import (
 	"io/fs"
 	"maps"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -24,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -2198,9 +2202,39 @@ var errRedirect = errors.New("redirected")
 // storageClient uploads S3 outputs. A variable so tests can trust their TLS servers.
 var storageClient = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return errRedirect }}
 
+// uploadFailure names the class of a failed upload's error. The error itself is never shown: its *url.Error quotes the
+// presigned URL, whose query is a credential. A context cancelled with a cause reports the cause, so the request's own
+// context is read first.
+func uploadFailure(ctx context.Context, err error) string {
+	var dns *net.DNSError
+	var unknownAuthority x509.UnknownAuthorityError
+	var invalidCertificate x509.CertificateInvalidError
+	var hostname x509.HostnameError
+	var verification *tls.CertificateVerificationError
+	var op *net.OpError
+	var timeout interface{ Timeout() bool }
+	switch {
+	case errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded),
+		errors.As(err, &timeout) && timeout.Timeout():
+		return "timeout"
+	case errors.As(err, &dns):
+		return "dns"
+	case errors.As(err, &verification), errors.As(err, &unknownAuthority), errors.As(err, &invalidCertificate),
+		errors.As(err, &hostname), errors.As(err, &op) && op.Op == "remote error":
+		return "tls"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "connection refused"
+	case errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.EPIPE), errors.Is(err, net.ErrClosed),
+		errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return "connection closed"
+	}
+	return "other"
+}
+
 // store uploads a streamed output to its presigned PUT URL with the Content-Length of its listing, as it reads it, and
-// hashes the bytes the request sends. Its reason never quotes the URL or a response body, and is no longer than the
-// longest reason a pool's limits allow for.
+// hashes the bytes the request sends. Its reason never quotes the URL or a response body.
 func (run *activeRun) store(ctx context.Context, output pluginsdk.Output) storedOutput {
 	put, ok := run.puts[output.Name]
 	switch {
@@ -2223,7 +2257,7 @@ func (run *activeRun) store(ctx context.Context, output pluginsdk.Output) stored
 	request.ContentLength = output.Size
 	response, err := storageClient.Do(request)
 	if err != nil {
-		reason := "not uploaded: request failed"
+		reason := "not uploaded: request failed (" + uploadFailure(ctx, err) + ")"
 		if errors.Is(err, errRedirect) {
 			reason = "not uploaded: redirected"
 		}
