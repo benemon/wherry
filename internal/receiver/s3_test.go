@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -432,21 +433,31 @@ func TestS3OutputUploadNamesTheTransportFailure(t *testing.T) {
 	}
 }
 
-func TestTransportFailureClasses(t *testing.T) {
+func TestUploadFailureClasses(t *testing.T) {
 	wrap := func(err error) error {
 		return &url.Error{Op: "Put", URL: "https://store.example/b/k?X-Amz-Signature=" + s3Signature, Err: err}
 	}
-	for want, err := range map[string]error{
-		"canceled":           wrap(context.Canceled),
-		"timeout":            wrap(context.DeadlineExceeded),
-		"dns":                wrap(&net.OpError{Op: "dial", Err: &net.DNSError{Err: "no such host", Name: "store.example"}}),
-		"tls":                wrap(x509.UnknownAuthorityError{}),
-		"connection refused": wrap(&net.OpError{Op: "dial", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}),
-		"connection closed":  wrap(io.ErrUnexpectedEOF),
-		"other":              wrap(errors.New("something else")),
+	caused, cancel := context.WithCancelCause(context.Background())
+	cancel(errors.New("receiver stopping"))
+	for _, c := range []struct {
+		want string
+		ctx  context.Context
+		err  error
+	}{
+		{"canceled", context.Background(), wrap(context.Canceled)},
+		{"canceled", caused, wrap(errors.New("receiver stopping"))},
+		{"timeout", context.Background(), wrap(context.DeadlineExceeded)},
+		{"dns", context.Background(), wrap(&net.OpError{Op: "dial", Err: &net.DNSError{Err: "no such host", Name: "store.example"}})},
+		{"tls", context.Background(), wrap(&tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}})},
+		{"tls", context.Background(), wrap(&net.OpError{Op: "remote error", Err: errors.New("tls: certificate required")})},
+		{"connection refused", context.Background(), wrap(&net.OpError{Op: "dial", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)})},
+		{"connection closed", context.Background(), wrap(&net.OpError{Op: "write", Err: os.NewSyscallError("write", syscall.EPIPE)})},
+		{"connection closed", context.Background(), wrap(&net.OpError{Op: "write", Err: net.ErrClosed})},
+		{"connection closed", context.Background(), wrap(io.ErrUnexpectedEOF)},
+		{"other", context.Background(), wrap(errors.New("something else"))},
 	} {
-		if got := transportFailure(err); got != want {
-			t.Errorf("transportFailure(%v) = %q, want %q", err, got, want)
+		if got := uploadFailure(c.ctx, c.err); got != c.want {
+			t.Errorf("uploadFailure(%v) = %q, want %q", c.err, got, c.want)
 		}
 	}
 }
