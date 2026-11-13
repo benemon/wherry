@@ -526,7 +526,7 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 	defer closeClient()
 	result, err := client.Await(ctx, runID, *timeout)
 	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-		if status, statusErr := client.Status(ctx, runID); statusErr == nil {
+		if status, statusErr := client.LastStatus(ctx, runID); statusErr == nil {
 			for _, note := range []string{status.Waiting, status.CancelRequested} {
 				if note != "" {
 					fmt.Fprintln(stderr, note)

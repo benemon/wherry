@@ -407,7 +407,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		Name: "status",
 		Description: "Return the latest verified state of a run without waiting. With id, runs holds that run; " +
 			"without it, runs holds every run this host submitted or the tenant's receivers admitted, latest update first. " +
-			"A run of this host no receiver has claimed says in message why it waits, from the receivers' advertisements, which can be about 30 seconds old.",
+			"A run of this host no receiver has claimed says in message why it waits, from the receivers' advertisements, which can be up to 120 seconds old.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input statusInput) (*mcp.CallToolResult, statusOutput, error) {
 		client, err := connect()
@@ -453,7 +453,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		}
 		result, err := client.Await(ctx, input.ID, waitBound)
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-			status, err := client.Status(ctx, input.ID)
+			status, err := client.LastStatus(ctx, input.ID)
 			if err != nil {
 				return nil, waitReply{}, failure(err)
 			}

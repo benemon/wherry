@@ -589,6 +589,21 @@ func TestMCPStatusSaysWhyAQueuedRunWaits(t *testing.T) {
 	}
 }
 
+// wait of a resubmitted run returns at its bound the last run of the chain's waiting reason and pending cancel.
+func TestMCPWaitOfAResubmittedRunSaysWhyItsReplacementWaits(t *testing.T) {
+	t.Parallel()
+	b := newBus(t)
+	runID, _ := b.resubmitted(t)
+	session := mcpSession(t, b.connect(t), nil)
+	var cancelled cancelOutput
+	callTool(t, b.ctx, session, "cancel", map[string]any{"id": runID}, &cancelled)
+	var reply waitReply
+	callTool(t, b.ctx, session, "wait", map[string]any{"id": runID}, &reply)
+	if reply.State != string(wire.TaskStateSubmitted) || reply.RetryAfter == 0 || !strings.HasPrefix(reply.Message, "queued: lab on receiver-a advertises room; cancel requested ") {
+		t.Fatalf("wait %#v, want the replacement's waiting reason and pending cancel", reply)
+	}
+}
+
 func TestMCPStatusAndEventsShowPlacing(t *testing.T) {
 	b, runID, times := placingRun(t)
 	session := mcpSession(t, b.connect(t), nil)

@@ -649,6 +649,44 @@ func TestWaitTimeoutSaysWhyARunWaits(t *testing.T) {
 	}
 }
 
+// resubmitted submits a run, ends it key-lost and has the host resubmit it, returning the run and its replacement.
+func (b *bus) resubmitted(t *testing.T) (string, string) {
+	t.Helper()
+	submitted, err := b.client.Submit(b.ctx, busclient.SubmitInput{Selector: []wire.Requirement{}, Prompt: "work", EndBy: time.Now().Add(time.Hour), StartBy: time.Now().Add(10 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := submitted.RunID
+	admitted := b.tasks(t, runID)[0]
+	value := &wire.RunStatus{StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: runID, ContextID: runID, Status: now(wire.TaskStateFailed)},
+		Wherry: wire.StatusBinding{ReceiverBinding: b.binding(admitted), EventID: "terminal-1", Kind: "terminal", Event: wire.EventKeyLost, TaskHash: admitted.hash}}
+	b.feed(t, runID, b.echo(t, admitted), b.status(t, admitted, "claimed-1", "claimed", now(wire.TaskStateWorking)), b.sign(t, value))
+	status, err := b.client.Status(b.ctx, runID)
+	if err != nil || status.Replacement == "" {
+		t.Fatalf("status %#v, %v; want the run resubmitted", status, err)
+	}
+	return runID, status.Replacement
+}
+
+// wait of a resubmitted run says at its timeout why the last run of the chain waits and that its cancel is pending.
+func TestWaitTimeoutOfAResubmittedRunSaysWhyItsReplacementWaits(t *testing.T) {
+	b := newBus(t)
+	runID, _ := b.resubmitted(t)
+	var stdout, stderr bytes.Buffer
+	if err := runCancel(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	var exit *exitError
+	if err := runWait(b.ctx, b.client, []string{runID, "--timeout", "1s"}, &stdout, &stderr); !errors.As(err, &exit) || exit.code != timeoutCode {
+		t.Fatalf("wait = %v, want the timeout", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(stderr.String(), "\n"), "\n")
+	if len(lines) != 2 || lines[0] != "queued: lab on receiver-a advertises room" || !strings.HasPrefix(lines[1], "cancel requested ") {
+		t.Fatalf("wait stderr %q, want the replacement's waiting reason and pending cancel", stderr.String())
+	}
+}
+
 func TestStatusOfAnUnknownRunFails(t *testing.T) {
 	b := newBus(t)
 	var stdout, stderr bytes.Buffer
