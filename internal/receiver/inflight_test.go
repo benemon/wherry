@@ -145,3 +145,33 @@ func TestAConfigChangeDrainAdvertisesDraining(t *testing.T) {
 		t.Fatalf("Run returned %v, want ErrConfigChanged", err)
 	}
 }
+
+// A receiver that claims nothing advertises why: its pool suspended, no ready offer, or a run waiting for its platform.
+func TestAGatedReceiverAdvertisesWhy(t *testing.T) {
+	f := newBareFixture(t)
+	r := f.receiver
+	if ad := f.advertised(t); ad.Gated != "" {
+		t.Fatalf("gated %q while claiming, want none", ad.Gated)
+	}
+	r.mu.Lock()
+	r.state.Suspended = map[string]bool{testPool: true}
+	r.mu.Unlock()
+	if ad := f.advertised(t); ad.Gated != wire.GatedSuspended {
+		t.Fatalf("gated %q while the pool is suspended, want %s", ad.Gated, wire.GatedSuspended)
+	}
+	r.mu.Lock()
+	r.state.Suspended = nil
+	r.mu.Unlock()
+	run := &activeRun{receiver: r}
+	run.pending()
+	if ad := f.advertised(t); ad.Gated != wire.GatedPendingRun {
+		t.Fatalf("gated %q while a run waits for its platform, want %s", ad.Gated, wire.GatedPendingRun)
+	}
+	run.placed()
+	f.plugin.mu.Lock()
+	f.plugin.unready = true
+	f.plugin.mu.Unlock()
+	if ad := f.advertised(t); ad.Gated != wire.GatedNoReadyOffer || len(ad.Offers) != 0 {
+		t.Fatalf("advertisement %+v with no ready profile, want gated %s", ad, wire.GatedNoReadyOffer)
+	}
+}
