@@ -693,16 +693,23 @@ func (h *Host) Status(ctx context.Context, runID string) (StatusResult, error) {
 	}
 	h.resubmitIfLost(ctx, r)
 	var ads map[string]wire.Advertisement
-	if r.local != nil && len(r.statuses) == 0 {
-		if ads, err = liveAds(ctx, h, r.v); err != nil {
-			return StatusResult{}, err
-		}
+	if r.waits() {
+		ads, _ = liveAds(ctx, h, r.v)
 	}
 	result := r.status(ads)
 	if chain, err := h.chain(runID); err == nil && len(chain) > 1 {
 		result.Replacement = chain[1]
 	}
 	return result, nil
+}
+
+// LastStatus returns the status of the last run of runID's resubmission chain: the run Await follows and Cancel cancels.
+func (h *Host) LastStatus(ctx context.Context, runID string) (StatusResult, error) {
+	chain, err := h.chain(runID)
+	if err != nil {
+		return StatusResult{}, err
+	}
+	return h.Status(ctx, chain[len(chain)-1])
 }
 
 // RunsResult lists runs, latest update first; Skipped counts their unverifiable records and undecodable local records.
@@ -730,10 +737,6 @@ func (h *Host) Runs(ctx context.Context) (RunsResult, error) {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return RunsResult{}, err
 	}
-	ads, err := liveAds(ctx, h, v)
-	if err != nil {
-		return RunsResult{}, err
-	}
 	for _, file := range files {
 		if runID, ok := strings.CutSuffix(file.Name(), ".json"); ok && !file.IsDir() {
 			if _, ok := byRun[runID]; !ok {
@@ -744,6 +747,8 @@ func (h *Host) Runs(ctx context.Context) (RunsResult, error) {
 	result := RunsResult{Runs: []StatusResult{}}
 	// One reread map and a view carried forward bound the reloads to one per unknown kid across all runs.
 	reread := map[string]bool{}
+	var ads map[string]wire.Advertisement
+	adsRead := false
 	for runID, records := range byRun {
 		local, err := h.localRun(runID)
 		if errors.Is(err, errUndecodable) {
@@ -758,6 +763,10 @@ func (h *Host) Runs(ctx context.Context) (RunsResult, error) {
 		v = r.v
 		h.resubmitIfLost(ctx, r)
 		if r.pool != "" {
+			if r.waits() && !adsRead {
+				ads, _ = liveAds(ctx, h, r.v)
+				adsRead = true
+			}
 			status := r.status(ads)
 			result.Runs = append(result.Runs, status)
 			result.Skipped += status.Skipped
@@ -795,14 +804,24 @@ func (r *runView) status(ads map[string]wire.Advertisement) StatusResult {
 	return result
 }
 
+// waits reports whether the run is this host's and no receiver has reported a status of it, so it has a waiting reason.
+func (r *runView) waits() bool {
+	return r.local != nil && len(r.statuses) == 0
+}
+
 // waiting says why the run, which this host submitted and no receiver has reported a status of, waits as ads show it:
-// past its task_started_by in unclaimed's text, else on its own.
+// past its task_started_by in unclaimed's text, else on its own. With ads nil, as when they could not be read, it gives
+// unclaimed's text alone.
 func (r *runView) waiting(ads map[string]wire.Advertisement, now time.Time) (string, string) {
-	if r.local == nil || len(r.statuses) > 0 {
+	if !r.waits() {
 		return "", ""
 	}
+	unclaimed := r.unclaimed(now)
+	if ads == nil {
+		return unclaimed, ""
+	}
 	reason, queued := waitReason(r.v.state, ads, r.local.Pool, r.local.Topic)
-	if unclaimed := r.unclaimed(now); unclaimed != "" {
+	if unclaimed != "" {
 		return unclaimed + "; now: " + reason, ""
 	}
 	if queued {
@@ -1294,10 +1313,7 @@ func (h *Host) awaitRun(waitCtx context.Context, runID string) (AwaitResult, err
 			return outcome, nil
 		}
 		if now := time.Now(); r.unclaimed(now) != "" {
-			ads, err := liveAds(waitCtx, h, r.v)
-			if err != nil {
-				return AwaitResult{}, fmt.Errorf("wait %s: %w", runID, err)
-			}
+			ads, _ := liveAds(waitCtx, h, r.v)
 			unclaimed, _ := r.waiting(ads, now)
 			return AwaitResult{
 				Status: wire.TaskStatus{State: wire.TaskStateSubmitted}, Model: r.model(), Unclaimed: unclaimed, CancelRequested: r.cancelRequested(), Skipped: r.skipped,
