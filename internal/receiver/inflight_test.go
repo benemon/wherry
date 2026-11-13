@@ -78,8 +78,12 @@ func TestAnEndingRunRoutedToNoProfileCountsAgainstItsSlot(t *testing.T) {
 	old := newClaimClient
 	t.Cleanup(func() { newClaimClient = old })
 	// The first delivery is released as on a suspension, so the second is a redelivery that finds the run's job.
-	claimOnce(t, f, func() { f.receiver.state.Suspended[testPool] = true })
-	delete(f.receiver.state.Suspended, testPool)
+	// The receiver replaces its state whole and readers share its maps, so the suspension is a new map.
+	suspended := f.receiver.state.Suspended
+	claimOnce(t, f, func() { f.receiver.state.Suspended = map[string]bool{testPool: true} })
+	f.receiver.mu.Lock()
+	f.receiver.state.Suspended = suspended
+	f.receiver.mu.Unlock()
 	claimOnce(t, f, func() {
 		f.plugin.mu.Lock()
 		f.plugin.unready = true
