@@ -595,7 +595,7 @@ func (f fixture) requestOf(t *testing.T, run, hash, receiver string, key ed25519
 // topic.
 func (f fixture) claimOf(t *testing.T, run, hash string, offset int64, receiver string, key ed25519.PrivateKey, attempt int64) {
 	t.Helper()
-	status := f.receiver.status(&wire.Submission{Wherry: wire.SubmissionBinding{Tenant: testTenant, Run: run}}, hash, attempt, "claimed", taskStatus(wire.TaskStateWorking, ""), nil)
+	status := f.receiver.status(&wire.Submission{Message: wire.Message{ContextID: run}, Wherry: wire.SubmissionBinding{Tenant: testTenant, Run: run}}, hash, attempt, "claimed", taskStatus(wire.TaskStateWorking, ""), nil)
 	status.Wherry.Receiver, status.Wherry.TaskTopic, status.Wherry.TaskOffset = receiver, f.tasksTopic(), &offset
 	f.produce(t, operator.PoolEventsTopic(testPool), run, must(t)(wire.SignRecord(status, key)))
 }

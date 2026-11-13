@@ -681,6 +681,10 @@ func TestMCPSubmitNamesTheInvalidRule(t *testing.T) {
 	if failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, "model sonnet is not in agent claude's models in pool pool-a") {
 		t.Fatalf("error %#v, want INVALID_ARGUMENT naming the model, agent and pool", failure)
 	}
+	continued := map[string]any{"prompt": "x", "continue": "run-1", "git": map[string]any{"remote": "https://git.example.test/org/repo.git", "ref": "main"}}
+	if failure := callToolError(t, ctx, session, "submit", continued); failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, "continue takes the git input of the run it continues") {
+		t.Fatalf("error %#v, want INVALID_ARGUMENT refusing continue with git", failure)
+	}
 }
 
 func TestMCPErrorsCarryNoSecrets(t *testing.T) {

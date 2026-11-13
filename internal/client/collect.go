@@ -28,15 +28,17 @@ func (e *CollectError) Error() string { return e.Step + ": " + e.Err.Error() }
 func (e *CollectError) Unwrap() error { return e.Err }
 
 // Collect writes a run's verified outputs, S3 ones through DownloadOutputs, beneath dir, by default
-// <state_dir>/runs/<run>/outputs. A run whose task_started_by passed unclaimed has nothing collected. Its error is a
-// *CollectError.
+// <state_dir>/runs/<run>/outputs, and records a verified changes.bundle for a run that continues it. A run whose
+// task_started_by passed unclaimed has nothing collected. Its error is a *CollectError.
 func (h *Host) Collect(ctx context.Context, runID string, result AwaitResult, dir string) (Collected, error) {
 	var collected Collected
 	if result.Unclaimed != "" {
 		return collected, nil
 	}
+	runs := []string{runID}
 	if len(result.Runs) > 0 {
-		runID = result.Runs[len(result.Runs)-1]
+		runs = result.Runs
+		runID = runs[len(runs)-1]
 	}
 	if len(result.Outputs) > 0 {
 		paths, err := h.WriteOutputs(runID, dir, result.Outputs)
@@ -54,6 +56,10 @@ func (h *Host) Collect(ctx context.Context, runID string, result AwaitResult, di
 	}
 	collected.Outputs = append(collected.Outputs, downloaded...)
 	collected.Rejected = slices.Concat(result.Rejected, rejected)
+	// The outputs are on disk: a continuation of this run refuses without the record rather than this collect failing.
+	if err := h.recordBundle(ctx, runs, collected.Outputs); err != nil {
+		h.logger.Printf("run %s: record the collected %s: %v", runID, wire.GitBundle, err)
+	}
 	return collected, nil
 }
 

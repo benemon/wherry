@@ -2514,3 +2514,35 @@ func TestNothingCreatedSkipsReconcile(t *testing.T) {
 		t.Fatalf("lookups %d, want none for an outcome the plugin knows", lookups)
 	}
 }
+
+// A run's statuses, transcript chunks, output chunks and result carry its submission's context, here another run's.
+func TestRecordsCarryTheSubmissionsContext(t *testing.T) {
+	context := testRun("run-before")
+	f := newFixture(t, resultStream)
+	f.plugin.outputs = []pluginsdk.Output{file("report.md", "# Report\n")}
+	if status := f.execute(t, f.submit(t, f.host, func(task *wire.Submission) {
+		task.Message.ContextID, task.Message.ReferenceTaskIDs = context, []string{context}
+	}), 1); status != kgo.AckAccept {
+		t.Fatalf("ended %v; logs:\n%s", status, f.logs.String())
+	}
+	var contexts []string
+	for _, status := range slices.Concat(f.feedStatuses(t), f.eventStatuses(t)) {
+		contexts = append(contexts, status.StatusUpdate.ContextID)
+	}
+	for _, chunk := range f.chunks(t) {
+		contexts = append(contexts, chunk.ArtifactUpdate.ContextID)
+	}
+	for _, output := range f.outputChunks(t) {
+		contexts = append(contexts, output.ArtifactUpdate.ContextID)
+	}
+	results := f.results(t)
+	for _, result := range results {
+		contexts = append(contexts, result.Task.ContextID)
+	}
+	if len(results) != 1 || len(f.outputChunks(t)) != 1 || len(f.chunks(t)) == 0 || len(f.feedStatuses(t)) == 0 {
+		t.Fatalf("results %d, output chunks %d, chunks %d, statuses %d; want each", len(results), len(f.outputChunks(t)), len(f.chunks(t)), len(f.feedStatuses(t)))
+	}
+	if i := slices.IndexFunc(contexts, func(got string) bool { return got != context }); i >= 0 {
+		t.Fatalf("record %d carries context %q, want the submission's %q", i, contexts[i], context)
+	}
+}

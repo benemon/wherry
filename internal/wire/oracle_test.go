@@ -104,18 +104,62 @@ func TestRecordsAreA2AObjects(t *testing.T) {
 	}
 }
 
-func TestSubmissionIDsMustBeRunID(t *testing.T) {
-	for name, mutate := range map[string]func(*Submission){
-		"taskId":       func(value *Submission) { value.Message.TaskID = "run-2" },
-		"no taskId":    func(value *Submission) { value.Message.TaskID = "" },
-		"contextId":    func(value *Submission) { value.Message.ContextID = "run-2" },
-		"no contextId": func(value *Submission) { value.Message.ContextID = "" },
+func TestSubmissionTaskIDIsTheRunAndContextIDARunID(t *testing.T) {
+	long := "run-" + strings.Repeat("a", 60)
+	for name, test := range map[string]struct {
+		mutate func(*Submission)
+		valid  bool
+	}{
+		"another run's context":   {func(value *Submission) { value.Message.ContextID = "run-2" }, true},
+		"one reference":           {func(value *Submission) { value.Message.ReferenceTaskIDs = []string{"run-2"} }, true},
+		"taskId":                  {func(value *Submission) { value.Message.TaskID = "run-2" }, false},
+		"no taskId":               {func(value *Submission) { value.Message.TaskID = "" }, false},
+		"no contextId":            {func(value *Submission) { value.Message.ContextID = "" }, false},
+		"contextId too long":      {func(value *Submission) { value.Message.ContextID = long }, false},
+		"contextId characters":    {func(value *Submission) { value.Message.ContextID = "run_2" }, false},
+		"two references":          {func(value *Submission) { value.Message.ReferenceTaskIDs = []string{"run-2", "run-3"} }, false},
+		"reference not a run ID":  {func(value *Submission) { value.Message.ReferenceTaskIDs = []string{"run/2"} }, false},
+		"reference too long":      {func(value *Submission) { value.Message.ReferenceTaskIDs = []string{long} }, false},
+		"contextId run-ID length": {func(value *Submission) { value.Message.ContextID = long[:63] }, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			submission := validSubmission()
-			mutate(submission)
-			if err := submission.validate(); err == nil {
-				t.Fatal("submission whose message ids are not the run ID accepted")
+			test.mutate(submission)
+			if err := submission.validate(); (err == nil) != test.valid {
+				t.Fatalf("validate = %v, want valid %v", err, test.valid)
+			}
+		})
+	}
+}
+
+// A run's records carry its submission's context, which is a run ID but not necessarily the run's own.
+func TestRecordsCarryAnyRunIDAsContext(t *testing.T) {
+	for name, set := range map[string]func(string) Record{
+		"status": func(context string) Record {
+			value := validStatus()
+			value.StatusUpdate.ContextID = context
+			return value
+		},
+		"chunk": func(context string) Record {
+			value := validChunk()
+			value.ArtifactUpdate.ContextID = context
+			return value
+		},
+		"output": func(context string) Record {
+			value := validOutput()
+			value.ArtifactUpdate.ContextID = context
+			return value
+		},
+		"result": func(context string) Record { value := validResult(); value.Task.ContextID = context; return value },
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := set("run-2").validate(); err != nil {
+				t.Fatalf("another run's context refused: %v", err)
+			}
+			for _, context := range []string{"", "run_2", "run-" + strings.Repeat("a", 60)} {
+				if set(context).validate() == nil {
+					t.Errorf("context %q accepted", context)
+				}
 			}
 		})
 	}

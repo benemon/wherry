@@ -72,6 +72,9 @@ type SubmitInput struct {
 	Git *wire.GitInput
 	// GitChanges, patch or bundle, asks for the clone's changes back as that output.
 	GitChanges string
+	// Continue names a run of this host whose collected changes.bundle the agent continues from: the run takes that
+	// run's git input and context, and returns its own changes.bundle through S3.
+	Continue string
 	// S3Inputs are files uploaded to the pool's bucket before the task is published, which the plugin fetches.
 	S3Inputs []S3File
 	// StartBy bounds the agent job's start and EndBy the run's terminal state; each travels in whole seconds.
@@ -261,6 +264,37 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err := wire.ValidateRequirements(input.Selector); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
+	var continued continuation
+	if input.Continue != "" {
+		if input.Git != nil || input.GitChanges != "" {
+			return SubmitResult{}, fmt.Errorf("%w: continue takes the git input of the run it continues, so not git or git changes", ErrInvalidInput)
+		}
+		var names []string
+		for _, part := range input.Parts {
+			if part.Raw != nil || part.Data != nil {
+				names = append(names, wire.InputName(part))
+			}
+		}
+		for _, file := range input.S3Inputs {
+			names = append(names, file.Name)
+		}
+		for _, output := range input.Outputs {
+			names = append(names, output.Name)
+		}
+		if slices.Contains(names, baseBundle) || slices.Contains(names, wire.GitBundle) {
+			return SubmitResult{}, fmt.Errorf("%w: with continue, %s and %s are reserved for the bundles", ErrInvalidInput, baseBundle, wire.GitBundle)
+		}
+		var err error
+		if continued, err = h.continued(input.Continue); err != nil {
+			return SubmitResult{}, err
+		}
+		defer continued.bundle.Close()
+		previous := continued.last.Task.Wherry.Git
+		input.Git = &wire.GitInput{Remote: previous.Remote, Ref: previous.Ref, Path: previous.Path}
+		input.S3Inputs = append(slices.Clone(input.S3Inputs), S3File{Name: baseBundle, Body: continued.bundle})
+		// Not required: an agent that stops before its fetch leaves no bundle.
+		input.Outputs = append(slices.Clone(input.Outputs), wire.ExpectedOutput{Name: wire.GitBundle, Storage: wire.StorageS3})
+	}
 	outputs := input.Outputs
 	if input.Git != nil {
 		git := *input.Git
@@ -385,6 +419,9 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	}
 	_, credentialed := h.storage[pool]
 	storable := v.state.Pools[pool].Storage != nil && credentialed
+	if continued.last != nil && !storable {
+		return SubmitResult{}, fmt.Errorf("%w: continue needs a pool with storage and a host storage credential: the bundles travel through S3", ErrInvalidInput)
+	}
 	toS3 := func() {
 		parts := make([]wire.Part, 0, len(input.Parts))
 		for _, part := range input.Parts {
@@ -423,6 +460,9 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		return SubmitResult{}, err
 	}
 	submission.Wherry.Credentials, submission.Wherry.Supplied, submission.Wherry.Outputs, submission.Wherry.Git = input.Credentials, supplied, outputs, input.Git
+	if continued.last != nil {
+		submission.Message.ContextID, submission.Message.ReferenceTaskIDs = continued.last.Task.Message.ContextID, []string{continued.last.Run}
+	}
 	encoded, err := wire.SignRecord(submission, h.key)
 	if err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
@@ -447,6 +487,14 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, err
 		}
 		submission.Wherry.S3Inputs, err = uploadInputs(ctx, store, storage.Bucket, h.tenant, runID, input.S3Inputs)
+	}
+	if err == nil && continued.last != nil {
+		uploaded := submission.Wherry.S3Inputs[slices.IndexFunc(submission.Wherry.S3Inputs, func(input wire.S3Input) bool { return input.Name == baseBundle })]
+		if collected := continued.last.Bundle; uploaded.Size != collected.Size || uploaded.SHA256 != collected.SHA256 {
+			err = fmt.Errorf("%w: continue: the %s collected for run %s changed after wait verified it", ErrInvalidInput, wire.GitBundle, continued.last.Run)
+		}
+		// Set once base.bundle is among the S3 inputs, which validation requires of the base.
+		submission.Wherry.Git.Base = &wire.GitBase{Bundle: baseBundle, Commit: continued.commit}
 	}
 	redactionKey := make([]byte, 32)
 	if err == nil {
@@ -848,6 +896,8 @@ type runRecord struct {
 	Produced bool   `json:"produced,omitzero"`
 	// CancelRequestedMS is when this host first published a cancel of the run.
 	CancelRequestedMS int64 `json:"cancel_requested_at_ms,omitzero"`
+	// Bundle is the run's changes.bundle as wait last collected and verified it.
+	Bundle *collectedBundle `json:"bundle,omitzero"`
 }
 
 // feedOffset is where the tenant feed's records about the run begin, zero without a local record of it.

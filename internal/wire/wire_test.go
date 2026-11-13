@@ -858,3 +858,49 @@ func TestInputNamesAreUniqueAtDecode(t *testing.T) {
 		t.Fatalf("an input and an S3 input named dataset.bin: %v", err)
 	}
 }
+
+func TestGitBaseNamesAnInputAndContinuesAnotherContext(t *testing.T) {
+	commit := strings.Repeat("abcdef0123", 4)
+	const sshRemote = "ssh://git@git.example.test/org/repo.git"
+	base := func(mutate func(*Submission)) *Submission {
+		submission := validSubmission()
+		submission.Message.ContextID = "run-0"
+		submission.Message.Parts = append(submission.Message.Parts, Part{Raw: StdBytes("x"), Filename: "inline.bundle"})
+		submission.Wherry.S3Inputs = []S3Input{{Name: "base.bundle", Size: 1, SHA256: wireHash}}
+		submission.Wherry.Outputs = []ExpectedOutput{{Name: "changes.bundle", Storage: StorageS3}}
+		submission.Wherry.Git = &GitInput{Remote: "https://git.example.test/org/repo.git", Ref: "main", Base: &GitBase{Bundle: "base.bundle", Commit: commit}}
+		mutate(submission)
+		return submission
+	}
+	for name, test := range map[string]struct {
+		mutate func(*Submission)
+		valid  bool
+	}{
+		"S3 input":             {func(*Submission) {}, true},
+		"inline input":         {func(value *Submission) { value.Wherry.Git.Base.Bundle = "inline.bundle" }, true},
+		"sha256 commit":        {func(value *Submission) { value.Wherry.Git.Base.Commit = commit + strings.Repeat("a", 24) }, true},
+		"no input":             {func(value *Submission) { value.Wherry.Git.Base.Bundle = "missing.bundle" }, false},
+		"an output":            {func(value *Submission) { value.Wherry.Git.Base.Bundle = "changes.bundle" }, false},
+		"39 digits":            {func(value *Submission) { value.Wherry.Git.Base.Commit = commit[:39] }, false},
+		"uppercase":            {func(value *Submission) { value.Wherry.Git.Base.Commit = strings.ToUpper(commit[:1]) + commit[1:] }, false},
+		"not hex":              {func(value *Submission) { value.Wherry.Git.Base.Commit = "g" + commit[1:] }, false},
+		"the run's context":    {func(value *Submission) { value.Message.ContextID = value.Wherry.Run }, false},
+		"no base, own context": {func(value *Submission) { value.Message.ContextID, value.Wherry.Git.Base = value.Wherry.Run, nil }, true},
+		"ssh":                  {func(value *Submission) { value.Wherry.Git.Remote, value.Wherry.Git.HostKey = sshRemote, hostKey }, true},
+		"ssh, 39 digits": {func(value *Submission) {
+			value.Wherry.Git.Remote, value.Wherry.Git.HostKey, value.Wherry.Git.Base.Commit = sshRemote, hostKey, commit[:39]
+		}, false},
+		"ssh, uppercase": {func(value *Submission) {
+			value.Wherry.Git.Remote, value.Wherry.Git.HostKey, value.Wherry.Git.Base.Commit = sshRemote, hostKey, strings.ToUpper(commit)
+		}, false},
+		"ssh, quote": {func(value *Submission) {
+			value.Wherry.Git.Remote, value.Wherry.Git.HostKey, value.Wherry.Git.Base.Commit = sshRemote, hostKey, "x' --; touch /tmp/pwned; echo '"
+		}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := base(test.mutate).validate(); (err == nil) != test.valid {
+				t.Fatalf("validate = %v, want valid %v", err, test.valid)
+			}
+		})
+	}
+}

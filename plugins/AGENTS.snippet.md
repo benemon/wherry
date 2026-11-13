@@ -19,7 +19,10 @@ clones itself.
    `--git REMOTE@REF` for a repository the agent clones (its host must be one of
    the pool's VCS hosts), and `--git-changes patch` to get its commits back as
    `changes.patch` (`git am` it). The clone's credential and an `ssh` remote's
-   host key come from the `git` entries of your wherry configuration. Add
+   host key come from the `git` entries of your wherry configuration. To build
+   on a finished run's commits after `wherry wait` collected its
+   `changes.bundle`, use `--continue RUN_ID` in place of `--git`; the pool needs
+   storage. Add
    `--input FILE` for each file the agent needs. Inputs over the broker's
    record limit or a matching profile's limit go through S3 when the pool
    and host have storage, and otherwise submit refuses before publishing.

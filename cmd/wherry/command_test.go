@@ -1071,16 +1071,20 @@ func TestSubmitGitFlags(t *testing.T) {
 		flags []string
 		want  string
 	}{
-		"no ref":            {[]string{"--git", "https://git.example.test/org/repo.git"}, "--git takes REMOTE@REF"},
-		"path without git":  {[]string{"--git-path", "repo"}, "--git-path and --git-changes need --git"},
-		"changes alone":     {[]string{"--git-changes", "patch"}, "--git-path and --git-changes need --git"},
-		"userinfo":          {[]string{"--git", "https://user:s3cr3t@git.example.test/org/repo.git@main"}, "https git remote must not carry user information"},
-		"traversal":         {[]string{"--git", "https://git.example.test/org/repo.git@main", "--git-path", "../x"}, "git path must be a relative path"},
-		"outside vcs hosts": {[]string{"--git", "https://github.com/org/repo.git@main"}, "git remote host github.com is not in pool pool-a's vcs hosts"},
-		"vcs host port":     {[]string{"--git", "https://git.example.test:8443/org/repo.git@main"}, "git remote host git.example.test:8443 is not in pool pool-a's vcs hosts"},
-		"ssh without key":   {[]string{"--git", "ssh://deploy@git.example.test/org/repo.git@main"}, "ssh git remote requires host_key"},
-		"changes":           {[]string{"--git", "https://git.example.test/org/repo.git@main", "--git-changes", "diff"}, "git changes must be patch or bundle"},
-		"credential twice":  {[]string{"--git", "git@git.example.test:org/repo.git@main", "--credential", "deploy-key:env=DEPLOY_KEY"}, "credential deploy-key is listed twice"},
+		"no ref":                   {[]string{"--git", "https://git.example.test/org/repo.git"}, "--git takes REMOTE@REF"},
+		"path without git":         {[]string{"--git-path", "repo"}, "--git-path and --git-changes need --git"},
+		"changes alone":            {[]string{"--git-changes", "patch"}, "--git-path and --git-changes need --git"},
+		"continue and git":         {[]string{"--continue", "run-1", "--git", "https://git.example.test/org/repo.git@main"}, "--continue takes the git input of the run it continues"},
+		"continue and git-path":    {[]string{"--continue", "run-1", "--git-path", "repo"}, "--continue takes the git input of the run it continues"},
+		"continue and git-changes": {[]string{"--continue", "run-1", "--git-changes", "bundle"}, "--continue takes the git input of the run it continues"},
+		"continue an unknown run":  {[]string{"--continue", "run-1"}, "continue: run run-1 is not a run this host submitted under its tenant"},
+		"userinfo":                 {[]string{"--git", "https://user:s3cr3t@git.example.test/org/repo.git@main"}, "https git remote must not carry user information"},
+		"traversal":                {[]string{"--git", "https://git.example.test/org/repo.git@main", "--git-path", "../x"}, "git path must be a relative path"},
+		"outside vcs hosts":        {[]string{"--git", "https://github.com/org/repo.git@main"}, "git remote host github.com is not in pool pool-a's vcs hosts"},
+		"vcs host port":            {[]string{"--git", "https://git.example.test:8443/org/repo.git@main"}, "git remote host git.example.test:8443 is not in pool pool-a's vcs hosts"},
+		"ssh without key":          {[]string{"--git", "ssh://deploy@git.example.test/org/repo.git@main"}, "ssh git remote requires host_key"},
+		"changes":                  {[]string{"--git", "https://git.example.test/org/repo.git@main", "--git-changes", "diff"}, "git changes must be patch or bundle"},
+		"credential twice":         {[]string{"--git", "git@git.example.test:org/repo.git@main", "--credential", "deploy-key:env=DEPLOY_KEY"}, "credential deploy-key is listed twice"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

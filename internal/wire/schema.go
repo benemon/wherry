@@ -287,13 +287,22 @@ func S3OutputKey(tenant, run, name string) string {
 }
 
 // GitInput is the repository a run's agent clones itself: Remote at Ref into Path, with the task credential
-// Credential and, for an ssh remote, the OpenSSH known_hosts lines HostKey.
+// Credential and, for an ssh remote, the OpenSSH known_hosts lines HostKey. With Base, the agent checks out the base
+// commit instead of Ref and fetches the previous run's bundle over it.
 type GitInput struct {
-	Remote     string `json:"remote"`
-	Ref        string `json:"ref"`
-	Path       string `json:"path,omitzero"`
-	Credential string `json:"credential,omitzero"`
-	HostKey    string `json:"host_key,omitzero"`
+	Remote     string   `json:"remote"`
+	Ref        string   `json:"ref"`
+	Path       string   `json:"path,omitzero"`
+	Credential string   `json:"credential,omitzero"`
+	HostKey    string   `json:"host_key,omitzero"`
+	Base       *GitBase `json:"base,omitzero"`
+}
+
+// GitBase is a continued run's base: Bundle, one of the run's input files, holds the previous runs' commits over
+// Commit.
+type GitBase struct {
+	Bundle string `json:"bundle"`
+	Commit string `json:"commit"`
 }
 
 // Bounds of a git input's fields, in bytes; a path is bounded as an output name is.
@@ -425,6 +434,9 @@ func (g *GitInput) Validate(credentials []TaskCredential) error {
 	}
 	if g.Credential != "" && !slices.ContainsFunc(credentials, func(credential TaskCredential) bool { return credential.Name == g.Credential && credential.File != "" }) {
 		return errors.New("git credential must be one of the submission's task credentials, delivered as a file")
+	}
+	if g.Base != nil && !ValidCommit(g.Base.Commit) {
+		return errors.New("git base commit must be a lowercase hex object ID of 40 or 64 digits")
 	}
 	switch {
 	case parsed.Scheme == "ssh" && g.HostKey == "":
@@ -706,6 +718,15 @@ func validateID(value, name string) error {
 		return fmt.Errorf("%s must be a non-empty lowercase ID", name)
 	}
 	return nil
+}
+
+// ValidCommit reports whether value is a git object ID in lowercase hex, SHA-1 or SHA-256.
+func ValidCommit(value string) bool {
+	if len(value) != 40 && len(value) != 64 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 // ValidHash reports whether value is a SHA-256 in lowercase hex.

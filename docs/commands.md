@@ -1161,6 +1161,7 @@ and needs `wherry host init` on a re-provisioned host.
 | `--git REMOTE@REF` | | repository the agent clones: an `https` or `ssh` URL, or `user@host:path`, at a branch, tag or commit |
 | `--git-path` | the repository name | checkout directory, relative to the agent's working directory |
 | `--git-changes patch\|bundle` | | ask for the agent's commits back as the output `changes.patch` or `changes.bundle` |
+| `--continue RUN_ID` | | continue from the `changes.bundle` `wait` collected for a run of this host, in that run's repository, and return the next bundle through the pool's bucket |
 | `--input FILE[:s3]` | | file the agent gets in `WHERRY_INPUT_DIR` under its base name; `:s3` uploads it, at most 5 GiB, to the pool's bucket; repeatable |
 | `--credential NAME` | | request the placed agent's credential `NAME` at the target the pool's terms give it; an optional credential is delivered only when requested; repeatable |
 | `--credential NAME:file=FILE` or `--credential NAME:env=VAR` | | credential `NAME` from `credentials` in the client configuration, which the agent gets as the file `FILE` in `WHERRY_CREDENTIALS_DIR` or in the environment variable `VAR`; repeatable |
@@ -1211,7 +1212,47 @@ credential, and an `ssh` remote under no entry with a host key is refused.
 With a host key, no input may be named `known_hosts`.
 
 `--git-changes` adds `changes.patch` or `changes.bundle` to the expected
-outputs, unless `--output` names it already; neither is required.
+outputs, unless `--output` names it already; neither is required. On a pool
+with storage, `--git-changes bundle --output changes.bundle:s3` returns the
+bundle through the pool's bucket, unredacted and outside the pool's
+`output_limit`: the route for a first run that later runs continue.
+
+`--continue RUN_ID` starts the next round of work on a run's commits. It
+reuses the run's `--git` remote, ref and `--git-path`, and takes the
+credential and host key from the current client configuration, as `--git`
+does. It follows the run's
+[resubmissions](a2a-extension-v1.md#resubmission) to the last, and needs
+that run's `changes.bundle`, which [`wait`](#wherry-host-wait-run-id)
+records when it collects it. The new run:
+
+- gets the bundle as the input `base.bundle`, uploaded through the pool's
+  bucket, and the commands that check out the bundle's base commit, not the
+  ref, fetch the bundle and check out its head;
+- returns its own commits since the base as `changes.bundle` through the
+  pool's bucket, so each round needs only the latest bundle. The output is
+  not required: an agent that stops before its fetch leaves none. A round
+  that adds no commit still returns the previous round's bundle;
+- joins the run's A2A context, so every round of a chain shares the first
+  run's ID as its `contextId`, and names the run it continues in
+  `referenceTaskIds`.
+
+`submit` refuses `--continue`, before it uploads or publishes:
+
+- with `--git`, `--git-path` or `--git-changes`;
+- with an `--input` or `--output` named `base.bundle` or `changes.bundle`;
+- for a run this host did not submit under its tenant, a run without a git
+  input, or one whose `changes.bundle` `wait` has not collected or is
+  missing;
+- for a bundle that is not a git bundle with exactly one prerequisite and a
+  `HEAD` ref, the form `git bundle create` gives `refs/wherry/start..HEAD`;
+- on a pool without storage, or without a storage credential for it:
+  `continue needs a pool with storage and a host storage credential: the
+  bundles travel through S3`.
+
+After the upload, a bundle whose size or SHA-256 no longer matches what
+`wait` verified is refused, and the upload deleted. A run that continues
+needs receivers and custodians of this release or later
+([Upgrade](upgrade.md)).
 
 `--input` and `--output` read everything after the first `:` in their value
 as suffixes, so they refuse a path or name that holds a `:`.
@@ -1372,6 +1413,10 @@ output=<name> path=<path> sha256=<hex> size=<bytes>
 
 For `changes.patch` it also prints `apply with: git am <path>`, and for
 `changes.bundle` `fetch with: git fetch <path> HEAD`, on standard error.
+`wait` also records the verified `changes.bundle`, its absolute path, size
+and SHA-256, in the run's local record, wherever `--outputs-dir` puts it,
+for [`submit --continue`](#wherry-host-submit). A later `wait` that collects
+a bundle replaces the record; one that collects none keeps it.
 No expected output takes the name `reply.txt`.
 
 `wait` reads the run's statuses and result from the tenant feed, and its
