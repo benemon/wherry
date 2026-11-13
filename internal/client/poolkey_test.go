@@ -372,7 +372,7 @@ func TestAKeyLostRunIsResubmitted(t *testing.T) {
 		t.Fatalf("replacement binding %+v; original %+v", binding, original)
 	}
 	message := replacement.Message
-	if message.TaskID != binding.Run || message.ContextID != binding.Run || message.MessageID == task.submission.Message.MessageID || message.Parts[0].Text != "do the work" {
+	if message.TaskID != binding.Run || message.ContextID != runID || message.MessageID == task.submission.Message.MessageID || message.Parts[0].Text != "do the work" {
 		t.Fatalf("replacement message %+v", message)
 	}
 	if string(values.Credentials["model"]) != "model-token" {

@@ -319,6 +319,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	gitRemote := flags.String("git", "", "REMOTE@REF: git repository the agent clones, an https or ssh URL or user@host:path, at a branch, tag or commit")
 	gitPath := flags.String("git-path", "", "checkout directory, relative (default: the repository name)")
 	gitChanges := flags.String("git-changes", "", "patch or bundle: ask for the agent's commits back as changes.patch or changes.bundle")
+	continueRun := flags.String("continue", "", "RUN_ID: continue from the changes.bundle wait collected for a run of this host, in its repository, and return the next one through the pool's bucket")
 	var inputs, s3Inputs []string
 	flags.Func("input", "FILE[:s3]: a file to deliver to the agent's input directory, through the pool's bucket with :s3 (repeatable)", func(value string) error {
 		path, suffix, found := strings.Cut(value, ":")
@@ -357,13 +358,16 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry host submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE@REF [--git-path PATH] [--git-changes patch|bundle]] [--input FILE[:s3]]... [--credential NAME|NAME:file=FILE|NAME:env=VAR]... [--output NAME[:required][:s3]]... [--start-by TIME|DURATION] [--end-by TIME|DURATION]")
+		return errors.New("usage: wherry host submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE@REF [--git-path PATH] [--git-changes patch|bundle] | --continue RUN_ID] [--input FILE[:s3]]... [--credential NAME|NAME:file=FILE|NAME:env=VAR]... [--output NAME[:required][:s3]]... [--start-by TIME|DURATION] [--end-by TIME|DURATION]")
 	}
 	parts, err := inputParts(inputs)
 	if err != nil {
 		return err
 	}
 	var git *wire.GitInput
+	if *continueRun != "" && (wasSet(flags, "git") || wasSet(flags, "git-path") || wasSet(flags, "git-changes")) {
+		return errors.New("--continue takes the git input of the run it continues: drop --git, --git-path and --git-changes")
+	}
 	if *gitRemote != "" {
 		at := strings.LastIndex(*gitRemote, "@")
 		if at < 0 {
@@ -423,7 +427,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	defer closeClient()
 	result, err := client.Submit(ctx, busclient.SubmitInput{
 		Agent: *agent, Model: *model, Selector: selector, Prompt: *prompt, Parts: parts, Credentials: credentials, Requested: requested, Outputs: outputs, Git: git, GitChanges: *gitChanges,
-		S3Inputs: stored, StartBy: startTime, EndBy: endTime,
+		Continue: *continueRun, S3Inputs: stored, StartBy: startTime, EndBy: endTime,
 	})
 	if err != nil {
 		return err

@@ -201,6 +201,7 @@ type submitInput struct {
 	Model       string             `json:"model,omitempty" jsonschema:"model the agent runs, one of its models as receivers lists them; default: the agent's default model"`
 	Selector    []wire.Requirement `json:"selector,omitempty" jsonschema:"labels the profile must carry, each {key, operator, values}; operator is In or NotIn (with values), Exists or DoesNotExist (without); keys are arbitrary operator labels such as gpu or example.com/segment"`
 	Git         *gitInput          `json:"git,omitempty" jsonschema:"repository the agent clones itself; its host must be one of the pool's vcs hosts, and its credential and an ssh remote's host key come from the git entry of this host's wherry config whose url is the longest prefix of the remote"`
+	Continue    string             `json:"continue,omitempty" jsonschema:"run id of a run of this host whose changes.bundle wait collected: the agent clones that run's repository, continues from the bundle and returns changes.bundle through the pool's bucket, which needs a pool with storage and a host storage credential; not with git, nor an input or output named base.bundle or changes.bundle"`
 	Inputs      []fileInput        `json:"inputs,omitempty" jsonschema:"local files delivered to the agent's WHERRY_INPUT_DIR under their base names"`
 	Credentials []credentialInput  `json:"credentials,omitempty" jsonschema:"configured credentials delivered to the agent, each as a file in WHERRY_CREDENTIALS_DIR or in an environment variable, or by name alone a request for one of the placed agent's credentials at its target, which an optional one needs to be delivered; no two share a target, and none takes the target of one of the agent's own credentials"`
 	Outputs     []outputInput      `json:"outputs,omitempty" jsonschema:"files the agent is asked to leave in WHERRY_OUTPUT_DIR; wait writes the returned ones locally"`
@@ -656,7 +657,7 @@ func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part
 	}
 	submission := busclient.SubmitInput{
 		Agent: input.Agent, Model: input.Model, Selector: selector, Prompt: input.Prompt, Parts: parts,
-		StartBy: startBy, EndBy: endBy,
+		Continue: input.Continue, StartBy: startBy, EndBy: endBy,
 	}
 	if input.Git != nil {
 		submission.Git = &wire.GitInput{Remote: input.Git.Remote, Ref: input.Git.Ref, Path: input.Git.Path}

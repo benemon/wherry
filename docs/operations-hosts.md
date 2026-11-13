@@ -306,6 +306,14 @@ applies them with its own credentials:
 apply with: git am /home/me/.local/state/wherry/runs/run-.../outputs/changes.patch
 ```
 
+On a pool with storage, `--output changes.bundle:s3` beside
+`--git-changes bundle` returns the bundle through the pool's bucket. To
+build on a run's commits in a new run, `wherry host submit --continue RUN_ID`
+reuses its repository and continues from the `changes.bundle` that `wait`
+collected; each round returns its bundle through the pool's bucket, so the
+pool needs storage and the host a storage credential for it
+([`submit`](commands.md#wherry-host-submit)).
+
 The agent pushes only when the prompt asks it to and the credential allows
 it, and then only to the branch `wherry/<run>`; verify the commit it
 reports at that branch before trusting it, and delete the branch after.

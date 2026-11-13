@@ -110,6 +110,14 @@ Pick the route by what this host can reach:
   and leave `changes.bundle` in its output directory. Ask for that output and
   `git fetch` it. No credential is involved.
 
+To build on a finished run's commits, submit with `continue` set to its run
+id, without `git`, once `wait` has collected its `changes.bundle`. The new run
+clones the same repository, continues from that bundle and returns its own
+`changes.bundle`, holding every round's commits, through the pool's bucket:
+it needs a pool with storage and a host storage credential, or `submit`
+returns `INVALID_ARGUMENT`. No input or output may then be named
+`base.bundle` or `changes.bundle`.
+
 Get commits back with `changes` or a bundle output and push from this host.
 The agent's credentials, such as `github-token` as `GH_TOKEN`, serve the
 agent's own tools during the run; the clone and a push use only the matched

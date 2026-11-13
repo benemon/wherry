@@ -11,7 +11,7 @@ The defaults are `10m` and `2h`.
 | Tool | Input | Output |
 | --- | --- | --- |
 | `receivers` | none | `receivers`, the objects `wherry host receivers --json` prints |
-| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by` | `id`, `pool`, `wait`, `unrequested` |
+| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `continue`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by` | `id`, `pool`, `wait`, `unrequested` |
 | `status` | `id`, optional | `runs`, `skipped` |
 | `wait` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `reply`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped`, `runs` |
 | `cancel` | `id` | `id`, `cancel`, `skipped` |
@@ -31,7 +31,8 @@ The defaults are `10m` and `2h`.
   `selector` is an array of `{key, operator, values}`. `git` is
   `{remote, ref, path, changes}`, as `--git`, `--git-path` and `--git-changes`
   take them, with `remote` and `ref` required; its credential and host key come
-  from the client configuration's `git` entries, as for `submit`. `inputs` is
+  from the client configuration's `git` entries, as for `submit`. `continue`
+  is a run ID, as `--continue` takes it, and is refused with `git`. `inputs` is
   an array of `{path, storage}`, `credentials` an array of `{name}`,
   `{name, file}` or `{name, env}` and `outputs` an array of `{name, required, storage}`,
   as `--input`, `--credential` and `--output` take them;

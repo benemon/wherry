@@ -198,8 +198,13 @@ A submission is the task of one run.
 ```
 
 - `message` is the run's A2A `Message`, with `role` `ROLE_USER`. Readers
-  reject a submission with another role. Its `taskId` and `contextId` are
-  the run ID.
+  reject a submission with another role. Its `taskId` is the run ID. Its
+  `contextId` is a run ID: the run's own, or for a run that continues
+  another (`git.base`, [Git input](#git-input)), the context of the run it
+  continues, so every run of a chain shares its first run's ID. A run with
+  `git.base` cannot have its own ID as `contextId`. `referenceTaskIds`, when
+  present, holds one run ID, the run continued. Receivers carry it and act
+  on neither.
 - `run_nonce` is 16 random bytes in base64url without padding: exactly 22
   characters that decode, strictly, to 16 bytes. `run` is `run-` and the
   first 32 lowercase hex digits of the SHA-256 of `wherry-run`, `tenant`,
@@ -367,7 +372,7 @@ A `terminal` status's `wherry` object adds the attempt's chunk count:
 }
 ```
 
-- `statusUpdate.taskId` and `contextId` are the run ID.
+- `statusUpdate.taskId` is the run ID and `contextId` the submission's.
 - `attempt` is the share-group delivery count of the submission, from 1.
 - `task_hash` is the hash of the run's submission.
 - `event_id` identifies the fact the status reports. Readers keep one
@@ -622,7 +627,8 @@ A result is the A2A `Task` a run ends with.
 }
 ```
 
-- `task.id` and `task.contextId` are the run ID. `task.status` is the
+- `task.id` is the run ID and `task.contextId` the submission's. Chunks and
+  output chunks carry the same `taskId` and `contextId`. `task.status` is the
   run's final status, with the message its `terminal` status carries.
 - `task.history` holds the run's submitted message alone. Each `raw` and
   `data` part is replaced by a [reference part](#reference-parts) with the
@@ -858,10 +864,10 @@ process using the host's state directory, the host:
    whose bytes are stored and not marked produced, and builds nothing new;
 2. otherwise records a new replacement run ID first, then resolves the
    credentials again and builds and signs the replacement: the same message
-   content with the new run as `taskId` and `contextId` and a fresh
-   `messageId`, the same placement, credentials, outputs, git input, S3
-   inputs and bounds, `replaces` the failed run and `s3_input_run` the first
-   run of the chain;
+   content with the new run as `taskId` and a fresh `messageId`, the
+   original's `contextId` and `referenceTaskIds`, the same placement,
+   credentials, outputs, git input with its `base`, S3 inputs and bounds,
+   `replaces` the failed run and `s3_input_run` the first run of the chain;
 3. stores the signed bytes, produces them, and marks them produced.
 
 A crash before the bytes are stored resolves the credentials again on the
@@ -1528,6 +1534,12 @@ key and the credential as files, and gives the agent the commands.
   fields after an optional marker such as `@cert-authority`, with at least
   one entry. An `ssh`
   remote requires it and an `https` remote refuses it.
+- `base` (object, optional): a previous run's changes to continue from.
+  `bundle` names one of the run's input files, inline or S3, holding a git
+  bundle; `commit` is the bundle's base, a lowercase hex object ID of 40 or
+  64 digits. Readers reject a `base` whose `bundle` names no input of the
+  run, whose `commit` is malformed, or whose run has its own ID as
+  `contextId`.
 
 A ref, and each segment of a path, starts with a letter, digit or
 underscore and holds only letters, digits, `.`, `_` and `-`. A ref can also
@@ -1570,6 +1582,25 @@ for itself and every later command in it:
 
 Then `git checkout <ref>`, and `refs/wherry/start` set to the commit
 checked out.
+
+With `base`, the commands do not check out the ref, so a ref deleted
+upstream does not stop the run. After the clone they are:
+
+```
+git -C '<path>' checkout --detach '<commit>' --
+git -C '<path>' update-ref refs/wherry/start HEAD
+git -C '<path>' -c protocol.file.allow=always fetch "<input>/<bundle>" HEAD
+git -C '<path>' merge-base --is-ancestor refs/wherry/start FETCH_HEAD
+git -C '<path>' checkout --detach FETCH_HEAD --
+```
+
+and the prompt asks the agent to stop and report if any of them fails. The
+`-c` allows the `file` transport for the fetch alone, and the clone keeps
+`protocol.allow=never`. `refs/wherry/start` stays at the base commit, so the
+run's `changes.bundle` holds every commit since the base, and the next run
+needs that bundle alone. A receiver before `base` ignores it and would
+clone the ref; it rejects the run only because its `contextId` is not the
+run ID.
 
 Every command starts with `git`, with no environment assignment or
 redirect, so a harness rule that allows `git` commands allows them all,
@@ -1698,6 +1729,9 @@ claimant check against the pool's storage before use.
   S3 output, which goes to the host's own bucket and never to the
   transcript topic. An attempt that adopted an earlier attempt's job uploads
   to the PUT URLs of the task's envelope.
+- **Continuation.** A run with `git.base` expects `changes.bundle` as an S3
+  output, so its bundle returns unredacted and outside `output_limit`
+  whatever its size.
 - **Back.** The host downloads each S3 output in the result's
   `s3_outputs` that the run declares, at the key for its name, and keeps it
   only when it matches the listed size and SHA-256. It reports each other
@@ -1742,7 +1776,7 @@ proto3 JSON form ([Encoding](#encoding)) inside the signed records.
 
 | A2A operation | wherry |
 | --- | --- |
-| `SendMessage` | a [submission](#submission) on the task topic of the signature the host placed it on; the run ID is the task ID and the context ID. The run's records answer it |
+| `SendMessage` | a [submission](#submission) on the task topic of the signature the host placed it on; the run ID is the task ID, and the context ID is the run ID or, for a run that continues another, that run's context. The run's records answer it |
 | `CancelTask` | a [cancel](#cancel) on the pool's events topic |
 | `SubscribeToTask` | reading the tenant feed, `wherry.tenant.<tenant>`, for the run's statuses and result, and the tenant's transcript topic, `wherry.tenant.<tenant>.transcript`, for its chunks and output chunks |
 | `GetTask` | the run's latest [result](#result), or, before it has one, its latest [status](#status) |

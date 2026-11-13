@@ -2328,7 +2328,7 @@ func (run *activeRun) outputChunks(name string, data []byte) []*kgo.Record {
 		}
 		records = append(records, run.transcript(&wire.Output{
 			ArtifactUpdate: wire.TaskArtifactUpdateEvent{
-				TaskID: run.task.Wherry.Run, ContextID: run.task.Wherry.Run,
+				TaskID: run.task.Wherry.Run, ContextID: run.task.Message.ContextID,
 				Artifact: artifact,
 				Append:   index > 0, LastChunk: len(data) == 0, Metadata: metadata,
 			},
@@ -2479,7 +2479,7 @@ func (r *Receiver) binding(task *wire.Submission, attempt int64) wire.ReceiverBi
 func (r *Receiver) status(task *wire.Submission, hash string, attempt int64, kind string, status wire.TaskStatus, offset *int64) *wire.RunStatus {
 	eventID := wire.RandomID("event-")
 	return &wire.RunStatus{
-		StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: task.Wherry.Run, ContextID: task.Wherry.Run, Status: status},
+		StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: task.Wherry.Run, ContextID: task.Message.ContextID, Status: status},
 		Wherry:       wire.StatusBinding{ReceiverBinding: r.binding(task, attempt), EventID: eventID, Kind: kind, TaskHash: hash, LogOffset: offset},
 	}
 }
@@ -2526,7 +2526,7 @@ func (run *activeRun) chunks(lines []pluginsdk.Line, last bool) []*kgo.Record {
 	if last && len(lines) == 0 {
 		records = append(records, run.transcript(&wire.Chunk{
 			ArtifactUpdate: wire.TaskArtifactUpdateEvent{
-				TaskID: run.task.Wherry.Run, ContextID: run.task.Wherry.Run,
+				TaskID: run.task.Wherry.Run, ContextID: run.task.Message.ContextID,
 				Artifact: wire.Artifact{ArtifactID: wire.TranscriptArtifact, Parts: []wire.Part{}, Extensions: []string{wire.ExtensionURI}},
 				Append:   run.next > 0, LastChunk: true,
 			},
@@ -2549,7 +2549,7 @@ func (run *activeRun) chunks(lines []pluginsdk.Line, last bool) []*kgo.Record {
 		}
 		chunk := &wire.Chunk{
 			ArtifactUpdate: wire.TaskArtifactUpdateEvent{
-				TaskID: run.task.Wherry.Run, ContextID: run.task.Wherry.Run,
+				TaskID: run.task.Wherry.Run, ContextID: run.task.Message.ContextID,
 				Artifact: wire.Artifact{ArtifactID: wire.TranscriptArtifact, Parts: []wire.Part{part}, Extensions: []string{wire.ExtensionURI}},
 				// The stream's first chunk is the line at log offset zero; an adopter resumes past it.
 				Append:    line.Offset > 0,
@@ -2588,7 +2588,7 @@ func (run *activeRun) result(status wire.TaskStatus, result string) *kgo.Record 
 	})
 	return run.feed(&wire.Result{
 		Task: wire.Task{
-			ID: run.task.Wherry.Run, ContextID: run.task.Wherry.Run, Status: run.redactStatus(status),
+			ID: run.task.Wherry.Run, ContextID: run.task.Message.ContextID, Status: run.redactStatus(status),
 			History:   inputPointers(run.history),
 			Artifacts: append([]wire.Artifact{{ArtifactID: wire.ResultArtifact, Parts: []wire.Part{part}, Extensions: []string{wire.ExtensionURI}}}, run.references()...),
 			Metadata:  metadata,
@@ -2745,7 +2745,7 @@ func Preamble(directories pluginsdk.Directories, inputs []string, credentials []
 		lines = append(lines, "Write these output files, creating their directories if they do not exist: "+strings.Join(paths, ", ")+".")
 	}
 	if git != nil {
-		lines = append(lines, gitPreamble(git, run, input+"/"+wire.KnownHostsFile, credential, output, credentials, outputs)...)
+		lines = append(lines, gitPreamble(git, run, input, credential, output, credentials, outputs)...)
 	}
 	listed := "This run has no credentials."
 	if len(names) > 0 {
@@ -2769,7 +2769,7 @@ func Preamble(directories pluginsdk.Directories, inputs []string, credentials []
 // The clone's --config settings persist for later fetches and pushes and complement pluginsdk.AgentEnvironment, which
 // stops system, global and environment configuration being read. They guard a cooperative agent against ambient
 // configuration, not a hostile one, which can override them.
-func gitPreamble(git *wire.GitInput, run, knownHosts, credentialDir, outputDir string, credentials []wire.TaskCredential, outputs []wire.ExpectedOutput) []string {
+func gitPreamble(git *wire.GitInput, run, inputDir, credentialDir, outputDir string, credentials []wire.TaskCredential, outputs []wire.ExpectedOutput) []string {
 	remote, ref, checkout := "'"+git.Remote+"'", "'"+git.Ref+"'", "'"+git.Checkout()+"'"
 	keyFile := ""
 	if index := slices.IndexFunc(credentials, func(credential wire.TaskCredential) bool {
@@ -2785,7 +2785,7 @@ func gitPreamble(git *wire.GitInput, run, knownHosts, credentialDir, outputDir s
 		if keyFile != "" {
 			identity = `-i "` + keyFile + `"`
 		}
-		config = append(config, `core.sshCommand='ssh -F /dev/null `+identity+` -o IdentitiesOnly=yes -o IdentityAgent=none -o UserKnownHostsFile="`+knownHosts+
+		config = append(config, `core.sshCommand='ssh -F /dev/null `+identity+` -o IdentitiesOnly=yes -o IdentityAgent=none -o UserKnownHostsFile="`+inputDir+"/"+wire.KnownHostsFile+
 			`" -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes -o BatchMode=yes -o ProxyCommand=none'`)
 	case keyFile != "":
 		config = append(config, `credential.`+git.Origin()+`.helper='!f() { test "$1" = get || exit 0; echo username=x-access-token; echo "password=$(cat "`+keyFile+`")"; }; f'`)
@@ -2795,14 +2795,30 @@ func gitPreamble(git *wire.GitInput, run, knownHosts, credentialDir, outputDir s
 	for _, setting := range config {
 		clone += " --config " + setting
 	}
-	lines := []string{
-		"Clone the git repository " + git.Remote + " at " + git.Ref + " into " + git.Checkout() + ", relative to your working directory, with these commands. " +
-			"They need git 2.30 or later: run git version first, and if it is older, stop and report that.",
-		clone + " -- " + remote + " " + checkout,
-		"    git -C " + checkout + " checkout " + ref + " --",
-		"    git -C " + checkout + " update-ref refs/wherry/start HEAD",
-		"The clone keeps its settings for later fetches and pushes; do not change them.",
+	const requirement = "They need git 2.30 or later: run git version first, and if it is older, stop and report that."
+	var lines []string
+	if base := git.Base; base != nil {
+		// refs/wherry/start stays at the base, so the run's changes need only the base to import.
+		lines = []string{
+			"Clone the git repository " + git.Remote + " into " + git.Checkout() + ", relative to your working directory, and continue from the previous run's changes in " +
+				inputDir + "/" + base.Bundle + ", with these commands. " + requirement,
+			clone + " -- " + remote + " " + checkout,
+			"    git -C " + checkout + " checkout --detach '" + base.Commit + "' --",
+			"    git -C " + checkout + " update-ref refs/wherry/start HEAD",
+			"    git -C " + checkout + ` -c protocol.file.allow=always fetch "` + inputDir + "/" + base.Bundle + `" HEAD`,
+			"    git -C " + checkout + " merge-base --is-ancestor refs/wherry/start FETCH_HEAD",
+			"    git -C " + checkout + " checkout --detach FETCH_HEAD --",
+			"If any of these commands fails, stop and report it.",
+		}
+	} else {
+		lines = []string{
+			"Clone the git repository " + git.Remote + " at " + git.Ref + " into " + git.Checkout() + ", relative to your working directory, with these commands. " + requirement,
+			clone + " -- " + remote + " " + checkout,
+			"    git -C " + checkout + " checkout " + ref + " --",
+			"    git -C " + checkout + " update-ref refs/wherry/start HEAD",
+		}
 	}
+	lines = append(lines, "The clone keeps its settings for later fetches and pushes; do not change them.")
 	if keyFile != "" {
 		lines = append(lines, "Never print the credential or put it on a command line.")
 	}

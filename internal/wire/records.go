@@ -591,8 +591,11 @@ func (value *Submission) validate() error {
 	if err := binding.Placement.validate(); err != nil {
 		return err
 	}
-	if value.Message.TaskID != binding.Run || value.Message.ContextID != binding.Run {
-		return errors.New("message taskId and contextId must be the run ID")
+	if value.Message.TaskID != binding.Run || !runID.MatchString(value.Message.ContextID) {
+		return errors.New("message taskId must be the run ID and contextId a run ID")
+	}
+	if len(value.Message.ReferenceTaskIDs) > 1 || len(value.Message.ReferenceTaskIDs) == 1 && !runID.MatchString(value.Message.ReferenceTaskIDs[0]) {
+		return errors.New("message referenceTaskIds holds at most one run ID")
 	}
 	if err := validateMessage(&value.Message); err != nil {
 		return err
@@ -657,6 +660,10 @@ func (value *Submission) validate() error {
 	if binding.Git.HostKey != "" && inputs[KnownHostsFile] {
 		return errors.New("an input named known_hosts conflicts with the git host key")
 	}
+	// A receiver before git base ignores it; only a context other than the run's own makes such a receiver refuse.
+	if base := binding.Git.Base; base != nil && (!inputs[base.Bundle] || value.Message.ContextID == binding.Run) {
+		return errors.New("a git base names one of the run's input files and continues another run's context")
+	}
 	return nil
 }
 
@@ -719,7 +726,7 @@ func (value *RunStatus) validate() error {
 	if err := validateID(binding.EventID, "event_id"); err != nil {
 		return err
 	}
-	if update.TaskID != binding.Run || update.ContextID != binding.Run || !ValidHash(binding.TaskHash) ||
+	if update.TaskID != binding.Run || !runID.MatchString(update.ContextID) || !ValidHash(binding.TaskHash) ||
 		binding.TranscriptChunks < 0 || binding.TranscriptChunks > 0 && binding.Kind != "terminal" ||
 		(binding.TaskOffset != nil) != (binding.Kind == "claimed") || binding.TaskOffset != nil && *binding.TaskOffset < 0 ||
 		(binding.TaskTopic != "") != (binding.Kind == "claimed") || binding.TaskTopic != "" && !taskTopic.MatchString(binding.TaskTopic) {
@@ -769,7 +776,7 @@ func (value *Chunk) validate() error {
 	if err := value.Wherry.ReceiverBinding.validate(); err != nil {
 		return err
 	}
-	if update.TaskID != value.Wherry.Run || update.ContextID != value.Wherry.Run || value.Wherry.Seq < 0 || !ValidHash(value.Wherry.TaskHash) {
+	if update.TaskID != value.Wherry.Run || !runID.MatchString(update.ContextID) || value.Wherry.Seq < 0 || !ValidHash(value.Wherry.TaskHash) {
 		return errors.New("invalid chunk")
 	}
 	return validateArtifactUpdate(update)
@@ -780,7 +787,7 @@ func (value *Output) validate() error {
 	if err := value.Wherry.ReceiverBinding.validate(); err != nil {
 		return err
 	}
-	if update.TaskID != value.Wherry.Run || update.ContextID != value.Wherry.Run || !ValidHash(value.Wherry.TaskHash) {
+	if update.TaskID != value.Wherry.Run || !runID.MatchString(update.ContextID) || !ValidHash(value.Wherry.TaskHash) {
 		return errors.New("invalid output")
 	}
 	artifact := &update.Artifact
@@ -809,7 +816,7 @@ func (value *Result) validate() error {
 	if err := value.Wherry.ReceiverBinding.validate(); err != nil {
 		return err
 	}
-	if value.Task.ID != value.Wherry.Run || value.Task.ContextID != value.Wherry.Run || !ValidHash(value.Wherry.TaskHash) {
+	if value.Task.ID != value.Wherry.Run || !runID.MatchString(value.Task.ContextID) || !ValidHash(value.Wherry.TaskHash) {
 		return errors.New("invalid result")
 	}
 	return validateTask(&value.Task)

@@ -104,6 +104,36 @@ record, and a host before v0.1.2-rc.2 cannot read a record holding that time:
 binary that shares a state directory together, and do not go back to an
 older one while a cancelled run's record is kept.
 
+## Continued runs and run contexts from v0.1.3
+
+From v0.1.3 a run's A2A `contextId` need not be its own run ID.
+[`wherry host submit --continue`](commands.md#wherry-host-submit) gives a
+run the context of the run it continues, and every run that loses its pool
+key before it starts is resubmitted with its original's `contextId`, not the
+replacement's own ID. Receivers, custodians and hosts before v0.1.3 reject a
+record whose `contextId` is not its run ID:
+
+- A receiver or custodian before v0.1.3 rejects such a submission without a
+  status, so the run shows waiting, then unclaimed at `task_started_by`. One
+  such receiver in a pool rejects it for every receiver there. An older
+  custodian refuses to open it, so the task is redelivered until its bound.
+- A receiver before v0.1.3 ignores a submission's `git.base` and would clone
+  the ref; only the `contextId` check stops it.
+- A host before v0.1.3 drops every record of such a run from the tenant
+  feed, and cannot read a run record that holds a continued run's task or a
+  collected `changes.bundle`: `status`, `wait` and resubmission of the run
+  fail on it.
+
+Upgrade in this order:
+
+1. Every receiver and custodian in each pool.
+2. Every host binary of the tenant, together when they share a state
+   directory, and restart each `wherry host mcp` server.
+3. Then use `--continue`.
+
+A host upgraded before its receivers breaks the resubmission of every run
+that loses its pool key, not only of continued runs.
+
 ## What happens to running work?
 
 On `SIGINT` or `SIGTERM`, a receiver stops claiming and closes idle claims.

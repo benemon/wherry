@@ -188,7 +188,8 @@ func (h *Host) resubmit(ctx context.Context, runID string, lost bool) (string, e
 	}
 	terms := v.state.Pools[local.Pool]
 	submission := *local.Task
-	submission.Message.TaskID, submission.Message.ContextID, submission.Message.MessageID = local.Replacement, local.Replacement, wire.RandomID("msg-")
+	// The replacement keeps the original's contextId, referenceTaskIds and git base.
+	submission.Message.TaskID, submission.Message.MessageID = local.Replacement, wire.RandomID("msg-")
 	submission.Wherry.Run, submission.Wherry.RunNonce = local.Replacement, local.ReplacementNonce
 	submission.Wherry.Replaces, submission.Wherry.S3InputRun = runID, local.Task.Wherry.InputRun()
 	var agent operator.AgentTerms
