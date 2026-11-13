@@ -22,7 +22,7 @@ env:
   # The wherry-plugins commit whose examples the Plugins page embeds and whose README install regions the Install pages
   # include; a plugin release moves it to the commit it was cut from, and a plugin docs change the Install pages need
   # moves it to that change's commit.
-  WHERRY_PLUGINS_REF: 3b84d06ac220d603659dfdbdd32ae969bba1f8c7
+  WHERRY_PLUGINS_REF: 2ce0814ed52212418c132bdeacabe808a6aa1f3c
 
 concurrency:
   group: pages-${{ github.event_name }}-${{ github.ref }}
