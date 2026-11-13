@@ -49,7 +49,9 @@ type AwaitResult struct {
 	Redacted map[string]int
 	// Unclaimed is set, with Status SUBMITTED, when the run's task_started_by passed and no receiver claimed it.
 	Unclaimed string
-	Skipped   int
+	// CancelRequested is set while a cancel this host published waits for a receiver to claim the run.
+	CancelRequested string
+	Skipped         int
 	// Runs lists the run awaited and each replacement followed from it, the run the outcome is of last.
 	Runs []string
 	// keyLost marks an outcome whose run ended with the wherry event key-lost.
@@ -90,9 +92,13 @@ type StatusResult struct {
 	// Redacted counts, by name, the redaction markers of the run's values in Status, where each reads
 	// [redacted:<name>] instead.
 	Redacted map[string]int
-	// Unclaimed is set when the run's task_started_by passed and no receiver claimed it.
+	// Unclaimed is set when the run's task_started_by passed and no receiver claimed it, and Waiting before then while
+	// no receiver has reported a status: each says why as the live advertisements show it at the call.
 	Unclaimed string
-	Skipped   int
+	Waiting   string
+	// CancelRequested is set while a cancel this host published waits for a receiver to claim the run.
+	CancelRequested string
+	Skipped         int
 	// Replacement names the run that resubmits this one, when it lost its pool key before it started.
 	Replacement string
 }
@@ -686,11 +692,24 @@ func (h *Host) Status(ctx context.Context, runID string) (StatusResult, error) {
 		return StatusResult{}, fmt.Errorf("status %s: %w", runID, ErrRunNotFound)
 	}
 	h.resubmitIfLost(ctx, r)
-	result := r.status()
+	var ads map[string]wire.Advertisement
+	if r.waits() {
+		ads, _ = liveAds(ctx, h, r.v)
+	}
+	result := r.status(ads)
 	if chain, err := h.chain(runID); err == nil && len(chain) > 1 {
 		result.Replacement = chain[1]
 	}
 	return result, nil
+}
+
+// LastStatus returns the status of the last run of runID's resubmission chain: the run Await follows and Cancel cancels.
+func (h *Host) LastStatus(ctx context.Context, runID string) (StatusResult, error) {
+	chain, err := h.chain(runID)
+	if err != nil {
+		return StatusResult{}, err
+	}
+	return h.Status(ctx, chain[len(chain)-1])
 }
 
 // RunsResult lists runs, latest update first; Skipped counts their unverifiable records and undecodable local records.
@@ -728,6 +747,8 @@ func (h *Host) Runs(ctx context.Context) (RunsResult, error) {
 	result := RunsResult{Runs: []StatusResult{}}
 	// One reread map and a view carried forward bound the reloads to one per unknown kid across all runs.
 	reread := map[string]bool{}
+	var ads map[string]wire.Advertisement
+	adsRead := false
 	for runID, records := range byRun {
 		local, err := h.localRun(runID)
 		if errors.Is(err, errUndecodable) {
@@ -742,7 +763,11 @@ func (h *Host) Runs(ctx context.Context) (RunsResult, error) {
 		v = r.v
 		h.resubmitIfLost(ctx, r)
 		if r.pool != "" {
-			status := r.status()
+			if r.waits() && !adsRead {
+				ads, _ = liveAds(ctx, h, r.v)
+				adsRead = true
+			}
+			status := r.status(ads)
 			result.Runs = append(result.Runs, status)
 			result.Skipped += status.Skipped
 		}
@@ -756,8 +781,9 @@ func (h *Host) Runs(ctx context.Context) (RunsResult, error) {
 	return result, nil
 }
 
-// status is the latest verified status of the run, SUBMITTED until a receiver reports one.
-func (r *runView) status() StatusResult {
+// status is the latest verified status of the run, SUBMITTED until a receiver reports one, saying why it waits as ads,
+// the live advertisements, show it.
+func (r *runView) status(ads map[string]wire.Advertisement) StatusResult {
 	result := StatusResult{RunID: r.run, Pool: r.pool, Status: wire.TaskStatus{State: wire.TaskStateSubmitted}, Model: r.model(), Skipped: r.skipped}
 	if r.local != nil {
 		result.Updated = time.UnixMilli(r.local.SubmittedMS)
@@ -773,8 +799,48 @@ func (r *runView) status() StatusResult {
 	}
 	result.Redacted = map[string]int{}
 	result.Status = unredactStatus(result.Status, r.h.markers(r.local), result.Redacted)
-	result.Unclaimed = r.unclaimed(time.Now())
+	result.Unclaimed, result.Waiting = r.waiting(ads, time.Now())
+	result.CancelRequested = r.cancelRequested()
 	return result
+}
+
+// waits reports whether the run is this host's and no receiver has reported a status of it, so it has a waiting reason.
+func (r *runView) waits() bool {
+	return r.local != nil && len(r.statuses) == 0
+}
+
+// waiting says why the run, which this host submitted and no receiver has reported a status of, waits as ads show it:
+// past its task_started_by in unclaimed's text, else on its own. With ads nil, as when they could not be read, it gives
+// unclaimed's text alone.
+func (r *runView) waiting(ads map[string]wire.Advertisement, now time.Time) (string, string) {
+	if !r.waits() {
+		return "", ""
+	}
+	unclaimed := r.unclaimed(now)
+	if ads == nil {
+		return unclaimed, ""
+	}
+	reason, queued := waitReason(r.v.state, ads, r.local.Pool, r.local.Topic)
+	if unclaimed != "" {
+		return unclaimed + "; now: " + reason, ""
+	}
+	if queued {
+		reason = "queued: " + reason
+	}
+	return "", reason
+}
+
+// cancelRequested says when this host published a cancel of the run, while no receiver has reported a status of it.
+func (r *runView) cancelRequested() string {
+	if r.local == nil || r.local.CancelRequestedMS == 0 || len(r.statuses) > 0 {
+		return ""
+	}
+	return "cancel requested " + time.UnixMilli(r.local.CancelRequestedMS).UTC().Format(time.RFC3339) + "; applies when a receiver claims the task"
+}
+
+// liveAds reads the live advertisements of the pools the tenant is entitled to. A variable so tests can count reads.
+var liveAds = func(ctx context.Context, h *Host, v view) (map[string]wire.Advertisement, error) {
+	return h.reader.ReadAdvertisements(ctx, v.state, v.keys, slices.Sorted(maps.Keys(v.state.Entitlements[h.tenant])), time.Now(), liveness)
 }
 
 // unclaimed says that the run's task_started_by passed at now with no status from a receiver, and is empty otherwise.
@@ -1246,8 +1312,12 @@ func (h *Host) awaitRun(waitCtx context.Context, runID string) (AwaitResult, err
 			}
 			return outcome, nil
 		}
-		if unclaimed := r.unclaimed(time.Now()); unclaimed != "" {
-			return AwaitResult{Status: wire.TaskStatus{State: wire.TaskStateSubmitted}, Model: r.model(), Unclaimed: unclaimed, Skipped: r.skipped}, nil
+		if now := time.Now(); r.unclaimed(now) != "" {
+			ads, _ := liveAds(waitCtx, h, r.v)
+			unclaimed, _ := r.waiting(ads, now)
+			return AwaitResult{
+				Status: wire.TaskStatus{State: wire.TaskStateSubmitted}, Model: r.model(), Unclaimed: unclaimed, CancelRequested: r.cancelRequested(), Skipped: r.skipped,
+			}, nil
 		}
 		pollCtx, stopPoll := waitCtx, context.CancelFunc(func() {})
 		if r.local != nil && r.local.TaskStartedBy > 0 && len(r.statuses) == 0 {

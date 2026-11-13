@@ -764,8 +764,8 @@ profiles' replicas (0 or absent counts as one).
 {
   "v": 1,
   "receiver": "nomad-1", "pool": "build",
-  "offers": [{"profile": "container", "agent": "coder"}],
-  "capacity": 2, "in_flight": 0,
+  "offers": [{"profile": "container", "agent": "coder", "replicas": 2, "in_flight": 1}],
+  "capacity": 2, "in_flight": 1,
   "at_ms": 1789998000000
 }
 ```
@@ -779,8 +779,19 @@ profiles' replicas (0 or absent counts as one).
   smallest `inline_limit` among the offers that satisfy a placement in each
   receiver's last advertisement, live or stale; submitting inputs over it,
   the host carries them as S3 inputs, or refuses the run when the pool or
-  the host has no storage.
+  the host has no storage. Each offer also carries `replicas`, the tasks the
+  profile claims at once in the advertising process, 0 read as one, and
+  `in_flight`, the runs claimed through the profile that the receiver still
+  holds; both are 0 or more. A run counts against the profile whose replica
+  claimed it until the receiver lets it go, so the offers' `in_flight` need
+  not add up to the advertisement's.
 - `capacity` and `in_flight` are 0 or more, and `at_ms` is over 0.
+- `gated`, omitted while the receiver claims, names why it claims no task:
+  `suspended` (its pool is suspended), `no_ready_offer` (no profile is
+  ready), `pending_run` (a run it holds waits for its platform to place it),
+  or `draining` (it stopped claiming while its held runs finish, after a
+  configuration change or a stop). Any other value is invalid. Placement
+  credits a gated receiver with no spare.
 - A receiver advertises every 30 seconds, with or without a ready profile.
   Placement passes over a receiver whose `offers` is empty. Readers take
   each receiver's

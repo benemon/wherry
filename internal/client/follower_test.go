@@ -217,7 +217,7 @@ func TestAViewFetchesOnlyTheRecordsSinceTheLast(t *testing.T) {
 		}
 	}
 	r, err := host.history(f.ctx, runID)
-	if err != nil || r.status().Status.State != wire.TaskStateWorking {
+	if err != nil || r.status(nil).Status.State != wire.TaskStateWorking {
 		t.Fatalf("history %v; want WORKING", err)
 	}
 	if fetched := hook.fetched.Load() - before; fetched != 5 {
@@ -239,7 +239,7 @@ func TestAViewHoldsAClaimCommittedBeforeIt(t *testing.T) {
 	hook.slow.Store(true)
 	receiver.feed(t, f.ctx, submitted.RunID, receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil))
 	r, err := host.history(f.ctx, submitted.RunID)
-	if err != nil || r.status().Status.State != wire.TaskStateWorking {
+	if err != nil || r.status(nil).Status.State != wire.TaskStateWorking {
 		t.Fatalf("history %v; want WORKING from the claim committed before it", err)
 	}
 }
@@ -283,7 +283,7 @@ func TestARunBelowTheFollowersStartIsReadOnce(t *testing.T) {
 		t.Fatalf("follower starts at %d, the ended run's offset is %d; want the follower past the run", follower.start, local.FeedOffset)
 	}
 	r, err := f.host.history(f.ctx, runID)
-	if err != nil || r.status().Status.State != wire.TaskStateCompleted || r.skipped != 0 {
+	if err != nil || r.status(nil).Status.State != wire.TaskStateCompleted || r.skipped != 0 {
 		t.Fatalf("history %v; want COMPLETED with nothing skipped", err)
 	}
 	if awaited, err := f.host.Await(f.ctx, runID, 5*time.Second); err != nil || awaited.Status.State != wire.TaskStateCompleted {

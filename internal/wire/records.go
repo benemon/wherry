@@ -308,8 +308,18 @@ type Advertisement struct {
 	Offers   []Offer `json:"offers"`
 	Capacity int64   `json:"capacity"`
 	InFlight int64   `json:"in_flight"`
-	AtMS     int64   `json:"at_ms"`
+	// Gated is why the receiver claims no task, empty while it claims.
+	Gated string `json:"gated,omitzero"`
+	AtMS  int64  `json:"at_ms"`
 }
+
+// The reasons a receiver claims no task.
+const (
+	GatedSuspended    = "suspended"
+	GatedNoReadyOffer = "no_ready_offer"
+	GatedPendingRun   = "pending_run"
+	GatedDraining     = "draining"
+)
 
 // CustodianType is the JWS type of a custodian snapshot.
 const CustodianType = "application/vnd.wherry.custodian.v1+jws"
@@ -819,7 +829,8 @@ func (value *Advertisement) validate() error {
 	if err := validateIDs(map[string]string{"receiver": value.Receiver, "pool": value.Pool}); err != nil {
 		return err
 	}
-	if value.Capacity < 0 || value.InFlight < 0 || value.AtMS <= 0 {
+	if value.Capacity < 0 || value.InFlight < 0 || value.AtMS <= 0 ||
+		!slices.Contains([]string{"", GatedSuspended, GatedNoReadyOffer, GatedPendingRun, GatedDraining}, value.Gated) {
 		return errors.New("invalid advertisement")
 	}
 	return validateOffers(value.Offers)

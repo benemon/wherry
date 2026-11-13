@@ -1474,7 +1474,7 @@ func TestAdvertisement(t *testing.T) {
 		t.Fatal(err)
 	}
 	advertisement := f.advertisedOffers(t)
-	want := []wire.Offer{{Profile: "nomad", Agent: "claude", InlineLimit: 49152}}
+	want := []wire.Offer{{Profile: "nomad", Agent: "claude", InlineLimit: 49152, Replicas: 1}}
 	if !reflect.DeepEqual(advertisement.Offers, want) || advertisement.Pool != testPool || advertisement.Capacity != 1 {
 		t.Fatalf("advertisement %#v, want offers %#v", advertisement, want)
 	}
@@ -1488,7 +1488,7 @@ func TestAdvertisedOffersAreTheConfiguredProfiles(t *testing.T) {
 	}
 	var want []wire.Offer
 	for _, settings := range state.Receivers[testReceiver].Profiles {
-		want = append(want, wire.Offer{Profile: settings.Name, Agent: settings.Agent})
+		want = append(want, wire.Offer{Profile: settings.Name, Agent: settings.Agent, Replicas: int64(replicasOf(settings))})
 	}
 	if offers := m.advertisedOffers(t).Offers; !reflect.DeepEqual(offers, want) {
 		t.Fatalf("offers %#v, want each profile wherry.operator configures, in order: %#v", offers, want)

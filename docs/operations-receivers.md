@@ -215,6 +215,8 @@ When every member of a pool has no ready offer, you see these consequences:
 
 A receiver with ready offers fetches only the tasks of their signatures.
 A task on a signature no live member serves waits on its topic and spends no delivery; its host reports it at `task_started_by` with `no receiver claimed the task`.
+Until then `wherry host status RUN_ID` says why it waits, from the receivers' advertisements: a full profile, a receiver that is not claiming and why, or no live profile on its signature.
+A receiver advertises each ready profile's `replicas` and `in_flight`, and `gated` while it claims nothing: `suspended`, `no_ready_offer`, `pending_run`, or `draining` while held runs finish after a configuration change or a stop.
 
 ### A receiver with a pending run
 

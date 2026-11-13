@@ -228,7 +228,7 @@ type runOutput struct {
 	Pool       string         `json:"pool"`
 	State      string         `json:"state"`
 	Model      string         `json:"model,omitempty" jsonschema:"model the run's placement names"`
-	Message    string         `json:"message,omitempty"`
+	Message    string         `json:"message,omitempty" jsonschema:"status message, or while no receiver has reported a status, this host's note of why the run waits as the receivers' live advertisements show it now and of a cancel waiting for a claim"`
 	Updated    string         `json:"updated" jsonschema:"RFC 3339 time of the latest status; while the run has none, of this host's submission, else of the receiver's echo"`
 	Redacted   map[string]int `json:"redacted,omitempty" jsonschema:"redaction markers in the message by the credential or S3 object each names"`
 	ReplacedBy string         `json:"replaced_by,omitempty" jsonschema:"the run that resubmits this one, which lost its pool key before it started"`
@@ -272,7 +272,7 @@ type waitReply struct {
 	State       string                  `json:"state"`
 	Model       string                  `json:"model,omitempty" jsonschema:"model the run's placement names"`
 	RetryAfter  int                     `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished: seconds to wait before calling wait again"`
-	Message     string                  `json:"message,omitempty" jsonschema:"status message: the agent's answer or what went wrong, a credential the run could not obtain, the step the agent last reported while the run is unfinished, or this host's note that task_started_by passed and no receiver claimed the task; an answer over 64 KiB is cut to its first 64 KiB, and reply names the whole"`
+	Message     string                  `json:"message,omitempty" jsonschema:"status message: the agent's answer or what went wrong, a credential the run could not obtain, the step the agent last reported while the run is unfinished, or, while no receiver has reported a status, this host's note of why the run waits as the receivers' live advertisements show it now (a run past task_started_by: that no receiver claimed the task) and of a cancel waiting for a claim; an answer over 64 KiB is cut to its first 64 KiB, and reply names the whole"`
 	Reply       *replyFile              `json:"reply,omitempty" jsonschema:"set when the agent's answer is over 64 KiB"`
 	Artifacts   []resultArtifact        `json:"artifacts,omitempty"`
 	Outputs     []outputReply           `json:"outputs,omitempty" jsonschema:"the run's outputs, verified and written locally"`
@@ -283,7 +283,8 @@ type waitReply struct {
 }
 
 type cancelOutput struct {
-	ID      string `json:"id"`
+	ID      string `json:"id" jsonschema:"the run cancelled: the last run of the run's resubmission chain"`
+	Cancel  string `json:"cancel" jsonschema:"requested: the cancel is published; a run no receiver has claimed ends CANCELED once one claims it"`
 	Skipped int    `json:"skipped,omitempty"`
 }
 
@@ -362,7 +363,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "receivers",
-		Description: "List the receivers of the pools this tenant may use: each receiver's status (live, stale, silent or ended) and capacity, and each profile's plugin type, agent and labels as wherry.operator records them, its inline_limit from the offer, and its agent's models, default_model and credentials from the pool's terms, each credential with its target (env, the agent's environment variable, or file, in its credentials directory), its description from the pool's terms, optional, which submit delivers only when its credentials name it, and configured, whether this host has a source for it (the agent's credentials, delivered into the run; a git clone uses the host's git entries), with ready set when the receiver's live advertisement offers the profile. A live receiver with no ready profile lists every profile with ready false. Read it to choose an agent and selector before submit.",
+		Description: "List the receivers of the pools this tenant may use: each receiver's status (live, stale, silent or ended), and its capacity and in_flight, totals over all its profiles, and each profile's plugin type, agent and labels as wherry.operator records them, its replicas, in_flight and inline_limit from the offer, and its agent's models, default_model and credentials from the pool's terms, each credential with its target (env, the agent's environment variable, or file, in its credentials directory), its description from the pool's terms, optional, which submit delivers only when its credentials name it, and configured, whether this host has a source for it (the agent's credentials, delivered into the run; a git clone uses the host's git entries), with ready set when the receiver's live advertisement offers the profile. A live receiver with no ready profile lists every profile with ready false. A profile claims one task per replica, so a profile at in_flight equal to replicas is full whatever its receiver's totals; a queued run waits for its own profile. Read it to choose an agent and selector before submit.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ receiversInput) (*mcp.CallToolResult, receiversOutput, error) {
 		client, err := connect()
@@ -405,7 +406,8 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "status",
 		Description: "Return the latest verified state of a run without waiting. With id, runs holds that run; " +
-			"without it, runs holds every run this host submitted or the tenant's receivers admitted, latest update first.",
+			"without it, runs holds every run this host submitted or the tenant's receivers admitted, latest update first. " +
+			"A run of this host no receiver has claimed says in message why it waits, from the receivers' advertisements, which can be up to 120 seconds old.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input statusInput) (*mcp.CallToolResult, statusOutput, error) {
 		client, err := connect()
@@ -425,7 +427,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		output := statusOutput{Runs: []runOutput{}, Skipped: runs.Skipped}
 		for _, result := range runs.Runs {
 			output.Runs = append(output.Runs, runOutput{
-				ID: result.RunID, Pool: result.Pool, State: string(result.Status.State), Model: result.Model, Message: cmp.Or(statusText(result.Status), result.Unclaimed),
+				ID: result.RunID, Pool: result.Pool, State: string(result.Status.State), Model: result.Model, Message: cmp.Or(statusText(result.Status), notes(result.Unclaimed, result.Waiting, result.CancelRequested)),
 				Updated: result.Updated.UTC().Format(time.RFC3339Nano), Redacted: result.Redacted, ReplacedBy: result.Replacement,
 			})
 		}
@@ -451,12 +453,12 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		}
 		result, err := client.Await(ctx, input.ID, waitBound)
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-			status, err := client.Status(ctx, input.ID)
+			status, err := client.LastStatus(ctx, input.ID)
 			if err != nil {
 				return nil, waitReply{}, failure(err)
 			}
 			return nil, waitReply{
-				ID: input.ID, State: string(status.Status.State), Model: status.Model, Message: cmp.Or(statusText(status.Status), status.Unclaimed),
+				ID: input.ID, State: string(status.Status.State), Model: status.Model, Message: cmp.Or(statusText(status.Status), notes(status.Unclaimed, status.Waiting, status.CancelRequested)),
 				Redacted: status.Redacted, RetryAfter: retryAfter, Skipped: status.Skipped,
 			}, nil
 		}
@@ -464,7 +466,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 			return nil, waitReply{}, failure(err)
 		}
 		output := waitReply{
-			ID: input.ID, State: string(result.Status.State), Model: result.Model, Message: cmp.Or(statusText(result.Status), result.Unclaimed),
+			ID: input.ID, State: string(result.Status.State), Model: result.Model, Message: cmp.Or(statusText(result.Status), notes(result.Unclaimed, result.CancelRequested)),
 			Redacted: result.Redacted, Skipped: result.Skipped,
 		}
 		final := input.ID
@@ -513,7 +515,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			return nil, cancelOutput{}, failure(err)
 		}
-		return nil, cancelOutput{ID: result.RunID, Skipped: result.Skipped}, nil
+		return nil, cancelOutput{ID: result.RunID, Cancel: "requested", Skipped: result.Skipped}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -853,4 +855,9 @@ func inputReader(open func(string) (*os.File, error)) func(string, int64) (wire.
 		}
 		return wire.Part{Raw: append(wire.StdBytes{}, data...), Filename: filepath.Base(path)}, nil
 	}
+}
+
+// notes joins the notes a host gives of a run no receiver has reported a status of.
+func notes(texts ...string) string {
+	return strings.Join(slices.DeleteFunc(texts, func(text string) bool { return text == "" }), "; ")
 }

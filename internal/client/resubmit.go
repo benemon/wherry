@@ -120,22 +120,17 @@ func (h *Host) logResubmit(ctx context.Context, runID string, lost bool) {
 // replacement, or "" when the run is not to be resubmitted; lost reports that the caller read the run's latest status as
 // key-lost. The lock on the run is shared by every process using the state directory, so a run is replaced at most once.
 func (h *Host) resubmit(ctx context.Context, runID string, lost bool) (string, error) {
-	path, ok := h.runPath(runID)
-	if !ok {
+	if _, ok := h.runPath(runID); !ok {
 		return "", fmt.Errorf("resubmit %s: %w", runID, ErrRunNotFound)
 	}
 	if local, err := h.localRun(runID); err != nil || local == nil || local.Task == nil {
 		return "", err
 	}
-	lock := filepath.Join(h.stateDir, "resubmit", filepath.Base(path)+".lock")
-	unlock, err := h.lockFile(ctx, lock)
+	unlock, err := h.lockRun(ctx, runID)
 	if err != nil {
 		return "", err
 	}
-	defer func() {
-		os.Remove(lock)
-		unlock()
-	}()
+	defer unlock()
 	local, err := h.localRun(runID)
 	if err != nil || local == nil || local.Task == nil {
 		return "", err
@@ -157,6 +152,10 @@ func (h *Host) resubmit(ctx context.Context, runID string, lost bool) (string, e
 			}
 			return local.Replacement, nil
 		}
+	}
+	// A cancel recorded on the run is not carried to a replacement.
+	if local.CancelRequestedMS != 0 {
+		return "", nil
 	}
 	now := time.Now()
 	if !now.Before(wire.PastBound(local.TaskStartedBy)) {
@@ -283,6 +282,23 @@ func (h *Host) sweep() {
 	for _, lock := range locks {
 		removeLock(filepath.Join(h.stateDir, "resubmit", lock.Name()))
 	}
+}
+
+// lockRun takes the lock on runID that every process using the state directory shares, returning its release.
+func (h *Host) lockRun(ctx context.Context, runID string) (func(), error) {
+	path, ok := h.runPath(runID)
+	if !ok {
+		return nil, ErrRunNotFound
+	}
+	lock := filepath.Join(h.stateDir, "resubmit", filepath.Base(path)+".lock")
+	unlock, err := h.lockFile(ctx, lock)
+	if err != nil {
+		return nil, err
+	}
+	return func() {
+		os.Remove(lock)
+		unlock()
+	}, nil
 }
 
 // lockFile takes an exclusive lock on the file at path, shared by every process using the state directory, and returns

@@ -84,6 +84,26 @@ is unchanged and the host logs the refusal on each pass until the run's
 `task_started_by`. A later pass resubmits it once the credential is
 configured.
 
+### Per-profile use and the waiting reason
+
+From v0.1.2-rc.2 each offer in a receiver's advertisement carries the
+profile's `replicas` and `in_flight`, and the advertisement carries `gated`
+while the receiver claims nothing. A host places a task by the spare of the
+matching profiles rather than the receiver's, and says why a run waits. An
+older receiver's offers read as one replica with nothing in flight, so
+upgrade receivers and hosts together.
+
+The text for a run past `task_started_by` that no receiver claimed changes
+from `...: no receiver claimed the task` to
+`...: no receiver claimed the task; now: <reason>`. Update anything that
+matches the old ending exactly.
+
+`wherry host cancel` records when it first cancelled a run in the run's local
+record, and a host before v0.1.2-rc.2 cannot read a record holding that time:
+`status`, `wait` and resubmission of the run fail on it. Upgrade every wherry
+binary that shares a state directory together, and do not go back to an
+older one while a cancelled run's record is kept.
+
 ## What happens to running work?
 
 On `SIGINT` or `SIGTERM`, a receiver stops claiming and closes idle claims.

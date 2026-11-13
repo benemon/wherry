@@ -1093,7 +1093,7 @@ and receiver ID:
 
 ```
 receiver=<id> pool=<pool> capacity=<n> in_flight=<n> advertisement_age=<age> status=<status>
-  profile=<name> plugin=<type> agent=<agent> ready=<bool> labels=<k=v,...> [inline_limit=<n>] [models=<m,...> default_model=<m>] [credentials=<name:env=VAR|name:file=FILE[(missing,optional)],...>]
+  profile=<name> plugin=<type> agent=<agent> ready=<bool> labels=<k=v,...> [replicas=<n> in_flight=<n>] [inline_limit=<n>] [models=<m,...> default_model=<m>] [credentials=<name:env=VAR|name:file=FILE[(missing,optional)],...>]
     [credential=<name> description="<text>"]...
 ```
 
@@ -1108,7 +1108,14 @@ receiver's configuration record, and an agent's `models` and
 `default_model` from the pool's [terms](configuration-operator.md#pool-terms) when it has them.
 `ready` is true when the receiver is live
 and its advertisement offers the profile. A live receiver with no ready
-profile lists each profile with `ready=false`. `inline_limit`, when set, is
+profile lists each profile with `ready=false`. The receiver line's `capacity`
+and `in_flight` are totals over all of the receiver's profiles. A ready
+profile adds `replicas`, the tasks it claims at once, and `in_flight`, the
+runs it holds, both from the receiver's advertisement. A profile claims one
+task per replica, so a profile at `in_flight` equal to `replicas` is full,
+whatever the receiver's totals show, and a run placed on it waits. The
+profiles' `in_flight` need not add up to the receiver's: a run is counted
+against the profile whose replica claimed it. `inline_limit`, when set, is
 the most inline input bytes the offered profile delivers. `credentials` names
 the agent's credentials in the pool's terms, each with its target, the
 agent's environment variable or the file in its credentials directory,
@@ -1124,8 +1131,8 @@ a line of its own, as in `credential=github-token description="GitHub token for 
 | Member | Content |
 | --- | --- |
 | `receiver_id`, `pool` | strings |
-| `profiles` | `{name, plugin, agent, inline_limit, models, default_model, credentials, labels, ready}`, `credentials` holding `{name, env, file, description, optional, configured}`, `env` or `file` the target; optional values are omitted when unset |
-| `capacity`, `in_flight` | integers from the latest advertisement |
+| `profiles` | `{name, plugin, agent, inline_limit, models, default_model, credentials, labels, ready, replicas, in_flight}`, `credentials` holding `{name, env, file, description, optional, configured}`, `env` or `file` the target; `replicas` and `in_flight` are 0 for a profile that is not ready; optional values are omitted when unset |
+| `capacity`, `in_flight` | integers from the latest advertisement, totals over the receiver's profiles |
 | `last_advertised` | RFC 3339 time of the latest advertisement; omitted when there is none |
 | `status` | `live`, `stale`, `silent` or `ended` |
 
@@ -1146,7 +1153,7 @@ and needs `wherry host init` on a re-provisioned host.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--agent` | the pool's default, then the signature with the most spare capacity | agent to run |
+| `--agent` | the pool's default, then the signature with the most spare capacity: the free replicas of its ready profiles on live receivers that are claiming | agent to run |
 | `--model` | the agent's `default_model` | model the agent runs, one of its `models` in the pool's terms |
 | `--selector` | empty | [selector](#selectors) over plugin profile labels |
 | `--prompt` | | prompt text |
@@ -1305,7 +1312,18 @@ reads the run. It does not fail the submission.
 ### `wherry host cancel RUN_ID`
 
 Publishes a signed cancel of the run to its pool's events and prints
-`run_id=<id>`.
+`run_id=<id> cancel=requested`. For a run this host resubmitted after it
+lost its pool key, the cancel goes to the last replacement, and `run_id` names
+it. A run cancelled after it lost its pool key, before this host resubmitted
+it, is not resubmitted.
+
+A receiver applies the cancel when it holds the run or claims it. Until a
+receiver reports a status of the run, `status` and `wait` show
+`cancel requested <RFC 3339 time>; applies when a receiver claims the task`,
+the time of this host's first cancel of the run, also after
+`task_started_by`: a receiver that claims a cancelled run ends it
+`TASK_STATE_CANCELED` without checking its bounds. Once a receiver reports a
+status, the run's own statuses show the cancel.
 
 A run takes no new input after `submit`
 ([Binding](a2a-extension-v1.md#binding)). To add a requirement to a run,
@@ -1381,16 +1399,24 @@ until a `wait` on it or the bucket's lifecycle rule removes them.
 A run this host submitted whose `task_started_by` passes with no status from
 a receiver can never start. `wait` then collects nothing, prints nothing on
 standard output, and exits at once with status 1 and
-`not started by task_started_by (<RFC 3339 time>): no receiver claimed the task`.
+`not started by task_started_by (<RFC 3339 time>): no receiver claimed the task; now: <reason>`,
+with the [waiting reason](#why-a-run-waits) as of the call, and before it
+on standard error any pending cancel.
 `task_started_by` comes from this host's record of the submission, so
 `wait` on another host of the tenant waits for its timeout.
+
+When `--timeout` passes before a receiver reports a status of a run this host
+submitted, `wait` prints the waiting reason, and any pending cancel, on
+standard error before it exits with status 6. For a resubmitted run they are
+the last replacement's, the run `cancel` names.
 
 A run this host submitted that ends with the wherry event `key-lost` before
 its `task_started_by` never started: its pool key was lost
 ([Lost pool keys](concepts.md#lost-pool-keys)). `wait` resubmits it under a
 new run ID, or produces the replacement this host already stored, and
-follows the replacement to its outcome, through every later replacement. It
-prints one line on standard error per replacement:
+follows the replacement to its outcome, through every later replacement. A
+run cancelled before its resubmission is not resubmitted. It prints one line
+on standard error per replacement:
 
 ```
 run <id> lost its pool key before it started; resubmitted as run <id>
@@ -1426,7 +1452,10 @@ placement names one, then one line per part of the status message. The
 state is `TASK_STATE_SUBMITTED` until a receiver reports one. For a run this
 host submitted whose `task_started_by` passed with no status from a receiver,
 the line after the state and model is
-`not started by task_started_by (<RFC 3339 time>): no receiver claimed the task`.
+`not started by task_started_by (<RFC 3339 time>): no receiver claimed the task; now: <reason>`.
+Before `task_started_by`, while no receiver has reported a status, that line
+is the [waiting reason](#why-a-run-waits). A pending cancel adds
+`cancel requested <RFC 3339 time>; applies when a receiver claims the task`.
 
 Without `RUN_ID` it prints one line per run, latest update first:
 
@@ -1453,6 +1482,31 @@ outcome.
 
 `status` exits with status 0 whenever it reads a state, whatever the
 state. It fails when the run is not found or the read fails.
+
+#### Why a run waits
+
+For a run this host submitted that no receiver has reported a status of, the
+host says why it waits, from its record of the run's pool and signature topic
+and the live advertisements of the pool's receivers. It reads them at each
+call and stores nothing, so the reason is as of the call. A receiver
+advertises every 30 seconds and its advertisement counts as live for 120
+seconds, so the numbers can be up to 120 seconds old. The reason is
+the first of:
+
+| Reason | When |
+| --- | --- |
+| `queued: pool <pool> is suspended` | the pool is suspended |
+| `no live profile offers the run's signature` | no live receiver offers a profile on the run's signature topic |
+| `queued: <profile> on <receiver> advertises room` | a profile on the topic has a free replica and its receiver is claiming; the claim is pending, one per profile with room, comma-separated |
+| `queued: <profile> on <receiver> <in_flight>/<replicas> in use` or `queued: <receiver> is not claiming (<gated>)` | every profile on the topic is full or its receiver claims nothing; one per profile or receiver, comma-separated |
+
+`<gated>` is why a receiver claims no task: `suspended`, `no_ready_offer` (no
+profile is ready), `pending_run` (a run it holds is waiting for its platform
+to place it), or `draining` (it stopped claiming, after a configuration
+change or a stop, while its held runs finish). Past `task_started_by` the
+reason follows `now:` without `queued: `, as in
+`not started by task_started_by (2026-11-12T10:00:00Z): no receiver claimed the task; now: claude on nomad-1 1/1 in use`.
+It describes the advertisements at the call, not those when the bound passed.
 
 ### `wherry host events RUN_ID`
 

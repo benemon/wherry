@@ -186,6 +186,18 @@ Then start or reconfigure a receiver with a profile of that signature, or
 resubmit with a selector a live signature satisfies. A replacement of a
 key-lost run keeps its original signature's topic.
 
+## A queued run that does not start
+
+`wherry host status RUN_ID` says why a run no receiver has claimed waits
+([Why a run waits](commands.md#why-a-run-waits)). `queued: claude on nomad-1 1/1 in use`
+means the run's profile is full: each profile claims one task per replica,
+whatever room `wherry host receivers` shows on the receiver line, whose
+`capacity` and `in_flight` are totals over its profiles. Wait for a held run
+to end, or raise the profile's `replicas` with `wherry operator receiver apply`.
+`is not claiming (<gated>)` names the receiver's gate: resume a suspended
+pool, make a profile ready, or see [A receiver with a pending run](operations-receivers.md#a-receiver-with-a-pending-run).
+`no live profile offers the run's signature` is the case below.
+
 ## A task unclaimed while a peer sits idle
 
 A task its host reports `not started by task_started_by` while another live

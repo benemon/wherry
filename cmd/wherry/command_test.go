@@ -391,7 +391,7 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 	if err := runReceivers(b.ctx, b.client, nil, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), "  profile=lab plugin=nomad agent=claude ready=true labels=runtime=exec inline_limit=49152") {
+	if !strings.Contains(stdout.String(), "  profile=lab plugin=nomad agent=claude ready=true labels=runtime=exec replicas=1 in_flight=0 inline_limit=49152") {
 		t.Fatalf("receivers output %q does not carry the profile, its plugin and its inline limit", stdout.String())
 	}
 	// The agent's credentials by name and target, with whether this host has a source for each.
@@ -541,7 +541,7 @@ func TestCancelCLI(t *testing.T) {
 	if err := runCancel(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	if stdout.String() != "run_id="+runID+"\n" || stderr.Len() != 0 {
+	if stdout.String() != "run_id="+runID+" cancel=requested\n" || stderr.Len() != 0 {
 		t.Fatalf("cancel stdout %q stderr %q", stdout.String(), stderr.String())
 	}
 	b.cancelRun(t, admitted)
@@ -603,7 +603,7 @@ func TestWaitAndStatusReportAnUnclaimedRunPastItsStartBy(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 6*time.Second {
 		t.Fatalf("wait returned after %s, want soon after the 2s task_started_by", elapsed)
 	}
-	if err == nil || !strings.HasPrefix(err.Error(), "not started by task_started_by (") || !strings.HasSuffix(err.Error(), "): no receiver claimed the task") {
+	if err == nil || !strings.HasPrefix(err.Error(), "not started by task_started_by (") || !strings.HasSuffix(err.Error(), "): no receiver claimed the task; now: lab on receiver-a advertises room") {
 		t.Fatalf("wait error %v", err)
 	}
 	if stdout.Len() != 0 || stderr.Len() != 0 {
@@ -616,6 +616,74 @@ func TestWaitAndStatusReportAnUnclaimedRunPastItsStartBy(t *testing.T) {
 	}
 	if want := "TASK_STATE_SUBMITTED\n" + unclaimed + "\n"; stdout.String() != want || stderr.Len() != 0 {
 		t.Fatalf("status stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
+	}
+}
+
+// When wait's timeout passes on a queued run, it says on standard error why the run waits and that a cancel waits for a
+// claim, as status does on standard output.
+func TestWaitTimeoutSaysWhyARunWaits(t *testing.T) {
+	b := newBus(t)
+	submitted, err := b.client.Submit(b.ctx, busclient.SubmitInput{Selector: []wire.Requirement{}, Prompt: "work", EndBy: time.Now().Add(time.Hour), StartBy: time.Now().Add(10 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runCancel(b.ctx, b.client, []string{submitted.RunID}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	var exit *exitError
+	if err := runWait(b.ctx, b.client, []string{submitted.RunID, "--timeout", "1s"}, &stdout, &stderr); !errors.As(err, &exit) || exit.code != timeoutCode {
+		t.Fatalf("wait = %v, want the timeout", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(stderr.String(), "\n"), "\n")
+	if stdout.Len() != 0 || len(lines) != 2 || lines[0] != "queued: lab on receiver-a advertises room" || !strings.HasPrefix(lines[1], "cancel requested ") {
+		t.Fatalf("wait stdout %q stderr %q, want the waiting reason and the pending cancel", stdout.String(), stderr.String())
+	}
+	stderr.Reset()
+	if err := runStatus(b.ctx, b.client, []string{submitted.RunID}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if want := "TASK_STATE_SUBMITTED\n" + strings.Join(lines, "\n") + "\n"; stdout.String() != want {
+		t.Fatalf("status stdout %q, want %q", stdout.String(), want)
+	}
+}
+
+// resubmitted submits a run, ends it key-lost and has the host resubmit it, returning the run and its replacement.
+func (b *bus) resubmitted(t *testing.T) (string, string) {
+	t.Helper()
+	submitted, err := b.client.Submit(b.ctx, busclient.SubmitInput{Selector: []wire.Requirement{}, Prompt: "work", EndBy: time.Now().Add(time.Hour), StartBy: time.Now().Add(10 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := submitted.RunID
+	admitted := b.tasks(t, runID)[0]
+	value := &wire.RunStatus{StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: runID, ContextID: runID, Status: now(wire.TaskStateFailed)},
+		Wherry: wire.StatusBinding{ReceiverBinding: b.binding(admitted), EventID: "terminal-1", Kind: "terminal", Event: wire.EventKeyLost, TaskHash: admitted.hash}}
+	b.feed(t, runID, b.echo(t, admitted), b.status(t, admitted, "claimed-1", "claimed", now(wire.TaskStateWorking)), b.sign(t, value))
+	status, err := b.client.Status(b.ctx, runID)
+	if err != nil || status.Replacement == "" {
+		t.Fatalf("status %#v, %v; want the run resubmitted", status, err)
+	}
+	return runID, status.Replacement
+}
+
+// wait of a resubmitted run says at its timeout why the last run of the chain waits and that its cancel is pending.
+func TestWaitTimeoutOfAResubmittedRunSaysWhyItsReplacementWaits(t *testing.T) {
+	b := newBus(t)
+	runID, _ := b.resubmitted(t)
+	var stdout, stderr bytes.Buffer
+	if err := runCancel(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	var exit *exitError
+	if err := runWait(b.ctx, b.client, []string{runID, "--timeout", "1s"}, &stdout, &stderr); !errors.As(err, &exit) || exit.code != timeoutCode {
+		t.Fatalf("wait = %v, want the timeout", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(stderr.String(), "\n"), "\n")
+	if len(lines) != 2 || lines[0] != "queued: lab on receiver-a advertises room" || !strings.HasPrefix(lines[1], "cancel requested ") {
+		t.Fatalf("wait stderr %q, want the replacement's waiting reason and pending cancel", stderr.String())
 	}
 }
 

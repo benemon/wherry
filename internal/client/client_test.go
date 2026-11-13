@@ -777,16 +777,16 @@ func TestSubmitIgnoresStaleOrUnauthorisedAdvertisements(t *testing.T) {
 func TestSubmitChoosesPoolOfMostSpareMember(t *testing.T) {
 	f := newFixture(t)
 	f.pool(t, "pool-b")
-	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity, ad.InFlight = 4, 3 })
-	f.addReceiver(t, "receiver-b", "pool-b").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity, ad.InFlight = 4, 1 })
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].Replicas, ad.Offers[0].InFlight = 4, 3 })
+	f.addReceiver(t, "receiver-b", "pool-b").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].Replicas, ad.Offers[0].InFlight = 4, 1 })
 	f.addReceiver(t, "receiver-c", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) {
-		ad.Capacity, ad.InFlight = 9, 0
 		ad.Offers = bothOffers()[1:]
+		ad.Offers[0].Replicas = 9
 	})
 	if result := f.submit(t, defaultSelector()); result.Pool != "pool-b" {
 		t.Fatalf("pool %q, want pool-b through its member with most spare capacity", result.Pool)
 	}
-	f.receivers["receiver-a"].advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity, ad.InFlight = 4, 1 })
+	f.receivers["receiver-a"].advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].Replicas, ad.Offers[0].InFlight = 4, 1 })
 	if result := f.submit(t, defaultSelector()); result.Pool != "pool-a" {
 		t.Fatalf("pool %q, want pool-a through the lower topic on equal spare capacity", result.Pool)
 	}
@@ -857,18 +857,18 @@ func TestResolvePlacement(t *testing.T) {
 	}
 }
 
-// Placement's unit is a signature: each live member adds its spare capacity to every signature it offers, and the
+// Placement's unit is a signature: each live member adds each matching profile's spare to its signature, and the
 // signature with the most spare wins, the lowest topic on a tie.
 func TestResolvePlacementSumsSpareBySignatureThenLowestTopic(t *testing.T) {
 	state := operator.NewState()
 	state.Pools["pool-a"], state.Pools["pool-b"], state.Pools["pool-c"] = testTerms(), testTerms(), testTerms()
 	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true, "pool-b": true}
 	ads := map[string]wire.Advertisement{}
-	member := func(id, pool string, capacity, inFlight int64, profile string) {
+	member := func(id, pool string, replicas, inFlight int64, profile string) {
 		state.Receivers[id] = operator.ReceiverConfig{Receiver: id, Pool: pool, Profiles: []operator.ProfileSettings{
 			{Name: "lab", Plugin: "nomad", Agent: "claude"}, {Name: "cloud", Plugin: "aws", Agent: "codex"},
 		}}
-		ads[id] = wire.Advertisement{Receiver: id, Pool: pool, Capacity: capacity, InFlight: inFlight, Offers: []wire.Offer{{Profile: profile, Agent: "x"}}}
+		ads[id] = wire.Advertisement{Receiver: id, Pool: pool, Offers: []wire.Offer{{Profile: profile, Agent: "x", Replicas: replicas, InFlight: inFlight}}}
 	}
 	member("receiver-d", "pool-b", 5, 1, "lab")   // spare 4
 	member("receiver-c", "pool-a", 5, 2, "lab")   // spare 3
@@ -880,18 +880,18 @@ func TestResolvePlacementSumsSpareBySignatureThenLowestTopic(t *testing.T) {
 	if err != nil || pool != "pool-a" || placement.Agent != "claude" || topic != poolA {
 		t.Fatalf("placed %q %#v on %s, %v; want pool-a's claude signature, spare 5 over pool-b's 4", pool, placement, topic, err)
 	}
-	ads["receiver-d"] = wire.Advertisement{Receiver: "receiver-d", Pool: "pool-b", Capacity: 6, Offers: ads["receiver-d"].Offers}
+	ads["receiver-d"].Offers[0] = wire.Offer{Profile: "lab", Agent: "x", Replicas: 6}
 	if pool, _, topic, _ := resolvePlacement(state, "tenant-a", "claude", "", nil, ads); pool != "pool-b" || topic != poolB {
 		t.Fatalf("placed %q on %s, want pool-b's signature with spare 6", pool, topic)
 	}
-	ads["receiver-d"] = wire.Advertisement{Receiver: "receiver-d", Pool: "pool-b", Capacity: 5, Offers: ads["receiver-d"].Offers}
+	ads["receiver-d"].Offers[0] = wire.Offer{Profile: "lab", Agent: "x", Replicas: 5}
 	if pool, _, topic, _ := resolvePlacement(state, "tenant-a", "claude", "", nil, ads); pool != "pool-a" || topic != poolA {
 		t.Fatalf("placed %q on %s, want pool-a's signature, the lower topic on equal spare", pool, topic)
 	}
 }
 
-// A member offering two profiles of one signature adds its spare to that signature once.
-func TestResolvePlacementAddsAMembersSpareOncePerSignature(t *testing.T) {
+// A member offering two profiles of one signature adds the spare of each to that signature.
+func TestResolvePlacementAddsEachProfilesSpareToItsSignature(t *testing.T) {
 	terms := testTerms()
 	state := operator.NewState()
 	state.Pools["pool-a"], state.Pools["pool-b"] = terms, terms
@@ -905,18 +905,18 @@ func TestResolvePlacementAddsAMembersSpareOncePerSignature(t *testing.T) {
 		{Name: "one", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman"}},
 	}}
 	ads := map[string]wire.Advertisement{
-		"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Capacity: 3, Offers: []wire.Offer{{Profile: "one"}, {Profile: "two"}}},
-		"receiver-b": {Receiver: "receiver-b", Pool: "pool-b", Capacity: 4, Offers: []wire.Offer{{Profile: "one"}}},
+		"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Capacity: 6, InFlight: 1, Offers: []wire.Offer{{Profile: "one", Replicas: 3, InFlight: 1}, {Profile: "two", Replicas: 3}}},
+		"receiver-b": {Receiver: "receiver-b", Pool: "pool-b", Capacity: 4, Offers: []wire.Offer{{Profile: "one", Replicas: 4}}},
 	}
-	if pool, _, _, err := resolvePlacement(state, "tenant-a", "claude", "", nil, ads); err != nil || pool != "pool-b" {
-		t.Fatalf("placed %q, %v; want pool-b's spare 4 over receiver-a's 3 counted once", pool, err)
+	if pool, _, _, err := resolvePlacement(state, "tenant-a", "claude", "", nil, ads); err != nil || pool != "pool-a" {
+		t.Fatalf("placed %q, %v; want pool-a's spare 2 + 3 over pool-b's 4", pool, err)
 	}
 }
 
 // Host signature placement: receiver-a offers S1 then S2 for claude, receiver-b S2 alone, receiver-d S1 alone, so S2's
 // aggregate spare is the greatest; no selector and a partial selector both choose S2, whatever the order of a member's
 // profiles and offers. A nonmatching signature with more spare, an unready one, and an unentitled pool's take no part;
-// equal aggregate spare chooses the lowest topic; two profiles of one signature on one member count its spare once.
+// equal aggregate spare chooses the lowest topic; two profiles of one signature on one member each count.
 func TestResolvePlacementBySignature(t *testing.T) {
 	s1 := map[string]string{"runtime": "podman", "region": "eu"}
 	s2 := map[string]string{"runtime": "podman", "region": "us"}
@@ -938,9 +938,9 @@ func TestResolvePlacementBySignature(t *testing.T) {
 		ads := map[string]wire.Advertisement{}
 		for _, m := range members {
 			state.Receivers[m.id] = operator.ReceiverConfig{Receiver: m.id, Pool: m.pool, Profiles: m.profiles}
-			ad := wire.Advertisement{Receiver: m.id, Pool: m.pool, Capacity: m.spare}
+			ad := wire.Advertisement{Receiver: m.id, Pool: m.pool}
 			for _, offer := range m.offers {
-				ad.Offers = append(ad.Offers, wire.Offer{Profile: offer, Agent: "claude"})
+				ad.Offers = append(ad.Offers, wire.Offer{Profile: offer, Agent: "claude", Replicas: m.spare})
 			}
 			ads[m.id] = ad
 		}
@@ -1009,14 +1009,14 @@ func TestResolvePlacementBySignature(t *testing.T) {
 			}
 		})
 	}
-	// Two profiles of S1 on receiver-c count its spare 2 once: S1 2 against S2 3. Counted per offer, S1 would have 4.
+	// Two profiles of S1 on receiver-c each count their spare 2: S1 4 against S2 3.
 	t.Run("duplicate profiles", func(t *testing.T) {
 		duplicates := []member{
 			{"receiver-b", "pool-a", 3, []operator.ProfileSettings{profile("two", s2)}, []string{"two"}},
 			{"receiver-c", "pool-a", 2, []operator.ProfileSettings{profile("one", s1), profile("again", s1)}, []string{"one", "again"}},
 		}
-		if topic := place(t, duplicates, partial); topic != topic2 {
-			t.Fatalf("placed on %s, want S2 %s: receiver-c's spare counts once for S1", topic, topic2)
+		if topic := place(t, duplicates, partial); topic != topic1 {
+			t.Fatalf("placed on %s, want S1 %s: both of receiver-c's profiles count", topic, topic1)
 		}
 	})
 }
@@ -1028,11 +1028,11 @@ func TestSubmitCountsOnlyLiveSpareForASignature(t *testing.T) {
 	us := operator.ProfileSettings{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "us"}}
 	config := operator.ReceiverConfig{Receiver: "receiver-b", Pool: "pool-a", Profiles: []operator.ProfileSettings{us}, PluginSHA256: map[string]string{"nomad": strings.Repeat("ab", 32)}}
 	receiver := f.addReceiverConfig(t, config)
-	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity = 2 })
-	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity = 1 })
+	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].Replicas = 2 })
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].Replicas = 1 })
 	// A stale advertisement for eu's signature, with spare enough to win were it live.
 	f.addReceiver(t, "receiver-c", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) {
-		ad.Capacity, ad.AtMS = 50, time.Now().Add(-10*liveness).UnixMilli()
+		ad.Offers[0].Replicas, ad.AtMS = 50, time.Now().Add(-10*liveness).UnixMilli()
 	})
 	want := operator.SignatureTopic("pool-a", "claude", us.Labels)
 	result := f.submit(t, defaultSelector())
@@ -1294,7 +1294,7 @@ func TestAwaitAndStatusReportAnUnclaimedRunPastItsStartBy(t *testing.T) {
 	awaited, err := f.host.Await(f.ctx, runID, 20*time.Second)
 	elapsed := time.Since(start)
 	if err != nil || awaited.Status.State != wire.TaskStateSubmitted || !strings.HasPrefix(awaited.Unclaimed, "not started by task_started_by (") ||
-		!strings.HasSuffix(awaited.Unclaimed, "): no receiver claimed the task") {
+		!strings.HasSuffix(awaited.Unclaimed, "): no receiver claimed the task; now: lab on receiver-a advertises room") {
 		t.Fatalf("await %#v, %v; want the passed task_started_by", awaited, err)
 	}
 	if elapsed > 5*time.Second {
@@ -1369,7 +1369,7 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	f.pool(t, "pool-b")
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) {
 		ad.Capacity, ad.InFlight = 3, 1
-		ad.Offers[0].InlineLimit = 49152
+		ad.Offers[0].InlineLimit, ad.Offers[0].Replicas, ad.Offers[0].InFlight = 49152, 2, 1
 	})
 	f.addReceiver(t, "receiver-b", "pool-b").advertise(t, f.ctx, func(ad *wire.Advertisement) {
 		ad.Capacity, ad.InFlight, ad.AtMS = 4, 2, time.Now().Add(-121*time.Second).UnixMilli()
@@ -1397,7 +1397,7 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	}
 	if a := got["receiver-a"]; a.Status != "live" || a.Capacity != 3 || a.InFlight != 1 ||
 		!reflect.DeepEqual(a.Profiles, []Profile{
-			{Name: "lab", Plugin: "nomad", Agent: "claude", InlineLimit: 49152, Credentials: []Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true},
+			{Name: "lab", Plugin: "nomad", Agent: "claude", InlineLimit: 49152, Credentials: []Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true, Replicas: 2, InFlight: 1},
 			{Name: "cloud", Plugin: "aws", Agent: "codex", Credentials: []Credential{{Name: "openai", Env: "OPENAI_API_KEY", Configured: true}, {Name: "github-token", Env: "GH_TOKEN", Description: "GitHub token for gh", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
 		}) {
 		t.Fatalf("live receiver %#v", a)
@@ -2202,7 +2202,7 @@ func TestRunHistoryStartsAtTheFeedOffsetOfItsSubmission(t *testing.T) {
 	task := receiver.claim(t, f.ctx, submitted.RunID)[0]
 	receiver.feed(t, f.ctx, submitted.RunID, receiver.echo(t, task), receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil))
 	r, err := f.host.history(f.ctx, submitted.RunID)
-	if err != nil || r.status().Status.State != wire.TaskStateWorking || r.skipped != 0 {
+	if err != nil || r.status(nil).Status.State != wire.TaskStateWorking || r.skipped != 0 {
 		t.Fatalf("history %v; want WORKING with nothing skipped, the earlier record unread", err)
 	}
 }
