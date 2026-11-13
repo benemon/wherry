@@ -88,6 +88,10 @@ type Receiver struct {
 	ended    signed.Keys
 	offers   []wire.Offer
 	inFlight int64
+	// profileInFlight counts inFlight by the profile of the slot that claimed each run.
+	profileInFlight map[string]int64
+	// draining is set once claiming ends while held runs finish.
+	draining bool
 	// shutdownBy, set at a stop, is when every step of the stop must have ended.
 	shutdownBy time.Time
 	// halt, set by Run once it claims, ends claiming and held runs at once with the error Run returns.
@@ -193,6 +197,11 @@ func (r *Receiver) Run(ctx context.Context) error {
 	})()
 	ctx, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
+	defer context.AfterFunc(ctx, func() {
+		r.mu.Lock()
+		r.draining = true
+		r.mu.Unlock()
+	})()
 	// Held runs still read cancels, so the periodic steps last until held tasks are released.
 	running, stopRunning := context.WithCancelCause(context.WithoutCancel(ctx))
 	defer stopRunning(nil)
@@ -581,7 +590,7 @@ func (r *Receiver) advertise(ctx context.Context) error {
 		}
 	}
 	offers := []wire.Offer{}
-	for _, named := range r.profiles {
+	for i, named := range r.profiles {
 		callCtx, cancel := context.WithTimeout(ctx, advertiseInterval)
 		ready, err := named.Plugin.Ready(callCtx)
 		cancel()
@@ -597,14 +606,19 @@ func (r *Receiver) advertise(ctx context.Context) error {
 			r.logger.Printf("profile %s readiness: not ready", named.Name)
 			continue
 		}
-		offers = append(offers, wire.Offer{Profile: named.Name, Agent: named.Agent, InlineLimit: named.Plugin.InlineLimit()})
+		offers = append(offers, wire.Offer{
+			Profile: named.Name, Agent: named.Agent, InlineLimit: named.Plugin.InlineLimit(), Replicas: int64(replicasOf(r.config.Profiles[i])),
+		})
 	}
 	r.mu.Lock()
+	for i := range offers {
+		offers[i].InFlight = r.profileInFlight[offers[i].Profile]
+	}
 	r.offers = offers
-	inFlight := r.inFlight
+	inFlight, gated := r.inFlight, r.gatedReason()
 	r.mu.Unlock()
 	value, err := wire.SignRecord(&wire.Advertisement{
-		Receiver: r.id, Pool: r.config.Pool, Offers: offers, Capacity: int64(r.replicas()), InFlight: inFlight, AtMS: time.Now().UnixMilli(),
+		Receiver: r.id, Pool: r.config.Pool, Offers: offers, Capacity: int64(r.replicas()), InFlight: inFlight, Gated: gated, AtMS: time.Now().UnixMilli(),
 	}, r.signing)
 	if err != nil {
 		return err

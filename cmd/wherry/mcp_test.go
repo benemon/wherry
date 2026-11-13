@@ -309,7 +309,7 @@ func TestMCPSubmitWaitRoundTrip(t *testing.T) {
 	callTool(t, ctx, session, "receivers", map[string]any{}, &receivers)
 	if len(receivers.Receivers) != 1 || receivers.Receivers[0].ReceiverID != "receiver-a" || receivers.Receivers[0].Pool != "pool-a" || receivers.Receivers[0].Status != "live" ||
 		!reflect.DeepEqual(receivers.Receivers[0].Profiles, []busclient.Profile{{Name: "lab", Plugin: "nomad", Agent: "claude", InlineLimit: 49152,
-			Credentials: []busclient.Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true}, {Name: "github-token", Env: "GH_TOKEN", Description: "GitHub token for gh", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: true}}) {
+			Credentials: []busclient.Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true}, {Name: "github-token", Env: "GH_TOKEN", Description: "GitHub token for gh", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: true, Replicas: 1}}) {
 		t.Fatalf("receivers %#v", receivers)
 	}
 	var submitted submitOutput
@@ -469,7 +469,7 @@ func TestMCPWaitBoundedRetry(t *testing.T) {
 	if elapsed < waitBound || elapsed > waitBound+10*time.Second {
 		t.Fatalf("wait returned after %s, want the %s bound", elapsed, waitBound)
 	}
-	if !reflect.DeepEqual(reply, map[string]any{"id": submitted.ID, "state": string(wire.TaskStateSubmitted), "retry_after": float64(retryAfter)}) {
+	if !reflect.DeepEqual(reply, map[string]any{"id": submitted.ID, "state": string(wire.TaskStateSubmitted), "retry_after": float64(retryAfter), "message": "queued: lab on receiver-a advertises room"}) {
 		t.Fatalf("wait %s", encoded)
 	}
 	if progress.Load() == 0 {
@@ -523,7 +523,7 @@ func TestMCPWaitAndStatusReportAnUnclaimedRunPastItsStartBy(t *testing.T) {
 		t.Fatalf("wait returned after %s, want soon after the 2s task_started_by", elapsed)
 	}
 	message, _ := reply["message"].(string)
-	if !strings.HasPrefix(message, "not started by task_started_by (") || !strings.HasSuffix(message, "): no receiver claimed the task") ||
+	if !strings.HasPrefix(message, "not started by task_started_by (") || !strings.HasSuffix(message, "): no receiver claimed the task; now: lab on receiver-a advertises room") ||
 		!reflect.DeepEqual(reply, map[string]any{"id": submitted.ID, "state": string(wire.TaskStateSubmitted), "message": message}) {
 		t.Fatalf("wait %#v, want the passed task_started_by without retry_after", reply)
 	}
@@ -542,7 +542,7 @@ func TestMCPCancel(t *testing.T) {
 		session := mcpSession(t, b.connect(t), nil)
 		var cancelled cancelOutput
 		callTool(t, ctx, session, "cancel", map[string]any{"id": runID}, &cancelled)
-		if cancelled.ID != runID {
+		if cancelled.ID != runID || cancelled.Cancel != "requested" {
 			t.Fatalf("cancel %#v", cancelled)
 		}
 		b.cancelRun(t, admitted)
@@ -565,6 +565,28 @@ func TestMCPCancel(t *testing.T) {
 			t.Fatalf("cancel of an unknown run %#v", failure)
 		}
 	})
+}
+
+// A queued run's status and wait say why it waits and that a cancel waits for a claim.
+func TestMCPStatusSaysWhyAQueuedRunWaits(t *testing.T) {
+	b := newBus(t)
+	ctx := b.ctx
+	session := mcpSession(t, b.connect(t), nil)
+	var submitted submitOutput
+	callTool(t, ctx, session, "submit", map[string]any{"prompt": "fix the bug", "start_by": "10m"}, &submitted)
+	var cancelled cancelOutput
+	callTool(t, ctx, session, "cancel", map[string]any{"id": submitted.ID}, &cancelled)
+	var status statusOutput
+	callTool(t, ctx, session, "status", map[string]any{"id": submitted.ID}, &status)
+	if len(status.Runs) != 1 || !strings.HasPrefix(status.Runs[0].Message, "queued: lab on receiver-a advertises room; cancel requested ") ||
+		!strings.HasSuffix(status.Runs[0].Message, "; applies when a receiver claims the task") {
+		t.Fatalf("status %#v, want the waiting reason and the pending cancel", status)
+	}
+	var runs statusOutput
+	callTool(t, ctx, session, "status", map[string]any{}, &runs)
+	if len(runs.Runs) != 1 || runs.Runs[0].Message != status.Runs[0].Message {
+		t.Fatalf("status without id %#v, want %q", runs, status.Runs[0].Message)
+	}
 }
 
 func TestMCPStatusAndEventsShowPlacing(t *testing.T) {

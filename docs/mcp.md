@@ -14,7 +14,7 @@ The defaults are `10m` and `2h`.
 | `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by` | `id`, `pool`, `wait`, `unrequested` |
 | `status` | `id`, optional | `runs`, `skipped` |
 | `wait` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `reply`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped`, `runs` |
-| `cancel` | `id` | `id`, `skipped` |
+| `cancel` | `id` | `id`, `cancel`, `skipped` |
 | `events` | `id` | `id`, `events`, `chunks`, `redacted`, `skipped` |
 | `logs` | `id`, `offset`, `limit` | `id`, `attempt`, `total`, `next_offset`, `lines`, `redacted`, `skipped` |
 
@@ -65,12 +65,26 @@ The defaults are `10m` and `2h`.
   state is `TASK_STATE_SUBMITTED` until a receiver reports one. For a run
   this host submitted whose `task_started_by` passed with no status from a
   receiver, `message` is
-  `not started by task_started_by (<RFC 3339 time>): no receiver claimed the task`. `updated` is
+  `not started by task_started_by (<RFC 3339 time>): no receiver claimed the task; now: <reason>`.
+  Before then, while no receiver has reported a status, `message` is the
+  run's [waiting reason](commands.md#why-a-run-waits), such as
+  `queued: claude on nomad-1 1/1 in use`, recomputed from the receivers' live
+  advertisements at each call. After `cancel`, and until a receiver reports
+  a status, `message` adds
+  `cancel requested <RFC 3339 time>; applies when a receiver claims the task`,
+  the notes joined by `; `. `updated` is
   the RFC 3339 time of the latest status. While the run has none, it is this
   host's submission of the run when its record holds one, else the Kafka
   timestamp of the run's echo. A run that ended with the wherry event
   `key-lost` before its `task_started_by` is resubmitted under a new run ID,
   as `wherry status` does, and `replaced_by` is the replacement's run ID.
+- `receivers` gives each ready profile `replicas` and `in_flight` from its
+  offer. A receiver's `capacity` and `in_flight` are totals over its
+  profiles. A profile claims one task per replica, so a profile at
+  `in_flight` equal to `replicas` is full whatever its receiver's totals.
+- `cancel` returns `cancel` `requested` and `id`, the run cancelled: for a
+  run resubmitted after it lost its pool key, the last replacement. The
+  cancel applies when a receiver holds or claims the run.
 - `wait` waits up to 45 seconds for the run to end;
   [The `wait` tool](#the-wait-tool) gives its fields.
 - A run that ends with the wherry event `key-lost` before its

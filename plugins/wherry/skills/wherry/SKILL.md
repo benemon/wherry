@@ -37,12 +37,16 @@ Call `receivers` first. For each receiver it returns:
   inline input bytes the profile delivers, when set, its `labels`, `credentials`,
   the agent's credentials by `name` with their target (`env`, the agent's
   environment variable, or `file`, in its credentials directory), `optional`
-  and `configured`, whether this host has a source for each, and `ready`, whether the
-  receiver's live advertisement offers it now. A live receiver
+  and `configured`, whether this host has a source for each, `ready`, whether the
+  receiver's live advertisement offers it now, and for a ready profile
+  `replicas` and `in_flight`. A live receiver
   with no ready plugin profile lists every profile with `ready` false, and no task
   is placed on it.
 - `status` (`live`, `stale`, `silent` or `ended`), `capacity` and
-  `in_flight`: whether it is live and how much receiver-wide room it has; each profile's replicas bound its own fresh tasks.
+  `in_flight`: whether it is live, and its totals over all its profiles. A
+  profile claims one task per replica, so a profile at `in_flight` equal to
+  `replicas` is full whatever the receiver's totals show; look for room on
+  the profile your run needs.
 
 Pick an `agent` from the profiles, or omit it to take the pool's default
 agent, or the first other agent in the pool's terms that a ready profile
@@ -164,12 +168,23 @@ seconds and returns one of:
 - `TASK_STATE_REJECTED` or `TASK_STATE_CANCELED` with a `message` that
   says why.
 - `TASK_STATE_SUBMITTED` with the `message`
-  `not started by task_started_by (<time>): no receiver claimed the task` and
+  `not started by task_started_by (<time>): no receiver claimed the task; now: <reason>` and
   no `retry_after`: no receiver took the run before its `task_started_by` and
-  none will. Check `receivers` for a live one that fits, then `submit` again.
+  none will. The reason is as of the call, not when the bound passed. Check
+  `receivers` for a live one that fits, then `submit` again.
 - `retry_after` with the current `state`: the run has not finished. Its
-  `message`, when it has one, is the step the agent last reported. Wait
-  that many seconds, or do other work, then call `wait` again.
+  `message`, when it has one, is the step the agent last reported. While no
+  receiver has claimed it, the `message` says why it waits:
+  `queued: <profile> on <receiver> <in_flight>/<replicas> in use` (the
+  profile is full; another run holds it), `queued: <receiver> is not
+  claiming (<gated>)`, `queued: pool <pool> is suspended`,
+  `queued: <profile> on <receiver> advertises room` (a claim is due), or
+  `no live profile offers the run's signature`. It is worked out from
+  advertisements up to about 30 seconds old. A queued run is not broken:
+  wait that many seconds, or do other work, then call `wait` again.
+- `cancel requested <time>; applies when a receiver claims the task` in the
+  `message` after `cancel`: the cancel is published and takes effect when a
+  receiver claims the run.
 
 A run whose pool lost its key before the run started ends
 `TASK_STATE_FAILED` with `cannot be opened: the pool's custodian changed and
@@ -221,8 +236,10 @@ same input, and start its `wait` as before.
 
 ## Cancel unneeded work
 
-When you no longer need a run's result, call `cancel` with its id. The run
-ends in `TASK_STATE_CANCELED`.
+When you no longer need a run's result, call `cancel` with its id. It
+returns `cancel` `requested`. The run ends in `TASK_STATE_CANCELED` once a
+receiver holds or claims it; until then `status` shows the cancel as
+requested.
 
 A run takes no new input after `submit`. When a requirement arrives
 mid-run, either cancel the run and submit again with the requirement in the

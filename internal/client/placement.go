@@ -6,14 +6,15 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 )
 
-// resolvePlacement selects a signature using operator labels and aggregate advertised spare capacity,
-// preferring the default agent, greatest spare capacity, then lowest topic, and returning a terms model refusal
-// when nothing places the task.
+// resolvePlacement selects a signature using operator labels and the spare its matching profiles advertise, summed
+// over every receiver that is claiming, preferring the default agent, greatest spare, then lowest topic, and returning a
+// terms model refusal when nothing places the task.
 func resolvePlacement(state operator.State, tenant, agent, model string, selector []wire.Requirement, ads map[string]wire.Advertisement) (string, wire.Placement, string, error) {
 	type signature struct {
 		pool, topic string
@@ -33,7 +34,6 @@ func resolvePlacement(state operator.State, tenant, agent, model string, selecto
 		if errors.Is(err, ErrInvalidInput) && refused == nil {
 			refused = err
 		}
-		offered := map[[2]string]bool{}
 		for _, candidate := range candidates {
 			for _, offer := range ad.Offers {
 				index := slices.IndexFunc(config.Profiles, func(profile operator.ProfileSettings) bool { return profile.Name == offer.Profile })
@@ -42,15 +42,13 @@ func resolvePlacement(state operator.State, tenant, agent, model string, selecto
 				}
 				topic := operator.SignatureTopic(ad.Pool, candidate.Name, config.Profiles[index].Labels)
 				key := [2]string{ad.Pool, topic}
-				if offered[key] {
-					continue
-				}
-				offered[key] = true
 				if signatures[key] == nil {
 					placed := wire.Placement{Agent: candidate.Name, Selector: selector, Model: cmp.Or(model, candidate.DefaultModel)}
 					signatures[key] = &signature{pool: ad.Pool, topic: topic, placement: placed, isDefault: agent == "" && candidate.Name == terms.DefaultAgent}
 				}
-				signatures[key].spare += spare(ad)
+				if ad.Gated == "" {
+					signatures[key].spare += spare(offer)
+				}
 			}
 		}
 	}
@@ -106,8 +104,51 @@ func requiresModel(agent operator.AgentTerms) bool {
 	return len(agent.Models) > 0 && agent.DefaultModel == ""
 }
 
-func spare(ad wire.Advertisement) int64 {
-	return ad.Capacity - ad.InFlight
+// spare is the claim slots offer advertises free.
+func spare(offer wire.Offer) int64 {
+	return max(replicas(offer)-offer.InFlight, 0)
+}
+
+func replicas(offer wire.Offer) int64 {
+	return max(offer.Replicas, 1)
+}
+
+// waitReason says why a run of pool produced to topic waits for a claim, as the live advertisements ads show it: the
+// pool is suspended, a profile offering topic advertises room, or each such profile is full or its receiver claims
+// nothing. queued is false when no live profile offers topic.
+func waitReason(state operator.State, ads map[string]wire.Advertisement, pool, topic string) (reason string, queued bool) {
+	if state.Suspended[pool] {
+		return "pool " + pool + " is suspended", true
+	}
+	var room, busy []string
+	for _, receiver := range slices.Sorted(maps.Keys(ads)) {
+		ad, config := ads[receiver], state.Receivers[receiver]
+		if ad.Pool != pool {
+			continue
+		}
+		for _, offer := range ad.Offers {
+			index := slices.IndexFunc(config.Profiles, func(profile operator.ProfileSettings) bool { return profile.Name == offer.Profile })
+			if index < 0 || operator.SignatureTopic(pool, config.Profiles[index].Agent, config.Profiles[index].Labels) != topic {
+				continue
+			}
+			if ad.Gated != "" {
+				busy = append(busy, fmt.Sprintf("%s is not claiming (%s)", receiver, ad.Gated))
+				break
+			}
+			if spare(offer) > 0 {
+				room = append(room, fmt.Sprintf("%s on %s advertises room", offer.Profile, receiver))
+			} else {
+				busy = append(busy, fmt.Sprintf("%s on %s %d/%d in use", offer.Profile, receiver, offer.InFlight, replicas(offer)))
+			}
+		}
+	}
+	switch {
+	case len(room) > 0:
+		return strings.Join(room, ", "), true
+	case len(busy) > 0:
+		return strings.Join(busy, ", "), true
+	}
+	return "no live profile offers the run's signature", false
 }
 
 // profileInlineLimit returns the smallest declared limit of the advertised profiles in pool whose signature topic is

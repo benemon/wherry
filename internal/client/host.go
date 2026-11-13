@@ -139,6 +139,10 @@ type Profile struct {
 	Credentials  []Credential      `json:"credentials,omitzero"`
 	Labels       map[string]string `json:"labels"`
 	Ready        bool              `json:"ready"`
+	// Replicas and InFlight are the claim slots the ready profile's offer advertises and the runs they hold, both 0 when
+	// it is not ready.
+	Replicas int64 `json:"replicas"`
+	InFlight int64 `json:"in_flight"`
 }
 
 // Credential is one of an agent's credentials: its target, the agent's environment variable Env or credentials-directory
@@ -609,8 +613,40 @@ func sshRemote(remote string) string {
 	return "ssh://" + user + match[2] + "/" + strings.TrimPrefix(match[3], "/")
 }
 
-// Cancel publishes a cancel of a run to the events topic of its pool.
+// errReplaced is cancel's refusal of a run a resubmission replaced before cancel took the run's lock.
+var errReplaced = errors.New("run replaced")
+
+// Cancel publishes a cancel of the last run of runID's resubmission chain to the events topic of its pool, and records
+// when it was first requested in that run's local record.
 func (h *Host) Cancel(ctx context.Context, runID string) (CancelResult, error) {
+	for {
+		chain, err := h.chain(runID)
+		if err != nil {
+			return CancelResult{}, err
+		}
+		// A run's record is written under its own lock and, once it is a replacement, under that of the run it replaces.
+		result, err := h.cancel(ctx, chain[max(len(chain)-2, 0):])
+		if !errors.Is(err, errReplaced) {
+			return result, err
+		}
+	}
+}
+
+// cancel cancels the last of runs, holding the lock of each.
+func (h *Host) cancel(ctx context.Context, runs []string) (CancelResult, error) {
+	for _, run := range runs {
+		unlock, err := h.lockRun(ctx, run)
+		if err != nil {
+			return CancelResult{}, fmt.Errorf("cancel %s: %w", run, err)
+		}
+		defer unlock()
+	}
+	runID := runs[len(runs)-1]
+	if chain, err := h.chain(runID); err != nil {
+		return CancelResult{}, err
+	} else if len(chain) > 1 {
+		return CancelResult{}, errReplaced
+	}
 	r, err := h.history(ctx, runID)
 	if err != nil {
 		return CancelResult{}, err
@@ -624,6 +660,12 @@ func (h *Host) Cancel(ctx context.Context, runID string) (CancelResult, error) {
 	}
 	if err := h.produce(ctx, &kgo.Record{Topic: operator.PoolEventsTopic(r.pool), Key: []byte(runID), Value: encoded}); err != nil {
 		return CancelResult{}, err
+	}
+	if local := r.local; local != nil && local.CancelRequestedMS == 0 {
+		local.CancelRequestedMS = time.Now().UnixMilli()
+		if err := h.writeRun(*local); err != nil {
+			return CancelResult{}, fmt.Errorf("cancel %s was published; recording it locally: %w", runID, err)
+		}
 	}
 	return CancelResult{RunID: runID, Skipped: r.skipped}, nil
 }
@@ -743,6 +785,9 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 			if offerIndex >= 0 {
 				listed.InlineLimit = ad.Offers[offerIndex].InlineLimit
 			}
+			if ready {
+				listed.Replicas, listed.InFlight = replicas(ad.Offers[offerIndex]), ad.Offers[offerIndex].InFlight
+			}
 			agents := v.state.Pools[config.Pool].Agents
 			if index := slices.IndexFunc(agents, func(agent operator.AgentTerms) bool { return agent.Name == profile.Agent }); index >= 0 {
 				listed.Models, listed.DefaultModel = agents[index].Models, agents[index].DefaultModel
@@ -801,6 +846,8 @@ type runRecord struct {
 	// broker acknowledged it.
 	Signed   []byte `json:"signed,omitzero"`
 	Produced bool   `json:"produced,omitzero"`
+	// CancelRequestedMS is when this host first published a cancel of the run.
+	CancelRequestedMS int64 `json:"cancel_requested_at_ms,omitzero"`
 }
 
 // feedOffset is where the tenant feed's records about the run begin, zero without a local record of it.

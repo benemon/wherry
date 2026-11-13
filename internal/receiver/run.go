@@ -105,6 +105,22 @@ func (r *Receiver) claimGated() bool {
 	return r.state.Suspended[r.config.Pool] || len(r.offers) == 0 || len(r.pending) > 0
 }
 
+// gatedReason is why the receiver claims no task, as an advertisement's gated names it, and empty while it claims. It
+// requires r.mu.
+func (r *Receiver) gatedReason() string {
+	switch {
+	case r.state.Suspended[r.config.Pool]:
+		return wire.GatedSuspended
+	case len(r.offers) == 0:
+		return wire.GatedNoReadyOffer
+	case len(r.pending) > 0:
+		return wire.GatedPendingRun
+	case r.draining:
+		return wire.GatedDraining
+	}
+	return ""
+}
+
 func (r *Receiver) gated(profile Named) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -194,8 +210,8 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 		record.Ack(ack)
 		return flush()
 	}
-	r.adjustInFlight(1)
-	defer r.adjustInFlight(-1)
+	r.adjustInFlight(profile.Name, 1)
+	defer r.adjustInFlight(profile.Name, -1)
 	tenant, routed := admitted.task.Wherry.Tenant, admitted.profile.Name
 	r.metrics.admissions.WithLabelValues(tenant, routed).Inc()
 	if attemptOf(record) == 1 {
@@ -2816,9 +2832,13 @@ func text(message wire.Message) string {
 	return strings.Join(parts, "\n")
 }
 
-func (r *Receiver) adjustInFlight(delta int64) {
+func (r *Receiver) adjustInFlight(profile string, delta int64) {
 	r.mu.Lock()
 	r.inFlight += delta
+	if r.profileInFlight == nil {
+		r.profileInFlight = map[string]int64{}
+	}
+	r.profileInFlight[profile] += delta
 	r.mu.Unlock()
 }
 

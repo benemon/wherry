@@ -240,6 +240,9 @@ func runReceivers(ctx context.Context, client *busclient.Host, args []string, st
 				receiver.ReceiverID, receiver.Pool, receiver.Capacity, receiver.InFlight, age, receiver.Status)
 			for _, profile := range receiver.Profiles {
 				fmt.Fprintf(stdout, "  profile=%s plugin=%s agent=%s ready=%t labels=%s", profile.Name, profile.Plugin, profile.Agent, profile.Ready, wire.TermsText(profile.Labels))
+				if profile.Ready {
+					fmt.Fprintf(stdout, " replicas=%d in_flight=%d", profile.Replicas, profile.InFlight)
+				}
 				if profile.InlineLimit > 0 {
 					fmt.Fprintf(stdout, " inline_limit=%d", profile.InlineLimit)
 				}
@@ -299,7 +302,7 @@ func runCancel(ctx context.Context, client *busclient.Host, args []string, stdou
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "run_id=%s\n", result.RunID)
+	fmt.Fprintf(stdout, "run_id=%s cancel=requested\n", result.RunID)
 	warnSkipped(stderr, result.Skipped)
 	return nil
 }
@@ -523,6 +526,13 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 	defer closeClient()
 	result, err := client.Await(ctx, runID, *timeout)
 	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+		if status, statusErr := client.Status(ctx, runID); statusErr == nil {
+			for _, note := range []string{status.Waiting, status.CancelRequested} {
+				if note != "" {
+					fmt.Fprintln(stderr, note)
+				}
+			}
+		}
 		return &exitError{timeoutCode, err}
 	}
 	if err != nil {
@@ -533,6 +543,9 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 		fmt.Fprintf(stderr, "run %s lost its pool key before it started; resubmitted as run %s\n", result.Runs[i-1], result.Runs[i])
 	}
 	if result.Unclaimed != "" {
+		if result.CancelRequested != "" {
+			fmt.Fprintln(stderr, result.CancelRequested)
+		}
 		return errors.New(result.Unclaimed)
 	}
 	if collectErr == nil {
@@ -632,8 +645,10 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 				fmt.Fprintln(stdout, partText(part))
 			}
 		}
-		if result.Unclaimed != "" {
-			fmt.Fprintln(stdout, result.Unclaimed)
+		for _, note := range []string{result.Unclaimed, result.Waiting, result.CancelRequested} {
+			if note != "" {
+				fmt.Fprintln(stdout, note)
+			}
 		}
 		if result.Replacement != "" {
 			fmt.Fprintf(stdout, "replaced_by=%s\n", result.Replacement)

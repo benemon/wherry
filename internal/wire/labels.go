@@ -29,6 +29,10 @@ type Offer struct {
 	Profile     string `json:"profile"`
 	Agent       string `json:"agent"`
 	InlineLimit int64  `json:"inline_limit,omitzero"`
+	// Replicas is the profile's claim slots in the advertising process, 0 read as 1, and InFlight the runs those slots
+	// hold.
+	Replicas int64 `json:"replicas"`
+	InFlight int64 `json:"in_flight"`
 }
 
 // reservedPrefix is held back for labels wherry itself may define.
@@ -124,8 +128,8 @@ func validateOffers(offers []Offer) error {
 		if err := validateIDs(map[string]string{"offer profile": offer.Profile, "offer agent": offer.Agent}); err != nil {
 			return err
 		}
-		if offer.InlineLimit < 0 {
-			return errors.New("offer inline limit must not be negative")
+		if offer.InlineLimit < 0 || offer.Replicas < 0 || offer.InFlight < 0 {
+			return errors.New("offer inline limit, replicas and in-flight count must not be negative")
 		}
 		if slices.ContainsFunc(offers[:i], func(other Offer) bool { return other.Profile == offer.Profile }) {
 			return errors.New("duplicate offer profile")

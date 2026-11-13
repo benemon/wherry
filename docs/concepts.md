@@ -111,9 +111,12 @@ capacity and which profiles are ready. A receiver whose latest advertisement
 is at most 120 seconds old is live. For each live receiver, each agent the
 task may run and each ready profile that launches it with labels the
 selector accepts, the client counts the profile's signature. It adds the
-receiver's spare capacity once to each signature it offers. The sum is an
-estimate: spare capacity is receiver-wide, while each profile's replicas
-bound its own fresh tasks. With no agent named, a signature of the pool's
+profile's spare capacity, its advertised replicas less the runs they hold and
+never below 0, to that signature, so two profiles of one receiver on one
+signature both count. A receiver that advertises it is not claiming, for
+example while its pool is suspended or a run it holds waits for its platform
+to place it, adds nothing. The sum is an estimate from advertisements up to
+about 30 seconds old. With no agent named, a signature of the pool's
 default agent wins over any other; with no default-agent signature matching,
 the choice among the other agents' signatures is by spare capacity. Among
 the signatures that remain, the one with the most spare capacity wins, and
