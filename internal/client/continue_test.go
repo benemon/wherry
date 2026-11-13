@@ -2,12 +2,14 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -258,6 +260,27 @@ func TestSubmitRefusesAContinuationBeforeUploadOrPublish(t *testing.T) {
 			os.Remove(local.Bundle.Path)
 			return continueInput(first)
 		}, "cannot be read"},
+		"the bundle a directory": {func(t *testing.T, f *fixture, first string) SubmitInput {
+			local, _ := f.host.localRun(first)
+			if err := os.Remove(local.Bundle.Path); err != nil || os.Mkdir(local.Bundle.Path, 0o700) != nil {
+				t.Fatal(err)
+			}
+			return continueInput(first)
+		}, "cannot be read"},
+		"the bundle a FIFO": {func(t *testing.T, f *fixture, first string) SubmitInput {
+			local, _ := f.host.localRun(first)
+			if err := os.Remove(local.Bundle.Path); err != nil || syscall.Mkfifo(local.Bundle.Path, 0o600) != nil {
+				t.Fatal(err)
+			}
+			return continueInput(first)
+		}, "cannot be read"},
+		"an undecodable record": {func(t *testing.T, f *fixture, first string) SubmitInput {
+			path, _ := f.host.runPath(first)
+			if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return continueInput(first)
+		}, "'s chain cannot be read"},
 		"git": {func(t *testing.T, f *fixture, first string) SubmitInput {
 			input := continueInput(first)
 			input.Git = &wire.GitInput{Remote: "https://git.example.test/org/repo.git", Ref: "main"}
@@ -299,11 +322,13 @@ func TestSubmitRefusesAContinuationBeforeUploadOrPublish(t *testing.T) {
 func TestSubmitRefusesABundleWithoutOneBaseAndAHead(t *testing.T) {
 	other := strings.Repeat("ef", 20)
 	for name, header := range map[string]string{
-		"not a bundle":         "PK\x03\x04",
-		"two prerequisites":    "# v2 git bundle\n-" + testBase + " one\n-" + other + " two\n" + testHead + " HEAD\n",
-		"no prerequisite":      "# v2 git bundle\n" + testHead + " HEAD\n",
-		"no HEAD":              "# v2 git bundle\n-" + testBase + " one\n" + testHead + " refs/heads/main\n",
-		"a short prerequisite": "# v2 git bundle\n-" + testBase[:39] + " one\n" + testHead + " HEAD\n",
+		"not a bundle":          "PK\x03\x04",
+		"two prerequisites":     "# v2 git bundle\n-" + testBase + " one\n-" + other + " two\n" + testHead + " HEAD\n",
+		"no prerequisite":       "# v2 git bundle\n" + testHead + " HEAD\n",
+		"no HEAD":               "# v2 git bundle\n-" + testBase + " one\n" + testHead + " refs/heads/main\n",
+		"a short prerequisite":  "# v2 git bundle\n-" + testBase[:39] + " one\n" + testHead + " HEAD\n",
+		"a malformed HEAD":      "# v2 git bundle\n-" + testBase + " one\nfoo HEAD\n",
+		"HEAD the prerequisite": "# v2 git bundle\n-" + testBase + " one\n" + testBase + " HEAD\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			f, o, _ := continueFixture(t)
@@ -445,6 +470,54 @@ func TestCollectRecordsTheBundleInTheFinalReplacement(t *testing.T) {
 	last, _ := f.host.localRun(replacement)
 	if original.Bundle != nil || last.Bundle == nil || last.Bundle.SHA256 != hexSum(testBundle) {
 		t.Fatalf("recorded %+v on the original and %+v on the replacement; want the replacement's alone", original.Bundle, last.Bundle)
+	}
+}
+
+// Collect holds the lock of the run a replacement replaces, under which a resubmission writes the replacement's record.
+func TestCollectRecordsTheBundleUnderThePredecessorsLock(t *testing.T) {
+	f, _, _ := continueFixture(t)
+	first := firstRun(t, f, testBundle)
+	replacement := replace(t, f, first)
+	unlock, err := f.host.lockRun(f.ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	result := AwaitResult{Runs: []string{first, replacement}, Outputs: []Output{{Name: wire.GitBundle, Data: testBundle, Size: int64(len(testBundle)), SHA256: hexSum(testBundle)}}}
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.host.Collect(f.ctx, first, result, dir)
+		done <- err
+	}()
+	select {
+	case <-done:
+		t.Fatal("Collect recorded the bundle while another process held the predecessor's lock")
+	case <-time.After(500 * time.Millisecond):
+	}
+	unlock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if local, _ := f.host.localRun(replacement); local.Bundle == nil || local.Bundle.Path != filepath.Join(dir, wire.GitBundle) {
+		t.Fatalf("recorded %+v, want the bundle in %s", local.Bundle, dir)
+	}
+}
+
+// A collect whose bundle cannot be recorded still returns the outputs it wrote.
+func TestCollectReturnsItsOutputsWhenTheBundleIsNotRecorded(t *testing.T) {
+	f, _, _ := continueFixture(t)
+	first := firstRun(t, f, testBundle)
+	unlock, err := f.host.lockRun(f.ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	ctx, cancel := context.WithTimeout(f.ctx, 200*time.Millisecond)
+	defer cancel()
+	result := AwaitResult{Outputs: []Output{{Name: wire.GitBundle, Data: testBundle, Size: int64(len(testBundle)), SHA256: hexSum(testBundle)}}}
+	collected, err := f.host.Collect(ctx, first, result, t.TempDir())
+	if err != nil || len(collected.Outputs) != 1 || collected.Outputs[0].Name != wire.GitBundle {
+		t.Fatalf("collect = %+v, %v; want the bundle written", collected, err)
 	}
 }
 

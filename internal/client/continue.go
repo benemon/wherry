@@ -40,12 +40,12 @@ type continuation struct {
 func (h *Host) continued(runID string) (continuation, error) {
 	chain, err := h.chain(runID)
 	if err != nil {
-		return continuation{}, err
+		return continuation{}, fmt.Errorf("%w: continue: the local records of run %s's chain cannot be read", ErrInvalidInput, runID)
 	}
 	var local *runRecord
 	for _, run := range []string{runID, chain[len(chain)-1]} {
 		if local, err = h.localRun(run); err != nil {
-			return continuation{}, err
+			return continuation{}, fmt.Errorf("%w: continue: the local record of run %s cannot be read", ErrInvalidInput, run)
 		}
 		if local == nil || local.Task == nil || local.Run != run || local.Task.Wherry.Run != run || local.Task.Wherry.Tenant != h.tenant ||
 			local.Task.Wherry.Host != h.host || wire.CheckRunID(local.Task.Wherry) != nil {
@@ -57,6 +57,11 @@ func (h *Host) continued(runID string) (continuation, error) {
 	}
 	if local.Bundle == nil {
 		return continuation{}, fmt.Errorf("%w: continue: wait has collected no %s of run %s", ErrInvalidInput, wire.GitBundle, local.Run)
+	}
+	// A FIFO would block Open.
+	info, err := os.Lstat(local.Bundle.Path)
+	if err != nil || !info.Mode().IsRegular() {
+		return continuation{}, fmt.Errorf("%w: continue: the %s collected for run %s cannot be read", ErrInvalidInput, wire.GitBundle, local.Run)
 	}
 	bundle, err := os.Open(local.Bundle.Path)
 	if err != nil {
@@ -75,7 +80,7 @@ func bundleBase(bundle io.Reader) (string, error) {
 	scanner := bufio.NewScanner(io.LimitReader(bundle, maxBundleHeader))
 	scanner.Buffer(nil, maxBundleHeader)
 	var prerequisites []string
-	head := false
+	var head string
 	for first := true; scanner.Scan(); first = false {
 		line := scanner.Text()
 		switch {
@@ -84,8 +89,8 @@ func bundleBase(bundle io.Reader) (string, error) {
 				return "", errors.New("is not a v2 or v3 git bundle")
 			}
 		case line == "":
-			if len(prerequisites) != 1 || !head {
-				return "", errors.New("needs exactly one prerequisite and a HEAD ref")
+			if len(prerequisites) != 1 || head == "" || head == prerequisites[0] {
+				return "", errors.New("needs exactly one prerequisite and a HEAD ref other than it")
 			}
 			return prerequisites[0], nil
 		case strings.HasPrefix(line, "@"):
@@ -96,8 +101,13 @@ func bundleBase(bundle io.Reader) (string, error) {
 			}
 			prerequisites = append(prerequisites, commit)
 		default:
-			_, ref, _ := strings.Cut(line, " ")
-			head = head || ref == "HEAD"
+			oid, ref, _ := strings.Cut(line, " ")
+			if ref == "HEAD" {
+				if !wire.ValidCommit(oid) {
+					return "", errors.New("has a malformed HEAD ref")
+				}
+				head = oid
+			}
 		}
 	}
 	return "", errors.New("has no header end within 64 KiB")

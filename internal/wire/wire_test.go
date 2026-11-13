@@ -861,6 +861,7 @@ func TestInputNamesAreUniqueAtDecode(t *testing.T) {
 
 func TestGitBaseNamesAnInputAndContinuesAnotherContext(t *testing.T) {
 	commit := strings.Repeat("abcdef0123", 4)
+	const sshRemote = "ssh://git@git.example.test/org/repo.git"
 	base := func(mutate func(*Submission)) *Submission {
 		submission := validSubmission()
 		submission.Message.ContextID = "run-0"
@@ -885,6 +886,16 @@ func TestGitBaseNamesAnInputAndContinuesAnotherContext(t *testing.T) {
 		"not hex":              {func(value *Submission) { value.Wherry.Git.Base.Commit = "g" + commit[1:] }, false},
 		"the run's context":    {func(value *Submission) { value.Message.ContextID = value.Wherry.Run }, false},
 		"no base, own context": {func(value *Submission) { value.Message.ContextID, value.Wherry.Git.Base = value.Wherry.Run, nil }, true},
+		"ssh":                  {func(value *Submission) { value.Wherry.Git.Remote, value.Wherry.Git.HostKey = sshRemote, hostKey }, true},
+		"ssh, 39 digits": {func(value *Submission) {
+			value.Wherry.Git.Remote, value.Wherry.Git.HostKey, value.Wherry.Git.Base.Commit = sshRemote, hostKey, commit[:39]
+		}, false},
+		"ssh, uppercase": {func(value *Submission) {
+			value.Wherry.Git.Remote, value.Wherry.Git.HostKey, value.Wherry.Git.Base.Commit = sshRemote, hostKey, strings.ToUpper(commit)
+		}, false},
+		"ssh, quote": {func(value *Submission) {
+			value.Wherry.Git.Remote, value.Wherry.Git.HostKey, value.Wherry.Git.Base.Commit = sshRemote, hostKey, "x' --; touch /tmp/pwned; echo '"
+		}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := base(test.mutate).validate(); (err == nil) != test.valid {

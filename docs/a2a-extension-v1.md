@@ -1729,9 +1729,10 @@ claimant check against the pool's storage before use.
   S3 output, which goes to the host's own bucket and never to the
   transcript topic. An attempt that adopted an earlier attempt's job uploads
   to the PUT URLs of the task's envelope.
-- **Continuation.** A run with `git.base` expects `changes.bundle` as an S3
-  output, so its bundle returns unredacted and outside `output_limit`
-  whatever its size.
+- **Continuation.** The host gives a run with `git.base` an expected
+  `changes.bundle` S3 output, so its bundle returns unredacted and outside
+  `output_limit` whatever its size. This is the host's choice, not a rule
+  readers check.
 - **Back.** The host downloads each S3 output in the result's
   `s3_outputs` that the run declares, at the key for its name, and keeps it
   only when it matches the listed size and SHA-256. It reports each other

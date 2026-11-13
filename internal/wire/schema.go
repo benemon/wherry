@@ -435,6 +435,9 @@ func (g *GitInput) Validate(credentials []TaskCredential) error {
 	if g.Credential != "" && !slices.ContainsFunc(credentials, func(credential TaskCredential) bool { return credential.Name == g.Credential && credential.File != "" }) {
 		return errors.New("git credential must be one of the submission's task credentials, delivered as a file")
 	}
+	if g.Base != nil && !ValidCommit(g.Base.Commit) {
+		return errors.New("git base commit must be a lowercase hex object ID of 40 or 64 digits")
+	}
 	switch {
 	case parsed.Scheme == "ssh" && g.HostKey == "":
 		return errors.New("ssh git remote requires host_key")
@@ -442,9 +445,6 @@ func (g *GitInput) Validate(credentials []TaskCredential) error {
 		return errors.New("host_key applies only to an ssh git remote")
 	case g.HostKey != "":
 		return checkHostKey(g.HostKey, knownHost(parsed))
-	}
-	if g.Base != nil && !ValidCommit(g.Base.Commit) {
-		return errors.New("git base commit must be a lowercase hex object ID of 40 or 64 digits")
 	}
 	return nil
 }

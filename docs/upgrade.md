@@ -116,7 +116,10 @@ record whose `contextId` is not its run ID:
 - A receiver or custodian before v0.1.3 rejects such a submission without a
   status, so the run shows waiting, then unclaimed at `task_started_by`. One
   such receiver in a pool rejects it for every receiver there. An older
-  custodian refuses to open it, so the task is redelivered until its bound.
+  custodian that hands over its pool keys skips such a task without a
+  re-key, so after the custodian changes no receiver can open it and the run
+  ends key-lost. Its replacement keeps the `contextId`, so the next such
+  handover loses it too.
 - A receiver before v0.1.3 ignores a submission's `git.base` and would clone
   the ref; only the `contextId` check stops it.
 - A host before v0.1.3 drops every record of such a run from the tenant

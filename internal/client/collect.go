@@ -17,7 +17,7 @@ type Collected struct {
 	Rejected []wire.UnreturnedOutput
 }
 
-// CollectError is the step of Collect that failed: "write outputs", "S3 outputs" or "record changes.bundle".
+// CollectError is the step of Collect that failed: "write outputs" or "S3 outputs".
 type CollectError struct {
 	Step string
 	Err  error
@@ -56,8 +56,9 @@ func (h *Host) Collect(ctx context.Context, runID string, result AwaitResult, di
 	}
 	collected.Outputs = append(collected.Outputs, downloaded...)
 	collected.Rejected = slices.Concat(result.Rejected, rejected)
+	// The outputs are on disk: a continuation of this run refuses without the record rather than this collect failing.
 	if err := h.recordBundle(ctx, runs, collected.Outputs); err != nil {
-		return Collected{}, &CollectError{Step: "record " + wire.GitBundle, Err: err}
+		h.logger.Printf("run %s: record the collected %s: %v", runID, wire.GitBundle, err)
 	}
 	return collected, nil
 }
