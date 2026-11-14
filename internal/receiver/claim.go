@@ -41,7 +41,8 @@ type runClaim struct {
 	reported           bool
 	result, failure    error
 	sent, anchor       time.Time
-	// final is set once the final acknowledgement is sent; finalAnswered and finalErr are every answer since.
+	// final is set before the final acknowledgement is sent; finalAnswered and finalErr record whether an answer came
+	// since, and the first error.
 	final, finalAnswered bool
 	finalErr             error
 }

@@ -2,6 +2,9 @@ package receiver
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"errors"
 	"slices"
 	"strings"
 	"sync"
@@ -141,9 +144,61 @@ func TestKeptClientTakesTheNextRecord(t *testing.T) {
 	if a[0] != b[0] || joins() != 0 {
 		t.Fatalf("accepted by %s then %s with %d joins between, want one member and no join; logs:\n%s", a[0], b[0], joins(), f.logs.String())
 	}
-	// kfake's share heartbeat interval is 5 s, as a broker's default.
+	// A sanity bound, not the oracle: kfake assigns a new member within about 1.5 s, under this bound.
 	if received > 2*time.Second {
 		t.Fatalf("the second record was dispatched %s after it was produced, want well under one heartbeat", received)
+	}
+}
+
+// A slot whose admission rejects a record keeps its client: the next record is taken by the same member without a join.
+func TestRejectedClaimKeepsItsClient(t *testing.T) {
+	f := newFixture(t, resultStream)
+	acks := f.shareAcks(t)
+	_, other, _ := ed25519.GenerateKey(rand.Reader)
+	first := f.submit(t, other, nil)
+	f.run(t, f.ctx)
+	waitFor(t, f, func() bool { return len(ackedBy(acks(), first.Offset, kgo.AckReject)) == 1 })
+	joins := f.shareJoins(t)
+	second := f.submit(t, f.host, func(task *wire.Submission) { named(task, "run-b") })
+	waitFor(t, f, func() bool { return len(ackedBy(acks(), second.Offset, kgo.AckAccept)) == 1 })
+	a, b := ackedBy(acks(), first.Offset, kgo.AckReject), ackedBy(acks(), second.Offset, kgo.AckAccept)
+	if a[0] != b[0] || joins() != 0 {
+		t.Fatalf("rejected by %s, then accepted by %s with %d joins between, want one member and no join; logs:\n%s", a[0], b[0], joins(), f.logs.String())
+	}
+}
+
+// A claim takes an answer only for its outstanding renewal or, once settling, its final acknowledgement; the final
+// acknowledgement counts as successful only when every answer since is.
+func TestClaimTakesOnlyOutstandingAnswers(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	claim := &runClaim{ctx: ctx, cancel: cancel}
+	refused := errors.New("refused")
+	for _, step := range []struct {
+		name           string
+		before         func()
+		running        bool
+		err            error
+		renewal, final bool
+		settled        bool
+	}{
+		{name: "answered renewal, running", running: true},
+		{name: "not running, not settling", err: refused},
+		{name: "outstanding renewal", before: func() { claim.sequence++ }, running: true, renewal: true},
+		{name: "settling, success", before: claim.settle, final: true, settled: true},
+		{name: "settling, a later error", err: refused, final: true},
+		{name: "settling, a later success", final: true},
+	} {
+		if step.before != nil {
+			step.before()
+		}
+		renewal, final := claim.receive(step.running, step.err)
+		if renewal != step.renewal || final != step.final || claim.settled() != step.settled {
+			t.Fatalf("%s: renewal %v final %v settled %v, want %v %v %v", step.name, renewal, final, claim.settled(), step.renewal, step.final, step.settled)
+		}
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("an ignored answer ended the claim: %v", context.Cause(ctx))
 	}
 }
 

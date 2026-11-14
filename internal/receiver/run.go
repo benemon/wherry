@@ -90,8 +90,8 @@ var newClaimClient = func(r *Receiver, _ Named, opts ...kgo.Opt) (*kgo.Client, e
 	return r.newClient(opts...)
 }
 
-// claimLoop holds one task at a time and keeps its share client for the next claim after a successful accept or reject,
-// sparing a join, calling idle once its client closes or claiming ends with a held task.
+// claimLoop claims one task at a time, keeping its client after a successful accept or reject; it calls idle once its
+// client closes or claiming ends with a held task.
 func (r *Receiver) claimLoop(claiming, running context.Context, profile Named, idle func()) {
 	defer idle()
 	var share *slotClient
@@ -103,7 +103,8 @@ func (r *Receiver) claimLoop(claiming, running context.Context, profile Named, i
 			sleep(claiming, 2*time.Second)
 		}
 	}
-	// Before idle: Run releases held tasks only once every idle slot's client has closed.
+	// Before idle, outside a few instructions' race with claiming's end: Run releases held tasks only once every idle
+	// slot's client has closed.
 	if share != nil {
 		share.Close()
 	}
@@ -136,7 +137,7 @@ func (r *Receiver) gated(profile Named) bool {
 	return r.claimGated() || !r.ready(profile.Name)
 }
 
-// newSlotClient is a slot's share client, answering acknowledgements for the claim it holds.
+// newSlotClient creates a slot's share client, whose callback answers the claim its holder names.
 func (r *Receiver) newSlotClient(profile Named) (*slotClient, error) {
 	share := &slotClient{}
 	client, err := newClaimClient(r, profile,
