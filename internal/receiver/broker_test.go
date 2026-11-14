@@ -25,6 +25,7 @@ import (
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -1105,5 +1106,77 @@ func TestThreeProfilesHoldTogetherOnRealBroker(t *testing.T) {
 		if ended != 0 {
 			t.Fatal("run ended before release")
 		}
+	}
+}
+
+// TestBackToBackClaimsRenewOnTheKeptClientOnRealBroker runs two tasks back to back on a receiver's one slot, each held
+// past the pool's 15 s lock with renewals: the second runs on the member the first ran on, and both complete at their
+// first delivery with no renewal failure.
+func TestBackToBackClaimsRenewOnTheKeptClientOnRealBroker(t *testing.T) {
+	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
+	if address == "" {
+		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
+	}
+	shortIntervals(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+	defer cancel()
+	b := newBrokerPool(t, ctx, address)
+	hostKey := b.laneHost(t, ctx)
+	keys := signed.Keys{}
+	lock := testTerms().LockDurationMS
+	r, logs := b.laneMember(t, b.receiver, keys, map[string]*fakePlugin{"nomad": {stream: resultStream, endDelay: time.Duration(lock)*time.Millisecond + 2*time.Second}})
+	runLane(t, ctx, r)
+	b.joined(t, ctx, logs)
+	members := func() []string {
+		groups, err := kadm.NewClient(b.kafka).DescribeShareGroups(ctx, operator.PoolGroup(b.pool))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, member := range groups[operator.PoolGroup(b.pool)].Members {
+			if member.ClientID == b.receiver {
+				ids = append(ids, member.MemberID)
+			}
+		}
+		return ids
+	}
+	topic := b.tasksTopic(t, ctx)
+	first := members()
+	runs := []string{b.laneTask(t, ctx, hostKey, "run-first", topic, nil)}
+	b.awaitTerminal(t, ctx, keys, runs[0], logs)
+	runs = append(runs, b.laneTask(t, ctx, hostKey, "run-second", topic, nil))
+	b.awaitTerminal(t, ctx, keys, runs[1], logs)
+	if second := members(); len(first) != 1 || !slices.Equal(first, second) {
+		t.Fatalf("members %v before the first task and %v after the second, want one kept member", first, second)
+	}
+	records, err := readTopic(ctx, b.kafka, operator.PoolEventsTopic(b.pool))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range runs {
+		var claims []int64
+		var state wire.TaskState
+		for _, record := range records {
+			var status wire.RunStatus
+			if string(record.Key) != run || wire.ParseRecord(record.Value, keys, &status) != nil {
+				continue
+			}
+			switch status.Wherry.Kind {
+			case "claimed":
+				claims = append(claims, status.Wherry.Attempt)
+			case "terminal":
+				state = status.StatusUpdate.Status.State
+			}
+		}
+		if !slices.Equal(claims, []int64{1}) || state != wire.TaskStateCompleted {
+			t.Fatalf("%s claimed at attempts %v and ended %s, want completed at its first delivery; logs:\n%s", run, claims, state, logs.String())
+		}
+	}
+	var sample dto.Metric
+	if err := r.metrics.renewalFailures.Write(&sample); err != nil {
+		t.Fatal(err)
+	}
+	if got := sample.GetCounter().GetValue(); got != 0 {
+		t.Fatalf("renewal failures %v, want 0; logs:\n%s", got, logs.String())
 	}
 }

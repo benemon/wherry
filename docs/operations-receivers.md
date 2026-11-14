@@ -151,7 +151,11 @@ Each plugin's README runs the receiver on its platform, with its steps:
 
 Each profile has one share client per effective replica, subscribing only to that
 profile's signature topic through the pool's share group. An idle loop keeps its
-client across empty polls. When its profile becomes unready it closes its idle
+client across empty polls. A loop also keeps its client across claims: after a
+claim ends with an accept or reject the broker answered without error, and no
+further task was fetched meanwhile, the next poll is on the same member and
+does not wait for a join. Any other end of a claim closes the client, which
+releases what it holds. When its profile becomes unready it closes its idle
 client; when ready again it rejoins after that close completes. Other profiles'
 idle clients keep their share group membership. Held clients keep renewing through readiness
 changes. A label, agent or replica change through `receiver apply` exits the
@@ -194,7 +198,7 @@ A receiver offers a profile only while the profile's plugin reports it ready.
 A receiver with no ready offer opens no new claim polls. Each loop closes its
 idle client when it observes the gate closed. An in-flight poll may still
 return a task, which goes through the admission checks.
-After an advertisement makes a profile ready, that profile's loops rejoin, unless its pool is suspended (`wherry_claim_gated{reason="suspended"}`) or it holds a [pending run](#a-receiver-with-a-pending-run) (`wherry_claim_gated{reason="pending_run"}`); closing waits for the in-flight fetch, and joining takes the broker's round trip.
+After an advertisement makes a profile ready, that profile's loops rejoin, unless its pool is suspended (`wherry_claim_gated{reason="suspended"}`) or it holds a [pending run](#a-receiver-with-a-pending-run) (`wherry_claim_gated{reason="pending_run"}`); closing waits for the in-flight fetch, and joining takes about one share group heartbeat (`group.share.heartbeat.interval.ms`, 5 seconds by default) before the new member can fetch.
 Its held runs keep running, renewing and reading cancels.
 `wherry_claim_gated{reason="no_ready_offer"}` is 1 while it has no ready offer; it reports a restriction on opening new polls, not observed polling.
 

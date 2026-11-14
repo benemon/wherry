@@ -1,9 +1,11 @@
 package receiver
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -11,9 +13,22 @@ import (
 
 var errClaimLost = errors.New("claim lost")
 
+// slotClient is a slot's share client, kept across the claims that end in a successful accept or reject.
+type slotClient struct {
+	*kgo.Client
+	answers atomic.Pointer[claimAnswers]
+}
+
+// claimAnswers is the claim whose acknowledgements a slot's client answers; run is set while its task runs.
+type claimAnswers struct {
+	run   string
+	claim *runClaim
+}
+
 // The gate permits one renewal in flight. Every check timeout ends the claim,
-// so no earlier answer is pending at a later check. With one record held, all
-// pending acknowledgements while executing are renewals of that record.
+// so no earlier answer is pending at a later check. A kept client also carries
+// answers its earlier claims left uncounted, so a claim takes an answer only
+// while its renewal or its final acknowledgement is outstanding.
 type runClaim struct {
 	gate               chan struct{}
 	mu                 sync.Mutex
@@ -26,6 +41,41 @@ type runClaim struct {
 	reported           bool
 	result, failure    error
 	sent, anchor       time.Time
+	// final is set before the final acknowledgement is sent; finalAnswered and finalErr record whether an answer came
+	// since, and the first error.
+	final, finalAnswered bool
+	finalErr             error
+}
+
+// receive takes an answer for the claim's outstanding renewal, when running, or its final acknowledgement, and
+// reports which it was.
+func (claim *runClaim) receive(running bool, err error) (renewal, final bool) {
+	claim.mu.Lock()
+	renewal = running && claim.answered < claim.sequence
+	final = !renewal && claim.final
+	if final {
+		claim.finalAnswered = true
+		claim.finalErr = cmp.Or(claim.finalErr, err)
+	}
+	claim.mu.Unlock()
+	if renewal {
+		claim.answer(err)
+	}
+	return renewal, final
+}
+
+// settle marks the claim's final acknowledgement outstanding.
+func (claim *runClaim) settle() {
+	claim.mu.Lock()
+	claim.final = true
+	claim.mu.Unlock()
+}
+
+// settled reports that the final acknowledgement was answered, only with success.
+func (claim *runClaim) settled() bool {
+	claim.mu.Lock()
+	defer claim.mu.Unlock()
+	return claim.finalAnswered && claim.finalErr == nil
 }
 
 func (claim *runClaim) answer(err error) {

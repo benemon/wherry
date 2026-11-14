@@ -347,7 +347,14 @@ func TestRedeliveryAdoptsOtherProfile(t *testing.T) {
 	}
 }
 
+// A held task is released only once the idle slots' clients have closed, a client B kept after a claim included.
 func TestThreeLoopsCloseBeforeRelease(t *testing.T) {
+	for _, kept := range []bool{false, true} {
+		t.Run(map[bool]string{false: "idle", true: "kept"}[kept], func(t *testing.T) { threeLoopsCloseBeforeRelease(t, kept) })
+	}
+}
+
+func threeLoopsCloseBeforeRelease(t *testing.T, kept bool) {
 	f := signatureFixture(t, signatureProfile("a", "claude", map[string]string{"sig": "a"}), signatureProfile("b", "claude", map[string]string{"sig": "b"}), signatureProfile("c", "claude", map[string]string{"sig": "c"}))
 	f.plugins["a"].endDelay = time.Minute
 	f.ready(t, "c", false)
@@ -363,6 +370,18 @@ func TestThreeLoopsCloseBeforeRelease(t *testing.T) {
 		}
 	}
 	waitFor(t, f, func() bool { _, _, n, _ := f.plugins["a"].counts(); return n == 1 })
+	if kept {
+		f.submit(t, f.host, func(task *wire.Submission) {
+			named(task, "run-b")
+			task.Wherry.Placement.Selector = []wire.Requirement{in("sig", "b")}
+		})
+		f.await(t, testRun("run-b"), func(task wire.Task) bool { return task.Status.State == wire.TaskStateCompleted })
+		// The result commits before the final acknowledgement; B is between claims once it has polled again.
+		time.Sleep(500 * time.Millisecond)
+		if b := f.awaitMember(t, time.Second, []string{topicB}); b.id != idle.id {
+			t.Fatal("B did not keep its client after its claim")
+		}
+	}
 	closing, release := make(chan struct{}), make(chan struct{})
 	releaseClose := sync.OnceFunc(func() { close(release) })
 	defer releaseClose()
