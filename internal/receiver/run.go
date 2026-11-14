@@ -26,7 +26,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -91,16 +90,22 @@ var newClaimClient = func(r *Receiver, _ Named, opts ...kgo.Opt) (*kgo.Client, e
 	return r.newClient(opts...)
 }
 
-// claimLoop retains a dedicated connection per held record because renewal cannot survive another poll, calling
-// idle once the idle client closes or claiming ends with a held task.
+// claimLoop holds one task at a time and keeps its share client for the next claim after a successful accept or reject,
+// sparing a join, calling idle once its client closes or claiming ends with a held task.
 func (r *Receiver) claimLoop(claiming, running context.Context, profile Named, idle func()) {
 	defer idle()
+	var share *slotClient
 	for claiming.Err() == nil {
-		if err := r.claimOne(claiming, running, profile, idle); err != nil && claiming.Err() == nil {
+		var err error
+		if share, err = r.claimNext(claiming, running, profile, idle, share); err != nil && claiming.Err() == nil {
 			r.deny(err, capClaim)
 			r.logger.Printf("claim: %v", err)
 			sleep(claiming, 2*time.Second)
 		}
+	}
+	// Before idle: Run releases held tasks only once every idle slot's client has closed.
+	if share != nil {
+		share.Close()
 	}
 }
 
@@ -131,17 +136,10 @@ func (r *Receiver) gated(profile Named) bool {
 	return r.claimGated() || !r.ready(profile.Name)
 }
 
-func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle func()) error {
-	if r.gated(profile) {
-		sleep(claiming, time.Second)
-		return nil
-	}
-	// While a task runs, the client acknowledges only renewals; running holds its run ID.
-	var running atomic.Pointer[string]
-	ctx, cancelClaim := context.WithCancelCause(ctx)
-	defer cancelClaim(nil)
-	claim := &runClaim{gate: make(chan struct{}, 1), cancel: cancelClaim, ctx: ctx}
-	share, err := newClaimClient(r, profile,
+// newSlotClient is a slot's share client, answering acknowledgements for the claim it holds.
+func (r *Receiver) newSlotClient(profile Named) (*slotClient, error) {
+	share := &slotClient{}
+	client, err := newClaimClient(r, profile,
 		kgo.ConsumeTopics(operator.SignatureTopic(r.config.Pool, profile.Agent, profile.Labels)),
 		kgo.ShareGroup(operator.PoolGroup(r.config.Pool)),
 		kgo.ShareMaxRecords(1),
@@ -150,28 +148,81 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 		kgo.FetchMaxWait(time.Second),
 		// FlushAcks does not return the broker's answer to an acknowledgement, a renewal included.
 		kgo.ShareAckCallback(func(_ *kgo.Client, results kgo.ShareAckResults) {
+			held := share.answers.Load()
+			if held == nil {
+				return
+			}
 			for _, result := range results {
-				if running.Load() != nil {
-					claim.answer(result.Err)
-				}
+				renewal, final := held.claim.receive(held.run != "", result.Err)
 				switch {
+				case !renewal && !final:
 				case authorisationError(result.Err):
 					r.deny(result.Err, capClaim)
-				case result.Err != nil && running.Load() != nil:
+				case result.Err != nil && renewal:
 					r.metrics.renewalFailures.Inc()
 				}
 			}
 		}),
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer share.Close()
+	share.Client = client
+	return share, nil
+}
+
+// claimOne claims once on a client of its own, closed before it returns.
+func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle func()) error {
+	share, err := r.claimNext(claiming, ctx, profile, idle, nil)
+	if share != nil {
+		share.Close()
+	}
+	return err
+}
+
+// claimNext claims once on share, or on a new client when share is nil, and returns the client when the slot keeps it.
+func (r *Receiver) claimNext(claiming, ctx context.Context, profile Named, idle func(), share *slotClient) (*slotClient, error) {
+	if r.gated(profile) {
+		if share != nil {
+			share.Close()
+		}
+		sleep(claiming, time.Second)
+		return nil, nil
+	}
+	ctx, cancelClaim := context.WithCancelCause(ctx)
+	defer cancelClaim(nil)
+	claim := &runClaim{gate: make(chan struct{}, 1), cancel: cancelClaim, ctx: ctx}
+	if share == nil {
+		var err error
+		if share, err = r.newSlotClient(profile); err != nil {
+			return nil, err
+		}
+	}
+	share.answers.Store(&claimAnswers{claim: claim})
+	kept := false
+	defer func() {
+		share.answers.Store(nil)
+		if !kept {
+			share.Close()
+		}
+	}()
 	// Acks are flushed on shutdown too, so they must outlive ctx.
 	flush := func() error {
 		flushCtx, cancel := r.shutdownContext(ctx)
 		defer cancel()
 		return share.FlushAcks(flushCtx)
+	}
+	// A kept client's next poll must not take the record back or find another fetched while nobody polled.
+	settle := func(record *kgo.Record, ack kgo.AckStatus) (*slotClient, error) {
+		claim.settle()
+		record.Ack(ack)
+		if err := flush(); err != nil {
+			return nil, err
+		}
+		if kept = (ack == kgo.AckAccept || ack == kgo.AckReject) && claim.settled() && share.BufferedFetchRecords() == 0 && claiming.Err() == nil; kept {
+			return share, nil
+		}
+		return nil, nil
 	}
 	// A held client keeps renewing through readiness changes.
 	stale := func() bool {
@@ -190,13 +241,13 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 		cancel()
 		// Closing the client releases a record this poll returned, before the slot counts as idle.
 		if claiming.Err() != nil {
-			return claiming.Err()
+			return nil, claiming.Err()
 		}
 		if len(fetches.Records()) == 0 && stale() {
-			return nil
+			return nil, nil
 		}
 		if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
-			return fmt.Errorf("poll: %w", err)
+			return nil, fmt.Errorf("poll: %w", err)
 		}
 		if records := fetches.Records(); len(records) > 0 {
 			record = records[0]
@@ -206,13 +257,11 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 	// A slot holding a task releases it only after running ends, so it does not hold up the idle slots' close.
 	defer context.AfterFunc(claiming, idle)()
 	if r.suspended() {
-		record.Ack(kgo.AckRelease)
-		return flush()
+		return settle(record, kgo.AckRelease)
 	}
 	admitted, ack := r.admit(ctx, record, profile)
 	if admitted == nil {
-		record.Ack(ack)
-		return flush()
+		return settle(record, ack)
 	}
 	r.adjustInFlight(profile.Name, 1)
 	defer r.adjustInFlight(profile.Name, -1)
@@ -223,8 +272,8 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 	}
 	r.metrics.inFlight.WithLabelValues(routed).Inc()
 	defer r.metrics.inFlight.WithLabelValues(routed).Dec()
-	running.Store(&admitted.task.Wherry.Run)
-	claim.share, claim.record = share, record
+	share.answers.Store(&claimAnswers{run: admitted.task.Wherry.Run, claim: claim})
+	claim.share, claim.record = share.Client, record
 	state, _, _ := r.snapshot()
 	claim.duration = state.Pools[r.config.Pool].LockDuration()
 	status := r.executeDelivery(claiming, ctx, claim, record, admitted, attemptOf(record))
@@ -232,15 +281,14 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 	if !errors.Is(context.Cause(ctx), errClaimLost) {
 		_ = flush()
 	}
-	running.Store(nil)
+	share.answers.Store(&claimAnswers{claim: claim})
 	if claim.reportLoss(r, admitted.task.Wherry.Run) {
-		return nil
+		return nil, nil
 	}
 	if status != 0 {
-		record.Ack(status)
-		return flush()
+		return settle(record, status)
 	}
-	return nil
+	return nil, nil
 }
 
 type admission struct {
