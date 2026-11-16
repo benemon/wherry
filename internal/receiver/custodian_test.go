@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -1755,5 +1756,166 @@ func TestDrainRekeysEachLiveHashOnce(t *testing.T) {
 	}
 	if wraps := rekeys[testRun("run-live")]; wraps[0].TaskHash != wire.TaskHash(live.Value) {
 		t.Fatalf("run-live re-keyed %s, want its task", wraps[0].TaskHash)
+	}
+}
+
+// abortingCommits makes the pool custodian's commits abort while reporting success, so its snapshot is never read back;
+// other transactions commit.
+func abortingCommits(t *testing.T) {
+	t.Helper()
+	previous := commitTransaction
+	t.Cleanup(func() { commitTransaction = previous })
+	commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
+		if id, _ := producer.OptValue(kgo.TransactionalID).(string); id != "p."+testPool+".custodian" {
+			return previous(ctx, producer)
+		}
+		return producer.EndTransaction(ctx, kgo.TryAbort)
+	}
+}
+
+// A snapshot that does not read back is reported with the offset it was produced at, the offset the read reached and
+// the latest snapshot the read returned.
+func TestSnapshotNotReadBackNamesTheOffsets(t *testing.T) {
+	f := newBareFixture(t)
+	abortingCommits(t)
+	f.receiver.assign(true)
+	// The snapshot takes offset 0 and its abort marker 1.
+	err := f.receiver.tend(f.ctx, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "publish bootstrap snapshot: not read back: produced at offset 0, read to 2, latest none") {
+		t.Fatalf("bootstrap: %v; want the produced offset, the read's end and no latest snapshot", err)
+	}
+}
+
+func TestRotationNotReadBackNamesTheLatestSnapshot(t *testing.T) {
+	f := newBareFixture(t)
+	custodian(t, f.ctx, f.receiver, time.Now())
+	if records := f.snapshotRecords(t); len(records) != 1 || records[0].Offset != 0 {
+		t.Fatalf("bootstrap snapshots %d; want one at offset 0", len(records))
+	}
+	abortingCommits(t)
+	id, key := onlyKey(t, f.receiver)
+	err := f.receiver.tend(f.ctx, rotationAt(time.UnixMilli(key.PublishedMS), testPool, id))
+	// The bootstrap's commit marker takes offset 1, the rotation 2 and its abort marker 3.
+	want := regexp.MustCompile(`publish rotation snapshot: not read back: produced at offset 2, read to 4, latest 0 by ` + regexp.QuoteMeta(f.receiver.id) + `$`)
+	if err == nil || !want.MatchString(err.Error()) {
+		t.Fatalf("rotation: %v; want %s", err, want)
+	}
+}
+
+// A successor's takeover landing while the custodian rotates is the latest snapshot its read-back names. The takeover
+// shares the custodian's transactional ID, so it fences the rotation's commit as well.
+func TestNotReadBackNamesAnotherCustodiansSnapshot(t *testing.T) {
+	f := newBareFixture(t)
+	custodian(t, f.ctx, f.receiver, time.Now())
+	successor := f.member(t, "receiver-b")
+	old := f.receiver.custody.producer
+	previous := commitTransaction
+	t.Cleanup(func() { commitTransaction = previous })
+	landed := false
+	commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
+		if producer != old {
+			return previous(ctx, producer)
+		}
+		if !landed {
+			landed = true
+			custodian(t, f.ctx, successor, time.Now())
+			// The custodian verifies the successor's snapshot only once its view holds the successor's key.
+			if err := f.receiver.refresh(f.ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return producer.EndTransaction(ctx, kgo.TryAbort)
+	}
+	id, key := onlyKey(t, f.receiver)
+	err := f.receiver.tend(f.ctx, rotationAt(time.UnixMilli(key.PublishedMS), testPool, id))
+	if err == nil || !regexp.MustCompile(`not read back: produced at offset 2, read to 6, latest 4 by receiver-b$`).MatchString(err.Error()) {
+		t.Fatalf("rotation: %q; want the successor's snapshot named", err)
+	}
+}
+
+// A latest record under the custodian key that is not a valid snapshot is named unverified.
+func TestNotReadBackNamesAnUnverifiedRecord(t *testing.T) {
+	f := newBareFixture(t)
+	f.produce(t, operator.CustodianTopic(testPool), wire.CustodianKey, []byte("not a snapshot"))
+	abortingCommits(t)
+	f.receiver.assign(true)
+	err := f.receiver.tend(f.ctx, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "not read back: produced at offset 1, read to 3, latest 0 by unverified") {
+		t.Fatalf("bootstrap over a junk record: %q; want the record named unverified", err)
+	}
+}
+
+// A snapshot whose produce failed has no offset to report.
+func TestNotReadBackWithAFailedProduce(t *testing.T) {
+	f := newBareFixture(t)
+	topic := operator.CustodianTopic(testPool)
+	details, err := kadm.NewClient(f.service.Operator).ListTopics(f.ctx, topic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := details[topic].ID
+	f.cluster.ControlKey(kmsg.Produce.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		f.cluster.KeepControl()
+		req := request.(*kmsg.ProduceRequest)
+		if !slices.ContainsFunc(req.Topics, func(produced kmsg.ProduceRequestTopic) bool { return produced.Topic == topic || produced.TopicID == id }) {
+			return nil, nil, false
+		}
+		response := req.ResponseKind().(*kmsg.ProduceResponse)
+		response.SetVersion(req.Version)
+		for _, produced := range req.Topics {
+			out := kmsg.NewProduceResponseTopic()
+			out.Topic, out.TopicID = produced.Topic, produced.TopicID
+			for _, partition := range produced.Partitions {
+				result := kmsg.NewProduceResponseTopicPartition()
+				result.Partition, result.ErrorCode = partition.Partition, kerr.InvalidRecord.Code
+				out.Partitions = append(out.Partitions, result)
+			}
+			response.Topics = append(response.Topics, out)
+		}
+		return response, nil, true
+	})
+	f.receiver.assign(true)
+	err = f.receiver.tend(f.ctx, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "not read back: produced at offset none, read to 0, latest none") {
+		t.Fatalf("bootstrap with a refused produce: %q; want no produced offset", err)
+	}
+}
+
+// A read-back that fails reports no read end: the read reached no offset.
+func TestNotReadBackWithAFailedRead(t *testing.T) {
+	f := newBareFixture(t)
+	topic := operator.CustodianTopic(testPool)
+	var refusing atomic.Bool
+	f.cluster.ControlKey(kmsg.ListOffsets.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		f.cluster.KeepControl()
+		req := request.(*kmsg.ListOffsetsRequest)
+		if !refusing.Load() || !slices.ContainsFunc(req.Topics, func(listed kmsg.ListOffsetsRequestTopic) bool { return listed.Topic == topic }) {
+			return nil, nil, false
+		}
+		response := req.ResponseKind().(*kmsg.ListOffsetsResponse)
+		response.SetVersion(req.Version)
+		for _, listed := range req.Topics {
+			out := kmsg.NewListOffsetsResponseTopic()
+			out.Topic = listed.Topic
+			for _, partition := range listed.Partitions {
+				result := kmsg.NewListOffsetsResponseTopicPartition()
+				result.Partition, result.ErrorCode = partition.Partition, kerr.InvalidRequest.Code
+				out.Partitions = append(out.Partitions, result)
+			}
+			response.Topics = append(response.Topics, out)
+		}
+		return response, nil, true
+	})
+	previous := commitTransaction
+	t.Cleanup(func() { commitTransaction = previous })
+	commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
+		err := producer.EndTransaction(ctx, kgo.TryAbort)
+		refusing.Store(true)
+		return err
+	}
+	f.receiver.assign(true)
+	err := f.receiver.tend(f.ctx, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "not read back: produced at offset 0, read to none, latest none") {
+		t.Fatalf("bootstrap with a refused read-back: %q; want no read end", err)
 	}
 }
