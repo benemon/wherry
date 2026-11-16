@@ -1226,8 +1226,7 @@ With a host key, no input may be named `known_hosts`.
 `--git-changes` adds `changes.patch` or `changes.bundle` to the expected
 outputs, unless `--output` names it already; neither is required. On a pool
 with storage, `--git-changes bundle --output changes.bundle:s3` returns the
-bundle through the pool's bucket, unredacted and outside the pool's
-`output_limit`: the route for a first run that later runs continue.
+bundle through the pool's bucket, outside the pool's `output_limit`: the route for a first run that later runs continue.
 
 `--continue RUN_ID` starts the next round of work on a run's commits. It
 reuses the run's `--git` remote, ref and `--git-path`, and takes the

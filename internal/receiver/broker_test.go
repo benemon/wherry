@@ -13,7 +13,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -731,8 +730,8 @@ func TestFilesOnRealBroker(t *testing.T) {
 	if err != nil || awaited.Status.State != wire.TaskStateCompleted {
 		t.Fatalf("await %+v, %v; receiver logs:\n%s\nhost logs:\n%s", awaited.Status, err, logs.String(), hostLogs.String())
 	}
-	if len(awaited.Outputs) != 2 || !bytes.Equal(awaited.Outputs[0].Data, big) || !regexp.MustCompile(`^key \[redacted:[A-Za-z0-9_-]{16}\]\n$`).Match(awaited.Outputs[1].Data) || len(awaited.Rejected) != 0 || len(awaited.NotReturned) != 250 {
-		t.Fatalf("outputs %d, rejected %+v, not returned %d; want big.bin intact, report.md redacted and 250 over the limit", len(awaited.Outputs), awaited.Rejected, len(awaited.NotReturned))
+	if len(awaited.Outputs) != 2 || !bytes.Equal(awaited.Outputs[0].Data, big) || !bytes.Equal(awaited.Outputs[1].Data, report) || len(awaited.Rejected) != 0 || len(awaited.NotReturned) != 250 {
+		t.Fatalf("outputs %d, rejected %+v, not returned %d; want big.bin and report.md as written and 250 over the limit", len(awaited.Outputs), awaited.Rejected, len(awaited.NotReturned))
 	}
 	run := fake.lastRun
 	if len(run.Inputs) != 1 || !bytes.Equal(run.Inputs[0].Data, input) || len(run.Credentials) != 2 || string(run.Credentials[1].Value) != deployValue {

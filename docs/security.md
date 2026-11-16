@@ -79,7 +79,11 @@ host resubmits it under the pool's current key until its `task_started_by`
 
 The receiver redacts each credential of 8 bytes or more that it delivered,
 with or without its trailing newline and as JSON escapes it, from
-everything it publishes for the attempt. Each marker is an HMAC of the
+everything it publishes for the attempt except output files. An output file
+is returned as the agent wrote it, so a credential or presigned URL the agent writes into one
+is readable on the tenant's transcript topic for its retention, in the copy
+the host writes and by the calling agent that reads it, as one in an S3
+output is in the host's bucket. Each marker is an HMAC of the
 credential's name under the run's redaction key, so no marker maps to a
 name without that key. A credential whose marker would contain a delivered
 value is replaced by `[*]` instead, so no replacement writes a value back. The receiver redacts no value shorter than 8 bytes
