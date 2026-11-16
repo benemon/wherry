@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -334,21 +335,22 @@ func (r *Receiver) dropProducer() {
 
 // current is a read of the pool's snapshot topic: its latest committed record, if any, and that record's snapshot when it
 // is a valid snapshot of the pool, verified by its append time. resign is set when this receiver wrote it with a signing
-// key it has since rotated.
+// key it has since rotated. end is the offset the read listed and read to.
 type current struct {
 	record   *kgo.Record
 	snapshot *wire.Snapshot
 	resign   bool
+	end      int64
 }
 
 func (c current) names(r *Receiver) bool { return c.snapshot != nil && c.snapshot.Custodian == r.id }
 
 func (r *Receiver) readCurrent(ctx context.Context) (current, error) {
-	records, err := r.reader.ReadFrom(ctx, operator.CustodianTopic(r.config.Pool), 0)
+	records, end, err := r.reader.ReadFromWithEnd(ctx, operator.CustodianTopic(r.config.Pool), 0)
 	if err != nil {
 		return current{}, r.deny(err, capRead)
 	}
-	var latest current
+	latest := current{end: end}
 	for _, record := range records {
 		if string(record.Key) == wire.CustodianKey {
 			latest.record = record
@@ -556,8 +558,11 @@ func (r *Receiver) publish(ctx context.Context, keys map[string]*poolKey, reason
 	if err == nil {
 		err = producer.BeginTransaction()
 	}
+	produced := "none"
 	if err == nil {
-		if err = producer.ProduceSync(ctx, &kgo.Record{Topic: operator.CustodianTopic(r.config.Pool), Key: []byte(wire.CustodianKey), Value: value}).FirstErr(); err == nil {
+		var record *kgo.Record
+		if record, err = producer.ProduceSync(ctx, &kgo.Record{Topic: operator.CustodianTopic(r.config.Pool), Key: []byte(wire.CustodianKey), Value: value}).First(); err == nil {
+			produced = strconv.FormatInt(record.Offset, 10)
 			err = commitSnapshot(ctx, producer)
 			if err != nil && !fenced(err) && !authorisationError(err) {
 				r.metrics.ambiguousCommits.Inc()
@@ -580,7 +585,19 @@ func (r *Receiver) publish(ctx context.Context, keys map[string]*poolKey, reason
 			r.logger.Printf("custodian: superseded in pool %s; writing no more snapshots until assigned again", r.config.Pool)
 			r.dropProducer()
 		}
-		return fmt.Errorf("publish %s snapshot: %w", reason, errors.Join(err, readErr, errors.New("not read back")))
+		// Which of a lagging read, a stale read and a lost write missed the snapshot shows only in these offsets.
+		// Unverified covers a record this receiver's state cannot yet authorise as well as an invalid one.
+		readTo, seen := strconv.FormatInt(latest.end, 10), "none"
+		switch {
+		case readErr != nil:
+			readTo = "none"
+		case latest.record != nil && latest.snapshot != nil:
+			seen = fmt.Sprintf("%d by %s", latest.record.Offset, latest.snapshot.Custodian)
+		case latest.record != nil:
+			seen = fmt.Sprintf("%d by unverified", latest.record.Offset)
+		}
+		return fmt.Errorf("publish %s snapshot: %w", reason, errors.Join(err, readErr,
+			fmt.Errorf("not read back: produced at offset %s, read to %s, latest %s", produced, readTo, seen)))
 	}
 	r.custody.contested = false
 	if err := r.keepKeys(keys, latest, now); err != nil {
