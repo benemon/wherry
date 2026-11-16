@@ -8,6 +8,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -2224,7 +2225,9 @@ func TestRunHistoryStartsAtTheFeedOffsetOfItsSubmission(t *testing.T) {
 }
 
 // A host opens a few connections for wherry status and wherry submit with three receivers on one broker, where a client
-// per topic read opened 17 and 21.
+// per topic read opened 17 and 21. Connections that carry nothing past ApiVersions and SASL but Fetch are not counted: franz-go kills a fetch connection
+// whose request is cancelled (pkg/kgo/broker.go, see abandonOnCancel), as ending a read's consumption does, so how many
+// redials a read costs is timing.
 func TestStatusAndSubmitShareConnections(t *testing.T) {
 	f := newFixture(t, kfake.NumBrokers(1))
 	for _, id := range []string{"receiver-a", "receiver-b", "receiver-c"} {
@@ -2236,20 +2239,28 @@ func TestStatusAndSubmitShareConnections(t *testing.T) {
 		limit     int64
 		operation func(*Host) error
 	}{
-		{"status", 6, func(h *Host) error {
+		{"status", 3, func(h *Host) error {
 			_, err := h.Status(f.ctx, task.submission.Wherry.Run)
 			return err
 		}},
-		{"submit", 7, func(h *Host) error {
+		{"submit", 6, func(h *Host) error {
 			_, err := h.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", EndBy: time.Now().Add(30 * time.Minute), StartBy: time.Now().Add(10 * time.Minute)})
 			return err
 		}},
 	} {
-		var dials atomic.Int64
+		var mu sync.Mutex
+		var conns []*requestConn
 		var dialer net.Dialer
 		kafka, err := kgo.NewClient(append(f.host.kafka.Opts(), kgo.Dialer(func(ctx context.Context, network, host string) (net.Conn, error) {
-			dials.Add(1)
-			return dialer.DialContext(ctx, network, host)
+			conn, err := dialer.DialContext(ctx, network, host)
+			if err != nil {
+				return nil, err
+			}
+			counted := &requestConn{Conn: conn}
+			mu.Lock()
+			conns = append(conns, counted)
+			mu.Unlock()
+			return counted, nil
 		}))...)
 		if err != nil {
 			t.Fatal(err)
@@ -2263,10 +2274,38 @@ func TestStatusAndSubmitShareConnections(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
-		if n := dials.Load(); n > c.limit {
-			t.Errorf("%s opened %d connections; want at most %d", c.name, n, c.limit)
+		mu.Lock()
+		var n int64
+		for _, conn := range conns {
+			if conn.counted.Load() {
+				n++
+			}
+		}
+		dialled := int64(len(conns))
+		mu.Unlock()
+		// Every operation reads through Fetch, so a classifier that counts every connection fails here.
+		if n == 0 || n > c.limit || dialled == n {
+			t.Errorf("%s opened %d connections for requests other than Fetch of %d; want 1 to %d, and at least one for Fetch", c.name, n, dialled, c.limit)
 		}
 	}
+}
+
+// requestConn is a dialled connection that records whether it carried a counted request. franz-go writes each request
+// whole in one Write, whose API key follows the 4-byte length.
+type requestConn struct {
+	net.Conn
+	counted atomic.Bool
+}
+
+func (conn *requestConn) Write(p []byte) (int, error) {
+	if len(p) >= 6 {
+		switch int16(binary.BigEndian.Uint16(p[4:6])) {
+		case int16(kmsg.ApiVersions), int16(kmsg.SASLHandshake), int16(kmsg.SASLAuthenticate), int16(kmsg.Fetch):
+		default:
+			conn.counted.Store(true)
+		}
+	}
+	return conn.Conn.Write(p)
 }
 
 // A run's history is unchanged by records keyed by other runs.
