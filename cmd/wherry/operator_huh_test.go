@@ -31,10 +31,10 @@ func operatorAnswers(t *testing.T) map[string]string {
 
 func stopOperatorConnection(t *testing.T, check func(string, []byte, string, string)) error {
 	t.Helper()
-	old := operatorKafka
-	t.Cleanup(func() { operatorKafka = old })
+	old := superUserKafka
+	t.Cleanup(func() { superUserKafka = old })
 	stop := errors.New("connection seam")
-	operatorKafka = func(b string, ca []byte, u, p string) (*kgo.Client, error) { check(b, ca, u, p); return nil, stop }
+	superUserKafka = func(b string, ca []byte, u, p, _ string) (*kgo.Client, error) { check(b, ca, u, p); return nil, stop }
 	return stop
 }
 

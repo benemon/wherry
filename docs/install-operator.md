@@ -9,7 +9,8 @@ On the operator machine:
 
 - The `wherry` CLI, as [Install the wherry CLI](install-cli.md) shows.
 - A Kafka cluster that meets the [Kafka prerequisites](operations-operator.md#prepare-kafka), with a super user's
-  SCRAM credential. This guide calls it `kafka-admin`. On Strimzi, set the
+  SCRAM credential. This guide calls it `kafka-admin`. If its credential is SCRAM-SHA-256 only, as on some hosted
+  services, add `--super-user-mechanism SCRAM-SHA-256` to `wherry operator init`. On Strimzi, set the
   [ignored-users pattern](operations-operator.md#strimzi) first.
 
 ## 1. Create the working directory

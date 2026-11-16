@@ -19,6 +19,8 @@ import (
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/charmbracelet/huh"
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"gopkg.in/yaml.v3"
 )
 
@@ -39,6 +41,14 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 		}
 	}()
 	required := []string{"broker", "super-user", "super-user-password-file"}
+	mechanism := operator.ScramSHA512
+	if value, given := options["super-user-mechanism"]; given {
+		// The refusal leaves out the value, which may be a password given to the wrong flag.
+		if value != operator.ScramSHA512 && value != operator.ScramSHA256 {
+			return fmt.Errorf("--super-user-mechanism takes %s or %s", operator.ScramSHA512, operator.ScramSHA256)
+		}
+		mechanism = value
+	}
 	onTerminal := promptsEligible(prompts)
 	if !onTerminal {
 		var missing []string
@@ -124,11 +134,22 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 	if err != nil {
 		return err
 	}
-	superUser, err := operatorKafka(answers["broker"], ca, answers["super-user"], string(superPassword))
+	superUser, err := superUserKafka(answers["broker"], ca, answers["super-user"], string(superPassword), mechanism)
 	if err != nil {
 		return err
 	}
 	defer superUser.Close()
+	// Kafka answers a missing credential for the mechanism as it answers a wrong password; checked before Delegate, whose
+	// first error would name wherry.operator.
+	if _, err := kadm.NewClient(superUser).ListBrokers(ctx); errors.Is(err, kerr.SaslAuthenticationFailed) {
+		hint := ""
+		if mechanism == operator.ScramSHA512 {
+			hint = "; if its credential is " + operator.ScramSHA256 + ", give --super-user-mechanism " + operator.ScramSHA256
+		}
+		return fmt.Errorf("super user %s's %s login refused: Kafka answers a wrong password and no %s credential alike%s", answers["super-user"], mechanism, mechanism, hint)
+	} else if err != nil {
+		return fmt.Errorf("super user %s: %w", answers["super-user"], err)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}

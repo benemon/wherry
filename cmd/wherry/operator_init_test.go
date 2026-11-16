@@ -13,6 +13,7 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1186,5 +1187,102 @@ func TestOperatorInitKeepsItsFilesWhenTheCredentialWaitFails(t *testing.T) {
 	refusing.Store(false)
 	if err := b.init(t, dir); err != nil {
 		t.Fatalf("init after the refusal ended: %v", err)
+	}
+}
+
+// operator init logs in as a super user whose only credential is SCRAM-SHA-256 when --super-user-mechanism names it,
+// and without the flag fails naming the flag, not wherry.operator, when the broker refuses the SCRAM-SHA-512 login as a
+// real broker does: kfake would close the connection instead.
+func TestOperatorInitWithASCRAMSHA256SuperUser(t *testing.T) {
+	noTerminal(t)
+	cluster, ca := tlsBroker(t, kfake.Superuser(operator.ScramSHA256, "kafka-root", "root-secret-value"))
+	dir := t.TempDir()
+	caFile, passwordFile := filepath.Join(dir, "broker-ca.pem"), filepath.Join(dir, "root-password-file")
+	for path, contents := range map[string]string{caFile: ca, passwordFile: "root-secret-value\n"} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := superUserKafka(cluster.ListenAddrs()[0], []byte(ca), "kafka-root", "root-secret-value", operator.ScramSHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(root.Close)
+	shareCeilings(t, root)
+	flags := []string{"init", "--broker", cluster.ListenAddrs()[0], "--ca-file", caFile, "--super-user", "kafka-root", "--super-user-password-file", passwordFile}
+
+	refused := filepath.Join(dir, "refused")
+	var refusing atomic.Bool
+	refusing.Store(true)
+	cluster.ControlKey(int16(kmsg.SASLAuthenticate), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		cluster.KeepControl()
+		if !refusing.Load() || !bytes.Contains(request.(*kmsg.SASLAuthenticateRequest).SASLAuthBytes, []byte("n=kafka-root,")) {
+			return nil, nil, false
+		}
+		response := request.ResponseKind().(*kmsg.SASLAuthenticateResponse)
+		response.ErrorCode = kerr.SaslAuthenticationFailed.Code
+		return response, nil, true
+	})
+	err = runOperator(append(flags, "--dir", refused), io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "kafka-root's "+operator.ScramSHA512+" login refused") || !strings.Contains(err.Error(), "--super-user-mechanism "+operator.ScramSHA256) ||
+		strings.Contains(err.Error(), operator.OperatorPrincipal) || strings.Contains(err.Error(), "root-secret-value") {
+		t.Fatalf("init without the flag: %v; want the super user's refused SCRAM-SHA-512 login and the flag named, not wherry.operator or the password", err)
+	}
+	// With the flag given, a refused login is the password's or the credential's: no hint to give the flag.
+	err = runOperator(append(flags, "--dir", refused, "--super-user-mechanism", operator.ScramSHA256), io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "kafka-root's "+operator.ScramSHA256+" login refused") || strings.Contains(err.Error(), "--super-user-mechanism") {
+		t.Fatalf("init with the flag, login refused: %v; want the SCRAM-SHA-256 login named and no flag hint", err)
+	}
+	if _, err := os.Stat(filepath.Join(refused, "operator.password")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("operator.password after the refused login: %v; want none", err)
+	}
+
+	refusing.Store(false)
+	accepted := filepath.Join(dir, "accepted")
+	if err := runOperator(append(flags, "--dir", accepted, "--super-user-mechanism", operator.ScramSHA256), io.Discard, io.Discard); err != nil {
+		t.Fatalf("init with --super-user-mechanism %s: %v", operator.ScramSHA256, err)
+	}
+	if err := runOperator([]string{"check", "--dir", accepted}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("check after init: %v", err)
+	}
+}
+
+// A super user whose broker cannot be reached is reported as that, not as a refused login, before anything names
+// wherry.operator.
+func TestOperatorInitReportsAnUnreachableBrokerForTheSuperUser(t *testing.T) {
+	noTerminal(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	listener.Close()
+	passwordFile := filepath.Join(t.TempDir(), "root-password-file")
+	if err := os.WriteFile(passwordFile, []byte("root-secret-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = runOperator([]string{"init", "--dir", filepath.Join(t.TempDir(), "dir"), "--broker", address, "--super-user", "kafka-root", "--super-user-password-file", passwordFile}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "super user kafka-root") || strings.Contains(err.Error(), "login refused") || strings.Contains(err.Error(), operator.OperatorPrincipal) {
+		t.Fatalf("init against a closed port: %v; want the super user's connection error, not a refused login or wherry.operator", err)
+	}
+}
+
+// An unknown, lower-case or empty --super-user-mechanism is refused before anything connects, naming the two the flag
+// takes and not the value given.
+func TestOperatorInitRefusesAnUnknownMechanism(t *testing.T) {
+	noTerminal(t)
+	for _, value := range []string{"SCRAM-SHA-1", "scram-sha-256", "", "unique-secret-marker"} {
+		connected := false
+		stopOperatorConnection(t, func(string, []byte, string, string) { connected = true })
+		opts := operatorAnswers(t)
+		opts["super-user-mechanism"] = value
+		err := operatorInit(context.Background(), "unused", opts, io.Discard)
+		if err == nil || connected || !strings.Contains(err.Error(), operator.ScramSHA512) || !strings.Contains(err.Error(), operator.ScramSHA256) ||
+			(value != "" && strings.Contains(err.Error(), value)) {
+			t.Fatalf("--super-user-mechanism %q: %v, connected %v; want a refusal naming both mechanisms, before connecting, without the value", value, err, connected)
+		}
+	}
+	if _, err := operator.SuperUserKafkaOpts("host:9093", nil, "root", "password", "SCRAM-SHA-1"); err == nil {
+		t.Fatal("SuperUserKafkaOpts accepted SCRAM-SHA-1")
 	}
 }
