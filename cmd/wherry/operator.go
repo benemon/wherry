@@ -24,7 +24,7 @@ import (
 // operatorUsage is each operator command's usage, under "" the operator's.
 var operatorUsage = map[string]string{
 	"":                   "usage: wherry operator <init|pool apply|tenant add|tenant list|tenant pool add|tenant pool remove|tenant host add|tenant host remove|tenant remove|pool suspend|pool resume|pool rotate-key|receiver apply|receiver show|receiver remove|check> [--dir DIR]",
-	"init":               "usage: wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] [--super-user NAME --super-user-password-file FILE]",
+	"init":               "usage: wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] [--super-user NAME --super-user-password-file FILE] [--super-user-mechanism SCRAM-SHA-512|SCRAM-SHA-256]",
 	"pool apply":         "usage: wherry operator pool apply NAME [-f PATH] [--dry-run]",
 	"tenant add":         "usage: wherry operator tenant add TENANT",
 	"tenant list":        "usage: wherry operator tenant list",
@@ -409,7 +409,7 @@ func integral(value any) any {
 func operatorArgs(args []string) ([]string, map[string]string, error) {
 	flags := flag.NewFlagSet("operator", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	for _, name := range []string{"f", "wait", "sha256", "dir", "broker", "ca-file", "super-user", "super-user-password-file"} {
+	for _, name := range []string{"f", "wait", "sha256", "dir", "broker", "ca-file", "super-user", "super-user-password-file", "super-user-mechanism"} {
 		flags.String(name, "", "")
 	}
 	var suspects []string
@@ -436,7 +436,7 @@ func operatorArgs(args []string) ([]string, map[string]string, error) {
 	}
 	command := operatorCommand(positional)
 	allowed := map[string]map[string]bool{
-		"init":           {"broker": true, "ca-file": true, "super-user": true, "super-user-password-file": true},
+		"init":           {"broker": true, "ca-file": true, "super-user": true, "super-user-password-file": true, "super-user-mechanism": true},
 		"pool apply":     {"f": true, "dry-run": true},
 		"receiver apply": {"f": true, "dry-run": true, "force": true},
 		"receiver show":  {},
@@ -787,6 +787,16 @@ func yamlFiles(dir string) ([]string, error) {
 		files = append(files, file)
 	}
 	return files, nil
+}
+
+// superUserKafka connects to broker as the Kafka super user with password and mechanism, trusting ca or, when ca is nil,
+// the system roots.
+var superUserKafka = func(broker string, ca []byte, user, password, mechanism string) (*kgo.Client, error) {
+	opts, err := operator.SuperUserKafkaOpts(broker, ca, user, password, mechanism)
+	if err != nil {
+		return nil, fmt.Errorf("broker %w", err)
+	}
+	return kgo.NewClient(append(opts, kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
 }
 
 // operatorKafka connects to broker as user with password, trusting ca or, when ca is nil, the system roots.

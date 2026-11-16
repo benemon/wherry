@@ -195,7 +195,8 @@ one.
 
 ```sh
 wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] \
-  [--super-user NAME --super-user-password-file FILE]
+  [--super-user NAME --super-user-password-file FILE] \
+  [--super-user-mechanism SCRAM-SHA-512|SCRAM-SHA-256]
 ```
 
 `operator init` delegates provisioning from the Kafka super user to `wherry.operator`.
@@ -215,6 +216,11 @@ If stderr is redirected, or prompts are otherwise unavailable, give every
 required flag. An omitted `--ca-file` uses the system roots.
 Missing flags are named in the error:
 `operator init has no terminal to prompt on; give --broker, --super-user, --super-user-password-file`.
+
+The super user logs in with SCRAM-SHA-512 unless `--super-user-mechanism SCRAM-SHA-256` says its credential is
+SCRAM-SHA-256; the mechanism is never prompted for, and any other value is refused before a prompt. Kafka answers a
+wrong password and a missing credential for the mechanism alike, so a refused login names the super user, the
+mechanism and the flag. Every principal wherry issues, `wherry.operator` included, uses SCRAM-SHA-512.
 
 It creates the working directory with mode 0755 when it is missing.
 Connected as the super user, once, it:
@@ -236,7 +242,7 @@ by printing `wherry.operator can provision; its password is in <dir>/operator.pa
 on standard error.
 
 Running `init` again rotates `wherry.operator`'s password: Kafka holds one
-SCRAM credential per user, so commands still running with the old password
+SCRAM credential per user and mechanism, so commands still running with the old password
 fail. A failure between steps 4 and 5 leaves `operator.password` holding the
 old password; running `init` again recovers. `init` always takes the super
 user from its flags or prompts, never from `operator.yaml`.

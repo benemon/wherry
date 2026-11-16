@@ -24,6 +24,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
 	"github.com/twmb/franz-go/pkg/kversion"
+	"github.com/twmb/franz-go/pkg/sasl"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 	"gopkg.in/yaml.v3"
 )
@@ -75,10 +76,32 @@ func ReadBundle(path string) (Bundle, error) {
 
 var yamlLine = regexp.MustCompile(`line \d+`)
 
+// ScramSHA512 and ScramSHA256 are the Kafka names of the SCRAM mechanisms a super user may log in with; every principal
+// wherry issues uses ScramSHA512.
+const (
+	ScramSHA512 = "SCRAM-SHA-512"
+	ScramSHA256 = "SCRAM-SHA-256"
+)
+
 // KafkaOpts are the options of a TLS and SCRAM-SHA-512 connection to broker as user, trusting the PEM certificates in
 // ca, or the system roots when ca is nil. A trailing line break, as a password file ends with, is not part of password,
 // and nothing else is no password.
 func KafkaOpts(broker string, ca []byte, user, password string) ([]kgo.Opt, error) {
+	return kafkaOpts(broker, ca, user, password, scram.Auth.AsSha512Mechanism)
+}
+
+// SuperUserKafkaOpts is KafkaOpts for a Kafka super user that logs in with mechanism, ScramSHA512 or ScramSHA256.
+func SuperUserKafkaOpts(broker string, ca []byte, user, password, mechanism string) ([]kgo.Opt, error) {
+	switch mechanism {
+	case ScramSHA512:
+		return kafkaOpts(broker, ca, user, password, scram.Auth.AsSha512Mechanism)
+	case ScramSHA256:
+		return kafkaOpts(broker, ca, user, password, scram.Auth.AsSha256Mechanism)
+	}
+	return nil, fmt.Errorf("the super user's mechanism is %s or %s", ScramSHA512, ScramSHA256)
+}
+
+func kafkaOpts(broker string, ca []byte, user, password string, mechanism func(scram.Auth) sasl.Mechanism) ([]kgo.Opt, error) {
 	password = strings.TrimRight(password, "\r\n")
 	if password == "" {
 		return nil, errors.New("password is empty")
@@ -96,7 +119,7 @@ func KafkaOpts(broker string, ca []byte, user, password string) ([]kgo.Opt, erro
 	return []kgo.Opt{
 		kgo.SeedBrokers(broker),
 		kgo.DialTLSConfig(&tls.Config{RootCAs: roots}),
-		kgo.SASL(scram.Auth{User: user, Pass: password}.AsSha512Mechanism()),
+		kgo.SASL(mechanism(scram.Auth{User: user, Pass: password})),
 		kgo.DisableClientMetrics(),
 		kgo.MaxVersions(versions),
 	}, nil

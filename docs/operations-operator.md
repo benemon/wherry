@@ -8,7 +8,10 @@ principals and group configurations; the cluster itself is prepared once.
 - **Share groups** are enabled, so receivers can claim tasks. See
   [KIP-932](https://cwiki.apache.org/confluence/display/KAFKA/KIP-932%3A+Queues+for+Kafka).
 - **A TLS listener with SCRAM-SHA-512** is reachable from every host and
-  receiver. Its address goes into every bundle; its CA does not. Each host
+  receiver. Every principal wherry issues uses SCRAM-SHA-512, so a listener
+  that enables only SCRAM-SHA-256 cannot serve wherry; the super user
+  `wherry operator init` uses may log in with SCRAM-SHA-256
+  (`--super-user-mechanism`). Its address goes into every bundle; its CA does not. Each host
   and receiver trusts the broker through the system's roots, or a `ca_file`
   in its own configuration when the CA is private, kept current by whoever
   distributes the Kafka CA.
