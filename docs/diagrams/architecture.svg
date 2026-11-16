@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 620" font-family="Outfit, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="title desc">
   <title id="title">wherry logical architecture by capability</title>
-  <desc id="desc">A coding agent on the caller's host delegates a task through harness integration. Placement chooses a signature, and a replica of a matching profile claims the task. Context delivery carries the prompt, files and repository to the job as files and each credential to its environment variable or file target, and a platform plugin runs the unmodified agent as a job on the user's platform. Results carry statuses, transcript, outputs and the result back, redacted, and the caller verifies outputs before writing them. Authority and trust spans every exchange: operator-issued identities and grants enforced by the broker, signed records checked against the operator's state, and credentials in an envelope under the pool's key.</desc>
+  <desc id="desc">A coding agent on the caller's host delegates a task through harness integration. Placement chooses a signature, and a replica of a matching profile claims the task. Context delivery carries the prompt, files and repository to the job as files and each credential to its environment variable or file target, and a platform plugin runs the unmodified agent as a job on the user's platform. Results carry statuses, transcript and the result back redacted, and output files as the agent wrote them, which the caller verifies before writing them. Authority and trust spans every exchange: operator-issued identities and grants enforced by the broker, signed records checked against the operator's state, and credentials in an envelope under the pool's key.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#2e4a35"/>
@@ -66,7 +66,7 @@
 
     <rect x="302" y="332" width="570" height="76" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
     <text x="587" y="356" text-anchor="middle" font-weight="600">Results</text>
-    <text x="587" y="375" text-anchor="middle" font-size="10.5" fill="#2e4a35">statuses, transcript, output files and result, redacted before they are published</text>
+    <text x="587" y="375" text-anchor="middle" font-size="10.5" fill="#2e4a35">statuses, transcript and result redacted; output files as written</text>
     <text x="587" y="390" text-anchor="middle" font-size="10.5" fill="#2e4a35">the caller verifies each output against the result before it writes the file</text>
 
     <rect x="302" y="432" width="570" height="100" rx="6" fill="#e8ebdf" stroke="#3f6b4a" stroke-width="1"/>

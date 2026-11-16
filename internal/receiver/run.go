@@ -2078,7 +2078,7 @@ func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pen
 	return run.end(ctx, status, result, pending, ack)
 }
 
-// collect redacts feed outputs and uploads S3 outputs unredacted to the host's bucket, listing every expected
+// collect publishes feed outputs and uploads S3 outputs to the host's bucket, each as written, listing every expected
 // output as returned or missing.
 func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stopped bool, terms operator.Terms) {
 	limit := terms.OutputLimit
@@ -2138,21 +2138,17 @@ func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stop
 		case int64(len(output.Data)) != output.Size:
 			reason = "rejected: size changed while read"
 		}
-		var form *redactedForm
-		if reason == "" {
-			// Redaction can lengthen an output, so the limit holds for its redacted form too.
-			if form = run.redact(output.Data, limit-total); form.over() {
-				reason = "exceeds output limit"
-			}
-		}
 		listed[name] = true
 		if reason != "" {
 			run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: name, Size: max(output.Size, 0), Reason: reason})
 			continue
 		}
-		total += form.size
-		run.outputs = append(run.outputs, run.outputChunks(name, form.data)...)
-		run.returned = append(run.returned, wire.ReturnedOutput{Name: name, SHA256: form.hash(), Size: form.size})
+		// An output file is returned as the agent wrote it: the tenant's topics are inside the trust boundary for the
+		// values delivered to its runs, as the host's bucket is for an S3 output.
+		sum := sha256.Sum256(output.Data)
+		total += output.Size
+		run.outputs = append(run.outputs, run.outputChunks(name, output.Data)...)
+		run.returned = append(run.returned, wire.ReturnedOutput{Name: name, SHA256: hex.EncodeToString(sum[:]), Size: output.Size})
 	}
 	for _, output := range run.expected {
 		if !listed[output.Name] {

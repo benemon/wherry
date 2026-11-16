@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io/fs"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -349,7 +350,8 @@ func sha(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func TestTaskCredentialIsRedactedFromTranscriptAndOutputs(t *testing.T) {
+// A task credential is redacted from the transcript; an output file is returned as the agent wrote it.
+func TestTaskCredentialIsRedactedFromTranscriptNotOutputs(t *testing.T) {
 	stream := []string{`{"type":"assistant","message":"key ` + deployValue + `"}`, doneOutcome}
 	f := newFixture(t, stream)
 	f.plugin.outputs = []pluginsdk.Output{{Name: "report.md", Size: int64(len("key " + deployValue + "\n")), Data: []byte("key " + deployValue + "\n")}}
@@ -363,12 +365,12 @@ func TestTaskCredentialIsRedactedFromTranscriptAndOutputs(t *testing.T) {
 		t.Fatalf("transcript line %q, want the task credential redacted", text)
 	}
 	outputs := f.outputChunks(t)
-	want := []byte("key " + marker + "\n")
+	want := []byte("key " + deployValue + "\n")
 	if len(outputs) != 1 || !bytes.Equal(outputs[0].ArtifactUpdate.Artifact.Parts[0].Raw, want) {
-		t.Fatalf("output chunks %+v, want report.md redacted", outputs)
+		t.Fatalf("output chunks %+v, want report.md as written", outputs)
 	}
 	if listed := manifest(t, f.lastTask(t)).Outputs; len(listed) != 1 || listed[0].SHA256 != sha(want) || listed[0].Size != int64(len(want)) {
-		t.Fatalf("manifest %+v, want the redacted bytes' hash and size", listed)
+		t.Fatalf("manifest %+v, want the written bytes' hash and size", listed)
 	}
 }
 
@@ -513,8 +515,7 @@ func TestRedactionMatchesReplaceAll(t *testing.T) {
 	}
 }
 
-// The marker can be longer than a value, so redaction cannot take an output, the turn's outputs, a transcript line or
-// a text past its limit.
+// The marker can be longer than a value, so redaction cannot take a transcript line or a text past its limit.
 func TestRedactionCannotExpandPastTheLimits(t *testing.T) {
 	terms := testTerms()
 	terms.OutputLimit = 4096
@@ -528,14 +529,10 @@ func TestRedactionCannotExpandPastTheLimits(t *testing.T) {
 		run.collect(f.ctx, pluginsdk.Handle{}, true, run.terms())
 		return run
 	}
-	run := collect(file("expanding.txt", strings.Repeat(value, 450)), file("small.txt", "key "+value))
-	if want := []wire.UnreturnedOutput{{Name: "expanding.txt", Size: 3600, Reason: "exceeds output limit"}}; !slices.Equal(run.unreturned, want) ||
-		len(run.returned) != 1 || run.returned[0].Size != int64(len("key "+marker)) {
-		t.Fatalf("returned %+v, not returned %+v; want expanding.txt over the limit once redacted", run.returned, run.unreturned)
-	}
-	run = collect(file("a.txt", strings.Repeat("a", 3000)), file("b.txt", strings.Repeat(value, 120)), file("c.txt", "c"))
-	if want := []wire.UnreturnedOutput{{Name: "b.txt", Size: 960, Reason: "exceeds output limit"}}; !slices.Equal(run.unreturned, want) || len(run.returned) != 2 {
-		t.Fatalf("returned %+v, not returned %+v; want b.txt taking the redacted total over the limit", run.returned, run.unreturned)
+	// An output is returned as written, so one at the limit that holds a value is returned whole.
+	run := collect(file("full.txt", strings.Repeat(value, 512)))
+	if len(run.unreturned) != 0 || len(run.returned) != 1 || run.returned[0].Size != 4096 {
+		t.Fatalf("returned %+v, not returned %+v; want full.txt whole", run.returned, run.unreturned)
 	}
 	line := []byte(strings.Repeat(value, 60000))
 	redacted := bytes.ReplaceAll(line, []byte(value), []byte(marker))
@@ -814,8 +811,8 @@ func TestAHungCollectionIsNotCollected(t *testing.T) {
 	}
 }
 
-// Credential files written by echo or a CLI end in a newline; a transcript carries the value JSON-escaped, and outputs
-// and result text often without the newline.
+// Credential files written by echo or a CLI end in a newline; a transcript carries the value JSON-escaped, and result
+// text often without the newline. Output files are returned as written.
 func TestCredentialFormsAreRedacted(t *testing.T) {
 	const agentValue, taskValue = "sk-token-with-newline\n", `pass"word\back-slash` + "\r\n"
 	stream := []string{
@@ -833,7 +830,7 @@ func TestCredentialFormsAreRedacted(t *testing.T) {
 	if line := f.chunks(t)[0].ArtifactUpdate.Artifact.Parts[0].Text; line != `{"type":"assistant","message":"cat gives `+agent+`\n and `+task+`\r\n"}` {
 		t.Fatalf("transcript line %q", line)
 	}
-	if data := string(f.outputChunks(t)[0].ArtifactUpdate.Artifact.Parts[0].Raw); data != "token "+agent+", password "+task {
+	if data := string(f.outputChunks(t)[0].ArtifactUpdate.Artifact.Parts[0].Raw); data != `token sk-token-with-newline, password pass"word\back-slash` {
 		t.Fatalf("output %q", data)
 	}
 	last := f.lastTask(t)
@@ -865,5 +862,33 @@ func TestOutputsOfAJobThatWouldNotStopAreNotCollected(t *testing.T) {
 	}
 	if limits := f.plugin.limits; f.plugin.collects != 1 || limits.FileBytes != 0 || !slices.Equal(limits.Stream, []string{wire.OutcomeFile}) {
 		t.Fatalf("%d collects, the last under %+v; want one reading the outcome file alone", f.plugin.collects, limits)
+	}
+}
+
+// A binary output that holds a delivered value is returned byte for byte, so the host verifies the hash of what the
+// agent wrote.
+func TestBinaryOutputWithACredentialIsReturnedAsWritten(t *testing.T) {
+	f := newFixture(t, resultStream)
+	run := testActiveRun(t, f, "run-b", 1)
+	run.deliver(map[string][]byte{"deploy-key": []byte(deployValue)})
+	data := append([]byte("PACK\x00\x00\x00\x02\xff\xfe"), append([]byte(deployValue), 0x00, 0x9c, 0x78)...)
+	f.plugin.outputs = []pluginsdk.Output{{Name: "changes.bundle", Size: int64(len(data)), Data: data}}
+	run.collect(f.ctx, pluginsdk.Handle{}, true, run.terms())
+	if len(run.returned) != 1 || run.returned[0].SHA256 != sha(data) || run.returned[0].Size != int64(len(data)) {
+		t.Fatalf("returned %+v; want changes.bundle with the hash and size of its bytes", run.returned)
+	}
+	var published []byte
+	for _, record := range run.outputs {
+		var output wire.Output
+		if err := wire.ParseRecord(record.Value, f.keys(), &output); err != nil {
+			t.Fatal(err)
+		}
+		published = append(published, output.ArtifactUpdate.Artifact.Parts[0].Raw...)
+	}
+	if !bytes.Equal(published, data) {
+		t.Fatalf("published %d bytes, sha256 %s; want the %d bytes as written, sha256 %s", len(published), sha(published), len(data), sha(data))
+	}
+	if text := scraped(t, f.receiver); regexp.MustCompile(`(?m)^wherry_redactions_total\{[^}]*\} [1-9]`).MatchString(text) {
+		t.Fatalf("an output counted as a redaction:\n%s", text)
 	}
 }

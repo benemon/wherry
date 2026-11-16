@@ -1304,8 +1304,12 @@ the [claim check](#the-claim-check).
 
 ## Redaction
 
-Before it signs any transcript chunk, output chunk, result text or status
-message of the attempt, the receiver replaces values with markers.
+Before it signs any transcript chunk, result text or status message of the
+attempt, the receiver replaces values with markers. Output files are not
+redacted: the receiver returns each as the agent wrote it, on the transcript
+topic or through S3, since a tenant's topics and its bucket are inside the
+trust boundary for the values delivered to its runs, and replacing bytes in a
+file would change it while its hash still verified.
 
 What it replaces:
 
@@ -1313,7 +1317,7 @@ What it replaces:
   credentials and presigned URLs included, and of each URL's
   `X-Amz-Signature` value alone;
 - two forms of each value: its bytes without trailing CR and LF, since a
-  credential file usually ends in a newline that transcripts and outputs
+  credential file usually ends in a newline that transcripts and replies
   drop, and those bytes escaped as a JSON string, as a transcript line
   carries them. The value's own bytes contain the first form, so its
   redaction leaves only the line ending.
@@ -1344,17 +1348,13 @@ How it replaces:
   beside it into a value that was not there before: when a value starts
   with a marker's tail, such as `]`, and the rest of it follows a replaced
   value, the published text holds that value whole.
-- An output file is redacted whole before the receiver splits it into
-  chunks and computes its hash and size.
-- In result metadata it replaces within JSON string values only, so the
-  metadata stays valid.
+- Output names, in result metadata and output chunks, are not redacted:
+  they belong to the output files.
 - An adopted attempt redacts the values of its own open of the envelope.
 
 The marker can be longer than a value, so the limits hold for the redacted
 bytes:
 
-- an output whose redacted form is over the pool's `output_limit`, or would
-  take the run's outputs over it, is listed as `exceeds output limit`;
 - a transcript line whose redacted form is over 512 KiB becomes a
   [reference part](#reference-parts) with that form's hash and size;
 - a reply whose redacted form is over 64 KiB travels as its preview and
@@ -1680,8 +1680,8 @@ leaves the outputs `not collected`; the receiver then asks the plugin for the
 outcome file alone, within another 2 minutes. The outcome file counts against
 neither output limit, and is invalid over the pool's `output_limit`.
 
-The receiver checks every name, redacts every file, and publishes each
-returned file as [output chunks](#output-chunk) and in the result's
+The receiver checks every name and publishes each returned file as the
+agent wrote it, as [output chunks](#output-chunk) and in the result's
 [metadata](#metadata). A required output listed in `not_returned` ends
 the run `TASK_STATE_FAILED` with
 `required output <name> not returned: <reason>`, behind the agent's
@@ -1729,12 +1729,11 @@ claimant check against the pool's storage before use.
   together, but is at most 5 GiB, and among the 256 outputs a submission
   expects. Collection waits until the run's `task_ended_by`, when the PUT URLs
   expire, if that is later than 2 minutes. The receiver does not redact an
-  S3 output, which goes to the host's own bucket and never to the
-  transcript topic. An attempt that adopted an earlier attempt's job uploads
+  S3 output, as it does not redact a feed output. An attempt that adopted an earlier attempt's job uploads
   to the PUT URLs of the task's envelope.
 - **Continuation.** The host gives a run with `git.base` an expected
-  `changes.bundle` S3 output, so its bundle returns unredacted and outside
-  `output_limit` whatever its size. This is the host's choice, not a rule
+  `changes.bundle` S3 output, so its bundle returns outside `output_limit`
+  whatever its size. This is the host's choice, not a rule
   readers check.
 - **Back.** The host downloads each S3 output in the result's
   `s3_outputs` that the run declares, at the key for its name, and keeps it

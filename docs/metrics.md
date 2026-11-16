@@ -48,7 +48,7 @@ hash is not secret protection.
 | `wherry_collection_failures_total` | counter | `profile`, `reason` | runs whose outputs were not collected: `not_stopped`, `over_limits`, `timeout`, `failed` |
 | `wherry_open_waits_total` | counter | `tenant`, `outcome` | open request waits: `opened`, `refused`, `unanswered`, `expired` |
 | `wherry_open_wait_seconds` | histogram | `tenant` | time a claimed run waited for its attempt wrap or refusal |
-| `wherry_redactions_total` | counter | `tenant`, `profile` | credential values replaced in published output |
+| `wherry_redactions_total` | counter | `tenant`, `profile` | credential values replaced in what the receiver publishes and logs; output files are returned as written |
 | `wherry_bus_errors_total` | counter | `op` | Kafka errors: `read`, `write`, `transactional ID`, `share group` |
 | `wherry_denials_total` | counter | `op` | Kafka authorisation errors, by the capability denied: `read`, `write`, `transactional ID`, `share group`, `membership` |
 | `wherry_claim_lost_total` | counter | none | runs halted after losing their claim |

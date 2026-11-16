@@ -281,8 +281,9 @@ through an allow rule such as
 (`git -c alias.x='!cmd'` runs any command), can undo every one of these
 settings. A hostile or prompt-injected agent holds whatever credentials the
 parent sent, and what it can do with them is bounded by their scope and
-lifetime, the platform's egress policy, and the receiver's redaction of what it
-returns.
+lifetime and the platform's egress policy. The receiver redacts delivered values
+from the transcript, statuses and reply, but returns output files as the agent
+wrote them.
 
 The host's configuration supplies least privilege; wherry passes the
 credential as a file and checks the host:

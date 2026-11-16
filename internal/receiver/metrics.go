@@ -151,7 +151,7 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 		Buckets: pluginsdk.PlacementBuckets,
 	}, []string{"profile"})
 	m.collectors = append(m.collectors, m.placement)
-	m.redactions = counters("redactions_total", "Credential values replaced in published output.", "tenant", "profile")
+	m.redactions = counters("redactions_total", "Credential values replaced in what the receiver publishes and logs; output files are returned as written.", "tenant", "profile")
 	m.busErrors = counters("bus_errors_total", "Kafka operation errors, by operation.", "op")
 	m.denials = counters("denials_total", "Kafka authorisation errors, by the capability denied.", "op")
 	m.takeovers = counters("custodian_takeovers_total", "Snapshots this receiver published taking over its pool's key custody, by reason.", "reason")

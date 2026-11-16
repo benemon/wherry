@@ -155,7 +155,7 @@ The agent leaves its outputs in the directory `WHERRY_OUTPUT_DIR` names.
 Once the job ends and is stopped, whatever its exit, the plugin
 collects the regular files there, up to 256 entries and the pool's output
 limit (8 MiB by default), without
-following links. The receiver redacts each file, publishes it in chunks on
+following links. The receiver publishes each file as the agent wrote it, in chunks on
 the tenant's transcript topic in the result's transaction, and lists every
 output in the result with the size and SHA-256 it computed, or with the
 reason it was not returned. A required output that is not returned fails
@@ -174,7 +174,7 @@ directory and verifies them; the receiver streams each S3 output to its
 PUT URL, hashing what it sends, and lists it in the result. The host then
 downloads and verifies the outputs and deletes the run's objects. The
 host's storage credential never leaves the host, and S3 outputs, which go
-to the host's own bucket, are not redacted.
+to the host's own bucket, are not redacted either.
 
 A task can also name a git repository: a remote and a ref. The host's
 `git` configuration gives the clone its credential and, for `ssh`, its host
