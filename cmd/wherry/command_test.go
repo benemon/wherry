@@ -403,6 +403,27 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 	}
 }
 
+// A receiver whose advertisement says it claims nothing shows why, in text and JSON.
+func TestReceiversShowsGated(t *testing.T) {
+	b := newBus(t)
+	b.produce(t, operator.PoolReceiversTopic("pool-a"), "receiver-a", b.sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: "pool-a",
+		Offers: []wire.Offer{{Profile: "lab", Agent: "claude", InlineLimit: 49152}}, Capacity: 1, AtMS: time.Now().Add(time.Second).UnixMilli(), Gated: wire.GatedSuspended}))
+	var stdout, stderr bytes.Buffer
+	if err := runReceivers(b.ctx, b.client, nil, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if line, _, _ := strings.Cut(stdout.String(), "\n"); !strings.HasSuffix(line, " status=live gated=suspended") {
+		t.Fatalf("receiver line %q; want it to end status=live gated=suspended", line)
+	}
+	stdout.Reset()
+	if err := runReceivers(b.ctx, b.client, []string{"--json"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), `"gated":"suspended"`) {
+		t.Fatalf("receivers JSON %s; want gated", stdout.String())
+	}
+}
+
 func TestReceiversShowsEnded(t *testing.T) {
 	b := newBus(t)
 	end, err := operator.EncodeRecord(operator.Record{Kind: "end", Receiver: "receiver-a"})

@@ -128,6 +128,8 @@ type Receiver struct {
 	InFlight       int64     `json:"in_flight"`
 	LastAdvertised time.Time `json:"last_advertised,omitzero"`
 	Status         string    `json:"status"`
+	// Gated is why a live receiver's latest advertisement says it claimed no task, empty while it claimed or not live.
+	Gated string `json:"gated,omitzero"`
 }
 
 // Profile is one profile of a receiver: its plugin type, agent and labels from its config record, the agent's models,
@@ -816,7 +818,7 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 			receiver.LastAdvertised = time.UnixMilli(ad.AtMS).UTC()
 			receiver.Status = "stale"
 			if age <= liveness && age >= -liveness {
-				receiver.Status = "live"
+				receiver.Status, receiver.Gated = "live", ad.Gated
 			}
 		}
 		for _, profile := range config.Profiles {
