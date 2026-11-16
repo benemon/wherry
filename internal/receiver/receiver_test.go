@@ -68,6 +68,8 @@ type fakePlugin struct {
 	// pool, name and agent are the ones the fixture's factory builds the plugin with.
 	pool, name, agent string
 	inlineLimit       int64
+	// jobAttempt, when set, is the attempt Lookup reports the job was created by; unset, 1.
+	jobAttempt *int64
 	// unready and readyErr make Ready report the plugin unable to start a job.
 	unready     bool
 	readyErr    error
@@ -300,6 +302,9 @@ func (f *fakePlugin) Lookup(ctx context.Context, runID string) (pluginsdk.Job, e
 		return pluginsdk.Job{}, err
 	}
 	job := pluginsdk.Job{State: f.job, Handle: f.handle(runID), Attempt: 1, Profile: cmp.Or(f.jobProfile, f.name), Agent: cmp.Or(f.jobAgent, f.agent)}
+	if f.jobAttempt != nil {
+		job.Attempt = *f.jobAttempt
+	}
 	if f.follows > 0 && f.followedJob != nil {
 		job.State = *f.followedJob
 	} else if job.State == pluginsdk.JobAbsent && f.created[runID] {

@@ -538,8 +538,8 @@ result again, takes its first line, trims surrounding spaces and cuts it at
 differs from the one it last published, it publishes the line as a status of
 kind `working` with state `TASK_STATE_WORKING` ([Status](a2a-extension-v1.md#status)),
 at most one a minute. A file emptied later leaves the last line in place.
-A receiver that adopts the run publishes the run's last line again, with its
-time, after its `started` status. `wherry host status`, `wherry host events`
+A receiver that adopts the run's job publishes that job's last line again,
+with its time, after its `started` status. `wherry host status`, `wherry host events`
 and the MCP `status`, `events` and `wait` tools show it.
 
 The run ends when the job ends. The receiver stops the job, collects its

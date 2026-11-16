@@ -400,7 +400,7 @@ A `terminal` status's `wherry` object adds the attempt's chunk count:
 | `claimed` | `TASK_STATE_WORKING` | the receiver admits the run | `task_topic`, `task_offset` |
 | `placing` | `TASK_STATE_WORKING` | the job is registered and the platform has not placed it; again when the platform's reason changes | the reason as message text |
 | `started` | `TASK_STATE_WORKING` | the job has started | |
-| `working` | `TASK_STATE_WORKING` | the agent's [working file](configuration-receiver.md#agent-contract) holds a line other than the one last published, at most once a minute; and an adopter's last line again after its `started` | the line as message text |
+| `working` | `TASK_STATE_WORKING` | the agent's [working file](configuration-receiver.md#agent-contract) holds a line other than the one last published, at most once a minute; and the adopted job's last line again after an adopter's `started` | the line as message text |
 | `rejected` | `TASK_STATE_REJECTED` | the receiver refuses the submission | the reason as message text |
 | `terminal` | `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED` or `TASK_STATE_CANCELED` | the run has ended | the agent's message from its [outcome file](configuration-receiver.md#agent-contract), or the reason as message text |
 | `released` | `TASK_STATE_SUBMITTED` | the receiver gives back its claim, before it returns the task to the pool | |
@@ -478,7 +478,9 @@ A status of kind `working` carries the agent's own line, not a fixed text:
 the first line of its working file, trimmed, of at most 512 bytes. The whole
 file is redacted before and after CRLF becomes a line break, and again after
 each URL is replaced by `[redacted-url]`, invalid UTF-8 by U+FFFD, a carriage
-return by a line break and each other control character by a space. An adopter republishes the run's last line with its original time, so
+return by a line break and each other control character by a space. An adopter republishes the last line of the job it adopted, published by
+the attempt that created the job or a later one (any attempt's, when the
+plugin recorded no attempt for the job), with its original time, so
 a run's latest update can be earlier than its `started` status. A status of kind `placing` or `working` has state
 `TASK_STATE_WORKING`, one text part and no `log_offset`, and fails validation
 otherwise; a status of kind `working` also fails it when its text, or its
