@@ -10,7 +10,8 @@ clones itself.
    the agent's `models` and `default_model` when it has them, `labels`,
    `ready` and `credentials`, each agent credential's `name`, with
    its target (`env` or `file`), `optional` and `configured`, whether this
-   host has a source for it. Pick
+   host has a source for it, and a live receiver's `gated`, why it claimed no
+   task as of its latest advertisement, when it claimed none. Pick
    an agent and build a selector from the labels.
 2. `wherry submit --prompt TEXT` prints `run_id` and `pool`. Add `--agent NAME`
    to choose the agent, `--model NAME` to choose one of its `models` in place

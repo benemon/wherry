@@ -1372,7 +1372,7 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 		ad.Offers[0].InlineLimit, ad.Offers[0].Replicas, ad.Offers[0].InFlight = 49152, 2, 1
 	})
 	f.addReceiver(t, "receiver-b", "pool-b").advertise(t, f.ctx, func(ad *wire.Advertisement) {
-		ad.Capacity, ad.InFlight, ad.AtMS = 4, 2, time.Now().Add(-121*time.Second).UnixMilli()
+		ad.Capacity, ad.InFlight, ad.AtMS, ad.Gated = 4, 2, time.Now().Add(-121*time.Second).UnixMilli(), wire.GatedDraining
 	})
 	f.addReceiver(t, "receiver-c", "pool-a")
 	f.addReceiver(t, "receiver-d", "pool-a").advertise(t, f.ctx, nil)
@@ -1402,14 +1402,30 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 		}) {
 		t.Fatalf("live receiver %#v", a)
 	}
-	if b := got["receiver-b"]; b.Status != "stale" || b.Capacity != 4 || b.InFlight != 2 || len(b.Profiles) != 2 || b.Profiles[0].Ready || b.Profiles[1].Ready {
-		t.Fatalf("stale receiver %#v; want its profiles listed, none ready", b)
+	if b := got["receiver-b"]; b.Status != "stale" || b.Capacity != 4 || b.InFlight != 2 || b.Gated != "" || len(b.Profiles) != 2 || b.Profiles[0].Ready || b.Profiles[1].Ready {
+		t.Fatalf("stale receiver %#v; want its profiles listed, none ready, and no gated from its old advertisement", b)
+	}
+	if a := got["receiver-a"]; a.Gated != "" {
+		t.Fatalf("claiming receiver gated %q; want none", a.Gated)
 	}
 	if c := got["receiver-c"]; c.Status != "silent" || !c.LastAdvertised.IsZero() {
 		t.Fatalf("silent receiver %#v", c)
 	}
 	if d := got["receiver-d"]; d.Status != "ended" {
 		t.Fatalf("ended receiver %#v", d)
+	}
+}
+
+// A live receiver whose advertisement says it claims nothing carries the reason.
+func TestReceiversCarriesALiveReceiversGated(t *testing.T) {
+	f := newFixture(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Gated = wire.GatedSuspended })
+	receivers, err := f.host.Receivers(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receivers) != 1 || receivers[0].Status != "live" || receivers[0].Gated != wire.GatedSuspended {
+		t.Fatalf("receivers %+v; want receiver-a live and gated suspended", receivers)
 	}
 }
 

@@ -43,7 +43,11 @@ Call `receivers` first. For each receiver it returns:
   with no ready plugin profile lists every profile with `ready` false, and no task
   is placed on it.
 - `status` (`live`, `stale`, `silent` or `ended`), `capacity` and
-  `in_flight`: whether it is live, and its totals over all its profiles. A
+  `in_flight`: whether it is live, and its totals over all its profiles.
+  `gated`, on a live receiver, says why it claimed no task as of its latest
+  advertisement (`suspended`, `no_ready_offer`, `pending_run` or `draining`);
+  such a receiver takes no task even when its profiles are ready and below
+  `replicas`. A
   profile claims one task per replica, so a profile at `in_flight` equal to
   `replicas` is full whatever the receiver's totals show; look for room on
   the profile your run needs.

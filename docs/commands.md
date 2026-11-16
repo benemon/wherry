@@ -1092,7 +1092,7 @@ Lists the receivers of every pool the tenant is entitled to, sorted by pool
 and receiver ID:
 
 ```
-receiver=<id> pool=<pool> capacity=<n> in_flight=<n> advertisement_age=<age> status=<status>
+receiver=<id> pool=<pool> capacity=<n> in_flight=<n> advertisement_age=<age> status=<status> [gated=<reason>]
   profile=<name> plugin=<type> agent=<agent> ready=<bool> labels=<k=v,...> [replicas=<n> in_flight=<n>] [inline_limit=<n>] [models=<m,...> default_model=<m>] [credentials=<name:env=VAR|name:file=FILE[(missing,optional)],...>]
     [credential=<name> description="<text>"]...
 ```
@@ -1103,7 +1103,12 @@ non-printable character appears as an escape such as `\u202e`.
 
 `status` is `live` when the latest advertisement is dated within 120
 seconds of now, either side, `stale` otherwise, `silent` when there is none,
-and `ended` after the receiver's membership end. Plugin profiles, their plugins and their labels come from the
+and `ended` after the receiver's membership end. `gated`, shown only while `status` is
+`live`, is why the receiver claimed no task as of its latest advertisement,
+`advertisement_age` ago: the first of `suspended`, `no_ready_offer`,
+`pending_run` and `draining` that held, as under
+[why a run waits](#why-a-run-waits). A receiver with `gated` claims no task
+even when its profiles are ready and below `replicas`. Plugin profiles, their plugins and their labels come from the
 receiver's configuration record, and an agent's `models` and
 `default_model` from the pool's [terms](configuration-operator.md#pool-terms) when it has them.
 `ready` is true when the receiver is live
@@ -1135,6 +1140,7 @@ a line of its own, as in `credential=github-token description="GitHub token for 
 | `capacity`, `in_flight` | integers from the latest advertisement, totals over the receiver's profiles |
 | `last_advertised` | RFC 3339 time of the latest advertisement; omitted when there is none |
 | `status` | `live`, `stale`, `silent` or `ended` |
+| `gated` | for a live receiver, why its latest advertisement says it claimed no task; omitted while it claims or when not live |
 
 ### `wherry host submit`
 
