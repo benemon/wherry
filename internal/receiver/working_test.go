@@ -320,7 +320,7 @@ func TestWorkingReadFailuresAreLoggedOncePerClass(t *testing.T) {
 	}
 }
 
-// An adopter publishes the run's last working line again after its started status, with its time, and holds the
+// An adopter publishes its job's last working line again after its started status, with its time, and holds the
 // floor from it: it reads nothing within workingFloor.
 func TestWorkingAnAdopterRepublishesTheLastLine(t *testing.T) {
 	f, record := adopting(t)
@@ -358,5 +358,80 @@ func TestWorkingAnAdopterRepublishesTheLastLine(t *testing.T) {
 	defer f.plugin.mu.Unlock()
 	if f.plugin.workingReads != 0 {
 		t.Fatalf("the adopter read the working file %d times within the floor", f.plugin.workingReads)
+	}
+}
+
+// An adopter republishes the last line of the job it adopted: one published by the attempt that created the job, or a
+// later one, and none of an earlier job's.
+func TestWorkingAnAdopterRepublishesOnlyItsJobsLine(t *testing.T) {
+	type line struct {
+		attempt int64
+		kind    string
+		text    string
+	}
+	for name, c := range map[string]struct {
+		jobAttempt int64
+		earlier    []line
+		adopter    int64
+		want       string
+	}{
+		"earlier job": {2, []line{{1, "claimed", ""}, {1, "started", ""}, {1, "working", "line A"}, {2, "claimed", ""}, {2, "started", ""}}, 3, "a newer step"},
+		"intermediate adopter": {1, []line{{1, "claimed", ""}, {1, "started", ""}, {1, "working", "line A"},
+			{2, "claimed", ""}, {2, "adopting", ""}, {2, "started", ""}, {2, "working", "line B"}}, 3, "line B"},
+		"newest line of the job": {2, []line{{1, "claimed", ""}, {1, "started", ""}, {1, "working", "line A"},
+			{2, "claimed", ""}, {2, "started", ""}, {2, "working", "line B1"}, {2, "working", "line B2"}}, 3, "line B2"},
+		"no recorded attempt": {0, []line{{1, "claimed", ""}, {1, "started", ""}, {1, "working", "line A"}}, 2, "line A"},
+		// The intermediate adopter ended before its started status, so it republished nothing.
+		"silent intermediate adopter": {1, []line{{1, "claimed", ""}, {1, "started", ""}, {1, "working", "line A"},
+			{2, "claimed", ""}, {2, "adopting", ""}}, 3, "line A"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, record := adopting(t)
+			hold := make(chan struct{})
+			f.plugin.followHold = hold
+			f.plugin.working = []byte("a newer step")
+			f.plugin.jobAttempt = &c.jobAttempt
+			for _, l := range c.earlier {
+				f.publishStatus(t, record, testReceiver, f.receiver.signing, l.kind, wire.TaskStateWorking, func(status *wire.RunStatus) {
+					status.Wherry.Attempt = l.attempt
+					if l.kind == "working" {
+						status.StatusUpdate.Status = taskStatus(wire.TaskStateWorking, l.text)
+					}
+				})
+			}
+			done := f.executing(t, f.ctx, record, c.adopter)
+			// The job's follow is held until the adopter has published a working line, its republish or its own read.
+			for deadline := time.Now().Add(20 * renewInterval); time.Now().Before(deadline); time.Sleep(renewInterval / 4) {
+				if slices.ContainsFunc(f.eventStatuses(t), func(status wire.RunStatus) bool {
+					return status.Wherry.Attempt == c.adopter && status.Wherry.Kind == "working"
+				}) {
+					break
+				}
+			}
+			close(hold)
+			if status := <-done; status != kgo.AckAccept {
+				t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+			}
+			var kinds, lines []string
+			for _, status := range f.eventStatuses(t) {
+				if status.Wherry.Attempt == c.adopter {
+					kinds = append(kinds, status.Wherry.Kind)
+					if status.Wherry.Kind == "working" {
+						lines = append(lines, workingText(status))
+					}
+				}
+			}
+			if started := slices.Index(kinds, "started"); started < 0 || started+1 >= len(kinds) || len(lines) == 0 || lines[0] != c.want || kinds[started+1] != "working" {
+				t.Fatalf("adopter's statuses %v, working lines %q; want %q first after started", kinds, lines, c.want)
+			}
+			if n := len(slices.DeleteFunc(slices.Clone(lines), func(text string) bool { return text != c.want })); n != 1 {
+				t.Fatalf("adopter published %q %d times; want once", c.want, n)
+			}
+			for _, l := range c.earlier {
+				if l.kind == "working" && l.text != c.want && slices.Contains(lines, l.text) {
+					t.Fatalf("adopter republished %q, a line of another job or an earlier one of its job: %q", l.text, lines)
+				}
+			}
+		})
 	}
 }

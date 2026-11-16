@@ -1023,11 +1023,11 @@ func (r *Receiver) executeAttempt(ctx context.Context, claim *runClaim, record *
 		return kgo.AckRelease
 	}
 	// published is the last working line this execution published, at publishedAt; line is one read since, which the
-	// next tick publishes. An adopter publishes again the run's last line, with its time, after its started status.
+	// next tick publishes. An adopter publishes again its job's last line, with its time, after its started status.
 	var published, line string
 	var publishedAt time.Time
 	records := run.statusRecords("started", taskStatus(wire.TaskStateWorking, ""), &offset, nil)
-	if last := lastWorking(events.statuses[runID], run.taskHash); adopted && last != nil {
+	if last := lastWorking(events.statuses[runID], run.taskHash, job.Attempt); adopted && last != nil {
 		status := taskStatus(wire.TaskStateWorking, workingText(*last))
 		status.Timestamp = last.StatusUpdate.Status.Timestamp
 		records = append(records, run.statusRecords("working", status, nil, nil)...)
@@ -1420,10 +1420,12 @@ func (run *activeRun) workingLine(data []byte) string {
 	return wire.CutUTF8(strings.TrimSpace(line), wire.MaxWorkingText)
 }
 
-// lastWorking is the last of statuses that is a working status of the run's submission hash, nil without one.
-func lastWorking(statuses []wire.RunStatus, hash string) *wire.RunStatus {
+// lastWorking is the last working status of the run's submission hash that belongs to the job attempt jobAttempt
+// created, nil without one. Lines of attempts from jobAttempt on are the job's: a later attempt that found no job
+// dispatched its own, which Lookup returns instead. A job with no recorded attempt reads 0, which keeps every line.
+func lastWorking(statuses []wire.RunStatus, hash string, jobAttempt int64) *wire.RunStatus {
 	for i := len(statuses) - 1; i >= 0; i-- {
-		if statuses[i].Wherry.Kind == "working" && statuses[i].Wherry.TaskHash == hash {
+		if statuses[i].Wherry.Kind == "working" && statuses[i].Wherry.TaskHash == hash && statuses[i].Wherry.Attempt >= jobAttempt {
 			return &statuses[i]
 		}
 	}
