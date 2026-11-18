@@ -266,9 +266,10 @@ func (r *Receiver) Run(ctx context.Context) error {
 	var idle, slots sync.WaitGroup
 	idle.Add(r.replicas())
 	for i, profile := range r.profiles {
+		turn := newClaimTurn()
 		for range replicasOf(r.config.Profiles[i]) {
 			idleDone := sync.OnceFunc(idle.Done)
-			slots.Go(func() { r.claimLoop(ctx, running, profile, idleDone) })
+			slots.Go(func() { r.claimLoop(ctx, running, profile, turn, idleDone) })
 		}
 	}
 	idle.Wait()

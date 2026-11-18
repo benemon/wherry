@@ -112,7 +112,7 @@ func claimOnce(t *testing.T, f fixture, withdraw func()) {
 			r.mu.Unlock()
 		})))...)
 	}
-	if err := f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], func() {}); err != nil {
+	if err := f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], newClaimTurn(), func() {}); err != nil {
 		t.Fatal(err)
 	}
 }

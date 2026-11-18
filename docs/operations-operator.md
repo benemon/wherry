@@ -144,10 +144,9 @@ as [Signatures](configuration-operator.md#pool-terms) describes.
   that failed may be handed the task again even when a peer with the same
   signature could start it. A profile that goes
   unready between a claim's subscription and its fetch has its task released.
-  The unready profile's other replicas still polling may each acquire it once
-  before they close their idle clients. For that readiness withdrawal, this
-  allows up to the profile's effective replica count minus one more
-  deliveries. A `replicas` value of 0 or an absent field means one replica.
+  Only one replica per profile polls at a time, and it closes before another
+  replica polls after the readiness withdrawal. A `replicas` value of 0 or an
+  absent field means one replica.
   From
   attempt `delivery_limit` minus 1, a receiver ends a run it would return to the
   pool `TASK_STATE_FAILED` with `delivery budget exhausted`, except in the
