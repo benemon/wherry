@@ -147,9 +147,20 @@ and runs in flight are then adopted on redelivery.
 ### Claim topology
 
 Each configured profile has its own single-topic claim loop for each
-effective replica (default one). Idle clients persist across empty polls. A
-loop holds one record at a time and admits fresh tasks through its own
-profile, including when another profile has the same signature. The
+effective replica (default one). One loop per profile polls at a time; the
+other loops keep joined clients so the next loop can poll without joining.
+The polling loop keeps its turn across empty polls and passes it after a task
+arrives, or after closing its client when polling ends. Each fetch parked
+when a receiver crashes can use one of a task's bounded deliveries, so one
+polling loop per profile bounds what a crash costs. A poll that returns a
+task can briefly grant its client one further fetch before the next loop
+polls, so a profile can have two fetches in flight for a moment. A task that
+stray fetch buffers returns to the pool when its lock lapses or its client
+closes, whichever comes first, using one delivery. Profiles that share a signature topic have
+separate turns, so a crash can leave one parked fetch from each such profile
+on that topic. Idle clients persist across empty polls. A loop holds one
+record at a time and admits fresh tasks through its own profile, including
+when another profile has the same signature. The
 selector guards against a host publishing to the wrong topic. It does not
 choose between profiles. Readiness
 withdrawal closes only that profile's idle clients. Held clients keep

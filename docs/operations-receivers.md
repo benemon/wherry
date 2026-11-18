@@ -150,8 +150,18 @@ Each plugin's README runs the receiver on its platform, with its steps:
 ### What a receiver subscribes to
 
 Each profile has one share client per effective replica, subscribing only to that
-profile's signature topic through the pool's share group. An idle loop keeps its
-client across empty polls. A loop also keeps its client across claims: after a
+profile's signature topic through the pool's share group. One client per profile
+polls at a time; the others remain joined, ready to take the polling turn without
+another join. The polling client keeps its turn across empty polls, and if polling
+ends without a task it closes before the turn passes. Because only one client per
+profile polls, a crashed receiver leaves about one parked fetch per profile, and
+each parked fetch can use one of a task's bounded deliveries. A poll returning a
+task can briefly grant that client one further fetch while the next client begins
+polling. A task that stray fetch buffers returns to the pool when its lock lapses or
+the first client closes, whichever comes first, using one delivery.
+Profiles sharing a signature topic have separate turns, so each such profile can
+leave one parked fetch on that topic after a crash. An idle loop keeps its client
+across empty polls. A loop also keeps its client across claims: after a
 claim ends with an accept or reject the broker answered without error, and no
 further task was fetched meanwhile, the next poll is on the same member and
 does not wait for a join. Any other end of a claim closes the client, which

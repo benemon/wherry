@@ -149,8 +149,8 @@ func (f fixture) renewals(t *testing.T) func() []time.Time {
 	}
 }
 
-// polling counts the live members of the pool's share group that hold no run: each run the receiver holds keeps the
-// share client that fetched it.
+// polling counts the live members of the pool's share group that hold no run, including joined clients waiting for
+// their profile's polling turn: each run the receiver holds keeps the share client that fetched it.
 func (f fixture) polling() int {
 	return f.live() - int(f.receiver.held())
 }
