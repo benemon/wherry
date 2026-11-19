@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/benemon/wherry/internal/kafkatest"
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
@@ -88,30 +89,9 @@ func TestSIGKILLAdoptionChildProcess(t *testing.T) {
 	defer stop()
 	err = r.Run(ctx)
 	logger.Printf("Run returned err=%v", err)
-	for _, family := range []string{"wherry_claims_total", "wherry_admissions_total", "wherry_adoptions_total", "wherry_redeliveries_total", "wherry_delivery_budget_exhausted_total"} {
-		logger.Printf("METRIC %s=%v", family, sigkillMetricValue(t, registry, family))
-	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
-}
-
-func sigkillMetricValue(t *testing.T, registry *prometheus.Registry, name string) float64 {
-	t.Helper()
-	families, err := registry.Gather()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var total float64
-	for _, family := range families {
-		if family.GetName() != name {
-			continue
-		}
-		for _, metric := range family.Metric {
-			total += metric.GetCounter().GetValue()
-		}
-	}
-	return total
 }
 
 type sigkillChild struct {
@@ -182,8 +162,7 @@ func sigkillLogEvidence(logs string) string {
 	var evidence []string
 	for _, line := range strings.Split(logs, "\n") {
 		if strings.Contains(line, "configured:") || strings.Contains(line, "continuing as custodian") ||
-			strings.Contains(line, "Run returned") ||
-			strings.Contains(line, "METRIC ") {
+			strings.Contains(line, "Run returned") {
 			evidence = append(evidence, line)
 		}
 	}
@@ -255,31 +234,6 @@ func sigkillOffsetSnapshot(t *testing.T, ctx context.Context, b brokerPool, topi
 	return fmt.Sprintf("topic=%s offsets=%+v", topic, group.Offsets)
 }
 
-func sigkillSessionTimeout(t *testing.T, ctx context.Context, client *kgo.Client) string {
-	t.Helper()
-	admin := kadm.NewClient(client)
-	brokers, err := admin.ListBrokers(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(brokers) == 0 {
-		t.Fatal("broker metadata returned no brokers")
-	}
-	resources, err := admin.DescribeBrokerConfigs(ctx, brokers[0].NodeID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, resource := range resources {
-		for _, config := range resource.Configs {
-			if config.Key == "group.share.session.timeout.ms" && config.Value != nil {
-				return *config.Value
-			}
-		}
-	}
-	t.Fatal("group.share.session.timeout.ms not returned")
-	return ""
-}
-
 func sigkillProbe(t *testing.T, ctx context.Context, b brokerPool, topic, run string, stopped time.Time) *kgo.Record {
 	t.Helper()
 	probe, err := kgo.NewClient(append(slices.Clone(b.opts), kgo.ClientID("sigkill-probe"), kgo.ConsumeTopics(topic), kgo.ShareGroup(operator.PoolGroup(b.pool)), kgo.ShareMaxRecords(1), kgo.ShareMaxRecordsStrict())...)
@@ -339,6 +293,13 @@ func TestSIGKILLedReceiverRunIsAdoptedOnRealBroker(t *testing.T) {
 	if address == "" {
 		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
 	}
+	// A crashed receiver's parked fetches spent the task's deliveries only on a multi-broker cluster.
+	probe, err := kgo.NewClient(kgo.SeedBrokers(address))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer probe.Close()
+	kafkatest.Brokers(t, t.Context(), kadm.NewClient(probe))
 	for _, test := range []struct {
 		name   string
 		signal os.Signal
@@ -356,7 +317,6 @@ func TestSIGKILLedReceiverRunIsAdoptedOnRealBroker(t *testing.T) {
 			profile := brokerProfile(20)
 			b.configure(t, ctx, profile)
 			b.deliveryLimit(t, ctx, 5)
-			t.Logf("group.share.session.timeout.ms=%s", sigkillSessionTimeout(t, ctx, b.kafka))
 			hostKey := b.laneHost(t, ctx)
 			stateDir := t.TempDir()
 			signing, err := trust.GenerateSigningKeyFile(filepath.Join(stateDir, "signing.key"))

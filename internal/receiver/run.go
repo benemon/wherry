@@ -71,8 +71,6 @@ var (
 	startRetryWait    = 30 * time.Second
 	startRetryMaxWait = 120 * time.Second
 	startRetryWindow  = 5 * time.Minute
-	// claimPollTimeout bounds one share poll without passing the profile's polling turn.
-	claimPollTimeout = 30 * time.Second
 	// followRetryInterval separates the Follows and Lookups of a run whose log stream failed.
 	followRetryInterval = time.Second
 	// collectTimeout bounds a plugin's collection of a run's outputs, during which the claim is renewed.
@@ -265,7 +263,7 @@ func (r *Receiver) claimNext(claiming, ctx context.Context, profile Named, turn 
 	}
 	var record *kgo.Record
 	for record == nil {
-		pollCtx, cancel := context.WithTimeout(claiming, claimPollTimeout)
+		pollCtx, cancel := context.WithCancel(claiming)
 		go func() {
 			for pollCtx.Err() == nil && !stale() {
 				sleep(pollCtx, 100*time.Millisecond)

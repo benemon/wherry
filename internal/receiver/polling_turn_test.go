@@ -18,15 +18,13 @@ import (
 )
 
 type claimClientEvents struct {
-	mu                       sync.Mutex
-	next                     atomic.Int32
-	events                   []string
-	polled                   atomic.Int32
-	polledKeys               []string
-	keepRetryableFetchErrors bool
-	closeStarted             chan int32
-	closeRelease             chan struct{}
-	closeBlocked             atomic.Bool
+	mu           sync.Mutex
+	next         atomic.Int32
+	events       []string
+	polledKeys   []string
+	closeStarted chan int32
+	closeRelease chan struct{}
+	closeBlocked atomic.Bool
 	// blockClient, when set, is the only client whose close closeStarted holds.
 	blockClient atomic.Int32
 }
@@ -59,7 +57,6 @@ func (h *claimClientHook) OnClientClosed(*kgo.Client) {
 
 func (h *claimClientHook) OnFetchRecordUnbuffered(record *kgo.Record, polled bool) {
 	if polled {
-		h.events.polled.Add(1)
 		h.events.mu.Lock()
 		h.events.polledKeys = append(h.events.polledKeys, string(record.Key))
 		h.events.mu.Unlock()
@@ -84,9 +81,6 @@ func installClaimClientEvents(t *testing.T, events *claimClientEvents) {
 	newClaimClient = func(r *Receiver, _ Named, opts ...kgo.Opt) (*kgo.Client, error) {
 		hook := &claimClientHook{id: events.next.Add(1), events: events}
 		opts = append(opts, kgo.WithHooks(hook))
-		if events.keepRetryableFetchErrors {
-			opts = append(opts, kgo.KeepRetryableFetchErrors())
-		}
 		return r.newClient(opts...)
 	}
 	t.Cleanup(func() { newClaimClient = old })
@@ -111,43 +105,6 @@ func firstShareFetchWriter(events []string) string {
 		}
 	}
 	return ""
-}
-
-func TestEmptyPollKeepsTheProfileTurn(t *testing.T) {
-	previous := claimPollTimeout
-	claimPollTimeout = 100 * time.Millisecond
-	t.Cleanup(func() { claimPollTimeout = previous })
-	f := gateFixture(t, resultStream)
-	events := &claimClientEvents{}
-	installClaimClientEvents(t, events)
-	held := make(chan struct{})
-	var once sync.Once
-	f.cluster.ControlKey(kmsg.ShareFetch.Int16(), func(kmsg.Request) (kmsg.Response, error, bool) {
-		f.cluster.KeepControl()
-		once.Do(func() {
-			f.cluster.SleepControl(func() {
-				close(held)
-				time.Sleep(3 * time.Second)
-			})
-		})
-		return nil, nil, false
-	})
-	f.run(t, f.ctx)
-	select {
-	case <-held:
-	case <-f.ctx.Done():
-		t.Fatal("no ShareFetch was held")
-	}
-	first := firstShareFetchWriter(events.snapshot())
-	time.Sleep(500 * time.Millisecond)
-	for _, event := range events.snapshot() {
-		if event[:len("write:")] == "write:" && event != "write:"+first {
-			t.Fatalf("client %s wrote ShareFetch while client %s's empty poll was held; events=%v", event[len("write:"):], first, events.snapshot())
-		}
-	}
-	awaitClaimEvent(t, f, events, func(got []string) bool {
-		return len(slices.DeleteFunc(slices.Clone(got), func(event string) bool { return event != "write:"+first })) >= 2
-	})
 }
 
 func TestGatedHolderClosesBeforePassingTheProfileTurn(t *testing.T) {
