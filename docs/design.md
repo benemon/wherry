@@ -177,8 +177,11 @@ gives the model, and
 
 **Snapshots.** The key custodian writes every snapshot through the
 transactional ID `p.<pool>.custodian`, one transaction per snapshot, and
-reads the committed snapshot back before it marks the key published. It
-initialises `p.<pool>.custodian` only when assigned. When assigned, a
+reads the committed snapshot back before it marks the key published. Kafka
+answers a commit before the commit marker reaches the topic's partition, so
+while the last stable offset has not passed the snapshot the custodian reads
+again every 50 ms for up to 5 seconds. A committed snapshot whose marker lands
+later is marked published on a later pass. It initialises `p.<pool>.custodian` only when assigned. When assigned, a
 receiver that the current snapshot names and that holds the snapshot's key
 continues with that key. Any other generates a P-256 key, stores it, and
 publishes it with reason `bootstrap` when the topic holds no snapshot and
