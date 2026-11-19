@@ -101,7 +101,7 @@ jobs:
       - name: Run the real-broker tests
         run: |
           . "$RUNNER_TEMP/kafka/env"
-          go test -count=1 -timeout 45m ${{ matrix.package }}
+          go test -count=1 -timeout 30m ${{ matrix.package }}
 
   s3:
     runs-on: ubuntu-latest
