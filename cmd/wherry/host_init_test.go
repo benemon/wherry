@@ -378,6 +378,42 @@ func TestHostInitRefusesADanglingLinkAtADerivedPath(t *testing.T) {
 	}
 }
 
+// A link to the default path whose target does not exist is a configuration of its own, and stays one: the host key and
+// state directory chosen beside the link before the configuration is written are the ones init uses, and it names them
+// in the configuration, since once written it is the default file. Loads through either path then agree, and a rerun
+// through either keeps the key; the configuration directory gets no host key.
+func TestHostInitKeepsItsIdentityThroughALinkToTheDefaultPath(t *testing.T) {
+	h := newInitHost(t, nil)
+	noTerminal(t)
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(h.config, alias); err != nil {
+		t.Fatal(err)
+	}
+	keyID, _ := h.init(t, h.bundle, "--config-file", alias)
+	h.registeredAt(t, "host-a", alias+".host.key", strings.TrimSpace(keyID))
+	absent(t, filepath.Join(h.dir, "host.key"))
+	absent(t, filepath.Join(h.dir, "bundle.yaml"))
+	if _, err := operator.ReadBundle(alias + ".bundle.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	if config := h.written(t); config.Bundle != alias+".bundle.yaml" || config.HostKey != alias+".host.key" || config.StateDir != alias+".state" {
+		t.Fatalf("config holds %+v; want the bundle, host_key and state_dir chosen beside %s named", config, alias)
+	}
+	for _, path := range []string{alias, h.config} {
+		config, err := busclient.LoadConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if config.HostKey != alias+".host.key" || config.StateDir != alias+".state" {
+			t.Fatalf("LoadConfig(%s) = host_key %s, state_dir %s; want the files beside %s", path, config.HostKey, config.StateDir, alias)
+		}
+		if again, _ := h.init(t, "--config-file", path); again != keyID {
+			t.Fatalf("rerun through %s registered %s; want the host's key %s kept", path, strings.TrimSpace(again), strings.TrimSpace(keyID))
+		}
+	}
+	absent(t, filepath.Join(h.dir, "host.key"))
+}
+
 // plantPrivateValueInX5U writes a private Ed25519 JWK at path whose x5u member also holds its private d value, as
 // ":<d>", which no URL parser accepts, and returns d. An error that echoes the field echoes the key.
 func plantPrivateValueInX5U(t *testing.T, path string) string {

@@ -58,8 +58,12 @@ the default when it is the default path, so the default configuration
 named relatively keeps the configuration directory's files, or when both
 exist and are one file, so a symlink or hard link to an existing default
 configuration does too. A link to a file not yet written is a
-configuration of its own, with its files beside the link. Explicit
-`bundle`, `host_key` and `state_dir` values are kept wherever the
+configuration of its own, with its files beside the link, and stays one
+when that file is the default configuration: writing through the link
+makes it the default file, so `host init` names the `host_key` and
+`state_dir` it chose beside the link in the configuration it writes, and
+every later load, through the link or the default path, keeps them.
+Explicit `bundle`, `host_key` and `state_dir` values are kept wherever the
 configuration is: `host init BUNDLE` copies the bundle to the `bundle` a
 configuration away from the default path names, and to `<path>.bundle.yaml`
 only when it names none; the default configuration's copy is always
@@ -89,13 +93,15 @@ A pool without a storage entry has no S3 lane on this host.
 MCP input roots must be absolute paths to existing directories.
 CLI commands can read any input path you give them.
 
-`host init` writes `bundle`, a `ca_file` it asked for, and an entry in
-`credentials`, `git` and `storage` for each answer, each a reference to a
-source and never a value; a re-run keeps every entry and adds only what a
-newly entitled pool needs. Without a terminal it asks nothing and lists what
-still has no source. It asks for the CA only on a terminal, so without one a
-broker under a private CA needs `ca.pem` in the configuration directory, or
-`ca_file` in the file, before `host init` runs.
+`host init` writes `bundle`, a `ca_file` it asked for, `host_key` and
+`state_dir` when a configuration written through a link to the default
+path needs them, and an entry in `credentials`, `git` and `storage` for
+each answer, each a reference to a source and never a value; a re-run
+keeps every entry and adds only what a newly entitled pool needs. Without
+a terminal it asks nothing and lists what still has no source. It asks for
+the CA only on a terminal, so without one a broker under a private CA
+needs `ca.pem` in the configuration directory, or `ca_file` in the file,
+before `host init` runs.
 
 `state_dir` holds:
 

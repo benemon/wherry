@@ -135,6 +135,26 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 		if err := write(); err != nil {
 			return err
 		}
+		// Writing the configuration can make it the default file: a link to the default path whose target did not exist
+		// until now. The host key and state directory chosen above stay this configuration's; they are named in it, so
+		// this load and every later one agree with the files it was given.
+		if !paths.Default {
+			after, err := busclient.DefaultPaths(path)
+			if err != nil {
+				return err
+			}
+			if after.Default && (file.HostKey == "" || file.StateDir == "") {
+				if file.HostKey == "" {
+					file.HostKey = paths.HostKey
+				}
+				if file.StateDir == "" {
+					file.StateDir = paths.StateDir
+				}
+				if err := write(); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	config, err := busclient.LoadConfig(path)
 	if err != nil {
