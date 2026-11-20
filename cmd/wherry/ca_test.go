@@ -21,6 +21,7 @@ import (
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/twmb/franz-go/pkg/kadm"
 )
 
 // otherCA is a self-signed CA certificate, as PEM, that signed nothing any test broker presents.
@@ -337,5 +338,68 @@ func TestTenantHostRefreshCommand(t *testing.T) {
 	}
 	if err := runOperator([]string{"tenant", "host", "refresh", "tenant-a", "host-a", "--force"}, io.Discard, io.Discard); err == nil || err.Error() != "unknown option --force" {
 		t.Fatalf("refresh --force = %v; want it refused", err)
+	}
+}
+
+// receiver apply of an existing receiver checks that the kept bundle is that receiver's before it records or rewrites
+// anything, as a host refresh does: with receiver-b's principal in receiver-a's kept bundle and the operator's CA
+// changed, apply of receiver-a is refused naming both principals, the bundle is untouched and no record is appended.
+func TestReceiverApplyRefusesAnotherPrincipalsBundle(t *testing.T) {
+	service := operatorEnv(t)
+	ctx := context.Background()
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll("receivers", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, receiver := range []string{"receiver-a", "receiver-b"} {
+		localFixture(t, ".", receiver)
+		head := "pool: pool-a\nplugin_sha256: {nomad: " + fakeSHA256 + "}\n"
+		if err := os.WriteFile(filepath.Join("receivers", receiver+".yaml"), []byte(head+basePlugin+item("name: claude\nagent: claude\n", "      ")), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := runOperator([]string{"receiver", "apply", receiver}, io.Discard, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join("bundles", "receivers", "receiver-a.bundle")
+	editBundle(t, path, func(bundle *operator.Bundle) { bundle.Principal = operator.ReceiverPrincipal("receiver-b") })
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := func() int64 {
+		t.Helper()
+		offsets, err := kadm.NewClient(service.Operator).ListEndOffsets(ctx, operator.OperatorTopic)
+		if err != nil || offsets.Error() != nil {
+			t.Fatal(err, offsets.Error())
+		}
+		offset, _ := offsets.Lookup(operator.OperatorTopic, 0)
+		return offset.Offset
+	}
+	appended := records()
+	if err := os.WriteFile("ca.pem", []byte(string(service.CA)+otherCA(t)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = runOperator([]string{"receiver", "apply", "receiver-a"}, io.Discard, io.Discard)
+	if want := path + " is the bundle of wherry.rcv.receiver-b, not of wherry.rcv.receiver-a"; err == nil || err.Error() != want {
+		t.Fatalf("apply with another principal's bundle = %v; want %q", err, want)
+	}
+	if after, err := os.ReadFile(path); err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("a refused apply rewrote %s", path)
+	}
+	if records() != appended {
+		t.Fatalf("a refused apply appended a record")
+	}
+	// The bundle's own principal back, the apply rewrites it with the renewed CA.
+	editBundle(t, path, func(bundle *operator.Bundle) { bundle.Principal = operator.ReceiverPrincipal("receiver-a") })
+	var stdout bytes.Buffer
+	if err := runOperator([]string{"receiver", "apply", "receiver-a"}, &stdout, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if want := "refreshed " + path + "; hand it to the receiver's platform, whose install guide's bundle step installs it, then restart the receiver\n"; stdout.String() != want {
+		t.Fatalf("apply printed %q; want %q", stdout.String(), want)
 	}
 }

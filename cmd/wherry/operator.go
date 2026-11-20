@@ -177,6 +177,11 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			} else if err != nil {
 				return err
 			}
+			// A kept bundle of another principal would be rewritten as this receiver's and handed to it; refused before
+			// the record changes, as a host refresh refuses one.
+			if principal := operator.ReceiverPrincipal(pos[2]); kept.Principal != principal {
+				return fmt.Errorf("%s is the bundle of %s, not of %s", bundle, kept.Principal, principal)
+			}
 			if _, err := service.ReceiverUpdate(ctx, config, false); err != nil {
 				return err
 			}

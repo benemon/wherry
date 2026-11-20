@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"golang.org/x/term"
 )
 
 // typedPassword is the password the prompt tests type: spaces at either end are part of it.
@@ -342,6 +343,16 @@ func TestOperatorPasswordFromStandardInput(t *testing.T) {
 			}
 			defer tty.Close()
 			defer master.Close()
+			// The terminal echoes nothing of its own: it is raw, as a masked prompt leaves it, so what the master reads
+			// is what wherry wrote to the terminal, and the typed password must be none of it.
+			if _, err := term.MakeRaw(int(tty.Fd())); err != nil {
+				t.Fatal(err)
+			}
+			shown := make(chan string, 1)
+			go func() {
+				b, _ := io.ReadAll(master)
+				shown <- string(b)
+			}()
 			// A password typed at the terminal is there to be read; the master stays open, so the terminal stays one, and
 			// is closed later so that a read of it, which the refusal forbids, ends instead of hanging.
 			io.WriteString(master, "typed-secret-marker\n")
@@ -364,11 +375,13 @@ func TestOperatorPasswordFromStandardInput(t *testing.T) {
 			if !strings.Contains(err.Error(), "standard input is a terminal") {
 				t.Fatal("terminal accepted:", err)
 			}
-			if strings.Contains(err.Error(), "typed-secret-marker") || strings.Contains(out.String(), "typed-secret-marker") {
+			tty.Close()
+			terminal := <-shown
+			if strings.Contains(err.Error(), "typed-secret-marker") || strings.Contains(out.String(), "typed-secret-marker") || strings.Contains(terminal, "typed-secret-marker") {
 				t.Fatal("typed password read or echoed")
 			}
-			if out.Len() != 0 {
-				t.Fatal("refusal came after a prompt", out.String())
+			if out.Len() != 0 || terminal != "" {
+				t.Fatalf("refusal came after a prompt: %q on the prompts, %q on the terminal", out.String(), terminal)
 			}
 			noFile(t, dir)
 		})
@@ -458,6 +471,81 @@ func TestOperatorPasswordPromptNeverEchoes(t *testing.T) {
 			t.Fatal("validation message missing", out.String())
 		}
 	})
+}
+
+// On a real terminal the masked prompt shows nothing of what is typed: the terminal's output, which a person at it would
+// see, carries the prompt, its validation message and its masking, and the kernel echoes nothing, since the prompt
+// takes the terminal raw. The secret reaches the caller as typed, spaces included.
+func TestSecretPromptOnATerminalShowsNothingTyped(t *testing.T) {
+	master, tty, err := pty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer master.Close()
+	defer tty.Close()
+	if err := pty.Setsize(master, &pty.Winsize{Rows: 24, Cols: 80}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TERM", "xterm-256color")
+	shown := &syncBuffer{}
+	read := make(chan struct{})
+	go func() {
+		defer close(read)
+		io.Copy(shown, master)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	q := &questions{ctx, tty, &promptLatch{out: tty}}
+	type answer struct {
+		text string
+		err  error
+	}
+	answers := make(chan answer, 1)
+	go func() {
+		text, err := q.secret("Kafka super user's password", func(s string) error {
+			if s == "" {
+				return errors.New("a password is required")
+			}
+			return nil
+		})
+		answers <- answer{text, err}
+	}()
+	// Keys are typed once the prompt is on the terminal: an empty answer first, refused with the validator's message,
+	// then the password.
+	onTerminal := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for !strings.Contains(ansi.Strip(shown.String()), want) {
+			if time.Now().After(deadline) {
+				t.Fatalf("terminal shows %q; want %q", shown.String(), want)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	onTerminal("Kafka super user's password")
+	io.WriteString(master, "\r")
+	onTerminal("a password is required")
+	io.WriteString(master, typedPassword)
+	time.Sleep(100 * time.Millisecond)
+	io.WriteString(master, "\r")
+	var got answer
+	select {
+	case got = <-answers:
+	case <-ctx.Done():
+		t.Fatalf("prompt never returned; terminal shows %q", shown.String())
+	}
+	if got.err != nil || got.text != typedPassword {
+		t.Fatalf("secret = %q, %v; want the password as typed", got.text, got.err)
+	}
+	tty.Close()
+	<-read
+	terminal := ansi.Strip(shown.String())
+	if strings.Contains(terminal, "unique-secret-marker") {
+		t.Fatalf("the terminal showed the password:\n%s", terminal)
+	}
+	if !strings.Contains(terminal, "a password is required") {
+		t.Fatalf("the terminal did not show the validation message:\n%s", terminal)
+	}
 }
 
 func TestOperatorCAConnection(t *testing.T) {

@@ -207,9 +207,12 @@ bundle, as [Broker trust](security.md#broker-trust) describes.
 
 Go's TLS stack reads `SSL_CERT_FILE` as its
 [crypto/x509](https://pkg.go.dev/crypto/x509#SystemCertPool) package
-documents. On Linux, a broker connection without `ca_file`, in any wherry
-command, trusts the roots it names. macOS ignores it for that connection:
-use `ca_file` there. The host's S3 client adds the certificates in
+documents. On Linux, a broker connection that falls back to the system
+roots, with neither a `ca_file` nor a bundle `ca` for a host or receiver and
+no `ca_file` for the operator, trusts the roots it names; a `ca_file` or a
+bundle `ca` replaces the system roots, so `SSL_CERT_FILE` then has no
+effect on that connection. macOS ignores it for the broker connection: use
+`ca_file` there. The host's S3 client adds the certificates in
 `SSL_CERT_FILE` to the system roots for a pool's storage endpoint on every
 OS.
 
