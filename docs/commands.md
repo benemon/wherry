@@ -1023,24 +1023,25 @@ Sets the host up from its bundle, and configures it for every pool its tenant
 is entitled to:
 
 1. With `BUNDLE`, it reads the bundle and copies it to the configuration's
-   [default bundle path](configuration-host.md#a-configuration-away-from-the-default-path):
-   `bundle.yaml` in the
+   bundle. For the default configuration that is always `bundle.yaml` in the
    [configuration directory](configuration-host.md#client-configuration),
-   `$XDG_CONFIG_HOME/wherry/` or by default `~/.config/wherry/`, for the
-   default configuration, and `<path>.bundle.yaml` beside a configuration at
-   any other `<path>`. The copy is mode 0600. The configuration directory
-   is made mode 0700; elsewhere, a directory init creates is mode 0700 and
-   an existing one keeps its mode. It replaces the
-   file there atomically, and names it as `bundle` in the configuration, even
-   when the configuration named another bundle. Before writing anything it
-   refuses when `<path>.bundle.yaml`, `<path>.host.key` or `<path>.state`
-   exists and is not the file the configuration already names, such as
-   another configuration or another host's bundle or key, naming the path
-   and the setting (`bundle`, `host_key`, `state_dir`) that avoids it; a
-   rerun on an initialised configuration succeeds, and explicit paths and
-   the configuration directory's files are not checked. Without `BUNDLE`,
-   it uses the bundle the configuration names, and refuses when it names
-   none.
+   `$XDG_CONFIG_HOME/wherry/` or by default `~/.config/wherry/`, named as
+   `bundle` in the configuration even when it named another bundle. A
+   configuration at any other `<path>` keeps the `bundle` it names and gets
+   the copy there; one naming none gets it at the
+   [default bundle path](configuration-host.md#a-configuration-away-from-the-default-path),
+   `<path>.bundle.yaml`, named as its `bundle`. The copy is mode 0600. The
+   configuration directory is made mode 0700; elsewhere, a directory init
+   creates is mode 0700 and an existing one keeps its mode. It replaces the
+   file there atomically. Before writing anything it refuses when the
+   bundle's destination, `<path>.host.key` or `<path>.state` exists and is
+   not the file the configuration already names, such as another
+   configuration or another host's bundle or key, naming the path and the
+   setting (`bundle`, `host_key`, `state_dir`) that avoids it; a rerun on an
+   initialised configuration succeeds, and explicit `host_key` and
+   `state_dir` paths and the configuration directory's files are not
+   checked. Without `BUNDLE`, it uses the bundle the configuration names,
+   and refuses when it names none.
 2. On a terminal, when the configuration names no `ca_file` and the
    configuration directory holds no `ca.pem`, Broker offers up to eight
    eligible local CA files, System roots and Other file. Other file asks
@@ -1101,10 +1102,12 @@ run `stty sane`.
 
 The configuration path is `--config-file` or `WHERRY_CONFIG`, else
 `config.yaml` in the configuration directory. A configuration at any other
-path, compared absolute with symlinks resolved, keeps its bundle, host key
+path, made absolute with no symlink resolved, keeps its bundle, host key
 and state directory beside it, as `<path>.bundle.yaml`, `<path>.host.key`
-and `<path>.state/`, so two configurations never share a host key; explicit
-`bundle`, `host_key` and `state_dir` values are kept. Writes use mode 0600 even
+and `<path>.state/`, so two configurations never share a host key; the
+default configuration named relatively, or through a link to it once it
+exists, is still the default. Explicit `bundle`, `host_key` and
+`state_dir` values are kept. Writes use mode 0600 even
 for existing files, with references to sources, never values. A re-run
 keeps existing entries and asks only for missing settings. When standard
 input or standard error is not a terminal, or with `TERM=dumb`, init asks nothing and lists missing

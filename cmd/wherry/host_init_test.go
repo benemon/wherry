@@ -284,6 +284,50 @@ func TestHostInitDefaultPathKeepsItsFiles(t *testing.T) {
 	}
 }
 
+// A configuration away from the default path that names a bundle keeps it: init BUNDLE copies the bundle to that path,
+// creating its directory, writes no <path>.bundle.yaml and leaves the setting as written, ~ included; a rerun keeps the
+// key. The destination is checked as a derived one is: a directory there is refused before anything is written, naming
+// it and the bundle setting.
+func TestHostInitKeepsAnExplicitBundle(t *testing.T) {
+	h := newInitHost(t, nil)
+	noTerminal(t)
+	dir := t.TempDir()
+	own, bundle := filepath.Join(dir, "own.yaml"), filepath.Join(os.Getenv("HOME"), "bundles", "mine.bundle")
+	if err := writeYAML(own, busclient.Config{Bundle: "~/bundles/mine.bundle"}); err != nil {
+		t.Fatal(err)
+	}
+	keyID, _ := h.init(t, h.bundle, "--config-file", own)
+	h.registeredAt(t, "host-a", own+".host.key", strings.TrimSpace(keyID))
+	if contents, err := operator.ReadBundle(bundle); err != nil || contents.Principal != operator.TenantPrincipal("tenant-a", "host-a") {
+		t.Fatalf("%s holds %+v, %v; want host-a's bundle copied to the bundle the configuration names", bundle, contents, err)
+	}
+	absent(t, own+".bundle.yaml")
+	var config busclient.Config
+	if err := readYAML(own, &config); err != nil || config.Bundle != "~/bundles/mine.bundle" {
+		t.Fatalf("%s holds %+v, %v; want bundle kept as written", own, config, err)
+	}
+	if again, _ := h.init(t, h.bundle, "--config-file", own); again != keyID {
+		t.Fatalf("rerun registered %s; want the host's key %s kept", strings.TrimSpace(again), strings.TrimSpace(keyID))
+	}
+	other, taken := filepath.Join(dir, "other.yaml"), filepath.Join(dir, "taken")
+	if err := os.Mkdir(taken, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeYAML(other, busclient.Config{Bundle: taken}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, prompts bytes.Buffer
+	err := run([]string{"host", "init", h.bundle, "--config-file", other}, &stdout, &prompts)
+	if want := taken + " exists and is not the bundle of configuration " + other + "; set bundle in " + other + " to a path of its own"; err == nil || err.Error() != want {
+		t.Fatalf("init = %v; want %q", err, want)
+	}
+	absent(t, other+".host.key")
+	absent(t, other+".bundle.yaml")
+	if stdout.Len() > 0 {
+		t.Fatalf("init printed %q; want no key registered", stdout.String())
+	}
+}
+
 // Before writing anything, init refuses a derived destination that exists and is not this configuration's: another
 // configuration at <path>.bundle.yaml, another host's key at <path>.host.key, or a file at <path>.state. Each is left as
 // it is, as is the configuration, and no key is made. The error names the path and the setting that avoids it. A rerun on
@@ -314,7 +358,7 @@ func TestHostInitRefusesAnotherConfigurationsFiles(t *testing.T) {
 	if err := writeYAML(other, busclient.Config{Bundle: filepath.Join(filepath.Dir(a), "other.bundle")}); err != nil {
 		t.Fatal(err)
 	}
-	refused(other, other+" exists and is not the bundle of configuration "+a+"; set bundle in "+a+" to a path of its own and run wherry host init without BUNDLE")
+	refused(other, other+" exists and is not the bundle of configuration "+a+"; set bundle in "+a+" to a path of its own")
 	absent(t, a+".host.key")
 	if err := os.Remove(other); err != nil {
 		t.Fatal(err)

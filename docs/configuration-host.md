@@ -27,7 +27,7 @@ The host's paths are the same on every OS, macOS included:
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `bundle` | path | required; `host init BUNDLE` writes the [default bundle path](#a-configuration-away-from-the-default-path) | Read the host's bundle from this file. |
+| `bundle` | path | required; `host init BUNDLE` writes the [default bundle path](#a-configuration-away-from-the-default-path) when the configuration names none | Read the host's bundle from this file; `host init BUNDLE` copies the bundle here. |
 | `ca_file` | path | `ca.pem` in the configuration directory if present | Trust these PEM CA certificates for the broker connection. |
 | `host_key` | path | `host.key` in the configuration directory, or `<path>.host.key` beside a configuration [away from the default path](#a-configuration-away-from-the-default-path) | Read the host's private Ed25519 JWK. |
 | `state_dir` | path | the host state directory, or `<path>.state/` beside a configuration [away from the default path](#a-configuration-away-from-the-default-path) | Store local run records here. |
@@ -47,30 +47,36 @@ it, named from its whole path, nothing stripped:
 
 | File | Default configuration | Configuration at `<path>` |
 | --- | --- | --- |
-| the bundle, where `host init BUNDLE` copies it | `bundle.yaml` in the configuration directory | `<path>.bundle.yaml` |
+| the bundle, where `host init BUNDLE` copies it when the configuration names none | `bundle.yaml` in the configuration directory, always | `<path>.bundle.yaml` |
 | the host key file | `host.key` in the configuration directory | `<path>.host.key` |
 | the state directory | the state directory | `<path>.state/` |
 
 So `--config-file /work/a.yaml` and `--config-file /work/b.yaml` are two
 hosts with two keys, and never share one; `/work/a` and `/work/a.yaml` are
-distinct too. Paths are compared absolute with symlinks resolved, so the
-default configuration named relatively, or through a symlink, keeps the
-configuration directory's files. Explicit `bundle`, `host_key` and
-`state_dir` values are kept wherever the configuration is. `host init`
-makes the configuration directory mode 0700; elsewhere it creates a
-missing directory for these files with mode 0700 and leaves an existing
-one's mode alone.
+distinct too. The path is made absolute and no symlink is resolved: it is
+the default when it is the default path, so the default configuration
+named relatively keeps the configuration directory's files, or when both
+exist and are one file, so a symlink or hard link to an existing default
+configuration does too. A link to a file not yet written is a
+configuration of its own, with its files beside the link. Explicit
+`bundle`, `host_key` and `state_dir` values are kept wherever the
+configuration is: `host init BUNDLE` copies the bundle to the `bundle` a
+configuration away from the default path names, and to `<path>.bundle.yaml`
+only when it names none; the default configuration's copy is always
+`bundle.yaml` in the configuration directory. `host init` makes the
+configuration directory mode 0700; elsewhere it creates a missing directory
+for these files with mode 0700 and leaves an existing one's mode alone.
 
-Before it writes anything, `host init` refuses when one of these derived
-paths already exists and is not the file the configuration names: another
-configuration at `<path>.bundle.yaml`, another host's key at
-`<path>.host.key`, or a file where `<path>.state/` would go. The error
-names the path and the setting, `bundle`, `host_key` or `state_dir`, that
-avoids it; with `BUNDLE`, the copy always goes to `<path>.bundle.yaml`, so
-a configuration naming its own `bundle` runs `host init` without `BUNDLE`.
-A rerun on an initialised configuration, whose derived files it already
-names, succeeds. Explicit paths are not checked this way, and nor are the
-default configuration's files in the configuration directory.
+Before it writes anything, `host init` refuses when the bundle's
+destination or one of the derived paths already exists and is not the file
+the configuration names: another configuration at `<path>.bundle.yaml`,
+another host's key at `<path>.host.key`, a file where `<path>.state/` would
+go, or a directory where the named `bundle` would go. The error names the
+path and the setting, `bundle`, `host_key` or `state_dir`, that avoids it.
+A rerun on an initialised configuration, whose files it already names,
+succeeds. Explicit `host_key` and `state_dir` paths are not checked this
+way, and nor are the default configuration's files in the configuration
+directory.
 
 Git entries contain `url`, optional `credential` and `host_key`.
 An SSH remote requires `host_key`.

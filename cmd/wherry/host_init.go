@@ -59,12 +59,24 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 			return fmt.Errorf("%s: %w", path, err)
 		}
 	}
-	// A derived destination that exists is written to, or taken as this host's key or state, only when this configuration
-	// already names it: anything else there is another configuration, or another host's bundle or key, and is left as it
-	// is. Explicit paths are the user's choice and are not checked; the configuration directory is wherry's own, so the
-	// default configuration's files are not checked either.
+	// BUNDLE is copied to the bundle a configuration away from the default path names, which it keeps, else to the derived
+	// path; the default configuration's copy is always the configuration directory's bundle.yaml.
+	destination, explicit := paths.Bundle, !paths.Default && file.Bundle != ""
+	if explicit {
+		if destination, err = busclient.ExpandHome(file.Bundle); err != nil {
+			return err
+		}
+	}
+	// A destination that exists is written to, or taken as this host's key or state, only when this configuration already
+	// names it: anything else there is another configuration, or another host's bundle or key, and is left as it is.
+	// Explicit host_key and state_dir paths are the user's choice and are not checked; the configuration directory is
+	// wherry's own, so the default configuration's files are not checked either.
 	if !paths.Default {
-		if err := refuseForeignFiles(path, paths, file, !changed, bundle != ""); err != nil {
+		copying := ""
+		if bundle != "" {
+			copying = destination
+		}
+		if err := refuseForeignFiles(path, paths, file, !changed, copying); err != nil {
 			return err
 		}
 	}
@@ -82,15 +94,17 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 			if err := os.Chmod(dir, 0o700); err != nil {
 				return err
 			}
-		} else if err := makePrivateDir(filepath.Dir(paths.Bundle)); err != nil {
+		} else if err := makePrivateDir(filepath.Dir(destination)); err != nil {
 			return err
 		}
 		// Bundles hold a password: ReplaceBundle writes mode 0600 and renames over the old file.
-		if err := operator.ReplaceBundle(paths.Bundle, contents); err != nil {
+		if err := operator.ReplaceBundle(destination, contents); err != nil {
 			return err
 		}
-		changed = changed || file.Bundle != paths.Bundle
-		file.Bundle = paths.Bundle
+		if !explicit {
+			changed = changed || file.Bundle != paths.Bundle
+			file.Bundle = paths.Bundle
+		}
 	} else if file.Bundle == "" {
 		return fmt.Errorf("%s names no bundle; run wherry host init BUNDLE", path)
 	}
@@ -454,20 +468,18 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 	return nil
 }
 
-// refuseForeignFiles fails when a derived destination of the configuration at path, which exists when exists is set,
-// already exists and is not the artifact the configuration names: the bundle is a destination only when BUNDLE is given
-// (copyBundle), the host key and state directory only when the configuration leaves them to their defaults. An existing
-// configuration names its derived host key and state directory by default, and the bundle its bundle field names; a
-// configuration not yet written names nothing. The error names the destination and the setting that avoids it.
-func refuseForeignFiles(path string, paths busclient.Paths, file busclient.Config, exists, copyBundle bool) error {
+// refuseForeignFiles fails when a destination of the configuration at path exists and is not its own. A configuration on
+// disk (exists) owns the bundle it names and, by default, its derived host key and state directory; one not yet written
+// owns nothing. bundle is where BUNDLE is copied, empty without one.
+func refuseForeignFiles(path string, paths busclient.Paths, file busclient.Config, exists bool, bundle string) error {
 	type destination struct {
 		path, setting, what string
 		named               bool // the configuration names it already
 		dir                 bool // it is a directory
 	}
 	var destinations []destination
-	if copyBundle {
-		destinations = append(destinations, destination{paths.Bundle, "bundle", "bundle", exists && sameFile(file.Bundle, paths.Bundle), false})
+	if bundle != "" {
+		destinations = append(destinations, destination{bundle, "bundle", "bundle", exists && sameFile(file.Bundle, bundle), false})
 	}
 	if file.HostKey == "" {
 		destinations = append(destinations, destination{paths.HostKey, "host_key", "host key", exists, false})
@@ -486,12 +498,7 @@ func refuseForeignFiles(path string, paths busclient.Paths, file busclient.Confi
 		if d.named && info.IsDir() == d.dir {
 			continue
 		}
-		advice := ""
-		if copyBundle && d.setting == "bundle" {
-			// With BUNDLE the copy always goes to the derived path; the bundle a configuration names is read as it is.
-			advice = " and run wherry host init without BUNDLE"
-		}
-		return fmt.Errorf("%s exists and is not the %s of configuration %s; set %s in %s to a path of its own%s", d.path, d.what, path, d.setting, path, advice)
+		return fmt.Errorf("%s exists and is not the %s of configuration %s; set %s in %s to a path of its own", d.path, d.what, path, d.setting, path)
 	}
 	return nil
 }

@@ -7,8 +7,9 @@ import (
 )
 
 // A configuration away from the default path takes its own bundle, host key and state directory, named from its whole
-// path, so configurations with alike names share nothing; the default path keeps the configuration directory's files
-// however it is reached: relatively, through a symlink, or through a symlinked configuration directory.
+// path as given, so configurations with alike names share nothing; the default path keeps the configuration directory's
+// files however it is reached: relatively, or, once it exists, through a symlink, a hard link or a symlinked
+// configuration directory. No symlink is resolved: a link to a file not yet written is a configuration of its own.
 func TestDefaultPathsKeepConfigurationsApart(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
@@ -43,19 +44,58 @@ func TestDefaultPathsKeepConfigurationsApart(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(configDir)
-	for _, path := range []string{standard, "config.yaml", filepath.Join("..", "wherry", "config.yaml"), link, filepath.Join(linkedDir, "wherry", "config.yaml")} {
+	wantDefault := func(path string) {
+		t.Helper()
 		paths, err := DefaultPaths(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !paths.Default || paths.Config != standard || paths.Bundle != filepath.Join(configDir, "bundle.yaml") || paths.HostKey != filepath.Join(configDir, "host.key") || paths.StateDir != filepath.Join(dir, "state", "wherry") {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !paths.Default || paths.Config != absolute || paths.Bundle != filepath.Join(configDir, "bundle.yaml") || paths.HostKey != filepath.Join(configDir, "host.key") || paths.StateDir != filepath.Join(dir, "state", "wherry") {
 			t.Errorf("DefaultPaths(%s) = %+v; want the default files", path, paths)
 		}
 	}
-	// The symlink's target does not exist yet; the configuration it will name is still the default.
-	if paths, err := DefaultPaths(link); err != nil || !paths.Default {
-		t.Fatalf("DefaultPaths(dangling symlink to the default) = %+v, %v; want the default files", paths, err)
+	wantOwn := func(path string) {
+		t.Helper()
+		paths, err := DefaultPaths(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if paths.Default || paths.Config != path || paths.Bundle != path+".bundle.yaml" || paths.HostKey != path+".host.key" || paths.StateDir != path+".state" {
+			t.Errorf("DefaultPaths(%s) = %+v; want its own files beside it, named from the path as given", path, paths)
+		}
 	}
+	for _, path := range []string{standard, "config.yaml", filepath.Join("..", "wherry", "config.yaml")} {
+		wantDefault(path)
+	}
+	// Before the default is written nothing can be the same file as it, and no symlink is followed: a link to where it
+	// will be is a configuration of its own, with its files beside the link.
+	wantOwn(link)
+	wantOwn(filepath.Join(linkedDir, "wherry", "config.yaml"))
+	if err := os.WriteFile(standard, []byte("bundle: bundle.yaml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hard := filepath.Join(dir, "hard.yaml")
+	if err := os.Link(standard, hard); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{standard, "config.yaml", filepath.Join("..", "wherry", "config.yaml"), link, hard, filepath.Join(linkedDir, "wherry", "config.yaml")} {
+		wantDefault(path)
+	}
+	// A symlink away from the default derives its files from its own path, whether or not its target exists.
+	alias, target := filepath.Join(dir, "alias.yaml"), filepath.Join(dir, "target.yaml")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatal(err)
+	}
+	wantOwn(alias)
+	if err := os.WriteFile(target, []byte("bundle: bundle.yaml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantOwn(alias)
+	wantOwn(target)
 	t.Setenv("XDG_CONFIG_HOME", linkedDir)
 	if paths, err := DefaultPaths(standard); err != nil || !paths.Default {
 		t.Fatalf("DefaultPaths(%s) under a symlinked XDG_CONFIG_HOME = %+v, %v; want the default files", standard, paths, err)
