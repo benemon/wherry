@@ -228,27 +228,34 @@ an error.
 
 ### Passing variables to an MCP server
 
-An MCP server a harness starts sees the harness's environment, so a
-variable exported in the shell that starts the harness reaches
-`wherry host mcp` and its submits. Each harness can also set variables on
-the server entry itself, which is the route when the harness is started
-from a launcher without them; whichever the harness uses, the submitting
-process is the server. Where neither fits, an explicit `credentials` entry
-with a `file` or `command` source is the fallback, and wins over the
-variable.
+The process that submits is the MCP server, so a catalog variable has to
+be set in the server's environment, and a harness decides what that
+environment holds. A variable exported in the shell that starts the
+harness reaches `wherry host mcp` only where the harness passes its own
+environment through: Gemini CLI strips variables that look like secrets,
+model keys among them, from what its servers inherit, and Codex forwards
+only the parent variables the server's entry names. Each harness's server
+entry can forward or set variables itself, which is also the route when
+the harness is started from a launcher without them. Where neither fits,
+an explicit `credentials` entry with a `file` or `command` source is the
+fallback, and wins over the variable.
 
-| Harness | Where its MCP server entries take variables |
+| Harness | How a variable reaches its MCP server, per its documentation |
 | --- | --- |
 | Claude Code | the `env` map of the server's entry in `.mcp.json`, or `--env VAR=value` to `claude mcp add` |
-| Codex | the `env` table of the server's `[mcp_servers.<name>]` entry in `~/.codex/config.toml` |
-| Gemini CLI | the `env` map of the server's `mcpServers` entry in `settings.json`, where a `$VAR` value expands from the CLI's environment |
+| Codex | `env_vars` of the server's `[mcp_servers.<name>]` table in `~/.codex/config.toml` names the parent variables to forward, for example `env_vars = ["CODEX_API_KEY"]`; its `env` table sets literal values |
+| Gemini CLI | the `env` map of the server's `mcpServers` entry in `settings.json`, with a `$VAR` value that expands from the CLI's environment, for example `"GEMINI_API_KEY": "$GEMINI_API_KEY"`; sensitive variables are removed from the inherited environment and need such an entry |
 | Cursor | the `env` map of the server's `mcpServers` entry in `.cursor/mcp.json` |
 | Copilot CLI | the `env` map of the server's entry in its MCP configuration, `~/.copilot/mcp-config.json` |
 
-A value written into such an entry is a copy of the credential in a file
-the harness reads; prefer exporting the variable in the harness's
-environment, or a `command` source that reads a keychain or Vault, and keep
-these files out of version control.
+Forward a variable by name where the harness allows it, as Codex's
+`env_vars` and Gemini CLI's `$VAR` do. A literal value written into such an
+entry is a copy of the credential in a file the harness reads; prefer a
+forwarded variable, or a `command` source that reads a keychain or Vault,
+and keep these files out of version control. After changing an entry, call
+the `receivers` tool from the harness: it reports each credential's
+`source` and `status` as the server sees them, where `wherry host
+receivers` in a shell reports that shell's environment.
 
 ## Bundle
 
