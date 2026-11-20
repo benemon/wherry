@@ -52,10 +52,10 @@ func TestBundleWritersCarryTheOperatorsCA(t *testing.T) {
 		}{
 			{"host add", func(path string) error { return service.HostAdd(ctx, "tenant-a", "host-b", path, false) }, service.Broker},
 			{"host add --force", func(path string) error { return service.HostAdd(ctx, "tenant-a", "host-a", path, true) }, service.Broker},
-			{"receiver add", func(path string) error {
+			{"receiver apply new", func(path string) error {
 				return service.ReceiverAdd(ctx, modelConfig("receiver-b", "pool-a"), service.Broker, path)
 			}, service.Broker},
-			{"receiver add elsewhere", func(path string) error {
+			{"receiver apply new elsewhere", func(path string) error {
 				config := modelConfig("receiver-c", "pool-a")
 				config.Broker = other
 				return service.ReceiverAdd(ctx, config, other, path)
