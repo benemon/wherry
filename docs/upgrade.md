@@ -77,14 +77,15 @@ host cannot resolve it.
 - `submit` prints `unsupplied=<name,...>`, and the MCP `submit` tool returns
   `unsupplied`, naming the optional credentials the host could not resolve,
   in place of the earlier report of the ones a task left out.
-- Pools must be re-applied with catalog agent names. `wherry operator pool
-  apply` derives a catalog agent's model credentials from its name, and
-  terms change only when the operator re-applies: rename each agent in
-  `pools/<pool>.yaml` to its
-  [credential catalog id](configuration-operator.md#catalog-agents), for
-  example `claude` to `claude-code` and `gemini` to `google`, remove the
-  model credentials written for it by hand, and apply the pool. Receivers
-  need no change; a host's `wherry host receivers` shows the derived names.
+- Existing pools keep working as they are. An agent whose name is no
+  [credential catalog id](configuration-operator.md#catalog-agents), such
+  as `claude` or `gemini`, stays supported with the credential list the
+  operator wrote, and `pool apply` records it as before. Renaming is needed
+  only to adopt catalog expansion, under which `wherry operator pool apply`
+  derives an agent's model credentials from its name, for example
+  `claude-code` for Claude Code and `google` for Gemini, and the operator
+  writes none. Follow [Rename an agent to its catalog id](#rename-an-agent-to-its-catalog-id)
+  below; editing the name in place is refused.
 - A non-catalog agent, one that keeps a name that is no catalog id and its
   explicit credential list, with an optional billing credential the host can
   resolve now receives it on every run. An optional `anthropic-api-key`
@@ -107,6 +108,66 @@ host cannot resolve it.
 - `wherry host init` asks no question for a credential whose target is a
   catalog variable and prints one line per entitled agent, ready or not
   ready, in place of the list of credentials without a source.
+
+### Rename an agent to its catalog id
+
+A receiver's profiles name their agent, and `pool apply` checks every live
+receiver of the pool against the new terms before it records them, so
+terms that only rename an agent are refused, in a dry run and in an apply,
+and the recorded terms stay as they were:
+
+```
+wherry: pool terms would strand live receivers: receiver nomad-1 plugin nomad profile container: receiver agent is outside pool terms
+```
+
+Rename in three stages. The example takes `claude`, with
+`claude-oauth-token` at `CLAUDE_CODE_OAUTH_TOKEN` written by hand, to
+`claude-code`:
+
+1. Add the catalog-named agent beside the old one in `pools/<pool>.yaml`,
+   with the old agent's `models` and any credential outside the catalog
+   but no model credential, keep the old agent as it is, and apply the
+   pool:
+
+   ```sh
+   wherry operator pool apply build
+   ```
+
+   The recorded terms now hold both agents, `claude-code` with the derived
+   `claude-code-oauth-token`, which a host's `wherry host receivers` shows
+   once a receiver offers the agent.
+
+2. Move each receiver to the new agent. In its configuration,
+   `receivers/<receiver>.yaml` or the receiver's directory, set
+   `agent: claude-code` on each profile that ran `claude`, change the
+   deployment settings that go with the agent, such as the image the
+   profile's `config` names, then check and apply it:
+
+   ```sh
+   wherry operator receiver apply nomad-1 -f nomad-1 --dry-run
+   wherry operator receiver apply nomad-1 -f nomad-1
+   ```
+
+   The receiver exits once its held runs end and its platform restarts it
+   on the new record, as [Change a receiver's configuration](operations-operator.md#change-a-receiver-s-configuration)
+   describes; move one receiver at a time. The moved profile's signature
+   topic is new, so tasks queued for `claude` stay on its topics: let them
+   finish, or cancel and resubmit them for `claude-code`, before step 3.
+   Hosts that name the agent, with `--agent` or the MCP `agent` field, now
+   name `claude-code`; a host whose configuration gives the old credential
+   name a source moves that entry to the derived name, or drops it when
+   `CLAUDE_CODE_OAUTH_TOKEN` is set where submits run.
+
+3. Remove the old agent from the terms, set `default_agent` to the new
+   name when it named the old one, and apply the pool again:
+
+   ```sh
+   wherry operator pool apply build --dry-run
+   wherry operator pool apply build
+   ```
+
+   The dry run refuses, naming the receiver and profile, while any live
+   receiver still runs the old agent.
 
 ## Optional credentials from v0.1.2
 

@@ -2,7 +2,9 @@ package operator
 
 import (
 	"context"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -131,6 +133,96 @@ func TestPoolApplyRecordsExpandedTerms(t *testing.T) {
 	terms.Agents[0].Credentials = []AgentCredential{{TaskCredential: wire.TaskCredential{Name: "claude-code-oauth-token", Env: "TOKEN"}}}
 	if err := service.PoolApply(ctx, "pool-a", terms, true); err == nil || !strings.Contains(err.Error(), "credential catalog derives") {
 		t.Errorf("repeated derived credential: %v", err)
+	}
+}
+
+// An operator adopting catalog expansion renames an agent in stages, since pool apply refuses terms under which a
+// live receiver's profile names no agent: the catalog-named agent is added beside the old one, each receiver's
+// profiles move to it through receiver apply, and the old agent goes in a further apply. The single-step rename is
+// refused, in a dry run and in an apply, and leaves the terms and the receiver as they were.
+func TestPoolApplyRenamesAnAgentToItsCatalogIdInStages(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	old := AgentTerms{Name: "claude", Credentials: []AgentCredential{{TaskCredential: wire.TaskCredential{Name: "claude-oauth-token", Env: "CLAUDE_CODE_OAUTH_TOKEN"}}}}
+	catalogNamed := AgentTerms{Name: "claude-code", Credentials: []AgentCredential{}}
+	terms := modelTerms()
+	terms.Agents = []AgentTerms{old}
+	terms.DefaultAgent = "claude"
+	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
+		t.Fatal(err)
+	}
+	config := ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []ProfileSettings{{Name: "container", Plugin: "fake", Agent: "claude", Config: map[string]any{"image": "claude-agent:1.0"}}},
+		PluginSHA256: map[string]string{"fake": strings.Repeat("ab", 32)}}
+	if err := service.ReceiverAdd(ctx, config, service.Broker, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	agents := func() (map[string][]AgentCredential, string, ReceiverConfig) {
+		t.Helper()
+		state, err := service.LoadState(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string][]AgentCredential{}
+		for _, agent := range state.Pools["pool-a"].Agents {
+			got[agent.Name] = agent.Credentials
+		}
+		return got, state.Pools["pool-a"].DefaultAgent, state.Receivers["receiver-a"]
+	}
+
+	// The rename in one step, as the terms would read after editing the name in place.
+	renamed := terms
+	renamed.Agents = []AgentTerms{catalogNamed}
+	renamed.DefaultAgent = "claude-code"
+	for _, dryRun := range []bool{true, false} {
+		err := service.PoolApply(ctx, "pool-a", renamed, dryRun)
+		if err == nil || err.Error() != "pool terms would strand live receivers: receiver receiver-a plugin fake profile container: receiver agent is outside pool terms" {
+			t.Fatalf("pool apply renaming claude to claude-code in one step, dry run %t = %v", dryRun, err)
+		}
+	}
+	if got, defaultAgent, recorded := agents(); !reflect.DeepEqual(got, map[string][]AgentCredential{"claude": old.Credentials}) || defaultAgent != "claude" || recorded.Profiles[0].Agent != "claude" {
+		t.Fatalf("after the refused rename: agents %+v default %s receiver %+v; want claude alone and the receiver on it", got, defaultAgent, recorded)
+	}
+
+	// Stage one: the catalog-named agent beside the old one, which keeps its explicit credential.
+	both := terms
+	both.Agents = []AgentTerms{old, catalogNamed}
+	if err := service.PoolApply(ctx, "pool-a", both, false); err != nil {
+		t.Fatalf("pool apply adding claude-code beside claude = %v", err)
+	}
+	if got, _, recorded := agents(); !reflect.DeepEqual(got, map[string][]AgentCredential{"claude": old.Credentials, "claude-code": claudeCodeCredentials}) || recorded.Profiles[0].Agent != "claude" {
+		t.Fatalf("after stage one: agents %+v receiver %+v; want both agents, claude-code expanded, and the receiver still on claude", got, recorded)
+	}
+
+	// Stage two: the receiver's profile moves to the new agent, its deployment settings with it.
+	moved := config
+	moved.Profiles = []ProfileSettings{{Name: "container", Plugin: "fake", Agent: "claude-code", Config: map[string]any{"image": "claude-code-agent:1.0"}}}
+	if _, err := service.ReceiverUpdate(ctx, moved, true); err != nil {
+		t.Fatalf("receiver apply --dry-run moving the profile to claude-code = %v", err)
+	}
+	recorded, err := service.ReceiverUpdate(ctx, moved, false)
+	if err != nil {
+		t.Fatalf("receiver apply moving the profile to claude-code = %v", err)
+	}
+	if recorded.Profiles[0].Agent != "claude-code" || recorded.Profiles[0].Config["image"] != "claude-code-agent:1.0" {
+		t.Fatalf("recorded profile %+v; want agent claude-code with its new settings", recorded.Profiles[0])
+	}
+	topics, err := service.taskTopics(ctx, "pool-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(topics, SignatureTopic("pool-a", "claude-code", nil)) {
+		t.Fatalf("task topics %v; want the moved profile's signature topic", topics)
+	}
+
+	// Stage three: the old agent goes, and the default moves with it.
+	for _, dryRun := range []bool{true, false} {
+		if err := service.PoolApply(ctx, "pool-a", renamed, dryRun); err != nil {
+			t.Fatalf("pool apply removing claude, dry run %t = %v", dryRun, err)
+		}
+	}
+	if got, defaultAgent, recorded := agents(); !reflect.DeepEqual(got, map[string][]AgentCredential{"claude-code": claudeCodeCredentials}) || defaultAgent != "claude-code" || recorded.Profiles[0].Agent != "claude-code" {
+		t.Fatalf("after stage three: agents %+v default %s receiver %+v; want claude-code alone", got, defaultAgent, recorded)
 	}
 }
 
