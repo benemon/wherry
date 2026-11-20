@@ -16,7 +16,9 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -456,9 +458,30 @@ func stubProbe(t *testing.T, probe func(*operator.Service, string) func(context.
 	t.Cleanup(func() { revocationProbe = saved })
 }
 
-// remove prints each step as it ends and step 5 as it starts, with the time its wait ends; it deletes the principal's
-// bundle once the revocation is complete, keeps it after an incomplete one, and deletes it on a rerun that finds the
-// principal already ended.
+// lineWriter tells each complete line written to it, with the time the line arrived.
+type lineWriter struct {
+	mu   sync.Mutex
+	rest []byte
+	told func(line string, at time.Time)
+}
+
+func (w *lineWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.rest = append(w.rest, p...)
+	for {
+		i := bytes.IndexByte(w.rest, '\n')
+		if i < 0 {
+			return len(p), nil
+		}
+		w.told(string(w.rest[:i]), time.Now())
+		w.rest = w.rest[i+1:]
+	}
+}
+
+// remove prints each step as it ends and step 5 as it starts, while the command is still in its wait, with the time
+// that wait ends; it deletes the principal's bundle once the revocation is complete, keeps it after an incomplete one,
+// and deletes it on a rerun that finds the principal already ended.
 func TestRemoveDeletesTheBundleOnceRevocationCompletes(t *testing.T) {
 	service := operatorEnv(t)
 	ctx := context.Background()
@@ -502,26 +525,65 @@ func TestRemoveDeletesTheBundleOnceRevocationCompletes(t *testing.T) {
 		t.Fatalf("remove deleted %s after an incomplete revocation:\n%s", hostBundle, stdout.String())
 	}
 	stubProbe(t, deniedProbe)
-	stdout.Reset()
-	if err := runOperator([]string{"tenant", "host", "remove", "tenant-a", "host-a"}, &stdout, io.Discard); err != nil {
-		t.Fatalf("remove = %v\n%s", err, stdout.String())
+	// A wait well above the broker-derived minimum, watched as it runs: the started line must arrive while the command is
+	// still in step 5, naming the time that wait ends, and step 5 must end about that long after it.
+	const wait = 2 * time.Second
+	var mu sync.Mutex
+	var lines []string
+	var startedAt, completedAt time.Time
+	started, completed := make(chan struct{}), make(chan struct{})
+	printed := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return strings.Join(lines, "\n")
 	}
-	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
-	started := -1
-	for i, line := range lines {
-		if strings.HasPrefix(line, "step=5 started name=wait until=") {
-			until, err := time.Parse(time.RFC3339, strings.TrimPrefix(line, "step=5 started name=wait until="))
-			if err != nil || time.Since(until) > time.Minute {
-				t.Fatalf("progress line %q; want until as the RFC 3339 time the wait ends", line)
-			}
-			started = i
+	out := &lineWriter{told: func(line string, at time.Time) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, line)
+		switch {
+		case strings.HasPrefix(line, "step=5 started "):
+			startedAt = at
+			close(started)
+		case strings.HasPrefix(line, "step=5 complete="):
+			completedAt = at
+			close(completed)
 		}
+	}}
+	done := make(chan error, 1)
+	go func() {
+		done <- runOperator([]string{"tenant", "host", "remove", "tenant-a", "host-a", "--wait", wait.String()}, out, io.Discard)
+	}()
+	select {
+	case <-started:
+	case err := <-done:
+		t.Fatalf("remove = %v, printing\n%s\nwant step 5 announced as it starts", err, printed())
 	}
-	if started < 0 || !strings.HasPrefix(lines[started-1], "step=4 complete=true") || !strings.HasPrefix(lines[started+1], "step=5 complete=true") {
-		t.Fatalf("remove printed\n%s\nwant step 5 announced as it starts, between steps 4 and 5 ending", stdout.String())
+	select {
+	case <-completed:
+		t.Fatalf("step 5 ended within %s of its announcement:\n%s\nwant the announcement while the wait runs", wait/2, printed())
+	case <-time.After(wait / 2):
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("remove = %v\n%s", err, printed())
+	}
+	index := slices.IndexFunc(lines, func(line string) bool { return strings.HasPrefix(line, "step=5 started name=wait until=") })
+	if index < 1 || index+1 >= len(lines) || !strings.HasPrefix(lines[index-1], "step=4 complete=true") || !strings.HasPrefix(lines[index+1], "step=5 complete=true") {
+		t.Fatalf("remove printed\n%s\nwant step 5 announced as it starts, between steps 4 and 5 ending", printed())
+	}
+	until, err := time.Parse(time.RFC3339, strings.TrimPrefix(lines[index], "step=5 started name=wait until="))
+	if err != nil {
+		t.Fatalf("progress line %q; want until as the RFC 3339 time the wait ends", lines[index])
+	}
+	// until is written to the second, so it is up to a second before the announcement plus the wait, never after.
+	if ahead := until.Sub(startedAt.Add(wait)); ahead <= -2*time.Second || ahead > 0 {
+		t.Fatalf("step 5 announced at %s until %s; want until the wait %s after the announcement", startedAt.Format(time.RFC3339Nano), until.Format(time.RFC3339), wait)
+	}
+	if actual := completedAt.Sub(startedAt); actual < wait-100*time.Millisecond {
+		t.Fatalf("step 5 ended %s after its announcement; want the announced wait %s", actual, wait)
 	}
 	if exists(hostBundle) {
-		t.Fatalf("remove kept %s after a complete revocation:\n%s", hostBundle, stdout.String())
+		t.Fatalf("remove kept %s after a complete revocation:\n%s", hostBundle, printed())
 	}
 	// A rerun finds the host already ended; it deletes a bundle an earlier run left, and a missing one is no error.
 	if err := runOperator([]string{"tenant", "host", "remove", "tenant-a", "host-a"}, io.Discard, io.Discard); err != nil {
