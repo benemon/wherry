@@ -320,8 +320,128 @@ profiles:
 	if got := wherry("receiver", "apply", "receiver-a", "-f", receiverFile("pool: pool-a\nplugin_sha256: {nomad: "+fakeSHA256+"}\n")); got != "" || records() != before+1 {
 		t.Fatalf("apply printed %q and left %d records; want nothing printed and one record more than %d", got, records(), before)
 	}
-	if got := wherry("receiver", "show", "receiver-a"); got != dryRun {
-		t.Fatalf("show printed\n%s\nwant what the dry run printed\n%s", got, dryRun)
+	if got := wherry("receiver", "show", "receiver-a"); got != "status: silent\n"+dryRun {
+		t.Fatalf("show printed\n%s\nwant what the dry run printed, after the status\n%s", got, dryRun)
+	}
+}
+
+// revocationBounds sets the broker timeouts that bound revocation's step 5 on the fake broker, which otherwise reports
+// none.
+func revocationBounds(t *testing.T, service *operator.Service, value string) {
+	t.Helper()
+	var alters []kadm.AlterConfig
+	for _, name := range []string{"connections.max.reauth.ms", "group.share.max.record.lock.duration.ms", "transaction.max.timeout.ms"} {
+		alters = append(alters, kadm.AlterConfig{Op: kadm.SetConfig, Name: name, Value: &value})
+	}
+	responses, err := kadm.NewClient(service.Operator).AlterBrokerConfigs(context.Background(), alters)
+	if err == nil {
+		err = responses[0].Err
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// deniedProbe stands for every broker denying the revoked principal, which the fake broker's authorisation answers do
+// not reproduce.
+func deniedProbe(*operator.Service, string) func(context.Context, string, string) error {
+	return func(context.Context, string, string) error { return operator.ErrAuthorizationDenied }
+}
+
+// stubProbe replaces the remove commands' probe for the test.
+func stubProbe(t *testing.T, probe func(*operator.Service, string) func(context.Context, string, string) error) {
+	t.Helper()
+	saved := revocationProbe
+	revocationProbe = probe
+	t.Cleanup(func() { revocationProbe = saved })
+}
+
+// remove prints each step as it ends and step 5 as it starts, with the time its wait ends; it deletes the principal's
+// bundle once the revocation is complete, keeps it after an incomplete one, and deletes it on a rerun that finds the
+// principal already ended.
+func TestRemoveDeletesTheBundleOnceRevocationCompletes(t *testing.T) {
+	service := operatorEnv(t)
+	ctx := context.Background()
+	if err := service.TenantAdd(ctx, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runOperator([]string{"tenant", "host", "add", "tenant-a", "host-a"}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	hostBundle := filepath.Join("bundles", "hosts", "tenant-a", "host-a.bundle")
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
+		t.Fatal(err)
+	}
+	receiverBundle, err := bundlePath(".", "receivers", true, "receiver-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{{Name: "claude", Plugin: "nomad", Agent: "claude"}}, PluginSHA256: map[string]string{"nomad": fakeSHA256}}
+	if err := service.ReceiverAdd(ctx, config, service.Broker, receiverBundle); err != nil {
+		t.Fatal(err)
+	}
+	// After the pool, whose lock duration the share-group ceiling bounds.
+	revocationBounds(t, service, "1")
+	exists := func(path string) bool {
+		t.Helper()
+		_, err := os.Stat(path)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		return err == nil
+	}
+	stubProbe(t, func(*operator.Service, string) func(context.Context, string, string) error {
+		return func(context.Context, string, string) error { return errors.New("injected probe failure") }
+	})
+	var stdout bytes.Buffer
+	if err := runOperator([]string{"tenant", "host", "remove", "tenant-a", "host-a"}, &stdout, io.Discard); err == nil || err.Error() != "revocation incomplete" {
+		t.Fatalf("remove with a failing probe = %v; want revocation incomplete", err)
+	}
+	if !exists(hostBundle) {
+		t.Fatalf("remove deleted %s after an incomplete revocation:\n%s", hostBundle, stdout.String())
+	}
+	stubProbe(t, deniedProbe)
+	stdout.Reset()
+	if err := runOperator([]string{"tenant", "host", "remove", "tenant-a", "host-a"}, &stdout, io.Discard); err != nil {
+		t.Fatalf("remove = %v\n%s", err, stdout.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	started := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "step=5 started name=wait until=") {
+			until, err := time.Parse(time.RFC3339, strings.TrimPrefix(line, "step=5 started name=wait until="))
+			if err != nil || time.Since(until) > time.Minute {
+				t.Fatalf("progress line %q; want until as the RFC 3339 time the wait ends", line)
+			}
+			started = i
+		}
+	}
+	if started < 0 || !strings.HasPrefix(lines[started-1], "step=4 complete=true") || !strings.HasPrefix(lines[started+1], "step=5 complete=true") {
+		t.Fatalf("remove printed\n%s\nwant step 5 announced as it starts, between steps 4 and 5 ending", stdout.String())
+	}
+	if exists(hostBundle) {
+		t.Fatalf("remove kept %s after a complete revocation:\n%s", hostBundle, stdout.String())
+	}
+	// A rerun finds the host already ended; it deletes a bundle an earlier run left, and a missing one is no error.
+	if err := runOperator([]string{"tenant", "host", "remove", "tenant-a", "host-a"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("rerun without a bundle = %v", err)
+	}
+	if err := os.WriteFile(hostBundle, []byte("left over"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	if err := runOperator([]string{"tenant", "host", "remove", "tenant-a", "host-a"}, &stdout, io.Discard); err != nil || !strings.HasPrefix(stdout.String(), "step=6 complete=true name=already ended") {
+		t.Fatalf("rerun = %v with output %q; want the already-ended step", err, stdout.String())
+	}
+	if exists(hostBundle) {
+		t.Fatalf("rerun kept %s after finding the host ended", hostBundle)
+	}
+	if err := runOperator([]string{"receiver", "remove", "receiver-a"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("receiver remove = %v", err)
+	}
+	if exists(receiverBundle) {
+		t.Fatalf("receiver remove kept %s after a complete revocation", receiverBundle)
 	}
 }
 

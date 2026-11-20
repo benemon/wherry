@@ -309,22 +309,38 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		if pos[0] == "tenant" {
 			topic = operator.HostTopic(pos[3], pos[4])
 		}
-		probe := service.Probe(topic)
-		var result operator.RevocationResult
-		if pos[0] == "tenant" {
-			result = service.RevokeHost(ctx, pos[3], pos[4], wait, probe)
-		} else {
-			result = service.RevokeReceiver(ctx, pos[2], wait, probe)
-		}
-		for _, step := range result.Steps {
+		probe := revocationProbe(service, topic)
+		// Each step is printed as it ends, and step 5 as it starts, so the wait shows as a wait and not a hang.
+		progress := func(step operator.RevocationStep) {
+			if !step.Until.IsZero() {
+				fmt.Fprintf(stdout, "step=%d started name=%s until=%s\n", step.Number, step.Name, step.Until.UTC().Format(time.RFC3339))
+				return
+			}
 			fmt.Fprintf(stdout, "step=%d complete=%t name=%s", step.Number, step.Complete, step.Name)
 			if step.Err != nil {
 				fmt.Fprintf(stdout, " error=%v", step.Err)
 			}
 			fmt.Fprintln(stdout)
 		}
+		var result operator.RevocationResult
+		var bundle string
+		if pos[0] == "tenant" {
+			result = service.RevokeHost(ctx, pos[3], pos[4], wait, probe, progress)
+			bundle, err = bundlePath(dir, "hosts", false, pos[3], pos[4])
+		} else {
+			result = service.RevokeReceiver(ctx, pos[2], wait, probe, progress)
+			bundle, err = bundlePath(dir, "receivers", false, pos[2])
+		}
 		if !result.Complete {
 			return errors.New("revocation incomplete")
+		}
+		if err != nil {
+			return err
+		}
+		// The bundle's principal can never log in again, so the file is only a password to keep safe; a rerun after an
+		// already-ended result deletes a bundle an earlier failure left.
+		if err := os.Remove(bundle); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("revocation complete; delete %s: %w", bundle, err)
 		}
 		return nil
 	case "check":
@@ -335,6 +351,12 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 	default:
 		return errors.New("unknown operator command")
 	}
+}
+
+// revocationProbe is the probe a remove runs: the service's, which asks every broker as the principal. A variable so
+// tests on a fake broker, whose authorisation answers differ from Kafka's, can decide the probe's outcome.
+var revocationProbe = func(service *operator.Service, topic string) func(context.Context, string, string) error {
+	return service.Probe(topic)
 }
 
 // writeRotateReport writes report's suspect keys, retention horizon and suspect tasks, naming each task and never a value.

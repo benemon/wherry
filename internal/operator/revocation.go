@@ -29,36 +29,53 @@ type RevocationStep struct {
 	Name     string
 	Complete bool
 	Err      error
+	// Until is set only on the step 5 a RevocationProgress is told as it starts: the time its wait ends.
+	Until time.Time
 }
 type RevocationResult struct {
 	Steps    []RevocationStep
 	Complete bool
 }
 
-func (service *Service) RevokeReceiver(ctx context.Context, receiver string, wait time.Duration, probe func(context.Context, string, string) error) RevocationResult {
-	return service.revoke(ctx, Record{Kind: "end", Receiver: receiver}, ReceiverPrincipal(receiver), wait, probe)
+// RevocationProgress is told each revocation step as it ends, and step 5 as it starts, with Until set and Complete
+// false, since its wait is usually the longest. The ones it is told as they end are the result's steps.
+type RevocationProgress func(RevocationStep)
+
+// RevokeReceiver runs the revocation steps for receiver; progress may be nil.
+func (service *Service) RevokeReceiver(ctx context.Context, receiver string, wait time.Duration, probe func(context.Context, string, string) error, progress RevocationProgress) RevocationResult {
+	return service.revoke(ctx, Record{Kind: "end", Receiver: receiver}, ReceiverPrincipal(receiver), wait, probe, progress)
 }
 
-func (service *Service) RevokeHost(ctx context.Context, tenant, host string, wait time.Duration, probe func(context.Context, string, string) error) RevocationResult {
+// RevokeHost runs the revocation steps for tenant's host; progress may be nil.
+func (service *Service) RevokeHost(ctx context.Context, tenant, host string, wait time.Duration, probe func(context.Context, string, string) error, progress RevocationProgress) RevocationResult {
+	// The steps decided here, before any runs, are reported as the run ones are.
+	reported := func(result RevocationResult) RevocationResult {
+		if progress != nil {
+			for _, step := range result.Steps {
+				progress(step)
+			}
+		}
+		return result
+	}
 	state, err := service.LoadState(ctx)
 	if err == nil {
 		err = state.LiveTenant(tenant)
 	}
 	if err != nil {
-		return RevocationResult{Steps: []RevocationStep{{Number: 1, Err: err}}}
+		return reported(RevocationResult{Steps: []RevocationStep{{Number: 1, Err: err}}})
 	}
 	if state.Ended[TenantPrincipal(tenant, host)] {
 		err = service.converge(ctx)
-		return RevocationResult{Complete: err == nil, Steps: []RevocationStep{{Number: 6, Name: "already ended", Complete: err == nil, Err: err}}}
+		return reported(RevocationResult{Complete: err == nil, Steps: []RevocationStep{{Number: 6, Name: "already ended", Complete: err == nil, Err: err}}})
 	}
 	if _, exists := state.Hosts[TenantPrincipal(tenant, host)]; !exists {
-		return RevocationResult{Steps: []RevocationStep{{Number: 1, Err: errors.New("unknown host")}}}
+		return reported(RevocationResult{Steps: []RevocationStep{{Number: 1, Err: errors.New("unknown host")}}})
 	}
-	return service.revoke(ctx, Record{Kind: "end", Tenant: tenant, Host: host}, TenantPrincipal(tenant, host), wait, probe)
+	return service.revoke(ctx, Record{Kind: "end", Tenant: tenant, Host: host}, TenantPrincipal(tenant, host), wait, probe, progress)
 }
 
-func (service *Service) revoke(ctx context.Context, end Record, principal string, wait time.Duration, probe func(context.Context, string, string) error) RevocationResult {
-	r := &revocation{service: service, end: end, principal: principal, wait: wait, probe: probe}
+func (service *Service) revoke(ctx context.Context, end Record, principal string, wait time.Duration, probe func(context.Context, string, string) error, progress RevocationProgress) RevocationResult {
+	r := &revocation{service: service, end: end, principal: principal, wait: wait, probe: probe, progress: progress}
 	return r.steps(ctx, 1, 6)
 }
 
@@ -68,6 +85,7 @@ type revocation struct {
 	principal string
 	wait      time.Duration
 	probe     func(context.Context, string, string) error
+	progress  RevocationProgress
 	password  string
 	recorded  bool
 	result    RevocationResult
@@ -85,7 +103,11 @@ func (r *revocation) steps(ctx context.Context, first, last int) RevocationResul
 		if err != nil && r.recorded && number < 6 {
 			err = errors.Join(err, service.converge(ctx))
 		}
-		r.result.Steps = append(r.result.Steps, RevocationStep{number, name, err == nil, err})
+		step := RevocationStep{Number: number, Name: name, Complete: err == nil, Err: err}
+		r.result.Steps = append(r.result.Steps, step)
+		if r.progress != nil {
+			r.progress(step)
+		}
 		return err == nil
 	}
 	if !run(1, "record revoking, rotate SCRAM password", func() error {
@@ -162,6 +184,9 @@ func (r *revocation) steps(ctx context.Context, first, last int) RevocationResul
 		return r.result
 	}
 	if !run(5, "wait revocation intervals", func() error {
+		if r.progress != nil {
+			r.progress(RevocationStep{Number: 5, Name: "wait", Until: time.Now().Add(r.wait)})
+		}
 		timer := time.NewTimer(r.wait)
 		defer timer.Stop()
 		select {

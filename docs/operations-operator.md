@@ -620,11 +620,15 @@ restored.
    wherry operator receiver remove nomad-1
    ```
 
-   When it ends, the command prints one line per
-   [revocation step](concepts.md#revocation) it ran,
+   The command prints one line per
+   [revocation step](concepts.md#revocation) as the step ends,
    `step=<n> complete=<bool> name=<name>`. The wait in step 5 is usually the
-   longest; `--wait DURATION` lengthens it, must be positive, and is
-   refused below the broker-derived minimum.
+   longest, so before it the command prints
+   `step=5 started name=wait until=<time>`, the UTC time the wait ends;
+   `--wait DURATION` lengthens it, must be positive, and is
+   refused below the broker-derived minimum. Once the six steps are
+   complete, the command deletes the principal's bundle from `bundles/`:
+   its password can never log in again.
 
 2. If it fails with `revocation incomplete`, the line of the failed step
    ends in ` error=<cause>`. Check what that step depends on (the broker
@@ -634,7 +638,8 @@ restored.
    stale command can restore wherry-managed grants, which the next pass
    deletes again. A run that failed before step 2 may have left the
    principal's grants, and the run again deletes them. Step 3 already retries for up to 2 minutes while a
-   broker still authorises the principal.
+   broker still authorises the principal. The bundle stays until a run
+   completes; a run that finds the principal already ended deletes it.
 
 3. For a receiver, rotate at its source each credential of the runs it
    opened and, when it held its pool's key as key custodian, of every run

@@ -667,7 +667,8 @@ wherry operator tenant host remove TENANT HOST [--wait DURATION]
 
 Runs the [revocation](concepts.md#revocation) steps for the host, as
 [`receiver remove`](#wherry-operator-receiver-remove-receiver) does for a
-receiver.
+receiver, and once they are complete deletes the host's bundle,
+`bundles/hosts/TENANT/HOST.bundle`.
 
 ### `wherry operator receiver remove RECEIVER`
 
@@ -675,15 +676,27 @@ receiver.
 wherry operator receiver remove RECEIVER [--wait DURATION]
 ```
 
-Runs the [revocation](concepts.md#revocation) steps. When it ends, it
-prints one line per step it ran:
+Runs the [revocation](concepts.md#revocation) steps. It prints one line per
+step as the step ends:
 
 ```
 step=<n> complete=<bool> name=<step name>
 ```
 
 The line of a failed step ends in ` error=<cause>`. It stops at the first
-incomplete step and fails with `revocation incomplete`. The probe asks every
+incomplete step and fails with `revocation incomplete`. Before step 5 waits,
+it prints when the wait ends, in UTC:
+
+```
+step=5 started name=wait until=<RFC 3339 time>
+```
+
+Once the revocation is complete, it deletes the receiver's bundle,
+`bundles/receivers/RECEIVER.bundle`: its principal can never log in again.
+An incomplete revocation keeps the bundle, and a rerun deletes it once it
+finds the principal ended; a bundle already gone is no error. When the
+deletion itself fails, the command fails naming the file, with the
+revocation complete. The probe asks every
 broker for the metadata of the principal's own key topic, and step 3
 completes when every broker answers `TOPIC_AUTHORIZATION_FAILED`. While a
 broker still authorises the principal, step 3 probes again every second for
