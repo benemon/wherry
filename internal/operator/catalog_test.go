@@ -144,8 +144,11 @@ func TestPoolApplyRenamesAnAgentToItsCatalogIdInStages(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	old := AgentTerms{Name: "claude", Credentials: []AgentCredential{{TaskCredential: wire.TaskCredential{Name: "claude-oauth-token", Env: "CLAUDE_CODE_OAUTH_TOKEN"}}}}
-	catalogNamed := AgentTerms{Name: "claude-code", Credentials: []AgentCredential{}}
+	// Two models with a default: an agent with several models and none makes every task name one, so the new agent has
+	// to carry the old one's default with its list.
+	old := AgentTerms{Name: "claude", Models: []string{"sonnet", "haiku"}, DefaultModel: "sonnet", Credentials: []AgentCredential{{TaskCredential: wire.TaskCredential{Name: "claude-oauth-token", Env: "CLAUDE_CODE_OAUTH_TOKEN"}}}}
+	catalogNamed := AgentTerms{Name: "claude-code", Models: old.Models, DefaultModel: old.DefaultModel, Credentials: []AgentCredential{}}
+	expanded := AgentTerms{Name: "claude-code", Models: old.Models, DefaultModel: old.DefaultModel, Credentials: claudeCodeCredentials}
 	terms := modelTerms()
 	terms.Agents = []AgentTerms{old}
 	terms.DefaultAgent = "claude"
@@ -157,15 +160,15 @@ func TestPoolApplyRenamesAnAgentToItsCatalogIdInStages(t *testing.T) {
 	if err := service.ReceiverAdd(ctx, config, service.Broker, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	agents := func() (map[string][]AgentCredential, string, ReceiverConfig) {
+	agents := func() (map[string]AgentTerms, string, ReceiverConfig) {
 		t.Helper()
 		state, err := service.LoadState(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		got := map[string][]AgentCredential{}
+		got := map[string]AgentTerms{}
 		for _, agent := range state.Pools["pool-a"].Agents {
-			got[agent.Name] = agent.Credentials
+			got[agent.Name] = agent
 		}
 		return got, state.Pools["pool-a"].DefaultAgent, state.Receivers["receiver-a"]
 	}
@@ -180,7 +183,7 @@ func TestPoolApplyRenamesAnAgentToItsCatalogIdInStages(t *testing.T) {
 			t.Fatalf("pool apply renaming claude to claude-code in one step, dry run %t = %v", dryRun, err)
 		}
 	}
-	if got, defaultAgent, recorded := agents(); !reflect.DeepEqual(got, map[string][]AgentCredential{"claude": old.Credentials}) || defaultAgent != "claude" || recorded.Profiles[0].Agent != "claude" {
+	if got, defaultAgent, recorded := agents(); !reflect.DeepEqual(got, map[string]AgentTerms{"claude": old}) || defaultAgent != "claude" || recorded.Profiles[0].Agent != "claude" {
 		t.Fatalf("after the refused rename: agents %+v default %s receiver %+v; want claude alone and the receiver on it", got, defaultAgent, recorded)
 	}
 
@@ -190,8 +193,8 @@ func TestPoolApplyRenamesAnAgentToItsCatalogIdInStages(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", both, false); err != nil {
 		t.Fatalf("pool apply adding claude-code beside claude = %v", err)
 	}
-	if got, _, recorded := agents(); !reflect.DeepEqual(got, map[string][]AgentCredential{"claude": old.Credentials, "claude-code": claudeCodeCredentials}) || recorded.Profiles[0].Agent != "claude" {
-		t.Fatalf("after stage one: agents %+v receiver %+v; want both agents, claude-code expanded, and the receiver still on claude", got, recorded)
+	if got, _, recorded := agents(); !reflect.DeepEqual(got, map[string]AgentTerms{"claude": old, "claude-code": expanded}) || recorded.Profiles[0].Agent != "claude" {
+		t.Fatalf("after stage one: agents %+v receiver %+v; want both agents, claude-code expanded with the models and default, and the receiver still on claude", got, recorded)
 	}
 
 	// Stage two: the receiver's profile moves to the new agent, its deployment settings with it.
@@ -221,8 +224,8 @@ func TestPoolApplyRenamesAnAgentToItsCatalogIdInStages(t *testing.T) {
 			t.Fatalf("pool apply removing claude, dry run %t = %v", dryRun, err)
 		}
 	}
-	if got, defaultAgent, recorded := agents(); !reflect.DeepEqual(got, map[string][]AgentCredential{"claude-code": claudeCodeCredentials}) || defaultAgent != "claude-code" || recorded.Profiles[0].Agent != "claude-code" {
-		t.Fatalf("after stage three: agents %+v default %s receiver %+v; want claude-code alone", got, defaultAgent, recorded)
+	if got, defaultAgent, recorded := agents(); !reflect.DeepEqual(got, map[string]AgentTerms{"claude-code": expanded}) || defaultAgent != "claude-code" || recorded.Profiles[0].Agent != "claude-code" {
+		t.Fatalf("after stage three: agents %+v default %s receiver %+v; want claude-code alone, with the models and default", got, defaultAgent, recorded)
 	}
 }
 

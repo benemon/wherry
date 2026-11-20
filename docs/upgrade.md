@@ -125,15 +125,18 @@ Rename in three stages. The example takes `claude`, with
 `claude-code`:
 
 1. Add the catalog-named agent beside the old one in `pools/<pool>.yaml`,
-   with the old agent's `models` and any credential outside the catalog
-   but no model credential, keep the old agent as it is, and apply the
-   pool:
+   with the old agent's `models` and `default_model` and any credential
+   outside the catalog but no model credential, keep the old agent as it
+   is, and apply the pool:
 
    ```sh
    wherry operator pool apply build
    ```
 
-   The recorded terms now hold both agents, `claude-code` with the derived
+   Copy `default_model` with `models`: an agent with several models and no
+   `default_model` makes every task name one, so a task that named none
+   for the old agent would be refused for the new. The recorded terms now
+   hold both agents, `claude-code` with the derived
    `claude-code-oauth-token`, which a host's `wherry host receivers` shows
    once a receiver offers the agent.
 
@@ -151,8 +154,15 @@ Rename in three stages. The example takes `claude`, with
    The receiver exits once its held runs end and its platform restarts it
    on the new record, as [Change a receiver's configuration](operations-operator.md#change-a-receiver-s-configuration)
    describes; move one receiver at a time. The moved profile's signature
-   topic is new, so tasks queued for `claude` stay on its topics: let them
-   finish, or cancel and resubmit them for `claude-code`, before step 3.
+   topic is new, so tasks queued for `claude` stay on its topics, and the
+   restart drains only the runs the receiver holds. Empty each
+   queue before step 3, in one of two ways. To let the queued tasks finish
+   on `claude`, point new submissions at `claude-code` first, keep one
+   profile on `claude` for each signature with tasks still queued until
+   its queue drains, and move that last profile only then. Otherwise
+   cancel the queued tasks and submit them again for `claude-code`; a
+   receiver applies a cancel when it claims the task, so a cancel of a
+   task on a signature no profile serves stays pending.
    Hosts that name the agent, with `--agent` or the MCP `agent` field, now
    name `claude-code`; a host whose configuration gives the old credential
    name a source moves that entry to the derived name, or drops it when
