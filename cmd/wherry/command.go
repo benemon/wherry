@@ -18,6 +18,7 @@ import (
 	"time"
 
 	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 )
 
@@ -29,7 +30,7 @@ operator:
   wherry operator pool apply|suspend|resume|rotate-key
   wherry operator tenant add|list|remove
   wherry operator tenant pool add|remove
-  wherry operator tenant host add|remove
+  wherry operator tenant host add|refresh|remove
   wherry operator receiver apply|show|remove
   wherry operator check
 receiver:
@@ -62,7 +63,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 	case "operator":
 		return runOperator(args[1:], stdout, stderr)
 	case "host":
-		return runHost(args[1:], stdout, stderr)
+		// A connection the broker's certificate fails for want of a trusted CA is explained: the bundle may predate the
+		// operator's CA file, and the operator's refresh rewrites it.
+		return operator.ExplainUnknownAuthority(runHost(args[1:], stdout, stderr), "wherry operator tenant host refresh TENANT HOST")
 	case "dev":
 		return runDev(args[1:], stdout, stderr)
 	case "version":

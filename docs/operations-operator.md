@@ -11,10 +11,10 @@ principals and group configurations; the cluster itself is prepared once.
   receiver. Every principal wherry issues uses SCRAM-SHA-512, so a listener
   that enables only SCRAM-SHA-256 cannot serve wherry; the super user
   `wherry operator init` uses may log in with SCRAM-SHA-256
-  (`--super-user-mechanism`). Its address goes into every bundle; its CA does not. Each host
-  and receiver trusts the broker through the system's roots, or a `ca_file`
-  in its own configuration when the CA is private, kept current by whoever
-  distributes the Kafka CA.
+  (`--super-user-mechanism`). Its address goes into every bundle, and so
+  does its CA when `operator.yaml` names a `ca_file`. Each host and receiver
+  trusts the broker through a `ca_file` in its own configuration, else the
+  `ca` its bundle carries, else the system's roots.
 - **An authoriser** denies anything no ACL allows, and `super.users` names
   the Kafka super user, which `wherry operator init` uses once. See
   [Authorization and ACLs](https://kafka.apache.org/documentation/#security_authz).
@@ -50,10 +50,11 @@ The pattern matches `wherry.operator`, every host principal
 `wherry.tnt.<tenant>.<host>` and every receiver principal
 `wherry.rcv.<receiver>`.
 
-Strimzi issues and renews the cluster CA. The operator, hosts and receivers
-name its certificate as their `ca_file`. When Strimzi replaces the CA
-certificate, put the new one in every `ca_file` that names it:
-`operator.yaml`'s, each host's and each receiver's.
+Strimzi issues and renews the cluster CA. `operator.yaml` names its
+certificate as `ca_file`, and every bundle carries it. When Strimzi replaces
+the CA certificate, put the new one in `operator.yaml`'s `ca_file`, then
+refresh and redistribute every bundle, as
+[Broker trust](security.md#broker-trust) describes.
 [Certificate renewal](https://strimzi.io/docs/operators/latest/deploying.html#con-certificate-renewal-str)
 gives Strimzi's timing.
 
@@ -375,13 +376,9 @@ Prerequisites: the working directory
    ```
 
 3. Hand the bundle, `bundles/hosts/acme/laptop.bundle`, to the host's user over
-   a channel you trust. It holds the host's Kafka password. When the
-   broker's certificate chains to a private CA, the host also needs that
-   CA's certificate, as `ca.pem` in its
-   [configuration directory](configuration-host.md#client-configuration), by
-   default `~/.config/wherry/ca.pem`, or at a path `wherry host init` asks
-   for. `host init` asks only on a terminal, so without one put the
-   certificate in place first; the bundle does not carry it.
+   a channel you trust. It holds the host's Kafka password and, when
+   `operator.yaml` names a `ca_file`, the broker's CA, so the host needs
+   nothing else to reach the broker.
 
 The host's user then runs `wherry host init <bundle>`, which places the
 bundle, registers the host key and writes the
@@ -517,9 +514,10 @@ host that meets [Run a receiver](operations-receivers.md#run-a-receiver).
 
 4. Deliver the bundle, `bundles/receivers/nomad-1.bundle`, to the receiver
    host over a channel you trust, such as the platform's secret mechanism.
-   It holds the receiver's Kafka password and no CA: when the broker's
-   certificate chains to a private CA, the receiver host also needs that
-   CA's certificate, named as `ca_file` in its local configuration.
+   It holds the receiver's Kafka password and, when the receiver uses the
+   operator's broker and `operator.yaml` names a `ca_file`, the broker's CA.
+   A receiver on another broker address gets no CA: it trusts that broker
+   through the system roots, or a `ca_file` in its local configuration.
 
 5. Install wherry and the receiver's plugins, as in
    [Install plugins](operations-receivers.md#install-plugins), and write the receiver's [local
@@ -530,7 +528,8 @@ host that meets [Run a receiver](operations-receivers.md#run-a-receiver).
 
    ```yaml
    bundle: /etc/wherry/receiver.bundle
-   # A private CA the broker's certificate chains to; without ca_file, the system roots.
+   # A private CA the broker's certificate chains to, overriding the ca the bundle carries; without ca_file, the bundle's
+   # ca, else the system roots.
    ca_file: /etc/wherry/kafka-ca.pem
    state_dir: /var/lib/wherry/state
    plugin_dir: /usr/local/libexec/wherry/plugins

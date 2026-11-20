@@ -31,6 +31,36 @@ Restart a pool's receivers one at a time.
 A stopping key custodian needs a live successor to re-key its tasks.
 Follow [Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian).
 
+## The broker CA in the bundle
+
+Bundles carry the broker's CA as `ca` when `operator.yaml` names a
+`ca_file`, and hosts and receivers trust the broker through their own
+`ca_file`, else the bundle's `ca`, else the system roots. A host no longer
+reads `ca.pem` from its configuration directory, and neither `host init` nor
+`receiver apply` asks for a CA.
+
+An older binary refuses a bundle that carries `ca`, since unknown fields are
+errors; the new binary with an older bundle and no `ca_file` cannot reach a
+broker under a private CA. Each host and receiver therefore takes the new
+binary and its refreshed bundle in one step:
+
+1. Upgrade the operator's binary.
+2. Run `wherry operator tenant host refresh TENANT HOST` for each host and
+   `wherry operator receiver apply RECEIVER` for each receiver, which
+   rewrite each kept bundle with the CA and the same password, and hand
+   each refreshed bundle over as the first was.
+3. On each host, replace the binary and run `wherry host init BUNDLE` with
+   the refreshed bundle, then remove the `ca_file` line from the
+   configuration and `ca.pem` from the configuration directory. Restart the
+   harness sessions that run `wherry host mcp`.
+4. On each receiver, replace the binary and the bundle together and restart
+   the receiver; remove `ca_file` from its local configuration.
+
+Until a host or receiver takes both, it keeps the old binary with the old
+bundle and its CA file, which still work.
+[Broker trust](security.md#broker-trust) gives the renewal procedure for
+later CA changes.
+
 ## Optional credentials from v0.1.2
 
 From v0.1.2 a host delivers an optional agent credential, one the pool's
@@ -185,7 +215,7 @@ Each receiver page gives its platform's upgrade and uninstall steps.
    [`tenant host remove`](commands.md#wherry-operator-tenant-host-remove-tenant-host) runs the host's revocation steps.
 
 2. After it succeeds, delete `~/.config/wherry/` on the laptop.
-   It holds `config.yaml`, `bundle.yaml`, `host.key` and `ca.pem`.
+   It holds `config.yaml`, `bundle.yaml` and `host.key`.
 3. Delete `~/claude-oauth-token` on the laptop when nothing else uses it.
 4. On the operator machine, delete `bundles/hosts/<tenant>/<host>.bundle`.
    Host removal does not delete it.

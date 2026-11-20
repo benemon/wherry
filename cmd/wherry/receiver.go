@@ -41,7 +41,7 @@ const (
 )
 
 // receiverLocalConfig is the receiver's local configuration file. CAFile holds the PEM certificates the receiver trusts
-// the broker with; without it, the system roots. Credentials maps the name a profile's config gives
+// the broker with; without it, the bundle's ca, else the system roots. Credentials maps the name a profile's config gives
 // its platform credential to the source of its value. DrainTimeout bounds how long held runs may finish after a stop
 // signal; it stays below the platform's stop window, which the receiver cannot read.
 type receiverLocalConfig struct {
@@ -141,15 +141,17 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	}
 	plugins := &plugins{dir: config.PluginDir, credentials: config.Credentials, logger: logger, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
+	// A bundle written before the operator trusted the broker through a CA file carries no ca; receiver apply rewrites it.
+	refresh := "wherry operator receiver apply " + strings.TrimPrefix(bundle.Principal, operator.ReceiverPrincipal(""))
 	r, err := receiver.New(bundle, ca, config.StateDir, *rotateKey, config.DrainTimeout, plugins.profile, logger, registry)
 	if err != nil {
-		return err
+		return operator.ExplainUnknownAuthority(err, refresh)
 	}
 	plugins.logs, plugins.hold = r.PluginLogs(stdout), r.HoldPlatformCredential
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := r.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		return err
+		return operator.ExplainUnknownAuthority(err, refresh)
 	}
 	return nil
 }

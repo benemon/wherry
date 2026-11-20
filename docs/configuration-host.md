@@ -22,13 +22,13 @@ The host's paths are the same on every OS, macOS included:
 
 | Directory | Path | Holds |
 | --- | --- | --- |
-| configuration directory | `$XDG_CONFIG_HOME/wherry/`, by default `~/.config/wherry/` | `config.yaml`, `bundle.yaml`, `host.key` and, for a private CA, `ca.pem` |
+| configuration directory | `$XDG_CONFIG_HOME/wherry/`, by default `~/.config/wherry/` | `config.yaml`, `bundle.yaml` and `host.key` |
 | state directory | `$XDG_STATE_HOME/wherry/`, by default `~/.local/state/wherry/` | the host's state, `state_dir` |
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `bundle` | path | required; `host init BUNDLE` writes the [default bundle path](#a-configuration-away-from-the-default-path) when the configuration names none | Read the host's bundle from this file; `host init BUNDLE` copies the bundle here. |
-| `ca_file` | path | `ca.pem` in the configuration directory if present | Trust these PEM CA certificates for the broker connection. |
+| `ca_file` | path | none | Trust these PEM CA certificates for the broker connection, in place of the `ca` the bundle carries. |
 | `host_key` | path | `host.key` in the configuration directory, or `<path>.host.key` beside a configuration [away from the default path](#a-configuration-away-from-the-default-path) | Read the host's private Ed25519 JWK. |
 | `state_dir` | path | the host state directory, or `<path>.state/` beside a configuration [away from the default path](#a-configuration-away-from-the-default-path) | Store local run records here. |
 | `credentials` | mapping | none | Map credential names to [sources](security.md#credential-sources). |
@@ -36,7 +36,7 @@ The host's paths are the same on every OS, macOS included:
 | `storage` | mapping | none | Map pool names to S3 `access_key` and `secret_key` credential names. |
 | `input_roots` | list of paths | MCP server working directory | Allow the MCP server to send inputs from these directories. |
 
-Without a CA file, the host trusts system roots.
+Without a `ca_file`, the host trusts the broker through the bundle's `ca`, and without that through the system roots.
 Each credential source uses exactly one of `file`, `env` and `command`.
 
 ### A configuration away from the default path
@@ -93,15 +93,16 @@ A pool without a storage entry has no S3 lane on this host.
 MCP input roots must be absolute paths to existing directories.
 CLI commands can read any input path you give them.
 
-`host init` writes `bundle`, a `ca_file` it asked for, `host_key` and
+`host init` writes `bundle`, `host_key` and
 `state_dir` when a configuration written through a link to the default
 path needs them, and an entry in `credentials`, `git` and `storage` for
 each answer, each a reference to a source and never a value; a re-run
 keeps every entry and adds only what a newly entitled pool needs. Without
-a terminal it asks nothing and lists what still has no source. It asks for
-the CA only on a terminal, so without one a broker under a private CA
-needs `ca.pem` in the configuration directory, or `ca_file` in the file,
-before `host init` runs.
+a terminal it asks nothing and lists what still has no source. It asks
+nothing about the broker's CA: the bundle carries it. A `ca_file` the
+configuration keeps overrides the bundle's `ca`, so a stale one hides a
+refreshed CA; `host init BUNDLE` warns when the configuration keeps one and
+the bundle carries a `ca`.
 
 `state_dir` holds:
 
@@ -125,8 +126,8 @@ The configuration of host `laptop`, setting every field:
 
 ```yaml
 bundle: ~/.config/wherry/laptop.bundle
-# A private CA the broker's certificate chains to; without ca_file, ~/.config/wherry/ca.pem if it exists, else the
-# system roots.
+# A private CA the broker's certificate chains to, overriding the ca the bundle carries; without ca_file, the bundle's
+# ca, else the system roots.
 ca_file: ~/.config/wherry/kafka-ca.pem
 host_key: ~/.config/wherry/laptop.key
 state_dir: ~/.local/state/wherry/laptop
@@ -170,22 +171,27 @@ each submit.
 ## Bundle
 
 A YAML file that `wherry operator` writes with mode 0600 under the working
-directory's `bundles/`. Unknown fields are errors, so a bundle carrying a
-`ca` is refused, and `broker`, `principal` and `password` are required; a
-decode error names only its line numbers. A trailing line break ends the
-password and is not part of it, and a password of nothing else is refused.
+directory's `bundles/`. Unknown fields are errors, and `broker`, `principal`
+and `password` are required; a decode error names only its line numbers. A
+trailing line break ends the password and is not part of it, and a password
+of nothing else is refused.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `broker` | string | required | Kafka bootstrap address, `host:port` |
 | `principal` | string | required | SCRAM-SHA-512 user name |
 | `password` | string | required | SCRAM password |
+| `ca` | string | none | PEM CA certificates the host trusts the broker with, written when `operator.yaml` names a `ca_file` |
 
-A bundle carries nothing about the broker's TLS CA. The Kafka platform owns
-and renews its CA; each host and receiver trusts the broker through the
-system's roots or the `ca_file` of its own configuration, kept current by
-whoever distributes the Kafka CA. A `ca_file` with no certificate fails with
-`CA contains no certificates`.
+The Kafka platform owns and renews its CA. The operator trusts it through
+`operator.yaml`'s `ca_file`, and every bundle it writes for its broker
+carries that file's certificates as `ca`, so the host needs no CA file of
+its own; a bundle with no `ca` leaves the host on the system roots. A `ca`
+that holds no certificate is refused, and the host does not fall back to
+the system roots. A `ca_file` in the configuration overrides the bundle's
+`ca`; one with no certificate fails with `CA contains no certificates`. When
+the platform renews its CA, the operator refreshes and redistributes each
+bundle, as [Broker trust](security.md#broker-trust) describes.
 
 ## Environment variables
 

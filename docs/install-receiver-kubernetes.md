@@ -22,8 +22,8 @@ Choose a Kubernetes plugin release that pairs with your wherry release.
   `build` is that boundary here.
 - The record's `broker:` line names a Kafka inside the cluster.
   Set it to the address you gave `wherry operator init`, or remove the line to use that address.
-- This guide's broker uses a private CA, `kafka-ca.pem` from Set up the operator.
-  Take the steps' lines for a private broker CA.
+- This guide's broker uses a private CA. The bundle carries it, so skip the steps' lines for a separate CA file;
+  a `ca_file` in the local configuration would override the bundle's CA.
 - The last step runs `wherry host receivers` from your laptop.
   You run it first on [Set up a host](install-host.md#_3-see-the-receiver).
 - The steps copy the example `config.yaml` to `receivers/kubernetes-1.config.yaml`.

@@ -18,8 +18,8 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 )
 
-// initHost is host-a of tenant-a on a TLS kfake cluster, added but not initialised, its bundle where the operator
-// wrote it. HOME is a temporary directory without XDG variables, and its ~/.config/wherry/ca.pem trusts the cluster.
+// initHost is host-a of tenant-a on a TLS kfake cluster, added but not initialised, its bundle, which carries the
+// cluster's CA, where the operator wrote it. HOME is a temporary directory without XDG variables.
 type initHost struct {
 	ctx     context.Context
 	service *operator.Service
@@ -52,10 +52,8 @@ func newInitHost(t *testing.T, pools map[string]operator.Terms) initHost {
 	if err := service.HostAdd(ctx, "tenant-a", "host-a", h.bundle, false); err != nil {
 		t.Fatal(err)
 	}
+	// The configuration directory exists, as on a host that has run wherry before; host init hardens it.
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "ca.pem"), []byte(ca), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return h
