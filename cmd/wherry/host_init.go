@@ -501,6 +501,10 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 	return nil
 }
 
+// exampleCommand is the command source a not-ready line shows: a placeholder for whatever helper, keychain or vault
+// client prints the credential, naming no vendor.
+const exampleCommand = "your-secret-tool, get, NAME"
+
 // agentLines is one line per entitled agent, pool by pool: ready, naming where each credential comes from, or not ready,
 // naming the variables to set where submits run, the catalog entry's page, and the one-line form of an explicit source
 // in the configuration at path. Discovery runs no command: a command source counts, unchecked.
@@ -534,11 +538,13 @@ func agentLines(path string, file busclient.Config, pools map[string]operator.Te
 				if c.Description != "" {
 					target = c.Description + ", " + target
 				}
+				// The configured source comes first: an explicit env source wins over the credential's catalog variable, so
+				// setting the catalog variable cannot help while the source's own variable is unset.
 				switch {
+				case c.Source == busclient.SourceEnv && c.Status == busclient.StatusUnset:
+					needs = append(needs, fmt.Sprintf("credential %s (%s): its env source %s is unset", c.Name, target, c.Variable))
 				case c.CatalogVariable:
 					variables = append(variables, c.Env)
-				case c.Status == busclient.StatusUnset:
-					needs = append(needs, fmt.Sprintf("credential %s (%s): its env source %s is unset", c.Name, target, c.Variable))
 				default:
 					needs = append(needs, fmt.Sprintf("credential %s (%s) has no source", c.Name, target))
 				}
@@ -554,7 +560,7 @@ func agentLines(path string, file busclient.Config, pools map[string]operator.Te
 				}
 				needs = append([]string{set}, needs...)
 			}
-			lines = append(lines, prefix+"not ready; "+strings.Join(needs, "; ")+fmt.Sprintf("; or add to %s: credentials: {%s: {command: [op, read, \"op://vault/item/field\"]}}", path, example))
+			lines = append(lines, prefix+"not ready; "+strings.Join(needs, "; ")+fmt.Sprintf("; or add to %s: credentials: {%s: {command: [%s]}}", path, example, exampleCommand))
 		}
 	}
 	return lines, nil

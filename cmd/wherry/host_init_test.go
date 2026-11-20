@@ -15,6 +15,7 @@ import (
 	"time"
 
 	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
@@ -164,7 +165,7 @@ func TestHostInitWithoutATerminal(t *testing.T) {
 		}
 	}
 	// MODEL_API_KEY is set, but no catalog entry reads it, so the agent is not ready until the configuration names a source.
-	for _, want := range []string{"pool pool-a agent claude: not ready; credential model (MODEL_API_KEY) has no source; or add to " + h.config + ": credentials: {model: {command: [op, read, \"op://vault/item/field\"]}}\n", "git host git.example.test", "storage of pool pool-a"} {
+	for _, want := range []string{"pool pool-a agent claude: not ready; credential model (MODEL_API_KEY) has no source; or add to " + h.config + ": credentials: {model: {command: [your-secret-tool, get, NAME]}}\n", "git host git.example.test", "storage of pool pool-a"} {
 		if !strings.Contains(prompts, want) {
 			t.Errorf("init without a terminal printed\n%s\nwant %q listed", prompts, want)
 		}
@@ -591,9 +592,12 @@ func TestHostInitReportsACatalogAgentsVariables(t *testing.T) {
 	noTerminal(t)
 	_, prompts := h.init(t, h.bundle)
 	want := "pool pool-a agent google: not ready; set one of GOOGLE_API_KEY, GOOGLE_GENERATIVE_AI_API_KEY, GEMINI_API_KEY where submits run (https://ai.google.dev/gemini-api/docs/models); or add to " +
-		h.config + ": credentials: {google-api-key: {command: [op, read, \"op://vault/item/field\"]}}\n"
+		h.config + ": credentials: {google-api-key: {command: [your-secret-tool, get, NAME]}}\n"
 	if !strings.Contains(prompts, want) {
 		t.Fatalf("init printed\n%s\nwant %q", prompts, want)
+	}
+	if strings.Contains(prompts, "op://") || strings.Contains(prompts, "op, read") {
+		t.Fatalf("init printed\n%s\nwant a vendor-neutral example command", prompts)
 	}
 	if strings.Contains(prompts, "has no source for") {
 		t.Fatalf("init printed\n%s\nwant no missing list for the catalog variables", prompts)
@@ -608,6 +612,31 @@ func TestHostInitReportsACatalogAgentsVariables(t *testing.T) {
 	}
 	if strings.Contains(prompts, "gemini-key-value") {
 		t.Fatal("init printed the variable's value")
+	}
+}
+
+// A not-ready line for a credential with an explicit env source whose variable is unset names that variable, not the
+// catalog variable its target names: the explicit source wins, so setting the catalog variable cannot help. Without
+// the explicit source the same credential's line names the catalog variable.
+func TestHostInitNamesTheExplicitSourcesVariableOverTheCatalogs(t *testing.T) {
+	t.Setenv("CODEX_API_KEY", "")
+	t.Setenv("WHERRY_TEST_CODEX_SOURCE", "")
+	codex := operator.AgentCredential{TaskCredential: wire.TaskCredential{Name: "codex-api-key", Env: "CODEX_API_KEY"}, Description: "OpenAI Codex"}
+	pools := map[string]operator.Terms{"pool-a": {Agents: []operator.AgentTerms{{Name: "codex", Credentials: []operator.AgentCredential{codex}}}}}
+	lines, err := agentLines("config.yaml", busclient.Config{Credentials: map[string]credential.Source{"codex-api-key": {Env: "WHERRY_TEST_CODEX_SOURCE"}}}, pools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "pool pool-a agent codex: not ready; credential codex-api-key (OpenAI Codex, CODEX_API_KEY): its env source WHERRY_TEST_CODEX_SOURCE is unset; or add to config.yaml: credentials: {codex-api-key: {command: [your-secret-tool, get, NAME]}}"
+	if len(lines) != 1 || lines[0] != want {
+		t.Fatalf("init lines %q; want %q", lines, want)
+	}
+	lines, err = agentLines("config.yaml", busclient.Config{}, pools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "set CODEX_API_KEY where submits run"; len(lines) != 1 || !strings.Contains(lines[0], want) || strings.Contains(lines[0], "WHERRY_TEST_CODEX_SOURCE") {
+		t.Fatalf("init lines %q; want %q and no explicit variable", lines, want)
 	}
 }
 
