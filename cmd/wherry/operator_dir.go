@@ -273,10 +273,9 @@ func storageKeysFromStandardInput() (operator.StorageKeys, error) {
 	return operator.StorageKeys{AccessKey: lines[0], SecretKey: lines[1]}, nil
 }
 
-// tenantStorage records tenant's S3 access key and secret key in dir's storage/<tenant>.yaml, mode 0600 and kept out
-// of git, from two masked prompts on a terminal or, with fromStdin, from standard input, which is refused when it is a
-// terminal. Both values are validated before anything is written; the write replaces the kept pair atomically, so a
-// failed write keeps it. The pair reaches no record, no error and no output.
+// tenantStorage records tenant's S3 key pair in dir's storage/<tenant>.yaml, mode 0600 and kept out of git, from masked
+// prompts or, with fromStdin, standard input, validating both values before the kept pair is replaced atomically;
+// neither value reaches a record, an error or the output.
 func tenantStorage(ctx context.Context, service *operator.Service, dir, tenant string, fromStdin bool, stdout, prompts io.Writer) (result error) {
 	defer func() {
 		if result != nil {
@@ -467,9 +466,8 @@ func bundlePath(dir, kind string, create bool, names ...string) (string, error) 
 	return filepath.Join(path, names[len(names)-1]+".bundle"), nil
 }
 
-// refreshBundle rewrites the kept bundle at path, read as kept, as current, the bundle its principal should hold now,
-// keeping the password, when the broker or the CA differs; each is compared on its own, so a CA renewal with the same
-// broker rewrites the bundle too. It reports whether it wrote.
+// refreshBundle rewrites the kept bundle at path as current, keeping kept's principal and password, when the kept bundle
+// differs from the current one, and reports whether it wrote.
 func refreshBundle(path string, kept, current operator.Bundle) (bool, error) {
 	current.Principal, current.Password = kept.Principal, kept.Password
 	if current == kept {

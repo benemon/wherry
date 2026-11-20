@@ -67,8 +67,6 @@ func run(args []string, stdout, stderr io.Writer) error {
 	case "operator":
 		return runOperator(args[1:], stdout, stderr)
 	case "host":
-		// A connection the broker's certificate fails for want of a trusted CA is explained: the bundle may predate the
-		// operator's CA file, and the operator's refresh rewrites it.
 		return operator.ExplainUnknownAuthority(runHost(args[1:], stdout, stderr), hostRefreshCommand)
 	case "dev":
 		return runDev(args[1:], stdout, stderr)

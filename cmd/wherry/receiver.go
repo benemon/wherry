@@ -141,7 +141,6 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	}
 	plugins := &plugins{dir: config.PluginDir, credentials: config.Credentials, logger: logger, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
-	// A bundle written before the operator trusted the broker through a CA file carries no ca; receiver apply rewrites it.
 	refresh := "wherry operator receiver apply " + strings.TrimPrefix(bundle.Principal, operator.ReceiverPrincipal(""))
 	r, err := receiver.New(bundle, ca, config.StateDir, *rotateKey, config.DrainTimeout, plugins.profile, logger, registry)
 	if err != nil {

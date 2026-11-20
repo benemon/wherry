@@ -76,8 +76,8 @@ type devCredential struct {
 	name, target, from string
 }
 
-// devCatalogAgents are the dev agents of the harnesses, in profile order, each named by its credential catalog id, and
-// devHarness the harness each runs: claude-code and anthropic run claude, google runs gemini.
+// devCatalogAgents are the dev agents in profile order, each a credential catalog id, and devHarness the harness each
+// runs.
 var (
 	devCatalogAgents = []string{"claude-code", "anthropic", "codex", "google"}
 	devHarness       = map[string]string{"claude-code": "claude", "anthropic": "claude", "codex": "codex", "google": "gemini"}
@@ -85,9 +85,8 @@ var (
 	mockCredential = devCredential{"mock-token", "MOCK_TOKEN", "WHERRY_DEV_MOCK_TOKEN"}
 )
 
-// devCredentials are the credentials up copies for agent, each from the variable at its own target: the ones the
-// credential catalog derives for a catalog agent, and mock's from WHERRY_DEV_MOCK_TOKEN. An agent outside both takes
-// none.
+// devCredentials are the credentials up copies for agent, each from the variable at its own target; mock's comes from
+// WHERRY_DEV_MOCK_TOKEN.
 func devCredentials(agent string) ([]devCredential, error) {
 	if agent == "mock" {
 		return []devCredential{mockCredential}, nil
@@ -379,9 +378,8 @@ func portFree(port int) error {
 	return listener.Close()
 }
 
-// devAgents are the agents of the manifest's harnesses, the --agent-image names and mock: claude-code, anthropic,
-// codex, google, mock, then the image agents outside that list, in flag order. A harness init found adds every agent
-// that runs it; an image named after one of them adds that agent alone.
+// devAgents are the catalog agents whose harness the manifest found or whose image a flag names, then mock, then the
+// image agents outside the catalog list, in flag order.
 func devAgents(manifest devManifest, images devAgentImages) []string {
 	var agents []string
 	for _, name := range append(slices.Clone(devCatalogAgents), "mock") {
@@ -863,9 +861,8 @@ func createBucket(ctx context.Context, keys [2]string) error {
 	return poll(ctx, time.Minute, func() error { return store.MakeBucket(ctx, devBucket, minio.MakeBucketOptions{}) })
 }
 
-// devDefaultAgent is pool dev's default agent for the manifest's default, a harness or mock: the agent that runs the
-// harness, and for claude, claude-code unless up copied ANTHROPIC_API_KEY and not CLAUDE_CODE_OAUTH_TOKEN, when it is
-// anthropic, so a submit naming no agent runs with the credential the environment holds.
+// devDefaultAgent is pool dev's default agent for the manifest's default harness or mock, chosen so a submit naming no
+// agent runs with the credential the environment holds.
 func devDefaultAgent(defaultHarness string, copied map[string]credential.Source) string {
 	switch defaultHarness {
 	case "claude":
@@ -882,9 +879,8 @@ func devDefaultAgent(defaultHarness string, copied map[string]credential.Source)
 	return defaultHarness
 }
 
-// devTerms are pool dev's terms: each agent with its credentials. A catalog agent lists none, since pool apply derives
-// them from the credential catalog as it does for any pool (operator.Expand); mock's explicit credential is required
-// where up copied a source for it. The default agent is devDefaultAgent's for the manifest's default.
+// devTerms are pool dev's terms, in which a catalog agent lists no credential, since pool apply derives them, and mock's
+// explicit credential is required where up copied a source for it.
 func devTerms(agents []string, defaultHarness string, storage bool, copied map[string]credential.Source) operator.Terms {
 	optional := false
 	terms := operator.Terms{DefaultAgent: devDefaultAgent(defaultHarness, copied), DeliveryLimit: 2, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 10}
@@ -1319,7 +1315,7 @@ func smoke(ctx context.Context, env devEnv, hostConfig busclient.Config) error {
 }
 
 // printReady names config in the commands it prints unless up wrote it at the standard path, where every host command
-// reads it by default. It lists pool dev's agents, marking the default, so a submit can name one.
+// reads it by default.
 func printReady(stdout io.Writer, env devEnv, config string) {
 	m := env.manifest
 	fmt.Fprintf(stdout, "ready: instance %s (nomad %s, kafka %s, plugin %s, wherry %s)\n",

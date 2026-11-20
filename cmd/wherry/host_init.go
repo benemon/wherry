@@ -59,18 +59,15 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 			return fmt.Errorf("%s: %w", path, err)
 		}
 	}
-	// BUNDLE is copied to the bundle a configuration away from the default path names, which it keeps, else to the derived
-	// path; the default configuration's copy is always the configuration directory's bundle.yaml.
+	// The default configuration's copy is the configuration directory's bundle.yaml, whatever bundle it names.
 	destination, explicit := paths.Bundle, !paths.Default && file.Bundle != ""
 	if explicit {
 		if destination, err = busclient.ExpandHome(file.Bundle); err != nil {
 			return err
 		}
 	}
-	// A destination that exists is written to, or taken as this host's key or state, only when this configuration already
-	// names it: anything else there is another configuration, or another host's bundle or key, and is left as it is.
-	// Explicit host_key and state_dir paths are the user's choice and are not checked; the configuration directory is
-	// wherry's own, so the default configuration's files are not checked either.
+	// Explicit host_key and state_dir paths are the user's choice, and the configuration directory is wherry's own, so
+	// neither is checked for another host's files.
 	if !paths.Default {
 		copying := ""
 		if bundle != "" {
@@ -131,9 +128,8 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 		if err := write(); err != nil {
 			return err
 		}
-		// Writing the configuration can make it the default file: a link to the default path whose target did not exist
-		// until now. The host key and state directory chosen above stay this configuration's; they are named in it, so
-		// this load and every later one agree with the files it was given.
+		// Writing through a link to the default path can make this file the default one; naming the host key and state
+		// directory chosen above keeps every later load on them.
 		if !paths.Default {
 			after, err := busclient.DefaultPaths(path)
 			if err != nil {
@@ -160,9 +156,8 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 	if err != nil {
 		return err
 	}
-	// A bundle carrying the tenant's storage keys serves every entitled pool with storage, so no storage question is
-	// asked and none is listed as missing; a pool the configuration maps to credentials of its own keeps them. Init read
-	// the bundle to connect, so it is there to read again.
+	// Bundled storage keys serve every entitled pool with storage, so those pools get no storage question; a pool the
+	// configuration maps to credentials of its own keeps them.
 	installed, err := operator.ReadBundle(config.Bundle)
 	if err != nil {
 		return err
@@ -200,8 +195,8 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 	}
 	slices.Sort(hosts)
 	hosts = slices.Compact(hosts)
-	// A credential whose every use targets a variable in the host's catalog is read from that variable where submits run,
-	// so no question is asked for it and no line written; one with any other target needs a source as before.
+	// A credential whose every use targets a catalog variable gets no question and no line; any other target needs a
+	// source.
 	catalogOnly := map[string]bool{}
 	for _, pool := range slices.Sorted(maps.Keys(pools)) {
 		agents, err := busclient.Discover(busclient.Config{Credentials: file.Credentials}, pools[pool])
@@ -505,9 +500,8 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 // client prints the credential, naming no vendor.
 const exampleCommand = "your-secret-tool, get, NAME"
 
-// agentLines is one line per entitled agent, pool by pool: ready, naming where each credential comes from, or not ready,
-// naming the variables to set where submits run, the catalog entry's page, and the one-line form of an explicit source
-// in the configuration at path. Discovery runs no command: a command source counts, unchecked.
+// agentLines is one line per entitled agent, pool by pool, ready or not, from discovery, which runs no command; a
+// not-ready line names the configuration at path.
 func agentLines(path string, file busclient.Config, pools map[string]operator.Terms) ([]string, error) {
 	var lines []string
 	for _, pool := range slices.Sorted(maps.Keys(pools)) {
@@ -589,9 +583,9 @@ func credentialFrom(c busclient.Readiness) string {
 	return name + ", no source"
 }
 
-// refuseForeignFiles fails when a destination of the configuration at path exists and is not its own. A configuration on
-// disk (exists) owns the bundle it names and, by default, its derived host key and state directory; one not yet written
-// owns nothing. bundle is where BUNDLE is copied, empty without one.
+// refuseForeignFiles fails when a derived destination of the configuration at path, or bundle, where BUNDLE is copied
+// (empty without one), exists and is not the configuration's own; a configuration not yet written (exists false) owns
+// nothing.
 func refuseForeignFiles(path string, paths busclient.Paths, file busclient.Config, exists bool, bundle string) error {
 	type destination struct {
 		path, setting, what string
