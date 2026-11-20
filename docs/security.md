@@ -451,7 +451,10 @@ holds for the bundle's pair and for a mapped pair alike and whatever the
 keys' length: the two storage keys are replaced exactly, with no minimum
 length, where the receiver's redaction of delivered credentials leaves a
 value shorter than 8 bytes. Both values are also held for the host's general
-redaction before the first storage call. The keys never leave the host:
+redaction before the first storage call, exactly and whatever its length,
+also when the same value was resolved earlier as a credential for a run,
+and the reader a download opens reports its errors through the same
+boundary. The keys never leave the host:
 receivers and agents get only the URLs it presigns, and neither key is a
 credential a pool's terms can request. Scope the pair to `wherry/<tenant>/`
 in each pool's bucket ([Operations](operations-hosts.md#s3-storage)).

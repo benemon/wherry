@@ -8,34 +8,42 @@ import (
 )
 
 // held are the forms of every credential value this process resolved, each with the marker of its name under no key;
-// seen keys the name and value of each, so a value resolved again adds no forms.
+// seen keys the name, value and kind of each registration, so a value resolved again adds no forms. The kinds are
+// recorded apart: a value hold saw, and left as short, is still registered exactly when holdStorageKey sees it later.
 var held struct {
 	sync.Mutex
 	forms []redact.Form
 	seen  map[string]bool
 }
 
+// Registration kinds, which key held.seen beside the name and value.
+const (
+	heldForms = "forms"
+	heldExact = "exact"
+)
+
 // hold has Redact replace value, which credential name names, for the life of the process. A value shorter than the
 // redactor's minimum matches ordinary text and is left, as for every credential a run receives.
 func hold(name string, value []byte) {
-	remember(name, value, func(forms []redact.Form, values map[string][]byte) []redact.Form {
+	remember(heldForms, name, value, func(forms []redact.Form, values map[string][]byte) []redact.Form {
 		return redact.AddForms(forms, nil, values, func(string) {})
 	})
 }
 
 // holdStorageKey has Redact replace value, the storage key name names, for the life of the process whatever its
-// length: every storage key a host accepts is secret, so the short-value rule of hold does not apply to the two.
+// length: every storage key a host accepts is secret, so the short-value rule of hold does not apply to the two. It
+// registers the value exactly whatever hold registered for the same name and value before.
 func holdStorageKey(name string, value []byte) {
-	remember(name, value, func(forms []redact.Form, values map[string][]byte) []redact.Form {
+	remember(heldExact, name, value, func(forms []redact.Form, values map[string][]byte) []redact.Form {
 		return redact.AddExact(forms, nil, values)
 	})
 }
 
-// remember adds the forms of value under name once, through add.
-func remember(name string, value []byte, add func([]redact.Form, map[string][]byte) []redact.Form) {
+// remember adds the forms of value under name once per kind, through add.
+func remember(kind, name string, value []byte, add func([]redact.Form, map[string][]byte) []redact.Form) {
 	held.Lock()
 	defer held.Unlock()
-	if key := name + "\x00" + string(value); !held.seen[key] {
+	if key := kind + "\x00" + name + "\x00" + string(value); !held.seen[key] {
 		if held.seen == nil {
 			held.seen = map[string]bool{}
 		}

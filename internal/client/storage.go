@@ -153,14 +153,33 @@ func (s *store) presignPut(ctx context.Context, bucket, key string, lifetime tim
 	return put.String(), nil
 }
 
-// get opens the object at key in bucket for reading.
+// get opens the object at key in bucket for reading. The store fetches the object at the first Read, so a refusal
+// naming the signing key arrives there, not here; the reader wraps every error its Read and Close return as the store's
+// other calls do, and passes io.EOF through unchanged, which io.Copy and io.ReadAll compare by identity.
 func (s *store) get(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
 	object, err := s.client.GetObject(ctx, bucket, key, minio.GetObjectOptions{})
 	if err != nil {
 		return nil, s.wrap(err)
 	}
-	return object, nil
+	return &redactedReader{object: object, store: s}, nil
 }
+
+// redactedReader is an object the store opened, whose Read and Close errors have the store's keys replaced by their
+// markers, as the errors of its other calls do.
+type redactedReader struct {
+	object io.ReadCloser
+	store  *store
+}
+
+func (r *redactedReader) Read(p []byte) (int, error) {
+	n, err := r.object.Read(p)
+	if err == io.EOF {
+		return n, err
+	}
+	return n, r.store.wrap(err)
+}
+
+func (r *redactedReader) Close() error { return r.store.wrap(r.object.Close()) }
 
 // uploadInputs puts each file under the run's prefix with one PUT and returns the S3 inputs with the size and SHA-256 of
 // the bytes it sent.

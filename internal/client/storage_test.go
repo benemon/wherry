@@ -1203,3 +1203,60 @@ func TestStorageErrorsAndLogsNameNoStorageKey(t *testing.T) {
 		})
 	}
 }
+
+// The store fetches an object at the first Read of the reader get returns, so a refusal naming the access key that
+// signed the request arrives through the reader after get succeeded. The reader's errors cross the store's boundary as
+// its other errors do: Read and Close name the key's marker, never the key, and the error still unwraps to the store's
+// refusal. A reader the store serves ends in io.EOF itself, which io.ReadAll and io.Copy end on.
+func TestObjectReaderErrorsNameNoStorageKey(t *testing.T) {
+	ctx := context.Background()
+	key := wire.S3OutputKey("tenant-a", "run-1", "report.pdf")
+	t.Run("a refusal at the first read", func(t *testing.T) {
+		server := refusingStore(t)
+		bundled := operator.StorageKeys{AccessKey: "AKIAREADERACCESSKEY", SecretKey: "reader-secret-key-value-sentinel"}
+		h := &Host{bundleStorage: bundled}
+		store, err := h.bucket(ctx, "pool-s3", &operator.Storage{Endpoint: server.URL, Bucket: testBucket})
+		if err != nil {
+			t.Fatal(err)
+		}
+		object, err := store.get(ctx, testBucket, key)
+		if err != nil {
+			t.Fatalf("get = %v; want the refusal deferred to the first read", err)
+		}
+		_, err = io.ReadAll(object)
+		if want := "no access key " + signed.RedactionMarker(nil, bundleAccessKey); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("read = %v; want %q", err, want)
+		}
+		var refusal minio.ErrorResponse
+		if !errors.As(err, &refusal) || refusal.Code != "InvalidAccessKeyId" {
+			t.Fatalf("read = %v; want it to unwrap to the store's InvalidAccessKeyId", err)
+		}
+		closeErr := object.Close()
+		for what, text := range map[string]string{"the read error": err.Error(), "the close error": fmt.Sprint(closeErr)} {
+			for _, value := range []string{bundled.AccessKey, bundled.SecretKey} {
+				if strings.Contains(text, value) {
+					t.Fatalf("%s holds the storage key %q: %s", what, value, text)
+				}
+			}
+		}
+	})
+	t.Run("a served object", func(t *testing.T) {
+		o := newUploadOracle(t)
+		o.objects["/"+testBucket+"/"+key] = []byte("report")
+		h := &Host{storage: map[string]StorageConfig{"pool-s3": *o.config}, credentials: o.sources}
+		store, err := h.bucket(ctx, "pool-s3", &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket})
+		if err != nil {
+			t.Fatal(err)
+		}
+		object, err := store.get(ctx, testBucket, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if data, err := io.ReadAll(object); err != nil || string(data) != "report" {
+			t.Fatalf("read %q, %v; want the object and io.EOF passed through unchanged", data, err)
+		}
+		if err := object.Close(); err != nil {
+			t.Fatalf("close = %v", err)
+		}
+	})
+}
