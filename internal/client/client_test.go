@@ -1511,8 +1511,8 @@ func TestConfigRejectsUnknownField(t *testing.T) {
 	}
 }
 
-// The host's files default to ~/.config/wherry and its state to ~/.local/state/wherry on every OS, or under
-// $XDG_CONFIG_HOME and $XDG_STATE_HOME when set.
+// The default configuration's files default to ~/.config/wherry and its state to ~/.local/state/wherry on every OS, or
+// under $XDG_CONFIG_HOME and $XDG_STATE_HOME when set.
 func TestHostPathsDefaultToXDGLocations(t *testing.T) {
 	// os.UserConfigDir matches the rule on Linux alone; on macOS it is ~/Library/Application Support.
 	if source, err := os.ReadFile("config.go"); err != nil || bytes.Contains(source, []byte("os.UserConfigDir")) {

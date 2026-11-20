@@ -994,14 +994,18 @@ wherry host init [BUNDLE] [--config-file FILE]
 Sets the host up from its bundle, and configures it for every pool its tenant
 is entitled to:
 
-1. With `BUNDLE`, it reads the bundle and copies it to `bundle.yaml` in the
+1. With `BUNDLE`, it reads the bundle and copies it to the configuration's
+   [default bundle path](configuration-host.md#a-configuration-away-from-the-default-path):
+   `bundle.yaml` in the
    [configuration directory](configuration-host.md#client-configuration),
-   `$XDG_CONFIG_HOME/wherry/` or by default `~/.config/wherry/`, mode 0600 in
-   a directory of mode 0700,
-   replacing any file there atomically, and names it as `bundle` in the
-   configuration, even when the configuration named another bundle. Without
-   `BUNDLE`, it uses the bundle the configuration names, and refuses when it
-   names none.
+   `$XDG_CONFIG_HOME/wherry/` or by default `~/.config/wherry/`, for the
+   default configuration, and `<path>.bundle.yaml` beside a configuration at
+   any other `<path>`. The copy is mode 0600. The configuration directory
+   is made mode 0700; elsewhere, a directory init creates is mode 0700 and
+   an existing one keeps its mode. It replaces any
+   file there atomically, and names it as `bundle` in the configuration, even
+   when the configuration named another bundle. Without `BUNDLE`, it uses the
+   bundle the configuration names, and refuses when it names none.
 2. On a terminal, when the configuration names no `ca_file` and the
    configuration directory holds no `ca.pem`, Broker offers up to eight
    eligible local CA files, System roots and Other file. Other file asks
@@ -1011,7 +1015,9 @@ is entitled to:
    `ca.pem` in place, or `ca_file` in the configuration, before `host init`.
    When the file is new or step 1 or 2 changed it, init writes the
    configuration now, before it connects.
-3. It creates the host key at `host_key`, a private JWK (RFC 7517) with mode
+3. It creates the host key at `host_key`, by default `host.key` in the
+   configuration directory for the default configuration and `<path>.host.key`
+   beside any other, a private JWK (RFC 7517) with mode
    0600, unless the file exists, creating its directory with mode 0700. It
    registers the key on the host's key topic when the topic holds none, and
    prints the key ID alone when standard input or standard error is not a
@@ -1059,7 +1065,11 @@ answers not yet written. If the terminal misbehaves after an abnormal exit,
 run `stty sane`.
 
 The configuration path is `--config-file` or `WHERRY_CONFIG`, else
-`config.yaml` in the configuration directory. Writes use mode 0600 even
+`config.yaml` in the configuration directory. A configuration at any other
+path, compared absolute with symlinks resolved, keeps its bundle, host key
+and state directory beside it, as `<path>.bundle.yaml`, `<path>.host.key`
+and `<path>.state/`, so two configurations never share a host key; explicit
+`bundle`, `host_key` and `state_dir` values are kept. Writes use mode 0600 even
 for existing files, with references to sources, never values. A re-run
 keeps existing entries and asks only for missing settings. When standard
 input or standard error is not a terminal, or with `TERM=dumb`, init asks nothing and lists missing

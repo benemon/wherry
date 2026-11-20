@@ -81,7 +81,85 @@ func DefaultConfigPath() (string, error) {
 	return filepath.Join(dir, "config.yaml"), nil
 }
 
-// LoadConfig decodes the config at path, defaulting host_key and state_dir.
+// Paths are the files a host configuration takes when it names none: Config is the configuration's path, absolute with
+// symlinks resolved, and Default says it is DefaultConfigPath's file.
+type Paths struct {
+	Config, Bundle, HostKey, StateDir string
+	Default                           bool
+}
+
+// DefaultPaths derives the bundle, host key and state directory of the configuration at path. The default configuration
+// keeps the configuration directory's bundle.yaml and host.key and the state directory: deriving them from its path
+// would give an existing host a second key. Any other configuration takes its own path plus .bundle.yaml, .host.key and
+// .state, nothing stripped, so two configurations never share a file or a host key, however alike their names. Paths are
+// compared absolute with symlinks resolved, so the default file reached by another name is still the default.
+func DefaultPaths(path string) (Paths, error) {
+	resolved, err := canonical(path)
+	if err != nil {
+		return Paths{}, err
+	}
+	standard, err := DefaultConfigPath()
+	if err != nil {
+		return Paths{}, err
+	}
+	if standard, err = canonical(standard); err != nil {
+		return Paths{}, err
+	}
+	if resolved != standard {
+		return Paths{Config: resolved, Bundle: resolved + ".bundle.yaml", HostKey: resolved + ".host.key", StateDir: resolved + ".state"}, nil
+	}
+	dir, err := ConfigDir()
+	if err != nil {
+		return Paths{}, err
+	}
+	state, err := StateDir()
+	if err != nil {
+		return Paths{}, err
+	}
+	return Paths{Config: resolved, Bundle: filepath.Join(dir, "bundle.yaml"), HostKey: filepath.Join(dir, "host.key"), StateDir: state, Default: true}, nil
+}
+
+// canonical is path with ~ expanded, made absolute and its symlinks resolved. The file need not exist yet: a symlink
+// to a file not yet written resolves to its target, and the rest of a path is appended to its longest existing
+// ancestor, resolved.
+func canonical(path string) (string, error) {
+	path, err := ExpandHome(path)
+	if err != nil {
+		return "", err
+	}
+	if path, err = filepath.Abs(path); err != nil {
+		return "", err
+	}
+	var rest []string
+	for links := 0; ; {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err == nil {
+			return filepath.Join(append([]string{resolved}, rest...)...), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		if target, err := os.Readlink(path); err == nil {
+			// Bounded as the kernel bounds a lookup, so a symlink cycle is an error rather than a hang.
+			if links++; links > 40 {
+				return "", fmt.Errorf("%s: too many levels of symbolic links", path)
+			}
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(filepath.Dir(path), target)
+			}
+			path = target
+			continue
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return "", err
+		}
+		rest = append([]string{filepath.Base(path)}, rest...)
+		path = parent
+	}
+}
+
+// LoadConfig decodes the config at path, defaulting host_key and state_dir to DefaultPaths' for path.
 func LoadConfig(path string) (Config, error) {
 	path, err := ExpandHome(path)
 	if err != nil {
@@ -98,16 +176,16 @@ func LoadConfig(path string) (Config, error) {
 	if config.Bundle == "" {
 		return Config{}, errors.New("config requires bundle")
 	}
-	if config.HostKey == "" {
-		dir, err := ConfigDir()
+	if config.HostKey == "" || config.StateDir == "" {
+		paths, err := DefaultPaths(path)
 		if err != nil {
 			return Config{}, err
 		}
-		config.HostKey = filepath.Join(dir, "host.key")
-	}
-	if config.StateDir == "" {
-		if config.StateDir, err = StateDir(); err != nil {
-			return Config{}, err
+		if config.HostKey == "" {
+			config.HostKey = paths.HostKey
+		}
+		if config.StateDir == "" {
+			config.StateDir = paths.StateDir
 		}
 	}
 	for _, path := range []*string{&config.Bundle, &config.HostKey, &config.StateDir, &config.CAFile} {

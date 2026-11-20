@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,17 +93,41 @@ func (h initHost) written(t *testing.T) busclient.Config {
 // registered fails t unless the host key topic's current key is the key in the host key file, whose ID is keyID.
 func (h initHost) registered(t *testing.T, keyID string) {
 	t.Helper()
-	key, err := trust.LoadSigningKeyFile(filepath.Join(h.dir, "host.key"))
+	h.registeredAt(t, "host-a", filepath.Join(h.dir, "host.key"), keyID)
+}
+
+// registeredAt fails t unless host's key topic's current key is the key in the file at path, whose ID is keyID.
+func (h initHost) registeredAt(t *testing.T, host, path, keyID string) {
+	t.Helper()
+	key, err := trust.LoadSigningKeyFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner := signed.HostOwner("tenant-a", "host-a")
-	keys, err := operator.ReadKeys(h.ctx, h.service.Operator, map[string]string{owner: operator.HostTopic("tenant-a", "host-a")})
+	owner := signed.HostOwner("tenant-a", host)
+	keys, err := operator.ReadKeys(h.ctx, h.service.Operator, map[string]string{owner: operator.HostTopic("tenant-a", host)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if current := keys[owner].Current; current == nil || !current.Equal(key.Public()) || signed.KeyID(current) != keyID {
-		t.Fatalf("host key topic holds %v; want the host key %s registered", current, keyID)
+		t.Fatalf("host %s's key topic holds %v; want the host key %s registered", host, current, keyID)
+	}
+}
+
+// addHost adds host to tenant-a and returns the bundle the operator wrote.
+func (h initHost) addHost(t *testing.T, host string) string {
+	t.Helper()
+	bundle := filepath.Join(t.TempDir(), host+".bundle")
+	if err := h.service.HostAdd(h.ctx, "tenant-a", host, bundle, false); err != nil {
+		t.Fatal(err)
+	}
+	return bundle
+}
+
+// absent fails t when a file exists at path.
+func absent(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("%s exists (%v); want it absent", path, err)
 	}
 }
 
@@ -182,5 +207,79 @@ func TestHostInitWithoutABundle(t *testing.T) {
 	err := run([]string{"host", "init"}, &bytes.Buffer{}, &bytes.Buffer{})
 	if want := filepath.Join(home, ".config", "wherry", "config.yaml") + " names no bundle; run wherry host init BUNDLE"; err == nil || err.Error() != want {
 		t.Fatalf("init = %v; want %q", err, want)
+	}
+}
+
+// Two configurations in one directory take their own bundles and host keys, named from each whole path, so they never
+// come to share an identity (agb-d1hh). WHERRY_CONFIG names a configuration as --config-file does. The configuration
+// directory gets no file of theirs, and the directory they sit in keeps its mode.
+func TestHostInitKeepsConfigurationsApart(t *testing.T) {
+	h := newInitHost(t, nil)
+	bundleB := h.addHost(t, "host-b")
+	noTerminal(t)
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a, b := filepath.Join(dir, "a.yaml"), filepath.Join(dir, "b.yaml")
+	keyA, _ := h.init(t, h.bundle, "--config-file", a)
+	t.Setenv("WHERRY_CONFIG", b)
+	keyB, _ := h.init(t, bundleB)
+	t.Setenv("WHERRY_CONFIG", "")
+	if strings.TrimSpace(keyA) == strings.TrimSpace(keyB) {
+		t.Fatalf("both configurations registered key %s; want a key each", strings.TrimSpace(keyA))
+	}
+	for _, c := range []struct{ path, host, keyID string }{{a, "host-a", strings.TrimSpace(keyA)}, {b, "host-b", strings.TrimSpace(keyB)}} {
+		bundle, err := operator.ReadBundle(c.path + ".bundle.yaml")
+		if err != nil || bundle.Principal != operator.TenantPrincipal("tenant-a", c.host) {
+			t.Fatalf("%s.bundle.yaml holds %+v, %v; want %s's bundle", c.path, bundle, err, c.host)
+		}
+		h.registeredAt(t, c.host, c.path+".host.key", c.keyID)
+		var config busclient.Config
+		if err := readYAML(c.path, &config); err != nil || config.Bundle != c.path+".bundle.yaml" || config.HostKey != "" {
+			t.Fatalf("%s holds %+v, %v; want its own bundle named and host_key left to its default", c.path, config, err)
+		}
+	}
+	for _, name := range []string{"config.yaml", "bundle.yaml", "host.key"} {
+		absent(t, filepath.Join(h.dir, name))
+	}
+	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("%s is %v, %v; want its mode 0755 kept", dir, info.Mode(), err)
+	}
+}
+
+// The default configuration keeps the configuration directory's bundle.yaml and host.key when it is named relatively or
+// through a symlink, so an initialised host gets no second key; a configuration elsewhere keeps an explicit host_key.
+func TestHostInitDefaultPathKeepsItsFiles(t *testing.T) {
+	h := newInitHost(t, nil)
+	bundleB := h.addHost(t, "host-b")
+	noTerminal(t)
+	t.Chdir(h.dir)
+	keyID, _ := h.init(t, h.bundle, "--config-file", "config.yaml")
+	h.registered(t, strings.TrimSpace(keyID))
+	if _, err := operator.ReadBundle(filepath.Join(h.dir, "bundle.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link.yaml")
+	if err := os.Symlink(h.config, link); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := h.init(t, "--config-file", link); again != keyID {
+		t.Fatalf("init through a symlink registered %s; want the host's key %s kept", strings.TrimSpace(again), strings.TrimSpace(keyID))
+	}
+	for _, stray := range []string{filepath.Join(h.dir, "config.yaml.host.key"), filepath.Join(h.dir, "config.yaml.bundle.yaml"), link + ".host.key", link + ".bundle.yaml"} {
+		absent(t, stray)
+	}
+	dir := t.TempDir()
+	own, keyPath := filepath.Join(dir, "own.yaml"), filepath.Join(dir, "keys", "my.key")
+	if err := writeYAML(own, busclient.Config{HostKey: keyPath}); err != nil {
+		t.Fatal(err)
+	}
+	keyB, _ := h.init(t, bundleB, "--config-file", own)
+	h.registeredAt(t, "host-b", keyPath, strings.TrimSpace(keyB))
+	absent(t, own+".host.key")
+	var config busclient.Config
+	if err := readYAML(own, &config); err != nil || config.HostKey != keyPath || config.Bundle != own+".bundle.yaml" {
+		t.Fatalf("%s holds %+v, %v; want host_key kept and its own bundle named", own, config, err)
 	}
 }

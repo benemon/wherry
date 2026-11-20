@@ -27,10 +27,10 @@ The host's paths are the same on every OS, macOS included:
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `bundle` | path | required | Read the host's bundle from this file. |
+| `bundle` | path | required; `host init BUNDLE` writes the [default bundle path](#a-configuration-away-from-the-default-path) | Read the host's bundle from this file. |
 | `ca_file` | path | `ca.pem` in the configuration directory if present | Trust these PEM CA certificates for the broker connection. |
-| `host_key` | path | `host.key` in the configuration directory | Read the host's private Ed25519 JWK. |
-| `state_dir` | path | the host state directory | Store local run records here. |
+| `host_key` | path | `host.key` in the configuration directory, or `<path>.host.key` beside a configuration [away from the default path](#a-configuration-away-from-the-default-path) | Read the host's private Ed25519 JWK. |
+| `state_dir` | path | the host state directory, or `<path>.state/` beside a configuration [away from the default path](#a-configuration-away-from-the-default-path) | Store local run records here. |
 | `credentials` | mapping | none | Map credential names to [sources](security.md#credential-sources). |
 | `git` | list | none | Map URL prefixes to credential names and SSH known-hosts files. |
 | `storage` | mapping | none | Map pool names to S3 `access_key` and `secret_key` credential names. |
@@ -38,6 +38,28 @@ The host's paths are the same on every OS, macOS included:
 
 Without a CA file, the host trusts system roots.
 Each credential source uses exactly one of `file`, `env` and `command`.
+
+### A configuration away from the default path
+
+A host identity is its host key, and a configuration names one. A
+configuration at any path other than the default keeps its files beside
+it, named from its whole path, nothing stripped:
+
+| File | Default configuration | Configuration at `<path>` |
+| --- | --- | --- |
+| the bundle, where `host init BUNDLE` copies it | `bundle.yaml` in the configuration directory | `<path>.bundle.yaml` |
+| the host key file | `host.key` in the configuration directory | `<path>.host.key` |
+| the state directory | the state directory | `<path>.state/` |
+
+So `--config-file /work/a.yaml` and `--config-file /work/b.yaml` are two
+hosts with two keys, and never share one; `/work/a` and `/work/a.yaml` are
+distinct too. Paths are compared absolute with symlinks resolved, so the
+default configuration named relatively, or through a symlink, keeps the
+configuration directory's files. Explicit `bundle`, `host_key` and
+`state_dir` values are kept wherever the configuration is. `host init`
+makes the configuration directory mode 0700; elsewhere it creates a
+missing directory for these files with mode 0700 and leaves an existing
+one's mode alone.
 Git entries contain `url`, optional `credential` and `host_key`.
 An SSH remote requires `host_key`.
 An HTTPS remote refuses `host_key`.

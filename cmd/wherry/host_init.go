@@ -45,6 +45,12 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 	if path, err = busclient.ExpandHome(path); err != nil {
 		return err
 	}
+	// Each configuration's bundle and host key go with it, so two configurations never come to share a host identity
+	// (agb-d1hh); the default configuration keeps the configuration directory's.
+	paths, err := busclient.DefaultPaths(path)
+	if err != nil {
+		return err
+	}
 	var file busclient.Config
 	_, statErr := os.Stat(path)
 	changed := errors.Is(statErr, os.ErrNotExist)
@@ -58,18 +64,24 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return err
-		}
-		if err := os.Chmod(dir, 0o700); err != nil {
+		// The configuration directory is wherry's own and is hardened to 0700; a configuration elsewhere sits in a
+		// directory of the user's, which keeps its mode.
+		if paths.Default {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				return err
+			}
+			if err := os.Chmod(dir, 0o700); err != nil {
+				return err
+			}
+		} else if err := makePrivateDir(filepath.Dir(paths.Bundle)); err != nil {
 			return err
 		}
 		// Bundles hold a password: ReplaceBundle writes mode 0600 and renames over the old file.
-		if err := operator.ReplaceBundle(filepath.Join(dir, "bundle.yaml"), contents); err != nil {
+		if err := operator.ReplaceBundle(paths.Bundle, contents); err != nil {
 			return err
 		}
-		changed = changed || file.Bundle != filepath.Join(dir, "bundle.yaml")
-		file.Bundle = filepath.Join(dir, "bundle.yaml")
+		changed = changed || file.Bundle != paths.Bundle
+		file.Bundle = paths.Bundle
 	} else if file.Bundle == "" {
 		return fmt.Errorf("%s names no bundle; run wherry host init BUNDLE", path)
 	}
@@ -433,8 +445,34 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 	return nil
 }
 
+// makePrivateDir creates path's missing directories with mode 0700, whatever the umask, and leaves an existing one as
+// it is: a configuration placed in a user's own directory does not take the directory over.
+func makePrivateDir(path string) error {
+	var created []string
+	for dir := path; ; dir = filepath.Dir(dir) {
+		if _, err := os.Stat(dir); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		created = append(created, dir)
+		if dir == filepath.Dir(dir) {
+			break
+		}
+	}
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	for _, dir := range created {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func writeHostConfig(path string, file busclient.Config) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := makePrivateDir(filepath.Dir(path)); err != nil {
 		return err
 	}
 	if err := writeYAML(path, file); err != nil {
