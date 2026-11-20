@@ -71,7 +71,10 @@ Before it writes anything, `host init` refuses when the bundle's
 destination or one of the derived paths already exists and is not the file
 the configuration names: another configuration at `<path>.bundle.yaml`,
 another host's key at `<path>.host.key`, a file where `<path>.state/` would
-go, or a directory where the named `bundle` would go. The error names the
+go, a directory where the named `bundle` would go, or a symlink to any of
+these or to nothing. A symlink is refused or accepted by what it points at:
+one to the file the configuration names is its own, one whose target does
+not exist is refused rather than written through. The error names the
 path and the setting, `bundle`, `host_key` or `state_dir`, that avoids it.
 A rerun on an initialised configuration, whose files it already names,
 succeeds. Explicit `host_key` and `state_dir` paths are not checked this

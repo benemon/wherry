@@ -488,14 +488,14 @@ func refuseForeignFiles(path string, paths busclient.Paths, file busclient.Confi
 		destinations = append(destinations, destination{paths.StateDir, "state_dir", "state directory", exists, true})
 	}
 	for _, d := range destinations {
-		info, err := os.Stat(d.path)
-		if errors.Is(err, os.ErrNotExist) {
+		// The entry itself decides whether the destination is occupied, so a dangling symlink there is refused rather
+		// than written through; the link is followed only to establish what it is and whether it is this configuration's.
+		if _, err := os.Lstat(d.path); errors.Is(err, os.ErrNotExist) {
 			continue
-		}
-		if err != nil {
+		} else if err != nil {
 			return err
 		}
-		if d.named && info.IsDir() == d.dir {
+		if info, err := os.Stat(d.path); err == nil && d.named && info.IsDir() == d.dir {
 			continue
 		}
 		return fmt.Errorf("%s exists and is not the %s of configuration %s; set %s in %s to a path of its own", d.path, d.what, path, d.setting, path)

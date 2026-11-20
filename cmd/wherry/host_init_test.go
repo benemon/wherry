@@ -329,6 +329,55 @@ func TestHostInitKeepsAnExplicitBundle(t *testing.T) {
 	}
 }
 
+// A dangling symlink at a derived destination occupies it: init refuses it before writing anything, as it does a file,
+// leaving the link, and writes neither the configuration nor another derived file. A link is followed only to tell what
+// it points at: one from <path>.host.key to the key this configuration already uses is its own, and a rerun keeps it.
+func TestHostInitRefusesADanglingLinkAtADerivedPath(t *testing.T) {
+	h := newInitHost(t, nil)
+	noTerminal(t)
+	suffixes := map[string]string{".bundle.yaml": "bundle", ".host.key": "host_key", ".state": "state_dir"}
+	for suffix, setting := range suffixes {
+		t.Run(suffix, func(t *testing.T) {
+			dir := t.TempDir()
+			config, target := filepath.Join(dir, "config"), filepath.Join(dir, "missing")
+			if err := os.Symlink(target, config+suffix); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, prompts bytes.Buffer
+			err := run([]string{"host", "init", h.bundle, "--config-file", config}, &stdout, &prompts)
+			what := map[string]string{"bundle": "bundle", "host_key": "host key", "state_dir": "state directory"}[setting]
+			if want := config + suffix + " exists and is not the " + what + " of configuration " + config + "; set " + setting + " in " + config + " to a path of its own"; err == nil || err.Error() != want {
+				t.Fatalf("init = %v; want %q", err, want)
+			}
+			if linked, err := os.Readlink(config + suffix); err != nil || linked != target {
+				t.Fatalf("%s%s reads %q, %v; want the dangling link left as it was", config, suffix, linked, err)
+			}
+			absent(t, config)
+			absent(t, target)
+			for other := range suffixes {
+				if other != suffix {
+					absent(t, config+other)
+				}
+			}
+			if stdout.Len() > 0 {
+				t.Fatalf("init printed %q; want no key registered", stdout.String())
+			}
+		})
+	}
+	a := filepath.Join(t.TempDir(), "a")
+	keyID, _ := h.init(t, h.bundle, "--config-file", a)
+	moved := filepath.Join(filepath.Dir(a), "moved.key")
+	if err := os.Rename(a+".host.key", moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(moved, a+".host.key"); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := h.init(t, "--config-file", a); again != keyID {
+		t.Fatalf("rerun through a link to the host key registered %s; want the host's key %s kept", strings.TrimSpace(again), strings.TrimSpace(keyID))
+	}
+}
+
 // plantPrivateValueInX5U writes a private Ed25519 JWK at path whose x5u member also holds its private d value, as
 // ":<d>", which no URL parser accepts, and returns d. An error that echoes the field echoes the key.
 func plantPrivateValueInX5U(t *testing.T, path string) string {
