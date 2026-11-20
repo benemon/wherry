@@ -15,8 +15,24 @@ var held struct {
 	seen  map[string]bool
 }
 
-// hold has Redact replace value, which credential name names, for the life of the process.
+// hold has Redact replace value, which credential name names, for the life of the process. A value shorter than the
+// redactor's minimum matches ordinary text and is left, as for every credential a run receives.
 func hold(name string, value []byte) {
+	remember(name, value, func(forms []redact.Form, values map[string][]byte) []redact.Form {
+		return redact.AddForms(forms, nil, values, func(string) {})
+	})
+}
+
+// holdStorageKey has Redact replace value, the storage key name names, for the life of the process whatever its
+// length: every storage key a host accepts is secret, so the short-value rule of hold does not apply to the two.
+func holdStorageKey(name string, value []byte) {
+	remember(name, value, func(forms []redact.Form, values map[string][]byte) []redact.Form {
+		return redact.AddExact(forms, nil, values)
+	})
+}
+
+// remember adds the forms of value under name once, through add.
+func remember(name string, value []byte, add func([]redact.Form, map[string][]byte) []redact.Form) {
 	held.Lock()
 	defer held.Unlock()
 	if key := name + "\x00" + string(value); !held.seen[key] {
@@ -24,7 +40,7 @@ func hold(name string, value []byte) {
 			held.seen = map[string]bool{}
 		}
 		held.seen[key] = true
-		held.forms = redact.AddForms(held.forms, nil, map[string][]byte{name: value}, func(string) {})
+		held.forms = add(held.forms, map[string][]byte{name: value})
 	}
 }
 

@@ -610,7 +610,7 @@ func TestStorageKeysResolveThroughSources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if creds, err := store.GetCreds(); err != nil || creds.AccessKeyID != access || creds.SecretAccessKey != secret {
+	if creds, err := store.client.GetCreds(); err != nil || creds.AccessKeyID != access || creds.SecretAccessKey != secret {
 		t.Fatalf("S3 client holds %q and %q, %v; want the env and command sources' values", creds.AccessKeyID, creds.SecretAccessKey, err)
 	}
 	path := filepath.Join(t.TempDir(), "secret.key")
@@ -769,9 +769,10 @@ func TestAnEnvelopeOverItsLimitPublishesNothing(t *testing.T) {
 	}
 }
 
-// A storage key file padded with spaces and a tab is held for redaction as the key the host signs with, so an upload
-// error carrying that key is redacted.
-func TestPaddedStorageKeyIsRedacted(t *testing.T) {
+// refusingStore is a synthetic S3 store that answers every signed request with InvalidAccessKeyId naming the access
+// key that signed it, as a store does for a key it does not know, trusted by the client for the rest of t.
+func refusingStore(t *testing.T) *httptest.Server {
+	t.Helper()
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/xml")
 		if r.Method == http.MethodGet && r.URL.Query().Has("location") {
@@ -787,6 +788,13 @@ func TestPaddedStorageKeyIsRedacted(t *testing.T) {
 	previous := storageTransport
 	storageTransport = server.Client().Transport
 	t.Cleanup(func() { storageTransport = previous })
+	return server
+}
+
+// A storage key file padded with spaces and a tab is held for redaction as the key the host signs with, so an upload
+// error carrying that key leaves the store with the key's marker in its place.
+func TestPaddedStorageKeyIsRedacted(t *testing.T) {
+	server := refusingStore(t)
 	access, secret := filepath.Join(t.TempDir(), "access"), filepath.Join(t.TempDir(), "secret")
 	if err := os.WriteFile(access, []byte("  padded-access-key\t\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -803,11 +811,11 @@ func TestPaddedStorageKeyIsRedacted(t *testing.T) {
 	}
 	file, _ := randomFile(t, "dataset.bin", 16)
 	_, err = uploadInputs(ctx, store, testBucket, "tenant-a", "run-1", []S3File{{Name: "dataset.bin", Body: file}})
-	if err == nil || !strings.Contains(err.Error(), "upload S3 input dataset.bin: no access key padded-access-key") {
-		t.Fatalf("upload = %v; want an error carrying the access key", err)
+	if want := "upload S3 input dataset.bin: no access key " + signed.RedactionMarker(nil, "padded-access"); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("upload = %v; want %q", err, want)
 	}
-	if got := Redact(err.Error()); strings.Contains(got, "padded-access-key") {
-		t.Fatalf("redacted error holds the access key: %s", got)
+	if strings.Contains(err.Error(), "padded-access-key") {
+		t.Fatalf("upload error holds the access key: %v", err)
 	}
 }
 
@@ -869,7 +877,7 @@ func TestStorageCredentialsArePerPool(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if creds, err := store.GetCreds(); err != nil || creds.AccessKeyID != name+"-access-value" || creds.SecretAccessKey != name+"-secret-value" {
+		if creds, err := store.client.GetCreds(); err != nil || creds.AccessKeyID != name+"-access-value" || creds.SecretAccessKey != name+"-secret-value" {
 			t.Fatalf("pool-%s's S3 client holds %q and %q, %v; want pool-%s's pair", name, creds.AccessKeyID, creds.SecretAccessKey, err, name)
 		}
 	}
@@ -1005,7 +1013,7 @@ func TestBundleStorageKeysServeUnmappedPools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if creds, err := store.GetCreds(); err != nil || creds.AccessKeyID != bundled.AccessKey || creds.SecretAccessKey != bundled.SecretKey {
+	if creds, err := store.client.GetCreds(); err != nil || creds.AccessKeyID != bundled.AccessKey || creds.SecretAccessKey != bundled.SecretKey {
 		t.Fatalf("pool-a's S3 client holds %q and %q, %v; want the bundle's pair", creds.AccessKeyID, creds.SecretAccessKey, err)
 	}
 	for _, value := range []string{bundled.AccessKey, bundled.SecretKey} {
@@ -1017,7 +1025,7 @@ func TestBundleStorageKeysServeUnmappedPools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if creds, err := store.GetCreds(); err != nil || creds.AccessKeyID != "b-access-value" || creds.SecretAccessKey != "b-secret-value" {
+	if creds, err := store.client.GetCreds(); err != nil || creds.AccessKeyID != "b-access-value" || creds.SecretAccessKey != "b-secret-value" {
 		t.Fatalf("pool-b's S3 client holds %q and %q, %v; want the configuration's pair, which wins", creds.AccessKeyID, creds.SecretAccessKey, err)
 	}
 	if !h.credentialed("pool-a") || !h.credentialed("pool-b") || !h.credentialed("pool-c") {
@@ -1120,36 +1128,78 @@ func TestBundleStorageKeysReachNoStateRecordOrLog(t *testing.T) {
 	}
 }
 
-// A storage error that carries the bundle's access key is redacted: the pair is held before the first storage call.
-func TestBundleStorageKeysAreRedactedInStorageErrors(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/xml")
-		if r.Method == http.MethodGet && r.URL.Query().Has("location") {
-			fmt.Fprint(w, "<LocationConstraint></LocationConstraint>")
-			return
-		}
-		_, signer, _ := strings.Cut(r.Header.Get("Authorization"), "Credential=")
-		access, _, _ := strings.Cut(signer, "/")
-		w.WriteHeader(http.StatusForbidden)
-		fmt.Fprintf(w, "<Error><Code>InvalidAccessKeyId</Code><Message>no access key %s</Message></Error>", access)
-	}))
-	t.Cleanup(server.Close)
-	previous := storageTransport
-	storageTransport = server.Client().Transport
-	t.Cleanup(func() { storageTransport = previous })
-	bundled := operator.StorageKeys{AccessKey: "AKIAREFUSEDACCESSKEY", SecretKey: "refused-secret-key-value-sentinel"}
-	h := &Host{bundleStorage: bundled, credentials: map[string]credential.Source{}}
-	ctx := context.Background()
-	store, err := h.bucket(ctx, "pool-s3", &operator.Storage{Endpoint: server.URL, Bucket: testBucket})
-	if err != nil {
+// A store that refuses an upload naming the access key that signed it leaves neither storage key in the error Submit
+// returns nor in the host's log of the cleanup that follows: both values are replaced by their markers where they leave
+// the storage layer, whether the pair is the bundle's, the pair the configuration maps the pool to, or a bundled pair
+// whose access key is seven bytes, under the minimum the redactor keeps for other credentials. The error still unwraps
+// to the store's refusal, so callers classify it as before, and no task is published.
+func TestStorageErrorsAndLogsNameNoStorageKey(t *testing.T) {
+	server := refusingStore(t)
+	f := newFixture(t)
+	terms := testTerms()
+	terms.Storage = &operator.Storage{Endpoint: server.URL, Bucket: testBucket}
+	if err := f.service.PoolApply(f.ctx, "pool-s3", terms, false); err != nil {
 		t.Fatal(err)
 	}
-	file, _ := randomFile(t, "dataset.bin", 16)
-	_, err = uploadInputs(ctx, store, testBucket, "tenant-a", "run-1", []S3File{{Name: "dataset.bin", Body: file}})
-	if err == nil || !strings.Contains(err.Error(), "upload S3 input dataset.bin: no access key "+bundled.AccessKey) {
-		t.Fatalf("upload = %v; want an error carrying the access key", err)
+	if err := f.service.TenantPoolAdd(f.ctx, "tenant-a", "pool-s3"); err != nil {
+		t.Fatal(err)
 	}
-	if got := Redact(err.Error()); strings.Contains(got, bundled.AccessKey) || !strings.Contains(got, "no access key [redacted:") {
-		t.Fatalf("redacted error %q; want the bundle's access key replaced by its marker", got)
+	receiver := f.addReceiver(t, "receiver-s3", "pool-s3")
+	receiver.advertise(t, f.ctx, nil)
+	mapped := operator.StorageKeys{AccessKey: "AKIAMAPPEDACCESSKEY", SecretKey: "mapped-secret-key-value-sentinel"}
+	dir := t.TempDir()
+	for name, value := range map[string]string{"s3-access": mapped.AccessKey, "s3-secret": mapped.SecretKey} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(value+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		f.host.credentials[name] = credential.Source{File: filepath.Join(dir, name)}
+	}
+	for _, tc := range []struct {
+		name       string
+		bundle     operator.StorageKeys
+		mapped     bool
+		keys       operator.StorageKeys
+		accessName string
+	}{
+		{"bundled pair", operator.StorageKeys{AccessKey: "AKIABUNDLEACCESSKEY", SecretKey: "bundle-secret-key-value-sentinel"}, false, operator.StorageKeys{}, bundleAccessKey},
+		{"configured pair wins over the bundle", operator.StorageKeys{AccessKey: "AKIABUNDLEACCESSKEY", SecretKey: "bundle-secret-key-value-sentinel"}, true, mapped, "s3-access"},
+		{"seven-byte bundled access key", operator.StorageKeys{AccessKey: "a7x9key", SecretKey: "short-pair-secret-key-sentinel"}, false, operator.StorageKeys{}, bundleAccessKey},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f.host.bundleStorage, f.host.storage = tc.bundle, nil
+			if tc.mapped {
+				f.host.storage = map[string]StorageConfig{"pool-s3": {AccessKey: "s3-access", SecretKey: "s3-secret"}}
+			}
+			keys := tc.keys
+			if keys == (operator.StorageKeys{}) {
+				keys = tc.bundle
+			}
+			before := len(f.logs.String())
+			file, _ := randomFile(t, "dataset.bin", 16)
+			_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}},
+				EndBy: time.Now().Add(time.Hour), StartBy: time.Now().Add(time.Minute)})
+			marker := signed.RedactionMarker(nil, tc.accessName)
+			if want := "upload S3 input dataset.bin: no access key " + marker; err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("submit = %v; want %q", err, want)
+			}
+			var refusal minio.ErrorResponse
+			if !errors.As(err, &refusal) || refusal.Code != "InvalidAccessKeyId" {
+				t.Fatalf("submit = %v; want it to unwrap to the store's InvalidAccessKeyId", err)
+			}
+			logged := f.logs.String()[before:]
+			if want := "delete the S3 inputs of a task not published: no access key " + marker; !strings.Contains(logged, want) {
+				t.Fatalf("host logs\n%s\nwant %q", logged, want)
+			}
+			for _, value := range []string{keys.AccessKey, keys.SecretKey} {
+				for what, text := range map[string]string{"the submit error": err.Error(), "the host's logs": logged, "Redact": Redact("error naming " + value)} {
+					if strings.Contains(text, value) {
+						t.Fatalf("%s holds the storage key %q:\n%s", what, value, text)
+					}
+				}
+			}
+			if end := f.tasksEnd(t, "pool-s3"); end != 0 {
+				t.Fatalf("%d tasks published", end)
+			}
+		})
 	}
 }

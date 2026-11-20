@@ -441,12 +441,20 @@ deletes, with surrounding whitespace removed. Loading the configuration
 refuses a `storage` block missing either name, or naming a credential with
 no source in `credentials`. A source that fails names the credential and
 the cause: `read storage credential <name>: its environment variable is
-unset or empty`. Either pair is held for redaction before the first storage
-call, so an error the store answers with the access key shows a marker. The
-keys never leave the host: receivers and agents get only the URLs it
-presigns, and neither key is a credential a pool's terms can request. Scope
-the pair to `wherry/<tenant>/` in each pool's bucket
-([Operations](operations-hosts.md#s3-storage)).
+unset or empty`. A store's answer can name the access key that signed the
+request, as `InvalidAccessKeyId` does. Every error that leaves the host's
+storage layer and every line it logs has both key values replaced by their
+markers, `[redacted:...]`, so the error `wherry submit` prints, the MCP
+server's private log and the host's log of a failed cleanup show a marker
+in the key's place; the error still carries the store's response code. This
+holds for the bundle's pair and for a mapped pair alike and whatever the
+keys' length: the two storage keys are replaced exactly, with no minimum
+length, where the receiver's redaction of delivered credentials leaves a
+value shorter than 8 bytes. Both values are also held for the host's general
+redaction before the first storage call. The keys never leave the host:
+receivers and agents get only the URLs it presigns, and neither key is a
+credential a pool's terms can request. Scope the pair to `wherry/<tenant>/`
+in each pool's bucket ([Operations](operations-hosts.md#s3-storage)).
 
 ## The Kafka super user
 
