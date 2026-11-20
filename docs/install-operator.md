@@ -89,8 +89,8 @@ wherry operator tenant host add acme laptop
 This writes your laptop's bundle to `bundles/hosts/acme/laptop.bundle`.
 
 > [!IMPORTANT]
-> Hand-off: copy `bundles/hosts/acme/laptop.bundle` and `kafka-ca.pem` to your laptop's home directory, over a channel
-> you trust. The bundle holds the laptop's Kafka password.
+> Hand-off: copy `bundles/hosts/acme/laptop.bundle` to your laptop's home directory, over a channel you trust. The
+> bundle holds the laptop's Kafka password and the broker's CA.
 
 ## Check that it worked
 

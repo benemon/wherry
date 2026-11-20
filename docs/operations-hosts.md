@@ -4,10 +4,10 @@
 
 1. Ask your operator to create your tenant and entitle it to a pool.
 2. Ask for a host bundle from `wherry operator tenant host add TENANT HOST`.
-3. Install the broker CA if your Kafka cluster uses a private CA.
-4. Run `wherry host init HOST.bundle`.
-5. Configure the credential sources it requests.
-6. Run `wherry host receivers` to check your access.
+   It carries the broker's CA when the cluster uses a private one.
+3. Run `wherry host init HOST.bundle`.
+4. Configure the credential sources it requests.
+5. Run `wherry host receivers` to check your access.
 
 [Set up a host](install-host.md) gives a complete example.
 

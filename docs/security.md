@@ -488,17 +488,40 @@ its host or receiver over a channel you trust.
 
 ### Broker trust
 
-A bundle carries the broker address, the principal and its password, and no
-CA. Every host, receiver and the operator trusts the broker through the
-system's trusted roots, or through the CA file its own configuration names:
-`ca_file` in the host's or receiver's configuration (the host also looks for
-`ca.pem` in its [configuration directory](configuration-host.md#client-configuration),
-by default `~/.config/wherry/ca.pem`) and in `operator.yaml`. `wherry host init`
-asks for the CA only on a terminal, so a host without one has its CA file in
-place before `host init` connects. The Kafka platform issues
-and renews its CA; whoever distributes a private CA keeps each machine's
-file current, and a renewal needs no new bundle. A machine that trusts the
-system roots trusts every CA they hold for the broker's address.
+A bundle carries the broker address, the principal and its password, and,
+when `operator.yaml` names a `ca_file` and the bundle's broker is the
+operator's, that file's certificates as `ca`. The operator trusts the broker
+through `operator.yaml`. A host or receiver trusts it through the `ca_file`
+its own configuration names, else the bundle's `ca`, else the system's
+trusted roots; a `ca` that holds no certificate is refused rather than
+fallen back from. A `ca_file` overrides the bundle, so a stale one hides a
+refreshed CA: `wherry host init BUNDLE` warns when the configuration keeps a
+`ca_file` and the bundle carries a `ca`, and the renewal below removes the
+line. A machine that trusts the system roots trusts every CA they hold for
+the broker's address.
+
+The Kafka platform issues and renews its CA. A renewal means refreshing and
+redistributing bundles, with no new password:
+
+1. Put the new CA in the file `operator.yaml` names as `ca_file`, keeping
+   the old certificate beside it while the brokers still present the old
+   chain.
+2. Run `wherry operator tenant host refresh TENANT HOST` for each host and
+   `wherry operator receiver apply RECEIVER` for each receiver on the
+   operator's broker. Each rewrites its kept bundle with the new `ca` and
+   the same password, and a rerun changes nothing.
+3. Hand each refreshed bundle over as the first was. Each host's user runs
+   `wherry host init BUNDLE`, which replaces the host's copy, and removes
+   any `ca_file` line from the host configuration; a long-lived MCP server
+   restarts to reread the bundle. Each receiver's platform replaces the
+   bundle and restarts the receiver; a `ca_file` in its local configuration
+   is removed, or its file replaced.
+4. Once every bundle is refreshed, the old certificate may leave the
+   operator's file; the next refresh of each bundle drops it there.
+
+A bundle written before the operator trusted the broker through a CA file
+carries no `ca`. A host or receiver running it with no `ca_file` fails
+against a private-CA broker, and the failure names the refresh.
 
 ## Removal and retained data
 
