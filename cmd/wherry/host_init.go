@@ -59,6 +59,15 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 			return fmt.Errorf("%s: %w", path, err)
 		}
 	}
+	// A derived destination that exists is written to, or taken as this host's key or state, only when this configuration
+	// already names it: anything else there is another configuration, or another host's bundle or key, and is left as it
+	// is. Explicit paths are the user's choice and are not checked; the configuration directory is wherry's own, so the
+	// default configuration's files are not checked either.
+	if !paths.Default {
+		if err := refuseForeignFiles(path, paths, file, !changed, bundle != ""); err != nil {
+			return err
+		}
+	}
 	if bundle != "" {
 		contents, err := operator.ReadBundle(bundle)
 		if err != nil {
@@ -443,6 +452,59 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 		}
 	}
 	return nil
+}
+
+// refuseForeignFiles fails when a derived destination of the configuration at path, which exists when exists is set,
+// already exists and is not the artifact the configuration names: the bundle is a destination only when BUNDLE is given
+// (copyBundle), the host key and state directory only when the configuration leaves them to their defaults. An existing
+// configuration names its derived host key and state directory by default, and the bundle its bundle field names; a
+// configuration not yet written names nothing. The error names the destination and the setting that avoids it.
+func refuseForeignFiles(path string, paths busclient.Paths, file busclient.Config, exists, copyBundle bool) error {
+	type destination struct {
+		path, setting, what string
+		named               bool // the configuration names it already
+		dir                 bool // it is a directory
+	}
+	var destinations []destination
+	if copyBundle {
+		destinations = append(destinations, destination{paths.Bundle, "bundle", "bundle", exists && sameFile(file.Bundle, paths.Bundle), false})
+	}
+	if file.HostKey == "" {
+		destinations = append(destinations, destination{paths.HostKey, "host_key", "host key", exists, false})
+	}
+	if file.StateDir == "" {
+		destinations = append(destinations, destination{paths.StateDir, "state_dir", "state directory", exists, true})
+	}
+	for _, d := range destinations {
+		info, err := os.Stat(d.path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if d.named && info.IsDir() == d.dir {
+			continue
+		}
+		advice := ""
+		if copyBundle && d.setting == "bundle" {
+			// With BUNDLE the copy always goes to the derived path; the bundle a configuration names is read as it is.
+			advice = " and run wherry host init without BUNDLE"
+		}
+		return fmt.Errorf("%s exists and is not the %s of configuration %s; set %s in %s to a path of its own%s", d.path, d.what, path, d.setting, path, advice)
+	}
+	return nil
+}
+
+// sameFile reports whether named, a path from a configuration, and path are one existing file.
+func sameFile(named, path string) bool {
+	named, err := busclient.ExpandHome(named)
+	if err != nil || named == "" {
+		return false
+	}
+	a, errA := os.Stat(named)
+	b, errB := os.Stat(path)
+	return errA == nil && errB == nil && os.SameFile(a, b)
 }
 
 // makePrivateDir creates path's missing directories with mode 0700, whatever the umask, and leaves an existing one as

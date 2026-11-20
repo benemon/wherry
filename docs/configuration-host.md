@@ -60,6 +60,18 @@ configuration directory's files. Explicit `bundle`, `host_key` and
 makes the configuration directory mode 0700; elsewhere it creates a
 missing directory for these files with mode 0700 and leaves an existing
 one's mode alone.
+
+Before it writes anything, `host init` refuses when one of these derived
+paths already exists and is not the file the configuration names: another
+configuration at `<path>.bundle.yaml`, another host's key at
+`<path>.host.key`, or a file where `<path>.state/` would go. The error
+names the path and the setting, `bundle`, `host_key` or `state_dir`, that
+avoids it; with `BUNDLE`, the copy always goes to `<path>.bundle.yaml`, so
+a configuration naming its own `bundle` runs `host init` without `BUNDLE`.
+A rerun on an initialised configuration, whose derived files it already
+names, succeeds. Explicit paths are not checked this way, and nor are the
+default configuration's files in the configuration directory.
+
 Git entries contain `url`, optional `credential` and `host_key`.
 An SSH remote requires `host_key`.
 An HTTPS remote refuses `host_key`.

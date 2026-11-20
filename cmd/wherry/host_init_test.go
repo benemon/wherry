@@ -283,3 +283,66 @@ func TestHostInitDefaultPathKeepsItsFiles(t *testing.T) {
 		t.Fatalf("%s holds %+v, %v; want host_key kept and its own bundle named", own, config, err)
 	}
 }
+
+// Before writing anything, init refuses a derived destination that exists and is not this configuration's: another
+// configuration at <path>.bundle.yaml, another host's key at <path>.host.key, or a file at <path>.state. Each is left as
+// it is, as is the configuration, and no key is made. The error names the path and the setting that avoids it. A rerun on
+// an initialised configuration, whose derived files it names, succeeds and keeps its key.
+func TestHostInitRefusesAnotherConfigurationsFiles(t *testing.T) {
+	h := newInitHost(t, nil)
+	noTerminal(t)
+	a := filepath.Join(t.TempDir(), "a")
+	refused := func(blocking, want string) {
+		t.Helper()
+		before, err := os.ReadFile(blocking)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stdout, prompts bytes.Buffer
+		if err := run([]string{"host", "init", h.bundle, "--config-file", a}, &stdout, &prompts); err == nil || err.Error() != want {
+			t.Fatalf("init = %v; want %q", err, want)
+		}
+		if after, err := os.ReadFile(blocking); err != nil || !bytes.Equal(before, after) {
+			t.Fatalf("%s holds %q, %v; want it left as it was", blocking, after, err)
+		}
+		absent(t, a)
+		if stdout.Len() > 0 {
+			t.Fatalf("init printed %q; want no key registered", stdout.String())
+		}
+	}
+	other := a + ".bundle.yaml"
+	if err := writeYAML(other, busclient.Config{Bundle: filepath.Join(filepath.Dir(a), "other.bundle")}); err != nil {
+		t.Fatal(err)
+	}
+	refused(other, other+" exists and is not the bundle of configuration "+a+"; set bundle in "+a+" to a path of its own and run wherry host init without BUNDLE")
+	absent(t, a+".host.key")
+	if err := os.Remove(other); err != nil {
+		t.Fatal(err)
+	}
+	foreign := a + ".host.key"
+	if _, err := trust.GenerateSigningKeyFile(foreign); err != nil {
+		t.Fatal(err)
+	}
+	refused(foreign, foreign+" exists and is not the host key of configuration "+a+"; set host_key in "+a+" to a path of its own")
+	absent(t, other)
+	if err := os.Remove(foreign); err != nil {
+		t.Fatal(err)
+	}
+	state := a + ".state"
+	if err := os.WriteFile(state, []byte("not a directory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refused(state, state+" exists and is not the state directory of configuration "+a+"; set state_dir in "+a+" to a path of its own")
+	absent(t, other)
+	absent(t, foreign)
+	if err := os.Remove(state); err != nil {
+		t.Fatal(err)
+	}
+	keyID, _ := h.init(t, h.bundle, "--config-file", a)
+	h.registeredAt(t, "host-a", foreign, strings.TrimSpace(keyID))
+	for _, args := range [][]string{{h.bundle, "--config-file", a}, {"--config-file", a}} {
+		if again, _ := h.init(t, args...); again != keyID {
+			t.Fatalf("rerun %v registered %s; want the host's key %s kept", args, strings.TrimSpace(again), strings.TrimSpace(keyID))
+		}
+	}
+}

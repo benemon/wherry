@@ -1030,10 +1030,17 @@ is entitled to:
    default configuration, and `<path>.bundle.yaml` beside a configuration at
    any other `<path>`. The copy is mode 0600. The configuration directory
    is made mode 0700; elsewhere, a directory init creates is mode 0700 and
-   an existing one keeps its mode. It replaces any
+   an existing one keeps its mode. It replaces the
    file there atomically, and names it as `bundle` in the configuration, even
-   when the configuration named another bundle. Without `BUNDLE`, it uses the
-   bundle the configuration names, and refuses when it names none.
+   when the configuration named another bundle. Before writing anything it
+   refuses when `<path>.bundle.yaml`, `<path>.host.key` or `<path>.state`
+   exists and is not the file the configuration already names, such as
+   another configuration or another host's bundle or key, naming the path
+   and the setting (`bundle`, `host_key`, `state_dir`) that avoids it; a
+   rerun on an initialised configuration succeeds, and explicit paths and
+   the configuration directory's files are not checked. Without `BUNDLE`,
+   it uses the bundle the configuration names, and refuses when it names
+   none.
 2. On a terminal, when the configuration names no `ca_file` and the
    configuration directory holds no `ca.pem`, Broker offers up to eight
    eligible local CA files, System roots and Other file. Other file asks
