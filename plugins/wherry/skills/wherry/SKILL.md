@@ -154,8 +154,8 @@ goes without them. Leaving a credential out of `credentials` does not
 withhold it. The user withholds one, a billing credential such as an API
 key included, by removing its source from their wherry configuration and
 unsetting its variable where the wherry MCP server runs; when a task must
-not carry a credential `receivers` shows `configured`, tell the user so
-rather than submitting.
+not carry a credential whose `status` in `receivers` is `ready` or
+`unchecked`, tell the user so and do not submit.
 To get files back, add
 `outputs`: `{name, required}` for each file the agent should leave in
 `WHERRY_OUTPUT_DIR`. The prompt the agent receives names all of them.
@@ -236,15 +236,16 @@ with `truncated` set and its full size in `bytes`.
 `submit` returns `INVALID_ARGUMENT` with `auth required: credential NAME is not
 in this host's configuration` when the host has no source for a credential the
 agent requires or the task names, and with `auth required: credential NAME
-has no source: VAR is unset in the process that submits` when such a
-credential's catalog variable is unset. An optional credential the host
-cannot resolve is left out, listed in `unsupplied`, and the agent's prompt
-names it as not supplied; one the host resolves is sent to every run. When
-a run ends naming an optional credential it went without, the host could
-not resolve it at that submit. If `receivers` now shows it `configured`, a
-source or variable arrived since: submit again, naming it with `{name}` so
-the new submit fails rather than go without it again. Otherwise ask the
-user for a source, as below.
+has no source: VAR is unset in the process that submits, and this host's
+configuration names no source for it` when such a credential's catalog
+variable is unset. An optional credential the host cannot resolve is left
+out, listed in `unsupplied`, and the agent's prompt names it as not
+supplied; one the host resolves is sent to every run. When a run ends
+naming an optional credential it went without, the host could not resolve
+it at that submit. If `receivers` now shows its `status` as `ready` or
+`unchecked`, a source or variable arrived since: submit again, naming it
+with `{name}`, so the new submit fails when the host cannot resolve it.
+Otherwise ask the user for a source, as below.
 
 `submit` resolves the run's credentials and encrypts them in the task, so the run
 needs nothing more from this host. When a source fails to resolve, it returns

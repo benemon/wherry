@@ -104,7 +104,8 @@ no entry for a credential whose target is a
 host reads the variable where submits run. Without a terminal it asks
 nothing, prints one line per entitled agent, ready or not, and lists what
 else still has no source. It asks
-nothing about the broker's CA: the bundle carries it. A `ca_file` the
+nothing about the broker's CA: a bundle for the operator's broker carries
+it when `operator.yaml` names a `ca_file`. A `ca_file` the
 configuration keeps overrides the bundle's `ca`, so a stale one hides a
 refreshed CA; `host init BUNDLE` warns when the configuration keeps one and
 the bundle carries a `ca`.
@@ -241,13 +242,13 @@ the harness is started from a launcher without them. Where neither fits,
 an explicit `credentials` entry with a `file` or `command` source is the
 fallback, and wins over the variable.
 
-| Harness | How a variable reaches its MCP server, per its documentation |
+| Harness | How a variable reaches its MCP server, per the linked documentation |
 | --- | --- |
-| Claude Code | the `env` map of the server's entry in `.mcp.json`, or `--env VAR=value` to `claude mcp add` |
-| Codex | `env_vars` of the server's `[mcp_servers.<name>]` table in `~/.codex/config.toml` names the parent variables added, as an allowlist, to the baseline environment Codex gives every server, for example `env_vars = ["CODEX_API_KEY"]`; its `env` table sets literal values |
-| Gemini CLI | the `env` map of the server's `mcpServers` entry in `settings.json`, with a `$VAR` value that expands from the CLI's environment, for example `"GEMINI_API_KEY": "$GEMINI_API_KEY"`; sensitive variables are removed from the inherited environment and need such an entry |
-| Cursor | the `env` map of the server's `mcpServers` entry in `.cursor/mcp.json` |
-| Copilot CLI | the `env` map of the server's entry in its MCP configuration, `~/.copilot/mcp-config.json` |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code/mcp) | Set the `env` map of the server's entry in `.mcp.json`, or pass `--env VAR=value` to `claude mcp add`. |
+| [Codex](https://developers.openai.com/codex/config-reference) | List the parent variables to add to the baseline environment in `env_vars` of the server's `[mcp_servers.<name>]` table in `~/.codex/config.toml`, for example `env_vars = ["CODEX_API_KEY"]`, or set literal values in its `env` table. |
+| [Gemini CLI](https://geminicli.com/docs/tools/mcp-server/) | Forward the variable in the `env` map of the server's `mcpServers` entry in `settings.json` with a `$VAR` value, for example `"GEMINI_API_KEY": "$GEMINI_API_KEY"`, since sensitive variables are removed from the environment its servers inherit. |
+| [Cursor](https://cursor.com/docs/mcp) | Set the `env` map of the server's `mcpServers` entry in `.cursor/mcp.json`. |
+| [Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers) | Set the `env` map of the server's entry in `~/.copilot/mcp-config.json`. |
 
 Forward a variable by name where the harness allows it, as Codex's
 `env_vars` and Gemini CLI's `$VAR` do. A literal value written into such an

@@ -173,7 +173,8 @@ affected signature first.
 
 ### Catalog agents
 
-An agent's name is its credential catalog id. The catalog names the
+An agent named by a usable credential catalog id takes its model
+credentials from the catalog. The catalog names the
 environment variable each model provider and agent harness reads: the
 providers of [models.dev](https://models.dev), whose `api.json` wherry embeds
 as a snapshot with each provider's models removed, and wherry's own entries

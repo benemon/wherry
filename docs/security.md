@@ -50,7 +50,8 @@ once, with `auth required: credential <name> is not in this host's
 configuration`, when the host has no source for a required credential of
 the placed agent, for a named one, or for a task credential, and with
 `auth required: credential <name> has no source: <VAR> is unset in the
-process that submits` when its catalog variable is unset. A configured
+process that submits, and this host's configuration names no source for
+it` when its catalog variable is unset. A configured
 source that fails refuses the task naming the credential and the cause, and
 is never passed over for the credential's variable. When the placed agent's
 name is a catalog entry reading several variables, as `google` is, `submit`
