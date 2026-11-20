@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/benemon/wherry/internal/catalog/snapshot"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
 )
@@ -154,11 +155,11 @@ func TestCatalogFilesAreCanonical(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		entries, err := Strip(data)
+		entries, err := snapshot.Strip(data)
 		if err != nil {
 			t.Fatal(err)
 		}
-		encoded, err := Encode(entries)
+		encoded, err := snapshot.Encode(entries)
 		if err != nil {
 			t.Fatal(err)
 		}

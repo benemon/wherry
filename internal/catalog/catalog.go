@@ -1,14 +1,13 @@
 // Package catalog is the credential catalog: which environment variables each model provider and agent harness reads,
 // so that an agent named by a catalog id needs no credential entry in its pool's terms. The data is a committed snapshot
 // of models.dev's providers, models.dev.json, and wherry's own harness entries, harness.json, both embedded; nothing is
-// fetched at build or run time. go run ./internal/catalog/update refreshes the snapshot.
+// fetched at build or run time. go run ./internal/catalog/update refreshes the snapshot; the snapshot package reads and
+// writes the files' form.
 package catalog
 
 import (
-	"bytes"
 	"embed"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -154,39 +153,4 @@ func (entry Entry) Credentials() []Credential {
 // each _ replaced by -, so CLAUDE_CODE_OAUTH_TOKEN gives claude-code-oauth-token.
 func DerivedName(variable string) string {
 	return strings.ToLower(strings.ReplaceAll(variable, "_", "-"))
-}
-
-// Encode writes entries as a catalog file: the ids sorted, each entry's keys sorted, indented by two spaces, with no
-// HTML escaping and a final line feed, so that two writes of the same data are the same bytes. Entries are the raw
-// objects, so fields wherry does not read are kept.
-func Encode(entries map[string]map[string]any) ([]byte, error) {
-	if entries == nil {
-		return nil, errors.New("catalog: no entries")
-	}
-	var buffer bytes.Buffer
-	encoder := json.NewEncoder(&buffer)
-	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(entries); err != nil {
-		return nil, err
-	}
-	return buffer.Bytes(), nil
-}
-
-// Strip decodes a models.dev api.json, or a catalog file, into its entries with each one's models removed. Numbers
-// keep their written form.
-func Strip(data []byte) (map[string]map[string]any, error) {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
-	var entries map[string]map[string]any
-	if err := decoder.Decode(&entries); err != nil {
-		return nil, err
-	}
-	if decoder.More() {
-		return nil, errors.New("trailing data after the JSON object")
-	}
-	for _, entry := range entries {
-		delete(entry, "models")
-	}
-	return entries, nil
 }

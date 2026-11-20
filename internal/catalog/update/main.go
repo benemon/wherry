@@ -1,8 +1,9 @@
 // Command update refreshes the credential catalog's models.dev snapshot. It fetches https://models.dev/api.json, drops
 // each provider's models, and rewrites models.dev.json and SOURCE in the catalog directory, only once the whole response
-// is read and decoded; a failed fetch, decode or write leaves both files as they were. The output is deterministic: the
-// same response bytes give the same models.dev.json. Run it from the repository root as go run ./internal/catalog/update
-// and commit the result.
+// is read and decoded; a failed fetch, decode or write leaves both files as they were, and the two change together or
+// not at all. The output is deterministic: the same response bytes give the same models.dev.json. Run it from the
+// repository root as go run ./internal/catalog/update and commit the result. It builds from the standard library and
+// the catalog's snapshot package alone.
 package main
 
 import (
@@ -12,12 +13,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
-	"github.com/benemon/wherry/internal/catalog"
+	"github.com/benemon/wherry/internal/catalog/snapshot"
 )
 
 const defaultURL = "https://models.dev/api.json"
@@ -45,11 +48,11 @@ func update(ctx context.Context, client *http.Client, url, dir string, now time.
 	if err != nil {
 		return err
 	}
-	entries, err := catalog.Strip(data)
+	entries, err := snapshot.Strip(data)
 	if err != nil {
 		return fmt.Errorf("%s: %w", url, err)
 	}
-	encoded, err := catalog.Encode(entries)
+	encoded, err := snapshot.Encode(entries)
 	if err != nil {
 		return err
 	}
@@ -82,37 +85,78 @@ func fetch(ctx context.Context, client *http.Client, url string) ([]byte, error)
 	return data, nil
 }
 
-// writeFiles writes each file into dir through a temporary file in dir, renaming them into place only once every one
-// is written, so a failed write leaves the committed files unchanged.
+// rename is a variable so tests can fail a rename after the first one succeeded.
+var rename = os.Rename
+
+// writeFiles writes each file into dir through a temporary file in dir, then commits them all or none: a hard link keeps
+// each existing file under a backup name, the temporary files are renamed into place one by one, and a rename that
+// fails has every file renamed so far put back from its backup, so a failure at any point leaves the committed files as
+// they were. A target that exists and is not a regular file is refused before anything is renamed. Nothing temporary
+// is left behind.
 func writeFiles(dir string, files map[string][]byte) (err error) {
 	var temporary []string
 	defer func() {
-		if err != nil {
-			for _, path := range temporary {
-				os.Remove(path)
-			}
+		for _, path := range temporary {
+			os.Remove(path)
 		}
 	}()
-	renames := map[string]string{}
-	for name, data := range files {
+	names := slices.Sorted(maps.Keys(files))
+	targets := map[string]string{}
+	for _, name := range names {
+		target := filepath.Join(dir, name)
+		if info, statErr := os.Lstat(target); statErr == nil && !info.Mode().IsRegular() {
+			return fmt.Errorf("%s exists and is not a regular file", target)
+		} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			return statErr
+		}
 		file, err := os.CreateTemp(dir, "."+name+".*")
 		if err != nil {
 			return err
 		}
 		temporary = append(temporary, file.Name())
-		if _, err := file.Write(data); err != nil {
+		if _, err := file.Write(files[name]); err != nil {
 			return errors.Join(err, file.Close())
 		}
 		// CreateTemp opens the file mode 0600; the committed files are readable by everyone.
 		if err := errors.Join(file.Chmod(0o644), file.Sync(), file.Close()); err != nil {
 			return err
 		}
-		renames[file.Name()] = filepath.Join(dir, name)
+		targets[name] = file.Name()
 	}
-	for from, to := range renames {
-		if err := os.Rename(from, to); err != nil {
+	// Each existing file is kept under a second name before any is replaced; the link shares the file, so nothing is
+	// copied and the original is whole whatever happens to the name it was committed under.
+	backups := map[string]string{}
+	for _, name := range names {
+		target := filepath.Join(dir, name)
+		if _, statErr := os.Lstat(target); errors.Is(statErr, os.ErrNotExist) {
+			continue
+		}
+		// A backup left by an interrupted run is stale: the committed file is the one that counts.
+		backup := filepath.Join(dir, "."+name+".backup")
+		if err := os.Remove(backup); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
+		if err := os.Link(target, backup); err != nil {
+			return err
+		}
+		temporary = append(temporary, backup)
+		backups[name] = backup
+	}
+	var committed []string
+	for _, name := range names {
+		if err := rename(targets[name], filepath.Join(dir, name)); err != nil {
+			var restore []error
+			for _, done := range committed {
+				target := filepath.Join(dir, done)
+				if backup, existed := backups[done]; existed {
+					restore = append(restore, os.Rename(backup, target))
+				} else {
+					restore = append(restore, os.Remove(target))
+				}
+			}
+			return errors.Join(append([]error{err}, restore...)...)
+		}
+		committed = append(committed, name)
 	}
 	return nil
 }

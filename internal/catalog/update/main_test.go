@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -204,4 +206,79 @@ func TestUpdateKeepsTheCommittedFilesOnAFailedWrite(t *testing.T) {
 		t.Errorf("update = %v; want a permission error", err)
 	}
 	unchanged()
+}
+
+// The commit is all or nothing: when the second rename fails after the first succeeded, the file renamed first is put
+// back, both committed files read as before, and no temporary or backup file is left.
+func TestUpdateRestoresTheFirstFileWhenTheSecondRenameFails(t *testing.T) {
+	server, _ := fixtureServer(t, serve)
+	dir, unchanged := committed(t)
+	original := rename
+	t.Cleanup(func() { rename = original })
+	var renamed []string
+	rename = func(from, to string) error {
+		if len(renamed) == 1 {
+			return errors.New("injected rename failure")
+		}
+		renamed = append(renamed, filepath.Base(to))
+		return original(from, to)
+	}
+	err := update(context.Background(), server.Client(), server.URL+"/api.json", dir, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "injected rename failure") {
+		t.Fatalf("update = %v; want the injected failure", err)
+	}
+	// SOURCE sorts before models.dev.json, so SOURCE was committed and then put back.
+	if !slices.Equal(renamed, []string{"SOURCE"}) {
+		t.Errorf("renamed %v before the failure; want SOURCE alone", renamed)
+	}
+	unchanged()
+}
+
+// A target that is not a regular file, as a directory left at SOURCE is, refuses the commit before any rename, so the
+// snapshot keeps its bytes and the directory is left.
+func TestUpdateRefusesADirectoryAtATarget(t *testing.T) {
+	server, _ := fixtureServer(t, serve)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "models.dev.json"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "SOURCE"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SOURCE", "keep"), []byte("old-source"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := update(context.Background(), server.Client(), server.URL+"/api.json", dir, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "is not a regular file") {
+		t.Fatalf("update = %v; want the directory refused", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "models.dev.json")); err != nil || string(got) != "old" {
+		t.Errorf("snapshot changed to %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "SOURCE", "keep")); err != nil || string(got) != "old-source" {
+		t.Errorf("the directory at SOURCE changed: %q, %v", got, err)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 2 {
+		t.Errorf("directory holds %d entries after the refusal; want the two it had", len(entries))
+	}
+}
+
+// The updater builds from the standard library and the catalog's snapshot package alone: the runtime catalog, with its
+// wire rules, signing and plugin dependencies, is not among its dependencies.
+func TestUpdateDependsOnTheStandardLibraryAndTheSnapshotPackageAlone(t *testing.T) {
+	command := exec.Command("go", "list", "-deps", "-f", "{{if not .Standard}}{{.ImportPath}}{{end}}", ".")
+	out, err := command.Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	var deps []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line != "" {
+			deps = append(deps, line)
+		}
+	}
+	want := []string{"github.com/benemon/wherry/internal/catalog/snapshot", "github.com/benemon/wherry/internal/catalog/update"}
+	if !slices.Equal(deps, want) {
+		t.Errorf("dependencies outside the standard library:\n%s\nwant %v", out, want)
+	}
 }
