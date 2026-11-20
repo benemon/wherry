@@ -177,8 +177,8 @@ its own ([Broker trust](security.md#broker-trust)). A host bundle also
 holds the tenant's S3 key pair as `storage` once
 [`tenant storage`](#wherry-operator-tenant-storage-tenant) recorded it; a
 receiver bundle never does. The bundle is the invite: each command that
-writes or rewrites one prints its path and the next step, `wherry host init
-<file>` for a host and the platform's bundle step for a receiver.
+writes or rewrites one prints its path and the next step:
+`wherry host init <file>` for a host, and the platform's bundle step for a receiver.
 `tenant host add` refuses a host that exists unless given `--force`. `receiver apply` of a receiver that exists
 updates its configuration, and replaces its bundle only when the broker
 address or the CA changed, keeping the password; `tenant host refresh` does
@@ -571,8 +571,9 @@ its bundle to `bundles/hosts/<tenant>/<host>.bundle`, naming the broker in
 `operator.yaml`, carrying its `ca_file`'s certificates as `ca` when it
 names one, and the tenant's S3 key pair as `storage` when
 [`tenant storage`](#wherry-operator-tenant-storage-tenant) recorded one. It
-prints `wrote <bundle>; hand it to the host, where wherry host init <file>
-installs it`: the bundle carries everything the operator hands over. It
+prints
+`wrote <bundle>; hand it to the host, where wherry host init <file> installs it`:
+the bundle carries everything the operator hands over. It
 refuses a host that exists, and an existing bundle file,
 unless given [`--force`](#operator-commands). For a host that exists,
 `--force` reissues its identity: it records nothing and creates no topic. It
