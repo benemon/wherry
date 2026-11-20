@@ -195,12 +195,16 @@ func (h *Host) resubmit(ctx context.Context, runID string, lost bool) (string, e
 	if i := slices.IndexFunc(terms.Agents, func(agent operator.AgentTerms) bool { return agent.Name == submission.Wherry.Placement.Agent }); i >= 0 {
 		agent = terms.Agents[i]
 	}
-	if submission.Wherry.Supplied, err = h.supplied(agent, local.Task.Wherry.Supplied); err != nil {
+	// The replacement resolves the agent's current terms afresh, as a new submit would: every required credential, and
+	// every optional one this host resolves now. A catalog variable since unset leaves its credential out; an explicit
+	// source that fails is an error, and the run keeps waiting for a later pass.
+	resolver := newResolver(ctx, wire.RFC3339(submission.Wherry.TaskEndedBy))
+	if submission.Wherry.Supplied, _, err = h.supplied(agent, nil, resolver); err != nil {
 		return "", err
 	}
 	var store *store
 	if len(submission.Wherry.S3Inputs)+len(s3OutputNames(submission.Wherry.Outputs)) > 0 {
-		if store, err = h.bucket(ctx, local.Pool, terms.Storage); err != nil {
+		if store, err = h.bucket(ctx, local.Pool, terms.Storage, resolver); err != nil {
 			return "", err
 		}
 	}
@@ -208,7 +212,7 @@ func (h *Host) resubmit(ctx context.Context, runID string, lost bool) (string, e
 	if _, err := rand.Read(redactionKey); err != nil {
 		return "", err
 	}
-	encoded, err := h.enveloped(ctx, &submission, terms, poolKey, store, redactionKey)
+	encoded, err := h.enveloped(ctx, &submission, terms, poolKey, store, redactionKey, resolver)
 	if err != nil {
 		return "", err
 	}

@@ -40,6 +40,18 @@ func (source Source) Validate() error {
 	return nil
 }
 
+// Key identifies the source: two sources with one key read one value, so a host resolving a submission runs each key
+// once. It is not a value and names no secret, though it names a file's path or a command.
+func (source Source) Key() string {
+	switch {
+	case source.Env != "":
+		return "env\x00" + source.Env
+	case len(source.Command) > 0:
+		return "command\x00" + strings.Join(source.Command, "\x00")
+	}
+	return "file\x00" + source.File
+}
+
 // TaskEndByEnv is the variable a command source's child reads its task's task_ended_by from, as RFC 3339.
 const TaskEndByEnv = "WHERRY_TASK_END_BY"
 

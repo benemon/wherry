@@ -117,22 +117,22 @@ func coderTask(input SubmitInput) SubmitInput {
 	return input
 }
 
-// An optional agent credential is delivered only when the task requests it, whether or not the host has a source for
-// it; a required one is delivered unrequested, and a task credential with a target is not a request.
-func TestAnOptionalCredentialIsDeliveredOnlyOnRequest(t *testing.T) {
+// An optional agent credential is supplied whenever this host resolves it, named in the task or not; a required one is
+// supplied unnamed, a task credential with a target is no request, and nothing is left unsupplied while the host has a
+// source for every credential.
+func TestAnOptionalCredentialIsSuppliedWhenItResolves(t *testing.T) {
 	gh := []wire.TaskCredential{{Name: "github-token", File: "gh"}}
 	for name, test := range map[string]struct {
-		input       SubmitInput
-		unrequested []string
-		supplied    []string
-		enveloped   []string
+		input     SubmitInput
+		supplied  []string
+		enveloped []string
 	}{
-		"unrequested":                        {SubmitInput{}, []string{"github-token"}, []string{"openai"}, []string{"openai"}},
-		"requested":                          {SubmitInput{Requested: []string{"github-token"}}, nil, []string{"openai", "github-token"}, []string{"github-token", "openai"}},
-		"requested twice":                    {SubmitInput{Requested: []string{"github-token", "github-token"}}, nil, []string{"openai", "github-token"}, []string{"github-token", "openai"}},
-		"a required one requested":           {SubmitInput{Requested: []string{"openai"}}, []string{"github-token"}, []string{"openai"}, []string{"openai"}},
-		"a task credential of the name":      {SubmitInput{Credentials: gh}, []string{"github-token"}, []string{"openai"}, []string{"github-token", "openai"}},
-		"requested beside a task credential": {SubmitInput{Credentials: gh, Requested: []string{"github-token"}}, nil, []string{"openai", "github-token"}, []string{"github-token", "openai"}},
+		"unnamed":                            {SubmitInput{}, []string{"openai", "github-token"}, []string{"github-token", "openai"}},
+		"requested":                          {SubmitInput{Requested: []string{"github-token"}}, []string{"openai", "github-token"}, []string{"github-token", "openai"}},
+		"requested twice":                    {SubmitInput{Requested: []string{"github-token", "github-token"}}, []string{"openai", "github-token"}, []string{"github-token", "openai"}},
+		"a required one requested":           {SubmitInput{Requested: []string{"openai"}}, []string{"openai", "github-token"}, []string{"github-token", "openai"}},
+		"a task credential of the name":      {SubmitInput{Credentials: gh}, []string{"openai", "github-token"}, []string{"github-token", "openai"}},
+		"requested beside a task credential": {SubmitInput{Credentials: gh, Requested: []string{"github-token"}}, []string{"openai", "github-token"}, []string{"github-token", "openai"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t)
@@ -143,8 +143,8 @@ func TestAnOptionalCredentialIsDeliveredOnlyOnRequest(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !slices.Equal(submitted.Unrequested, test.unrequested) {
-				t.Fatalf("unrequested %v; want %v", submitted.Unrequested, test.unrequested)
+			if submitted.Unsupplied != nil {
+				t.Fatalf("unsupplied %v; want none, the host having a source for every credential", submitted.Unsupplied)
 			}
 			task := receiver.claim(t, f.ctx, submitted.RunID)[0]
 			if binding := task.submission.Wherry; !slices.Equal(binding.Supplied, test.supplied) || !slices.Equal(binding.Credentials, test.input.Credentials) {
@@ -169,6 +169,31 @@ func TestAnOptionalCredentialIsDeliveredOnlyOnRequest(t *testing.T) {
 				t.Fatalf("local record task credentials %v; want %v", local.TaskCredentials, taskCredentials)
 			}
 		})
+	}
+}
+
+// unsupplied names only the optional credentials this host could not resolve: an optional credential without a source
+// is left out and the submit goes ahead, where naming it fails the submit before anything is published.
+func TestUnsuppliedNamesTheOptionalCredentialsLeftOut(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = bothOffers() })
+	submitted, err := f.host.Submit(f.ctx, coderTask(SubmitInput{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(submitted.Unsupplied, []string{"github-token"}) {
+		t.Fatalf("unsupplied %v; want github-token, which has no source", submitted.Unsupplied)
+	}
+	if task := receiver.claim(t, f.ctx, submitted.RunID)[0]; !slices.Equal(task.submission.Wherry.Supplied, []string{"openai"}) {
+		t.Fatalf("supplied %v; want openai alone", task.submission.Wherry.Supplied)
+	}
+	_, err = f.host.Submit(f.ctx, coderTask(SubmitInput{Requested: []string{"github-token"}}))
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "auth required: credential github-token is not in this host's configuration") {
+		t.Fatalf("submit naming the credential = %v; want it refused auth required", err)
+	}
+	if records, _ := readTasks(f.ctx, f.service.Operator, "pool-a"); len(records) != 1 {
+		t.Fatalf("%d tasks published; want the first alone", len(records))
 	}
 }
 
@@ -199,11 +224,10 @@ func TestSubmitRefusesAnUnmetRequest(t *testing.T) {
 	}
 }
 
-// A replacement supplies, of the agent's current terms, the required credentials and those the original supplied: a
-// requested credential is still delivered, an unrequested one still withheld though the host has a source for it, a
-// credential the terms add as optional or remove is not supplied, one they make required is, and one they make optional
-// after submit stays supplied.
-func TestAReplacementKeepsTheRequests(t *testing.T) {
+// A replacement resolves the agent's current terms afresh, as a new submit would: every required credential, and every
+// optional one the host resolves now, whether or not the original named it; a credential the terms removed is dropped,
+// an optional one they added is supplied when the host has a source, and one they make required is required.
+func TestAReplacementResolvesTheTermsAfresh(t *testing.T) {
 	vault := operator.AgentCredential{TaskCredential: wire.TaskCredential{Name: "vault-token", Env: "VAULT_TOKEN"}, Required: new(bool)}
 	for name, test := range map[string]struct {
 		requested []string
@@ -211,11 +235,11 @@ func TestAReplacementKeepsTheRequests(t *testing.T) {
 		supplied  []string
 	}{
 		"requested":                            {[]string{"github-token"}, nil, []string{"openai", "github-token"}},
-		"unrequested":                          {nil, nil, []string{"openai"}},
-		"an optional credential added":         {nil, func(agent *operator.AgentTerms) { agent.Credentials = append(agent.Credentials, vault) }, []string{"openai"}},
-		"a requested credential removed":       {[]string{"github-token"}, func(agent *operator.AgentTerms) { agent.Credentials = agent.Credentials[:1] }, []string{"openai"}},
+		"unnamed":                              {nil, nil, []string{"openai", "github-token"}},
+		"an optional credential added":         {nil, func(agent *operator.AgentTerms) { agent.Credentials = append(agent.Credentials, vault) }, []string{"openai", "github-token", "vault-token"}},
+		"a supplied credential removed":        {[]string{"github-token"}, func(agent *operator.AgentTerms) { agent.Credentials = agent.Credentials[:1] }, []string{"openai"}},
 		"an optional credential made required": {nil, func(agent *operator.AgentTerms) { agent.Credentials[1].Required = nil }, []string{"openai", "github-token"}},
-		"a required credential made optional":  {nil, func(agent *operator.AgentTerms) { agent.Credentials[0].Required = new(bool) }, []string{"openai"}},
+		"a required credential made optional":  {nil, func(agent *operator.AgentTerms) { agent.Credentials[0].Required = new(bool) }, []string{"openai", "github-token"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t)

@@ -237,8 +237,10 @@ func TestRoundTrip(t *testing.T) {
 		Broker: address, CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}
 	dir := t.TempDir()
 	optional := false
+	// The agent's model credential targets a catalog variable, which the host reads with no configuration entry; the
+	// optional github-token targets GH_TOKEN, which no catalog entry reads.
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{
-		{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}},
+		{TaskCredential: wire.TaskCredential{Name: "anthropic-api-key", Env: "ANTHROPIC_API_KEY"}},
 		{TaskCredential: wire.TaskCredential{Name: "github-token", Env: "GH_TOKEN"}, Required: &optional},
 	}}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	bucket := s3Oracle(t)
@@ -313,16 +315,17 @@ func TestRoundTrip(t *testing.T) {
 	if err := os.WriteFile(deployPath, []byte(deployText), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// The agent's credential comes from the host's environment and the task's from a command; the host has no source
-	// for the agent's optional credential.
-	t.Setenv("WHERRY_ROUNDTRIP_MODEL", credentialText)
-	t.Setenv("WHERRY_ROUNDTRIP_GITHUB", "unrequested-github-token")
+	// The agent's credential comes from its own variable in the submitting process, with no entry in the host's
+	// configuration, and the task's from a command; the host has no source for the agent's optional credential, whose
+	// variable is set but, being in no catalog entry, is not read.
+	t.Setenv("ANTHROPIC_API_KEY", credentialText)
+	t.Setenv("GH_TOKEN", "github-token-never-read")
 	caFile := filepath.Join(dir, "ca.pem")
 	if err := os.WriteFile(caFile, []byte(ca), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	hostConfig := busclient.Config{Bundle: hostBundle, CAFile: caFile, HostKey: filepath.Join(dir, "host.key"), StateDir: filepath.Join(dir, "host-state"),
-		Credentials: map[string]credential.Source{"model": {Env: "WHERRY_ROUNDTRIP_MODEL"}, "deploy-key": {Command: []string{"cat", deployPath}}, "github-token": {Env: "WHERRY_ROUNDTRIP_GITHUB"}}}
+		Credentials: map[string]credential.Source{"deploy-key": {Command: []string{"cat", deployPath}}}}
 	if _, _, err := busclient.Init(ctx, hostConfig); err != nil {
 		t.Fatal(err)
 	}
@@ -399,18 +402,18 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if len(runs) != 1 || runs[0].ID != submitted.RunID || string(runs[0].Prompt) == "" ||
 		len(runs[0].Inputs) != 1 || runs[0].Inputs[0].Name != "data.csv" || string(runs[0].Inputs[0].Data) != "a,b\n" ||
-		!reflect.DeepEqual(runs[0].Credentials, []pluginsdk.Secret{{Name: "model", Env: "MODEL_API_KEY", Value: []byte(credentialText)}, {Name: "deploy-key", File: "id_ed25519", Value: []byte(deployText)}}) ||
+		!reflect.DeepEqual(runs[0].Credentials, []pluginsdk.Secret{{Name: "anthropic-api-key", Env: "ANTHROPIC_API_KEY", Value: []byte(credentialText)}, {Name: "deploy-key", File: "id_ed25519", Value: []byte(deployText)}}) ||
 		!strings.Contains(string(runs[0].Prompt), "Input files: /fake/inputs/data.csv.") ||
-		!strings.Contains(string(runs[0].Prompt), "This run's credentials are model, deploy-key, github-token (not supplied).") {
-		t.Fatalf("plugin runs %+v; want one dispatch with the host's credentials at their targets, the input, and the unrequested credential named not supplied", runs)
+		!strings.Contains(string(runs[0].Prompt), "This run's credentials are anthropic-api-key, deploy-key, github-token (not supplied).") {
+		t.Fatalf("plugin runs %+v; want one dispatch with the variable's value under the agent's target, the task credential, the input, and the unresolvable credential named not supplied", runs)
 	}
-	if !slices.Equal(submitted.Unrequested, []string{"github-token"}) {
-		t.Fatalf("submit unrequested %v; want the optional credential the host has a source for", submitted.Unrequested)
+	if !slices.Equal(submitted.Unsupplied, []string{"github-token"}) {
+		t.Fatalf("submit unsupplied %v; want the optional credential the host could not resolve", submitted.Unsupplied)
 	}
 	if configured.Credential != platformText || configured.Pool != "pool-a" || configured.Agent != "claude" || strings.Contains(string(configured.Config), "credential") {
 		t.Fatalf("plugin configured with %+v; want the source's platform credential, the profile's settings and no credential key", configured)
 	}
-	for _, secret := range []string{credentialText, platformText, deployText} {
+	for _, secret := range []string{credentialText, platformText, deployText, "github-token-never-read"} {
 		if strings.Contains(logs.String(), secret) {
 			t.Fatalf("receiver or plugin logs carry a credential:\n%s", logs.String())
 		}

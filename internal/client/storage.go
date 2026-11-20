@@ -90,9 +90,10 @@ func (h *Host) credentialed(pool string) bool {
 
 // bucket opens a pool's bucket, path-style, with this host's storage keys, which never leave the host: the receiver
 // and the agent see only URLs it presigns. The keys are the credentials the configuration maps the pool to, which win,
-// else the pair the bundle carries; either pair is held for redaction before any storage call, whatever its length,
-// and the store replaces both values in everything it returns or logs.
-func (h *Host) bucket(ctx context.Context, pool string, storage *operator.Storage) (*store, error) {
+// resolved through resolver so a source a credential of the submission shares runs once, else the pair the bundle
+// carries; either pair is held for redaction before any storage call, whatever its length, and the store replaces both
+// values in everything it returns or logs.
+func (h *Host) bucket(ctx context.Context, pool string, storage *operator.Storage, resolver *resolver) (*store, error) {
 	keyNames, mapped := h.storage[pool]
 	if !h.credentialed(pool) {
 		return nil, fmt.Errorf("%w: this host's configuration has no storage credential for pool %s's S3 inputs and outputs, and its bundle carries no storage keys", ErrInvalidInput, pool)
@@ -105,7 +106,7 @@ func (h *Host) bucket(ctx context.Context, pool string, storage *operator.Storag
 	if mapped {
 		names = [2]string{keyNames.AccessKey, keyNames.SecretKey}
 		for i, name := range names {
-			key, err := h.credentials[name].Resolve(ctx)
+			key, err := resolver.resolve(name, h.credentials[name])
 			if err != nil {
 				return nil, fmt.Errorf("read storage credential %s: %w", name, err)
 			}
@@ -266,7 +267,7 @@ func (h *Host) DownloadOutputs(ctx context.Context, runID string, result AwaitRe
 			return nil, nil, err
 		}
 		storage := v.state.Pools[local.Pool].Storage
-		store, err := h.bucket(ctx, local.Pool, storage)
+		store, err := h.bucket(ctx, local.Pool, storage, newResolver(ctx, ""))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -385,7 +386,7 @@ func (h *Host) Cleanup(ctx context.Context, runID string) error {
 		root = runID
 	}
 	storage := r.v.state.Pools[r.pool].Storage
-	store, err := h.bucket(ctx, r.pool, storage)
+	store, err := h.bucket(ctx, r.pool, storage, newResolver(ctx, ""))
 	if err != nil {
 		return err
 	}

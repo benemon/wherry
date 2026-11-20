@@ -29,7 +29,7 @@ func TestStorageKeysAreRedactedWhateverWasHeldFirst(t *testing.T) {
 		accessName: {Env: "WHERRY_TEST_ORDER_ACCESS"},
 		secretName: {Env: "WHERRY_TEST_ORDER_SECRET"},
 	}}
-	store, err := h.bucket(context.Background(), "pool-s3", &operator.Storage{Endpoint: "https://s3.example.test", Bucket: testBucket})
+	store, err := h.bucket(context.Background(), "pool-s3", &operator.Storage{Endpoint: "https://s3.example.test", Bucket: testBucket}, newResolver(context.Background(), ""))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -864,12 +864,16 @@ func (r *runView) model() string {
 }
 
 // markers maps each redaction marker the run's key gives to its name: the credentials this host configures, the
-// run's task credentials, and its S3 objects' URLs. The feed carries only the markers.
+// credentials the persisted submission supplied, among them those read from a catalog variable with no configuration
+// entry, the run's task credentials, and its S3 objects' URLs. The feed carries only the markers.
 func (h *Host) markers(local *runRecord) map[string]string {
 	if local == nil || len(local.RedactionKey) != 32 {
 		return nil
 	}
 	names := slices.Concat(slices.Collect(maps.Keys(h.credentials)), local.TaskCredentials)
+	if local.Task != nil {
+		names = append(names, local.Task.Wherry.Supplied...)
+	}
 	for _, input := range local.S3Inputs {
 		names = append(names, signed.S3InputValue(input))
 	}

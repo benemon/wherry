@@ -1398,8 +1398,8 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	}
 	if a := got["receiver-a"]; a.Status != "live" || a.Capacity != 3 || a.InFlight != 1 ||
 		!reflect.DeepEqual(a.Profiles, []Profile{
-			{Name: "lab", Plugin: "nomad", Agent: "claude", InlineLimit: 49152, Credentials: []Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true, Replicas: 2, InFlight: 1},
-			{Name: "cloud", Plugin: "aws", Agent: "coder", Credentials: []Credential{{Name: "openai", Env: "OPENAI_API_KEY", Configured: true}, {Name: "github-token", Env: "GH_TOKEN", Description: "GitHub token for gh", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
+			{Name: "lab", Plugin: "nomad", Agent: "claude", InlineLimit: 49152, Credentials: []Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true, Source: SourceFile, Status: StatusReady}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true, Replicas: 2, InFlight: 1},
+			{Name: "cloud", Plugin: "aws", Agent: "coder", Credentials: []Credential{{Name: "openai", Env: "OPENAI_API_KEY", Configured: true, Source: SourceFile, Status: StatusReady}, {Name: "github-token", Env: "GH_TOKEN", Description: "GitHub token for gh", Optional: true, Status: StatusMissing}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
 		}) {
 		t.Fatalf("live receiver %#v", a)
 	}
@@ -1989,8 +1989,8 @@ func TestReceiversListsALiveReceiverWithNoOffers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(receivers) != 1 || receivers[0].Status != "live" || !reflect.DeepEqual(receivers[0].Profiles, []Profile{
-		{Name: "lab", Plugin: "nomad", Agent: "claude", Credentials: []Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: false},
-		{Name: "cloud", Plugin: "aws", Agent: "coder", Credentials: []Credential{{Name: "openai", Env: "OPENAI_API_KEY", Configured: true}, {Name: "github-token", Env: "GH_TOKEN", Description: "GitHub token for gh", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
+		{Name: "lab", Plugin: "nomad", Agent: "claude", Credentials: []Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true, Source: SourceFile, Status: StatusReady}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: false},
+		{Name: "cloud", Plugin: "aws", Agent: "coder", Credentials: []Credential{{Name: "openai", Env: "OPENAI_API_KEY", Configured: true, Source: SourceFile, Status: StatusReady}, {Name: "github-token", Env: "GH_TOKEN", Description: "GitHub token for gh", Optional: true, Status: StatusMissing}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
 	}) {
 		t.Fatalf("receivers %#v; want the live receiver with its configured profiles, none ready", receivers)
 	}

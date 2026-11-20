@@ -606,7 +606,7 @@ func TestStorageKeysResolveThroughSources(t *testing.T) {
 		"s3-secret": {Command: []string{"printf", secret + "\n"}},
 	}}
 	pool := &operator.Storage{Endpoint: "https://s3.example.test", Bucket: testBucket}
-	store, err := h.bucket(context.Background(), "pool-s3", pool)
+	store, err := h.bucket(context.Background(), "pool-s3", pool, newResolver(context.Background(), ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,7 +622,7 @@ func TestStorageKeysResolveThroughSources(t *testing.T) {
 	}
 	for name, source := range map[string]credential.Source{"open file": {File: path}, "unset env": {Env: "WHERRY_TEST_STORAGE_UNSET"}, "failing command": {Command: []string{"sh", "-c", "printf " + secret + "; exit 2"}}} {
 		h.credentials["s3-secret"] = source
-		_, err := h.bucket(context.Background(), "pool-s3", pool)
+		_, err := h.bucket(context.Background(), "pool-s3", pool, newResolver(context.Background(), ""))
 		if err == nil || !strings.HasPrefix(err.Error(), "read storage credential s3-secret: its ") {
 			t.Fatalf("bucket with a secret key from a %s: %v, want the credential named", name, err)
 		}
@@ -805,7 +805,7 @@ func TestPaddedStorageKeyIsRedacted(t *testing.T) {
 	h := &Host{storage: map[string]StorageConfig{"pool-s3": {AccessKey: "padded-access", SecretKey: "padded-secret"}},
 		credentials: map[string]credential.Source{"padded-access": {File: access}, "padded-secret": {File: secret}}}
 	ctx := context.Background()
-	store, err := h.bucket(ctx, "pool-s3", &operator.Storage{Endpoint: server.URL, Bucket: testBucket})
+	store, err := h.bucket(ctx, "pool-s3", &operator.Storage{Endpoint: server.URL, Bucket: testBucket}, newResolver(ctx, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -846,7 +846,7 @@ func TestLoopbackHTTPStorage(t *testing.T) {
 		credentials: map[string]credential.Source{"access": {File: access}, "secret": {File: secret}}}
 	ctx := context.Background()
 	storage := &operator.Storage{Endpoint: server.URL, Bucket: testBucket}
-	store, err := h.bucket(ctx, "pool-s3", storage)
+	store, err := h.bucket(ctx, "pool-s3", storage, newResolver(ctx, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -873,7 +873,7 @@ func TestStorageCredentialsArePerPool(t *testing.T) {
 	}
 	pool := &operator.Storage{Endpoint: "https://s3.example.test", Bucket: testBucket}
 	for _, name := range []string{"a", "b"} {
-		store, err := h.bucket(context.Background(), "pool-"+name, pool)
+		store, err := h.bucket(context.Background(), "pool-"+name, pool, newResolver(context.Background(), ""))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -881,7 +881,7 @@ func TestStorageCredentialsArePerPool(t *testing.T) {
 			t.Fatalf("pool-%s's S3 client holds %q and %q, %v; want pool-%s's pair", name, creds.AccessKeyID, creds.SecretAccessKey, err, name)
 		}
 	}
-	if _, err := h.bucket(context.Background(), "pool-c", pool); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "no storage credential for pool pool-c") {
+	if _, err := h.bucket(context.Background(), "pool-c", pool, newResolver(context.Background(), "")); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "no storage credential for pool pool-c") {
 		t.Fatalf("bucket of a pool without storage credentials = %v", err)
 	}
 }
@@ -1009,7 +1009,7 @@ func TestBundleStorageKeysServeUnmappedPools(t *testing.T) {
 	}
 	pool := &operator.Storage{Endpoint: "https://s3.example.test", Bucket: testBucket}
 	ctx := context.Background()
-	store, err := h.bucket(ctx, "pool-a", pool)
+	store, err := h.bucket(ctx, "pool-a", pool, newResolver(ctx, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1021,7 +1021,7 @@ func TestBundleStorageKeysServeUnmappedPools(t *testing.T) {
 			t.Fatalf("redacted text %q holds a bundled key; want it held before the storage call", got)
 		}
 	}
-	store, err = h.bucket(ctx, "pool-b", pool)
+	store, err = h.bucket(ctx, "pool-b", pool, newResolver(ctx, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1035,7 +1035,7 @@ func TestBundleStorageKeysServeUnmappedPools(t *testing.T) {
 	if bare.credentialed("pool-a") || !bare.credentialed("pool-b") {
 		t.Fatal("a host without a bundled pair reports storage keys for an unmapped pool")
 	}
-	_, err = bare.bucket(ctx, "pool-a", pool)
+	_, err = bare.bucket(ctx, "pool-a", pool, newResolver(ctx, ""))
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "no storage credential for pool pool-a's S3 inputs and outputs, and its bundle carries no storage keys") {
 		t.Fatalf("bucket without a mapping or a bundled pair = %v; want both named", err)
 	}
@@ -1215,7 +1215,7 @@ func TestObjectReaderErrorsNameNoStorageKey(t *testing.T) {
 		server := refusingStore(t)
 		bundled := operator.StorageKeys{AccessKey: "AKIAREADERACCESSKEY", SecretKey: "reader-secret-key-value-sentinel"}
 		h := &Host{bundleStorage: bundled}
-		store, err := h.bucket(ctx, "pool-s3", &operator.Storage{Endpoint: server.URL, Bucket: testBucket})
+		store, err := h.bucket(ctx, "pool-s3", &operator.Storage{Endpoint: server.URL, Bucket: testBucket}, newResolver(ctx, ""))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1244,7 +1244,7 @@ func TestObjectReaderErrorsNameNoStorageKey(t *testing.T) {
 		o := newUploadOracle(t)
 		o.objects["/"+testBucket+"/"+key] = []byte("report")
 		h := &Host{storage: map[string]StorageConfig{"pool-s3": *o.config}, credentials: o.sources}
-		store, err := h.bucket(ctx, "pool-s3", &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket})
+		store, err := h.bucket(ctx, "pool-s3", &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}, newResolver(ctx, ""))
 		if err != nil {
 			t.Fatal(err)
 		}

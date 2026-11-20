@@ -85,11 +85,12 @@ func TestSubmitFileFlags(t *testing.T) {
 	}
 }
 
-// --credential NAME requests the agent's credential at its target, beside task credentials with targets, and the submit
-// line names the agent's optional credentials left unrequested.
-func TestSubmitRequestsAgentCredentials(t *testing.T) {
+// --credential NAME names an optional credential of the agent the task cannot go without, beside task credentials with
+// targets; the submit line names the agent's optional credentials this host could not resolve, and an optional
+// credential with a source is supplied without being named.
+func TestSubmitSuppliesAgentCredentials(t *testing.T) {
 	b := newBus(t)
-	b.credentials["github-token"], b.credentials["deploy-key"] = b.credentials["model"], b.credentials["model"]
+	b.credentials["deploy-key"] = b.credentials["model"]
 	submit := func(flags ...string) (string, wire.SubmissionBinding) {
 		t.Helper()
 		var stdout, stderr bytes.Buffer
@@ -100,12 +101,21 @@ func TestSubmitRequestsAgentCredentials(t *testing.T) {
 		return stdout.String(), b.tasks(t, runID)[0].submission.Wherry
 	}
 	line, binding := submit("--credential", "deploy-key:env=DEPLOY_KEY")
-	if !strings.HasSuffix(line, " pool=pool-a unrequested=github-token\n") || !slices.Equal(binding.Supplied, []string{"model"}) {
-		t.Fatalf("submit printed %q with supplied %v; want github-token unrequested and model alone supplied", line, binding.Supplied)
+	if !strings.HasSuffix(line, " pool=pool-a unsupplied=github-token\n") || !slices.Equal(binding.Supplied, []string{"model"}) {
+		t.Fatalf("submit printed %q with supplied %v; want github-token unsupplied and model alone supplied", line, binding.Supplied)
 	}
-	line, binding = submit("--credential", "github-token", "--credential", "model", "--credential", "deploy-key:env=DEPLOY_KEY")
+	var stderr bytes.Buffer
+	if err := runSubmit(b.ctx, b.client, []string{"--prompt", "work", "--credential", "github-token"}, &bytes.Buffer{}, &stderr); err == nil || !strings.Contains(err.Error(), "auth required: credential github-token is not in this host's configuration") {
+		t.Fatalf("submit naming an unresolvable optional credential = %v; want it refused", err)
+	}
+	b.credentials["github-token"] = b.credentials["model"]
+	line, binding = submit("--credential", "deploy-key:env=DEPLOY_KEY")
 	if !strings.HasSuffix(line, " pool=pool-a\n") || !slices.Equal(binding.Supplied, []string{"model", "github-token"}) || !slices.Equal(binding.Credentials, []wire.TaskCredential{{Name: "deploy-key", Env: "DEPLOY_KEY"}}) {
-		t.Fatalf("submit printed %q with supplied %v and task credentials %+v; want both requests met and the task credential alone", line, binding.Supplied, binding.Credentials)
+		t.Fatalf("submit printed %q with supplied %v and task credentials %+v; want the optional credential supplied unnamed and the task credential alone", line, binding.Supplied, binding.Credentials)
+	}
+	line, binding = submit("--credential", "github-token", "--credential", "model")
+	if !strings.HasSuffix(line, " pool=pool-a\n") || !slices.Equal(binding.Supplied, []string{"model", "github-token"}) {
+		t.Fatalf("submit printed %q with supplied %v; want both named credentials supplied", line, binding.Supplied)
 	}
 }
 
