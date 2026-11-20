@@ -197,9 +197,13 @@ func (h *Host) resubmit(ctx context.Context, runID string, lost bool) (string, e
 	}
 	// The replacement resolves the agent's current terms afresh, as a new submit would: every required credential, and
 	// every optional one this host resolves now. A catalog variable since unset leaves its credential out; an explicit
-	// source that fails is an error, and the run keeps waiting for a later pass.
+	// source that fails is an error, and the run keeps waiting for a later pass. The same rules hold as at submit, so a
+	// replacement of an agent whose model credentials are all optional is not published without one of them.
 	resolver := newResolver(ctx, wire.RFC3339(submission.Wherry.TaskEndedBy))
 	if submission.Wherry.Supplied, _, err = h.supplied(agent, nil, resolver); err != nil {
+		return "", err
+	}
+	if err := h.atLeastOne(agent, submission.Wherry.Supplied); err != nil {
 		return "", err
 	}
 	var store *store

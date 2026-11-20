@@ -451,6 +451,39 @@ func TestAReplacementReresolvesCatalogVariablesAndExplicitSources(t *testing.T) 
 	})
 }
 
+// A resubmission keeps the at-least-one rule: a run of multi submitted with one model credential's variable set, whose
+// variable is unset by the time its pool key is lost, gets no replacement, the refusal names the model credentials and
+// their variables as a submit would, nothing is published, and a later pass with the variable set again replaces it.
+func TestAReplacementKeepsTheAtLeastOneRule(t *testing.T) {
+	f, receiver := catalogFixture(t)
+	t.Setenv(m3Variable, "m3-from-the-environment")
+	submitted := f.keyLost(t, receiver, catalogTask("multi"))
+	t.Setenv(m3Variable, "")
+	status, err := f.host.Status(f.ctx, submitted.RunID)
+	if err != nil || status.Replacement != "" {
+		t.Fatalf("status %+v, %v; want no replacement while no model credential resolves; logs:\n%s", status, err, f.logs.String())
+	}
+	want := "resubmit: invalid input: auth required: agent multi needs one of its model credentials m1, m2, m3: set one of " + m1Variable + ", " + m2Variable + ", " + m3Variable + " in the process that submits"
+	if logs := f.logs.String(); !strings.Contains(logs, want) {
+		t.Fatalf("logs:\n%s\nwant %q", logs, want)
+	}
+	if replacements := f.replacements(t, "pool-c", submitted.RunID); len(replacements) != 0 {
+		t.Fatalf("%d replacements published without a model credential", len(replacements))
+	}
+	t.Setenv(m1Variable, "m1-from-the-environment")
+	status, err = f.host.Status(f.ctx, submitted.RunID)
+	if err != nil || status.Replacement == "" {
+		t.Fatalf("status %+v, %v; want a replacement once a model credential resolves; logs:\n%s", status, err, f.logs.String())
+	}
+	replacement, values, err := open(t, f, status.Replacement, f.poolKeys["pool-c"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(replacement.Wherry.Supplied, []string{"m1"}) || !slices.Equal(slices.Sorted(maps.Keys(values.Credentials)), []string{"m1"}) {
+		t.Fatalf("replacement supplied %v and enveloped %v; want m1 alone", replacement.Wherry.Supplied, slices.Sorted(maps.Keys(values.Credentials)))
+	}
+}
+
 // After a host restart, the markers of a credential the run supplied from a catalog variable, which the configuration
 // never named, translate and count: the persisted submission's supplied names give them.
 func TestMarkersOfAnImplicitlySuppliedCredentialSurviveARestart(t *testing.T) {
