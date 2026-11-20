@@ -49,6 +49,13 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 		}
 		mechanism = value
 	}
+	// `-` reads the password from standard input; checked before loadPassword, whose errors would name `-` as a path, and
+	// before any prompt.
+	if options["super-user-password-file"] == "-" {
+		if err := terminalStandardInput("super-user-password-file", "password"); err != nil {
+			return err
+		}
+	}
 	onTerminal := promptsEligible(prompts)
 	if !onTerminal {
 		var missing []string
@@ -64,12 +71,13 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 	answers := map[string]string{}
 	q := &questions{ctx, stdin, &promptLatch{out: prompts}}
 	heading := false
-	passwordPath := ""
+	// superPassword is the prompt's answer; nil when a flag names a file or standard input.
+	var superPassword []byte
 	for _, question := range [][2]string{
 		{"broker", "Kafka broker address"},
 		{"ca-file", "CA certificate"},
 		{"super-user", "Kafka super user"},
-		{"super-user-password-file", "Kafka super user's password file"},
+		{"super-user-password-file", "Kafka super user's password"},
 	} {
 		value, given := options[question[0]]
 		if !given && onTerminal {
@@ -80,24 +88,27 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 				heading = true
 			}
 			var err error
-			if question[0] == "ca-file" {
+			switch question[0] {
+			case "ca-file":
 				value, err = q.ca()
-			} else {
-				kind := ""
-				if question[0] == "super-user-password-file" {
-					kind = "path"
-				}
-				value, err = q.ask(question[1], "", "", kind, func(s string) error {
+			case "super-user-password-file":
+				// The password itself, masked and never printed back; it is kept as typed, so a password with spaces at
+				// either end is still that password.
+				var password string
+				password, err = q.secret(question[1], func(s string) error {
+					if s == "" {
+						return fmt.Errorf("%s is required", question[1])
+					}
+					return nil
+				})
+				superPassword = []byte(password)
+			default:
+				value, err = q.ask(question[1], "", "", "", func(s string) error {
 					if s == "" {
 						return fmt.Errorf("%s is required", question[1])
 					}
 					if question[0] == "broker" {
 						return checkOperatorBroker(s)
-					}
-					if question[0] == "super-user-password-file" {
-						var err error
-						passwordPath, err = readablePath(s)
-						return err
 					}
 					return nil
 				})
@@ -105,14 +116,11 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 			if err != nil {
 				return err
 			}
-			if question[0] == "super-user-password-file" {
-				value = passwordPath
-			}
 		}
 		answers[question[0]] = value
 	}
 	for _, name := range required {
-		if answers[name] == "" {
+		if answers[name] == "" && !(name == "super-user-password-file" && superPassword != nil) {
 			return fmt.Errorf("operator init needs --%s", name)
 		}
 	}
@@ -130,9 +138,16 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 			return err
 		}
 	}
-	superPassword, err := loadPassword(answers["super-user-password-file"])
-	if err != nil {
-		return err
+	if superPassword == nil {
+		var err error
+		if answers["super-user-password-file"] == "-" {
+			superPassword, err = secretFromStandardInput("super-user-password-file", "password")
+		} else {
+			superPassword, err = loadPassword(answers["super-user-password-file"])
+		}
+		if err != nil {
+			return err
+		}
 	}
 	superUser, err := superUserKafka(answers["broker"], ca, answers["super-user"], string(superPassword), mechanism)
 	if err != nil {

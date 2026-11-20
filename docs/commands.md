@@ -195,7 +195,7 @@ one.
 
 ```sh
 wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] \
-  [--super-user NAME --super-user-password-file FILE] \
+  [--super-user NAME --super-user-password-file FILE|-] \
   [--super-user-mechanism SCRAM-SHA-512|SCRAM-SHA-256]
 ```
 
@@ -209,13 +209,21 @@ An address without a port uses the Kafka client's default port, 9092
 Choose a CA certificate from the PEM files in the current directory,
 System roots or Other file...
 Enter the super user's name.
-Enter the password file path.
-Press Tab to complete either file path.
+Enter the super user's password. The prompt masks it, never prints it back,
+and takes it as typed: leading and trailing spaces are part of the password,
+and only a trailing CR or LF is trimmed, as from a file.
+Press Tab to complete the CA file path.
 Press Ctrl-C to stop before any files are written.
 If stderr is redirected, or prompts are otherwise unavailable, give every
 required flag. An omitted `--ca-file` uses the system roots.
 Missing flags are named in the error:
 `operator init has no terminal to prompt on; give --broker, --super-user, --super-user-password-file`.
+
+`--super-user-password-file` takes a file path, or `-` to read the password
+from standard input, for example piped from a password manager. `-` is
+refused when standard input is a terminal; there the prompt is the route.
+Errors about `-` say standard input and never treat it as a path. The
+password is written nowhere, whichever way it arrives.
 
 The super user logs in with SCRAM-SHA-512 unless `--super-user-mechanism SCRAM-SHA-256` says its credential is
 SCRAM-SHA-256; the mechanism is never prompted for, and any other value is refused before a prompt. Kafka answers a

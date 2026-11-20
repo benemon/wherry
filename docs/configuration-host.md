@@ -210,4 +210,5 @@ A plugin reads its own variables from the receiver's environment; the
 lists its.
 
 Trailing CR and LF are trimmed from password files: `operator.password`, the
-super user's password file `operator init` reads, and a bundle's password.
+super user's password `operator init` reads from a file, standard input or its
+prompt, and a bundle's password.

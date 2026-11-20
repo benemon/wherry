@@ -24,7 +24,7 @@ import (
 // operatorUsage is each operator command's usage, under "" the operator's.
 var operatorUsage = map[string]string{
 	"":                   "usage: wherry operator <init|pool apply|tenant add|tenant list|tenant pool add|tenant pool remove|tenant host add|tenant host remove|tenant remove|pool suspend|pool resume|pool rotate-key|receiver apply|receiver show|receiver remove|check> [--dir DIR]",
-	"init":               "usage: wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] [--super-user NAME --super-user-password-file FILE] [--super-user-mechanism SCRAM-SHA-512|SCRAM-SHA-256]",
+	"init":               "usage: wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] [--super-user NAME --super-user-password-file FILE|-] [--super-user-mechanism SCRAM-SHA-512|SCRAM-SHA-256]",
 	"pool apply":         "usage: wherry operator pool apply NAME [-f PATH] [--dry-run]",
 	"tenant add":         "usage: wherry operator tenant add TENANT",
 	"tenant list":        "usage: wherry operator tenant list",
