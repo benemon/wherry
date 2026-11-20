@@ -170,9 +170,13 @@ type Host struct {
 	stateDir    string
 	credentials map[string]credential.Source
 	git         []GitCredential
-	// storage holds the host's S3 credentials by pool; a pool without an entry has no storage on this host.
+	// storage holds the host's S3 credentials by pool; a pool without an entry uses bundleStorage, and without that has
+	// no storage on this host.
 	storage map[string]StorageConfig
-	logger  *log.Logger
+	// bundleStorage is the tenant's S3 key pair the bundle carries, zero for none: the keys of every pool with storage
+	// that storage does not map. It is no credential, so no pool's terms can request it.
+	bundleStorage operator.StorageKeys
+	logger        *log.Logger
 	// follower is the host's reader of the tenant feed, kept while its context lasts.
 	followMu sync.Mutex
 	follower *follower
@@ -416,8 +420,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err := wire.ValidateInputs(input.Parts, math.MaxInt64); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
-	_, credentialed := h.storage[pool]
-	storable := v.state.Pools[pool].Storage != nil && credentialed
+	storable := v.state.Pools[pool].Storage != nil && h.credentialed(pool)
 	if continued.last != nil && !storable {
 		return SubmitResult{}, fmt.Errorf("%w: continue needs a pool with storage and a host storage credential: the bundles travel through S3", ErrInvalidInput)
 	}

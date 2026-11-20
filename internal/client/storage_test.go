@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -986,5 +987,169 @@ func TestSubmitToAPoolWithoutAStorageEntryBesideOneWithIt(t *testing.T) {
 	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 60000), Filename: "data.bin"}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "-byte record, over pool pool-r's 100000-byte record limit; a pool with storage and a host storage credential") {
 		t.Fatalf("submit = %v; want the pool refused as storage-less", err)
+	}
+}
+
+// The pair a host's bundle carries serves every pool with storage that its configuration maps to no credentials, and a
+// mapping for a pool wins over it. Both of the bundle's values are held for redaction before any storage call. A host
+// with neither a mapping nor a bundled pair refuses, naming both.
+func TestBundleStorageKeysServeUnmappedPools(t *testing.T) {
+	bundled := operator.StorageKeys{AccessKey: "AKIABUNDLEACCESSKEY", SecretKey: "bundle-secret-key-value-sentinel"}
+	h := &Host{bundleStorage: bundled, storage: map[string]StorageConfig{"pool-b": {AccessKey: "b-access", SecretKey: "b-secret"}}, credentials: map[string]credential.Source{}}
+	for _, name := range []string{"b-access", "b-secret"} {
+		h.credentials[name] = credential.Source{Command: []string{"printf", name + "-value"}}
+	}
+	pool := &operator.Storage{Endpoint: "https://s3.example.test", Bucket: testBucket}
+	ctx := context.Background()
+	store, err := h.bucket(ctx, "pool-a", pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if creds, err := store.GetCreds(); err != nil || creds.AccessKeyID != bundled.AccessKey || creds.SecretAccessKey != bundled.SecretKey {
+		t.Fatalf("pool-a's S3 client holds %q and %q, %v; want the bundle's pair", creds.AccessKeyID, creds.SecretAccessKey, err)
+	}
+	for _, value := range []string{bundled.AccessKey, bundled.SecretKey} {
+		if got := Redact("error naming " + value); strings.Contains(got, value) {
+			t.Fatalf("redacted text %q holds a bundled key; want it held before the storage call", got)
+		}
+	}
+	store, err = h.bucket(ctx, "pool-b", pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if creds, err := store.GetCreds(); err != nil || creds.AccessKeyID != "b-access-value" || creds.SecretAccessKey != "b-secret-value" {
+		t.Fatalf("pool-b's S3 client holds %q and %q, %v; want the configuration's pair, which wins", creds.AccessKeyID, creds.SecretAccessKey, err)
+	}
+	if !h.credentialed("pool-a") || !h.credentialed("pool-b") || !h.credentialed("pool-c") {
+		t.Fatal("a host with a bundled pair reports a pool without storage keys")
+	}
+	bare := &Host{storage: map[string]StorageConfig{"pool-b": {AccessKey: "b-access", SecretKey: "b-secret"}}, credentials: h.credentials}
+	if bare.credentialed("pool-a") || !bare.credentialed("pool-b") {
+		t.Fatal("a host without a bundled pair reports storage keys for an unmapped pool")
+	}
+	_, err = bare.bucket(ctx, "pool-a", pool)
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "no storage credential for pool pool-a's S3 inputs and outputs, and its bundle carries no storage keys") {
+		t.Fatalf("bucket without a mapping or a bundled pair = %v; want both named", err)
+	}
+}
+
+// A host whose bundle carries the tenant's pair signs its storage requests with it. The pair reaches no run record in
+// the host's state, no task record on the broker in the clear and no log; the envelope's presigned URLs carry the access
+// key identifier alone, never the secret key.
+func TestBundleStorageKeysReachNoStateRecordOrLog(t *testing.T) {
+	o := newUploadOracle(t)
+	f := newFixture(t)
+	terms := testTerms()
+	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
+	if err := f.service.PoolApply(f.ctx, "pool-s3", terms, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.TenantPoolAdd(f.ctx, "tenant-a", "pool-s3"); err != nil {
+		t.Fatal(err)
+	}
+	bundled := operator.StorageKeys{AccessKey: "AKIABUNDLEACCESSKEY", SecretKey: "bundle-secret-key-value-sentinel"}
+	f.host.bundleStorage = bundled
+	receiver := f.addReceiver(t, "receiver-s3", "pool-s3")
+	receiver.advertise(t, f.ctx, nil)
+	file, _ := randomFile(t, "dataset.bin", 1024)
+	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}},
+		Outputs: []wire.ExpectedOutput{{Name: "report.pdf", Storage: wire.StorageS3}}, EndBy: time.Now().Add(time.Hour), StartBy: time.Now().Add(time.Minute)})
+	if err != nil || submitted.Pool != "pool-s3" {
+		t.Fatalf("submit = %+v, %v; want pool-s3", submitted, err)
+	}
+	o.mu.Lock()
+	signedBy := slices.Clone(o.access)
+	o.mu.Unlock()
+	if len(signedBy) == 0 || slices.ContainsFunc(signedBy, func(access string) bool { return access != bundled.AccessKey }) {
+		t.Fatalf("storage requests signed with %q; want the bundle's access key alone", signedBy)
+	}
+	_, values, err := open(t, f, submitted.RunID, f.poolKeys["pool-s3"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values.S3Inputs) != 1 || len(values.S3Outputs) != 1 {
+		t.Fatalf("enveloped %d input and %d output URLs; want one of each", len(values.S3Inputs), len(values.S3Outputs))
+	}
+	for _, urls := range []map[string]string{values.S3Inputs, values.S3Outputs} {
+		for _, raw := range urls {
+			parsed, err := url.Parse(raw)
+			if err != nil || !strings.HasPrefix(parsed.Query().Get("X-Amz-Credential"), bundled.AccessKey+"/") {
+				t.Fatalf("enveloped URL %s, %v; want it signed with the bundle's access key", raw, err)
+			}
+			if strings.Contains(raw, bundled.SecretKey) || strings.Contains(raw, url.QueryEscape(bundled.SecretKey)) {
+				t.Fatalf("enveloped URL %s holds the secret key", raw)
+			}
+		}
+	}
+	records, err := readTasks(f.ctx, receiver.kafka, "pool-s3")
+	if err != nil || len(records) == 0 {
+		t.Fatalf("task records %d, %v", len(records), err)
+	}
+	for _, record := range records {
+		for _, value := range []string{bundled.AccessKey, bundled.SecretKey} {
+			if bytes.Contains(record.Value, []byte(value)) {
+				t.Fatalf("the task record holds a bundled storage key in the clear:\n%s", record.Value)
+			}
+		}
+	}
+	err = filepath.WalkDir(f.stateDir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, value := range []string{bundled.AccessKey, bundled.SecretKey} {
+			if bytes.Contains(contents, []byte(value)) {
+				return fmt.Errorf("%s holds a bundled storage key", path)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(f.stateDir, "runs", submitted.RunID+".json")); err != nil {
+		t.Fatalf("the run's record was not scanned: %v", err)
+	}
+	for _, value := range []string{bundled.AccessKey, bundled.SecretKey, "X-Amz"} {
+		if strings.Contains(f.logs.String(), value) {
+			t.Fatalf("host logs hold %q:\n%s", value, f.logs.String())
+		}
+	}
+}
+
+// A storage error that carries the bundle's access key is redacted: the pair is held before the first storage call.
+func TestBundleStorageKeysAreRedactedInStorageErrors(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if r.Method == http.MethodGet && r.URL.Query().Has("location") {
+			fmt.Fprint(w, "<LocationConstraint></LocationConstraint>")
+			return
+		}
+		_, signer, _ := strings.Cut(r.Header.Get("Authorization"), "Credential=")
+		access, _, _ := strings.Cut(signer, "/")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprintf(w, "<Error><Code>InvalidAccessKeyId</Code><Message>no access key %s</Message></Error>", access)
+	}))
+	t.Cleanup(server.Close)
+	previous := storageTransport
+	storageTransport = server.Client().Transport
+	t.Cleanup(func() { storageTransport = previous })
+	bundled := operator.StorageKeys{AccessKey: "AKIAREFUSEDACCESSKEY", SecretKey: "refused-secret-key-value-sentinel"}
+	h := &Host{bundleStorage: bundled, credentials: map[string]credential.Source{}}
+	ctx := context.Background()
+	store, err := h.bucket(ctx, "pool-s3", &operator.Storage{Endpoint: server.URL, Bucket: testBucket})
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, _ := randomFile(t, "dataset.bin", 16)
+	_, err = uploadInputs(ctx, store, testBucket, "tenant-a", "run-1", []S3File{{Name: "dataset.bin", Body: file}})
+	if err == nil || !strings.Contains(err.Error(), "upload S3 input dataset.bin: no access key "+bundled.AccessKey) {
+		t.Fatalf("upload = %v; want an error carrying the access key", err)
+	}
+	if got := Redact(err.Error()); strings.Contains(got, bundled.AccessKey) || !strings.Contains(got, "no access key [redacted:") {
+		t.Fatalf("redacted error %q; want the bundle's access key replaced by its marker", got)
 	}
 }

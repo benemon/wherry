@@ -36,24 +36,41 @@ const getLifetime = 15 * time.Minute
 // servers.
 var storageTransport http.RoundTripper
 
-// bucket opens a pool's bucket, path-style, with this host's storage credential, which never leaves the host: the
-// receiver and the agent see only URLs it presigns.
+// bundleAccessKey and bundleSecretKey name the bundle's storage keys in the redaction markers that replace them.
+const bundleAccessKey, bundleSecretKey = "bundle-access-key", "bundle-secret-key"
+
+// credentialed reports whether this host holds storage keys for pool: its configuration maps the pool to credentials,
+// or its bundle carries the tenant's pair.
+func (h *Host) credentialed(pool string) bool {
+	_, mapped := h.storage[pool]
+	return mapped || h.bundleStorage != (operator.StorageKeys{})
+}
+
+// bucket opens a pool's bucket, path-style, with this host's storage keys, which never leave the host: the receiver
+// and the agent see only URLs it presigns. The keys are the credentials the configuration maps the pool to, which win,
+// else the pair the bundle carries; either pair is held for redaction before any storage call.
 func (h *Host) bucket(ctx context.Context, pool string, storage *operator.Storage) (*minio.Client, error) {
-	keyNames, credentialed := h.storage[pool]
-	if !credentialed {
-		return nil, fmt.Errorf("%w: this host's configuration has no storage credential for pool %s's S3 inputs and outputs", ErrInvalidInput, pool)
+	keyNames, mapped := h.storage[pool]
+	if !h.credentialed(pool) {
+		return nil, fmt.Errorf("%w: this host's configuration has no storage credential for pool %s's S3 inputs and outputs, and its bundle carries no storage keys", ErrInvalidInput, pool)
 	}
 	if storage == nil {
 		return nil, fmt.Errorf("%w: pool %s has no storage for S3 inputs and outputs", ErrInvalidInput, pool)
 	}
 	var keys [2]string
-	for i, name := range []string{keyNames.AccessKey, keyNames.SecretKey} {
-		key, err := h.credentials[name].Resolve(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("read storage credential %s: %w", name, err)
+	if mapped {
+		for i, name := range []string{keyNames.AccessKey, keyNames.SecretKey} {
+			key, err := h.credentials[name].Resolve(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("read storage credential %s: %w", name, err)
+			}
+			keys[i] = strings.TrimSpace(string(key))
+			hold(name, []byte(keys[i]))
 		}
-		keys[i] = strings.TrimSpace(string(key))
-		hold(name, []byte(keys[i]))
+	} else {
+		keys = [2]string{h.bundleStorage.AccessKey, h.bundleStorage.SecretKey}
+		hold(bundleAccessKey, []byte(keys[0]))
+		hold(bundleSecretKey, []byte(keys[1]))
 	}
 	// minio drops the default port Host adds, as presigned URLs are signed without it.
 	return minio.New(storage.Host(), &minio.Options{

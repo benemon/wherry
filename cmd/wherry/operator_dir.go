@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
@@ -200,10 +201,152 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 	if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{answers["broker"], caFile, "operator.password"}); err != nil {
 		return err
 	}
-	if err := ignore(filepath.Join(dir, ".gitignore"), "operator.password", "bundles/"); err != nil {
+	if err := ignore(filepath.Join(dir, ".gitignore"), "operator.password", "bundles/", "storage/"); err != nil {
 		return err
 	}
 	fmt.Fprintf(prompts, "%s can provision; its password is in %s\n", operator.OperatorPrincipal, filepath.Join(dir, "operator.password"))
+	return nil
+}
+
+// storageKeysPath is the file under dir's storage/ holding tenant's S3 key pair; the directory is made, mode 0700, with
+// create.
+func storageKeysPath(dir, tenant string, create bool) (string, error) {
+	if !wire.ValidName(tenant) {
+		return "", fmt.Errorf("%q is not a valid name", tenant)
+	}
+	storage := filepath.Join(dir, "storage")
+	if create {
+		if err := os.MkdirAll(storage, 0o700); err != nil {
+			return "", err
+		}
+		if err := os.Chmod(storage, 0o700); err != nil {
+			return "", err
+		}
+	}
+	return filepath.Join(storage, tenant+".yaml"), nil
+}
+
+// tenantStorageKeys is the pair tenant storage recorded for tenant in dir, zero when none was.
+func tenantStorageKeys(dir, tenant string) (operator.StorageKeys, error) {
+	path, err := storageKeysPath(dir, tenant, false)
+	if err != nil {
+		return operator.StorageKeys{}, err
+	}
+	keys, err := operator.ReadStorageKeys(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return operator.StorageKeys{}, nil
+	}
+	return keys, err
+}
+
+// checkStorageKey is the validator of one of the pair, what naming it as in "access key". Its messages are fixed: the
+// prompt displays them, and the value is a secret. A key never holds whitespace or a control character, and one typed
+// with either would sign every request wrong.
+func checkStorageKey(what string) func(string) error {
+	return func(s string) error {
+		if s == "" {
+			return fmt.Errorf("%s is required", what)
+		}
+		if strings.ContainsFunc(s, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+			return fmt.Errorf("%s holds whitespace or a control character", what)
+		}
+		return nil
+	}
+}
+
+// storageKeysFromStandardInput reads the pair as one pipe carries it: exactly two non-empty lines, the access key then
+// the secret key, with or without a final line break. Anything else is refused with one message naming no content.
+func storageKeysFromStandardInput() (operator.StorageKeys, error) {
+	b, err := io.ReadAll(stdin)
+	if err != nil {
+		return operator.StorageKeys{}, fmt.Errorf("standard input: %w", err)
+	}
+	text := strings.TrimSuffix(strings.TrimSuffix(string(b), "\n"), "\r")
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimSuffix(line, "\r")
+	}
+	if len(lines) != 2 || lines[0] == "" || lines[1] == "" {
+		return operator.StorageKeys{}, errors.New("standard input must hold exactly two lines: the access key, then the secret key")
+	}
+	return operator.StorageKeys{AccessKey: lines[0], SecretKey: lines[1]}, nil
+}
+
+// tenantStorage records tenant's S3 access key and secret key in dir's storage/<tenant>.yaml, mode 0600 and kept out
+// of git, from two masked prompts on a terminal or, with fromStdin, from standard input, which is refused when it is a
+// terminal. Both values are validated before anything is written; the write replaces the kept pair atomically, so a
+// failed write keeps it. The pair reaches no record, no error and no output.
+func tenantStorage(ctx context.Context, service *operator.Service, dir, tenant string, fromStdin bool, stdout, prompts io.Writer) (result error) {
+	defer func() {
+		if result != nil {
+			result = presentationError{result}
+		}
+	}()
+	if _, err := storageKeysPath(dir, tenant, false); err != nil {
+		return err
+	}
+	if fromStdin && stdinIsTerminal() {
+		return errors.New("standard input is a terminal; leave out - to be asked for the storage keys, or pipe them in, the access key then the secret key, one per line")
+	}
+	if !fromStdin && !promptsEligible(prompts) {
+		return errors.New("tenant storage has no terminal to prompt on; pipe the access key and the secret key in, one per line, with -")
+	}
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return err
+	}
+	if err := state.LiveTenant(tenant); err != nil {
+		return err
+	}
+	var keys operator.StorageKeys
+	if fromStdin {
+		if keys, err = storageKeysFromStandardInput(); err != nil {
+			return err
+		}
+		for _, key := range []struct{ what, value string }{{"access key", keys.AccessKey}, {"secret key", keys.SecretKey}} {
+			if err := checkStorageKey(key.what)(key.value); err != nil {
+				return err
+			}
+		}
+	} else {
+		q := &questions{ctx, stdin, &promptLatch{out: prompts}}
+		if err := q.line("\nStorage of tenant %s\n", display(tenant)); err != nil {
+			return err
+		}
+		if keys.AccessKey, err = q.secret("S3 access key", checkStorageKey("access key")); err != nil {
+			return err
+		}
+		if keys.SecretKey, err = q.secret("S3 secret key", checkStorageKey("secret key")); err != nil {
+			return err
+		}
+	}
+	path, err := storageKeysPath(dir, tenant, true)
+	if err != nil {
+		return err
+	}
+	if err := operator.ReplaceStorageKeys(path, keys); err != nil {
+		return err
+	}
+	if err := ignore(filepath.Join(dir, ".gitignore"), "storage/"); err != nil {
+		return err
+	}
+	// The pair reaches a host only in its bundle, so each live host of the tenant is named with the refresh that
+	// rewrites it; a host added from now on gets it from tenant host add.
+	var hosts []string
+	for _, principal := range slices.Sorted(maps.Keys(state.Hosts)) {
+		host := state.Hosts[principal]
+		if host.Tenant == tenant && !state.Ended[principal] && !state.Revoking[principal] {
+			hosts = append(hosts, host.Name)
+		}
+	}
+	if _, err := fmt.Fprintf(stdout, "recorded the storage keys of %s in %s; tenant host add writes them into each new host's bundle\n", tenant, path); err != nil {
+		return err
+	}
+	for _, host := range hosts {
+		if _, err := fmt.Fprintf(stdout, "refresh %s's bundle: wherry operator tenant host refresh %s %s\n", host, tenant, host); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -285,7 +428,7 @@ func operatorService(dir string) (*operator.Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &operator.Service{Operator: client, Broker: config.Broker, CA: ca}, nil
+	return &operator.Service{Operator: client, Broker: config.Broker, CA: ca, Storage: func(tenant string) (operator.StorageKeys, error) { return tenantStorageKeys(dir, tenant) }}, nil
 }
 
 func inDir(dir, path string) string {

@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -247,6 +246,9 @@ func TestRoundTrip(t *testing.T) {
 		bucket = fallbackS3(t)
 	}
 	terms.Storage = &operator.Storage{Endpoint: bucket.endpoint, Bucket: s3Bucket}
+	// The operator recorded the tenant's storage keys, so the host bundles carry them and the host configuration maps
+	// no pool to credentials of its own.
+	service.Storage = func(string) (operator.StorageKeys, error) { return bucket.keys, nil }
 	hostBundle, otherBundle, receiverBundle := filepath.Join(dir, "host.yaml"), filepath.Join(dir, "other.yaml"), filepath.Join(dir, "receiver.yaml")
 	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a",
 		Profiles: []operator.ProfileSettings{{Name: "fake", Plugin: "fake", Agent: "claude", Labels: map[string]string{"gpu": "yes"},
@@ -321,8 +323,6 @@ func TestRoundTrip(t *testing.T) {
 	}
 	hostConfig := busclient.Config{Bundle: hostBundle, CAFile: caFile, HostKey: filepath.Join(dir, "host.key"), StateDir: filepath.Join(dir, "host-state"),
 		Credentials: map[string]credential.Source{"model": {Env: "WHERRY_ROUNDTRIP_MODEL"}, "deploy-key": {Command: []string{"cat", deployPath}}, "github-token": {Env: "WHERRY_ROUNDTRIP_GITHUB"}}}
-	hostConfig.Storage = map[string]busclient.StorageConfig{"pool-a": *bucket.config}
-	maps.Copy(hostConfig.Credentials, bucket.sources)
 	if _, _, err := busclient.Init(ctx, hostConfig); err != nil {
 		t.Fatal(err)
 	}
@@ -527,11 +527,11 @@ func s3RoundTrip(t *testing.T, ctx context.Context, bucket *s3Store, host *buscl
 
 const s3Bucket = "wherry-test"
 
-// s3Store is the TLS S3 boundary used by the round trip; store is set for the optional real S3 oracle.
+// s3Store is the TLS S3 boundary used by the round trip, with keys the pair the operator records for the tenant; store
+// is set for the optional real S3 oracle.
 type s3Store struct {
 	endpoint string
-	config   *busclient.StorageConfig
-	sources  map[string]credential.Source
+	keys     operator.StorageKeys
 	store    *minio.Client
 	client   *http.Client
 }
@@ -545,9 +545,8 @@ func s3Oracle(t *testing.T) *s3Store {
 		t.Log("WHERRY_S3_TEST_ENDPOINT not set: no real S3 leg")
 		return nil
 	}
-	sources := map[string]credential.Source{"s3-access": {File: os.Getenv("WHERRY_S3_TEST_ACCESS_KEY_FILE")}, "s3-secret": {File: os.Getenv("WHERRY_S3_TEST_SECRET_KEY_FILE")}}
 	keys := make([]string, 2)
-	for i, path := range []string{sources["s3-access"].File, sources["s3-secret"].File} {
+	for i, path := range []string{os.Getenv("WHERRY_S3_TEST_ACCESS_KEY_FILE"), os.Getenv("WHERRY_S3_TEST_SECRET_KEY_FILE")} {
 		key, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -599,7 +598,7 @@ func s3Oracle(t *testing.T) *s3Store {
 			}
 		}
 	})
-	return &s3Store{endpoint: proxy.URL, config: &busclient.StorageConfig{AccessKey: "s3-access", SecretKey: "s3-secret"}, sources: sources, store: store, client: proxy.Client()}
+	return &s3Store{endpoint: proxy.URL, keys: operator.StorageKeys{AccessKey: keys[0], SecretKey: keys[1]}, store: store, client: proxy.Client()}
 }
 
 func fallbackS3(t *testing.T) *s3Store {
@@ -639,15 +638,7 @@ func fallbackS3(t *testing.T) *s3Store {
 		t.Fatal(err)
 	}
 	t.Setenv("SSL_CERT_FILE", ca)
-	access, secret := filepath.Join(dir, "access"), filepath.Join(dir, "secret")
-	if err := os.WriteFile(access, []byte("access"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return &s3Store{endpoint: server.URL, config: &busclient.StorageConfig{AccessKey: "s3-access", SecretKey: "s3-secret"},
-		sources: map[string]credential.Source{"s3-access": {File: access}, "s3-secret": {File: secret}}, client: server.Client()}
+	return &s3Store{endpoint: server.URL, keys: operator.StorageKeys{AccessKey: "AKIAROUNDTRIPACCESS", SecretKey: "roundtrip-secret-key-value"}, client: server.Client()}
 }
 
 func hexSHA(data []byte) string {
