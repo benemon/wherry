@@ -1,7 +1,10 @@
 package catalog
 
 import (
+	"flag"
+	"maps"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -179,5 +182,90 @@ func TestCatalogFilesAreCanonical(t *testing.T) {
 	lines := strings.Split(strings.TrimSuffix(string(source), "\n"), "\n")
 	if len(lines) != 3 || lines[0] != "url: https://models.dev/api.json" || !strings.HasPrefix(lines[1], "fetched: ") || !strings.HasSuffix(lines[1], "Z") || !strings.HasPrefix(lines[2], "sha256: ") || len(lines[2]) != len("sha256: ")+64 {
 		t.Errorf("SOURCE:\n%s", source)
+	}
+}
+
+// update rewrites docs/credential-variables.md from the embedded catalog instead of checking it.
+var update = flag.Bool("update", false, "rewrite docs/credential-variables.md from the catalog")
+
+// variablesDoc is the path of the generated page, from this package's directory.
+var variablesDoc = filepath.Join("..", "..", "docs", "credential-variables.md")
+
+// renderVariables is the page that lists every variable a host reads implicitly, generated from the catalog so the docs
+// never drift from the snapshot.
+func renderVariables(c *Catalog) string {
+	lines := []string{
+		"# Variables read implicitly",
+		"",
+		"<!-- Generated from internal/catalog by go test ./internal/catalog -run TestDocsListTheCatalogVariables -update. Do not edit. -->",
+		"",
+		"A host reads these environment variables, and no others, from the process",
+		"that submits: when a pool's terms give one of the placed agent's credentials",
+		"one of them as its target and the host's configuration names no source for",
+		"that credential, the host takes the variable's value when it is set, and",
+		"the run gets it. See [Credentials from the submitting process](configuration-host.md#credentials-from-the-submitting-process)",
+		"for the rule and the [warning](security.md#credential-envelopes) on what",
+		"a set variable reaches. The list is the credential catalog's: wherry's",
+		"harness entries and the providers of the committed models.dev snapshot,",
+		"`internal/catalog/SOURCE` naming its fetch. A variable outside this list,",
+		"`GH_TOKEN` or `MODEL_API_KEY` for example, is read only through an explicit",
+		"source.",
+		"",
+		"| Variable | Catalog entries |",
+		"| --- | --- |",
+	}
+	variables := c.Variables()
+	for _, variable := range slices.Sorted(maps.Keys(variables)) {
+		ids := make([]string, 0, len(variables[variable]))
+		for _, id := range variables[variable] {
+			ids = append(ids, "`"+id+"`")
+		}
+		lines = append(lines, "| `"+variable+"` | "+strings.Join(ids, ", ")+" |")
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// The docs page listing the variables a host reads implicitly is generated from the catalog: it names every variable
+// of every entry, each with the entries reading it, GITHUB_TOKEN and the cloud variables among them, and nothing else.
+// A stale page fails here; -update rewrites it.
+func TestDocsListTheCatalogVariables(t *testing.T) {
+	c, err := Embedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := renderVariables(c)
+	if *update {
+		if err := os.WriteFile(variablesDoc, []byte(want), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := os.ReadFile(variablesDoc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("%s is not generated from the catalog; run go test ./internal/catalog -run TestDocsListTheCatalogVariables -update", variablesDoc)
+	}
+	for _, variable := range []string{"GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "GEMINI_API_KEY"} {
+		if !strings.Contains(want, "| `"+variable+"` |") {
+			t.Errorf("the page lacks %s", variable)
+		}
+	}
+	for _, absent := range []string{"GH_TOKEN` |", "OPENAI_API_KEY` | `codex`"} {
+		if strings.Contains(want, absent) {
+			t.Errorf("the page lists %q, which no entry reads that way", absent)
+		}
+	}
+	for variable, ids := range c.Variables() {
+		if !strings.Contains(want, "| `"+variable+"` | `"+ids[0]+"`") {
+			t.Errorf("the page lacks %s read by %s", variable, ids[0])
+		}
+	}
+	fixture, err := Parse(file(entry("one", "One", "ONE_KEY", "SHARED_KEY"), entry("two", "Two", "SHARED_KEY")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if variables := fixture.Variables(); !reflect.DeepEqual(variables, map[string][]string{"ONE_KEY": {"one"}, "SHARED_KEY": {"one", "two"}}) {
+		t.Errorf("variables %v", variables)
 	}
 }

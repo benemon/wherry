@@ -26,19 +26,54 @@ can read its credentials, and the platform's boundary enforces it, as each
 `wherry host receivers` lists each agent's credential names with their
 targets, marking those this host has no source for, such as
 `credentials=openai-api-key:env=OPENAI_API_KEY,github-token:env=GH_TOKEN(missing,optional)`,
-and each credential's description on its own line.
+and each credential's description on its own line. It runs no `command`
+source: one is marked `unchecked`.
+
+A host takes each credential of the placed agent from the first source it
+has: the source its [client configuration](configuration-host.md#client-configuration)
+names for the credential's name, else, when the credential's target is an
+environment variable in the host's credential catalog, that variable in the
+process that submits. Every other environment target, and every file
+target, needs a source in the configuration, so a pool's terms cannot make
+a host read a variable of the operator's choosing. The catalog's variables
+are listed in [Variables read implicitly](credential-variables.md).
 
 A required credential is delivered to every run of the agent. An optional
-credential is delivered only when the task requests it, with
-`--credential NAME` or, through MCP, a `credentials` entry with a name alone;
-`submit` names the optional credentials left out as `unrequested`. A
-credential every run needs belongs in the pool's terms as required. `wherry
-submit` refuses a task at once, with
-`auth required: credential <name> is not in this host's configuration`,
-when the host has no source for a required credential of the placed agent,
-for a requested one, or for a task credential. An optional credential that is
-not requested is not delivered, even when the host has a source for it, and
-the prompt names it as not supplied.
+credential is delivered to every run whose host resolves it, whether or not
+the task names it; `submit` names the optional credentials it could not
+resolve as `unsupplied`, and the prompt names them as not supplied.
+`--credential NAME` or, through MCP, a `credentials` entry with a name
+alone, names an optional credential the task cannot go without: the submit
+then fails when the host cannot resolve it. A credential every run needs
+belongs in the pool's terms as required. `wherry submit` refuses a task at
+once, with `auth required: credential <name> is not in this host's
+configuration`, when the host has no source for a required credential of
+the placed agent, for a named one, or for a task credential, and with
+`auth required: credential <name> has no source: <VAR> is unset in the
+process that submits` when its catalog variable is unset. A configured
+source that fails refuses the task naming the credential and the cause, and
+is never passed over for the credential's variable. When the placed agent's
+name is a catalog entry reading several variables, as `google` is, `submit`
+refuses before publishing unless one of the agent's credentials on those
+variables resolves, naming them and their variables.
+
+::: warning A set catalog variable reaches every run of its agent
+An optional credential whose variable is set where submits run reaches
+every run of that agent, with no request. The variables read this way are
+the catalog's alone, listed in
+[Variables read implicitly](credential-variables.md): the model providers'
+keys, the cloud credentials models.dev lists, such as `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AZURE_API_KEY` and
+`GOOGLE_APPLICATION_CREDENTIALS`, and `GITHUB_TOKEN`. `GITHUB_TOKEN` is the
+case to know: it is a catalog variable through models.dev's
+`github-copilot`, so a pool whose terms give an agent's credential that
+target gets the token from every submitting process that has it set, the
+MCP server a harness starts included; `GH_TOKEN` is not read implicitly.
+To hold a credential back from an agent's runs, unset its variable in the
+process that submits and remove any explicit source for that credential
+from the host configuration: an explicit source wins over the variable, so
+unsetting the variable alone leaves a configured source in force.
+:::
 
 A host resolves each credential's [source](#credential-sources) and
 presigns the run's S3 links when it submits, and encrypts them, with the run's
@@ -241,10 +276,11 @@ pool whose terms list the agent's credentials.
    credential as `missing`.
 
 3. Submit the task. Give each task credential its target with
-   `--credential NAME:file=FILE` or `--credential NAME:env=VAR`, and request
-   each optional agent credential the task needs with `--credential NAME`. `submit`
-   resolves each source and refuses the task, naming the credential, when
-   one fails.
+   `--credential NAME:file=FILE` or `--credential NAME:env=VAR`, and name
+   each optional agent credential the task cannot go without with
+   `--credential NAME`; one the host resolves is sent either way. `submit`
+   resolves each source once and refuses the task, naming the credential,
+   when one fails.
 
 4. When the run ends `TASK_STATE_FAILED` naming a credential, fix that
    credential's source and submit a new run.
@@ -388,9 +424,11 @@ it. The scope warning appears under the question.
 
 A source belongs to the credential name across pools: whatever the variable
 holds goes to the agents of every pool that names the credential, now or
-later, and, where the credential is optional, to the runs whose task requests
-it. It is read where submits run, including the MCP server your harness
-starts. A shell variable may have more reach than an agent needs; check its
+later, and, where the credential is optional, to every run whose submit
+resolves it, asked for or not. It is read where submits run, including the
+MCP server your harness starts. A credential whose target is a
+[catalog variable](credential-variables.md) needs no source: init asks
+nothing for it and reports the agent ready when the variable is set. A shell variable may have more reach than an agent needs; check its
 scope before choosing it. Init displays variable names, never their values,
 and does not resolve sources. Ctrl-V clipboard commands are disabled in
 these forms; your terminal's own paste still works.

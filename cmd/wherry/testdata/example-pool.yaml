@@ -2,7 +2,7 @@ agents:
   # claude-code is a credential catalog id: pool apply adds claude-code-oauth-token (CLAUDE_CODE_OAUTH_TOKEN), required.
   - name: claude-code
     credentials:
-      # A credential outside the catalog, beside the derived one; a run gets it only when its task requests it.
+      # A credential outside the catalog, beside the derived one; a run gets it when the host resolves it.
       - {name: github-token, env: GH_TOKEN, required: false, description: GitHub token}
     models:
       - haiku

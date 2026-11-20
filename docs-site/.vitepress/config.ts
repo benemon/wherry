@@ -105,6 +105,10 @@ const sidebar = [
             "link": "/configuration-host"
           },
           {
+            "text": "Variables read implicitly",
+            "link": "/credential-variables"
+          },
+          {
             "text": "Development instance",
             "link": "/configuration-development"
           }

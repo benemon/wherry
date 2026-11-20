@@ -132,8 +132,9 @@ returns once a run of the mock agent completes. Its steps:
    terms list each agent by its catalog id with no credential of its own,
    and `pool apply` expands them as it does for any pool: `claude-code`,
    `anthropic` and `codex` each take their one variable, required, and
-   `google` its three, each optional; a run of `google` gets the ones its
-   task requests with `--credential`. `mock` keeps its explicit
+   `google` its three, each optional; a run of `google` gets the ones whose
+   variables are set where the submit runs, and a submit with none set is
+   refused naming them. `mock` keeps its explicit
    `mock-token`, required when step 2 copied it and optional otherwise. A
    submit to an agent whose required credential step 2 did not copy fails
    naming it. The default agent is the one that runs the harness `init`

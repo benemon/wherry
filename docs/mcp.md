@@ -11,7 +11,7 @@ The defaults are `10m` and `2h`.
 | Tool | Input | Output |
 | --- | --- | --- |
 | `receivers` | none | `receivers`, the objects `wherry host receivers --json` prints |
-| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `continue`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by` | `id`, `pool`, `wait`, `unrequested` |
+| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `continue`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by` | `id`, `pool`, `wait`, `unsupplied` |
 | `status` | `id`, optional | `runs`, `skipped` |
 | `wait` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `reply`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped`, `runs` |
 | `cancel` | `id` | `id`, `cancel`, `skipped` |
@@ -48,16 +48,16 @@ The defaults are `10m` and `2h`.
   input root. With the default `state_dir`, `~/.local/state/wherry`, a root of `~`,
   `~/.local`, `~/.local/state` or `~/.local/state/wherry` holds it; `XDG_STATE_HOME`
   moves it.
-- A `credentials` entry with a name alone requests one of the placed agent's
-  credentials at the target the pool's terms give it. An optional agent
-  credential is delivered only when requested; `receivers` lists each
-  credential with its `description`, `optional` and `configured`, so read it
-  before asking for one. `submit` returns `unrequested`, the placed agent's
-  optional credentials the task did not request, whether or not the host has
-  a source for them; the run goes without them. A request for a name that is
-  not one of the placed agent's credentials, or for one the host has no
-  source for, fails with `INVALID_ARGUMENT` and the message `wherry host submit`
-  gives.
+- A `credentials` entry with a name alone names one of the placed agent's
+  optional credentials the task cannot go without. Every agent credential
+  the host resolves is delivered at the target the pool's terms give it,
+  required or optional, named or not; `receivers` lists each credential with
+  its `description`, `optional`, `configured`, `source`, `variable` and
+  `status`, so read it to see what a run will get. `submit` returns
+  `unsupplied`, the placed agent's optional credentials the host could not
+  resolve; the run goes without them. A name that is not one of the placed
+  agent's credentials, or one the host cannot resolve, fails with
+  `INVALID_ARGUMENT` and the message `wherry host submit` gives.
 - `status` returns the latest verified state of a run without
   waiting. `runs` holds one entry for the run `id` names, or,
   without `id`, one per run `wherry status` lists, latest update first.

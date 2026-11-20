@@ -98,8 +98,8 @@ wherry submit --prompt "List the files in your input directory."
 ```
 
 `submit` prints `run_id=run-<id> pool=dev`, followed by
-`unrequested=<names>` when the agent has optional credentials the task did
-not request. Each harness runs its own
+`unsupplied=<names>` when the agent has optional credentials the host could
+not resolve. Each harness runs its own
 default model. `wherry submit` is a [shortcut](commands.md#shortcuts) for
 `wherry host submit`, as `wherry wait` is for `wherry host wait`.
 

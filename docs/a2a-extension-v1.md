@@ -256,19 +256,23 @@ A submission is the task of one run.
   govern task credentials.
 - `supplied_credentials` names the agent's credentials the envelope holds,
   each once: every credential of the agent in the pool's terms that is
-  required, and every optional one the task requested; absent when there are
-  none. wherry's host delivers an optional credential only when the task
-  requests it, and refuses before publishing when it has no source for a
-  credential it would supply. A receiver delivers the credentials of its
-  current terms named here. It rejects a submission that does not name a
-  required credential of the agent in its terms. A name its terms no longer
-  declare is not delivered and is not an error. The run goes without the
-  agent's credentials not named here, and the prompt names them as not
-  supplied, unless a task credential of the same name is delivered. A
-  resubmission supplies, of the agent's terms at resubmit, every required
-  credential and every one the original supplied: a credential the terms
-  removed is dropped, an optional one they added is not supplied, and one
-  they made optional after submit is still supplied. This field replaces
+  required, and every optional one the host resolved; absent when there are
+  none. wherry's host resolves an optional credential from the source its
+  configuration names, else, when the credential's target is a variable in
+  the host's credential catalog, from that variable in the process that
+  submits, and supplies it whenever it resolves; a task may name an optional
+  credential it cannot go without, and the host then refuses before
+  publishing when it cannot resolve it, as it does for a required credential
+  or a task credential it has no source for. A receiver delivers the
+  credentials of its current terms named here. It rejects a submission that
+  does not name a required credential of the agent in its terms. A name its
+  terms no longer declare is not delivered and is not an error. The run goes
+  without the agent's credentials not named here, and the prompt names them
+  as not supplied, unless a task credential of the same name is delivered. A
+  resubmission resolves the agent's terms at resubmit afresh and supplies
+  every required credential and every optional one the host resolves then:
+  a credential the terms removed is dropped, and one whose catalog variable
+  is unset at resubmit is left out. This field replaces
   `unsupplied_credentials` of earlier versions, which a receiver ignores.
 - `outputs` lists at most 256 files the agent is asked to leave, each
   `{name, required, storage}`. `name` is a relative path of file names joined by

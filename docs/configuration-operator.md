@@ -101,10 +101,14 @@ names, and no two share a target. `pool apply` refuses terms that break a
 rule, naming the agent and credential.
 
 `submit` refuses a task when its host has no source for a required
-credential of the placed agent. A run gets an optional credential only when
-its task requests it, and the host must then have a source for it; otherwise
-the run goes without it, and its [prompt](configuration-receiver.md#agent-contract) names it as not
-supplied. Make a credential every run needs required, the default. Every plugin profile of the agent delivers the agent's credentials, each at
+credential of the placed agent. A run gets an optional credential when its
+host resolves it: from a source the host's configuration names, or, when
+the credential's target is a [variable the catalog reads](credential-variables.md),
+from that variable in the process that submits; otherwise the run goes
+without it, and its [prompt](configuration-receiver.md#agent-contract) names it as not
+supplied. A task names an optional credential it cannot go without with
+`--credential NAME`, and the submit then fails without a value for it. Make
+a credential every run needs required, the default. Every plugin profile of the agent delivers the agent's credentials, each at
 its target.
 
 Each entry of `vcs` is a lowercase host name, with an optional `:port` from 1 to 65535. Each entry appears once.
@@ -220,7 +224,7 @@ agents:
   # claude-code is a credential catalog id: pool apply adds claude-code-oauth-token (CLAUDE_CODE_OAUTH_TOKEN), required.
   - name: claude-code
     credentials:
-      # A credential outside the catalog, beside the derived one; a run gets it only when its task requests it.
+      # A credential outside the catalog, beside the derived one; a run gets it when the host resolves it.
       - {name: github-token, env: GH_TOKEN, required: false, description: GitHub token}
     models:
       - haiku
@@ -290,7 +294,7 @@ storage:
 # claude-code is a credential catalog id: pool apply adds claude-code-oauth-token (CLAUDE_CODE_OAUTH_TOKEN), required.
 name: claude-code
 credentials:
-  # A credential outside the catalog, beside the derived one; a run gets it only when its task requests it.
+  # A credential outside the catalog, beside the derived one; a run gets it when the host resolves it.
   - {name: github-token, env: GH_TOKEN, required: false, description: GitHub token}
 models:
   - haiku

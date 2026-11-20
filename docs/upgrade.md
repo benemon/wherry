@@ -62,9 +62,40 @@ bundle and its CA file, which still work.
 [Broker trust](security.md#broker-trust) gives the renewal procedure for
 later CA changes.
 
+## Optional credentials the host resolves
+
+A host now sends an optional agent credential, one the pool's terms mark
+`required: false`, to every run whose submit resolves it: from the source
+the host's configuration names, or, when the credential's target is one of
+the [variables the catalog reads](credential-variables.md), from that
+variable in the process that submits. The ask-first rule of v0.1.2, below,
+no longer applies: a task need not request an optional credential the host
+has, and `--credential NAME`, or an MCP `credentials` entry with a name
+alone, now means the task cannot go without it, failing the submit when the
+host cannot resolve it.
+
+- `submit` prints `unsupplied=<name,...>`, and the MCP `submit` tool returns
+  `unsupplied`, naming the optional credentials the host could not resolve;
+  `unrequested` is gone.
+- A host whose configuration names no source for a credential whose target
+  is a catalog variable reads the variable where submits run, the MCP server
+  a harness starts included. A set variable reaches every run of that agent:
+  see the [warning](security.md#credential-envelopes) and, to hold one back,
+  unset it in the process that submits and remove any explicit source for
+  that credential from the host configuration.
+- A resubmission resolves the terms afresh: an optional credential whose
+  variable is unset at resubmit is left out, and an explicit source that
+  fails is an error, logged on each pass.
+- Receivers are unchanged: they deliver what `supplied_credentials` names.
+- `wherry host init` asks no question for a credential whose target is a
+  catalog variable and prints one line per entitled agent, ready or not
+  ready, in place of the list of credentials without a source.
+
 ## Optional credentials from v0.1.2
 
-From v0.1.2 a host delivers an optional agent credential, one the pool's
+Superseded by [Optional credentials the host resolves](#optional-credentials-the-host-resolves),
+kept for the history of the wire field. From v0.1.2 a host delivered an
+optional agent credential, one the pool's
 terms mark `required: false`, only when the task requests it: with
 `wherry host submit --credential NAME`, or through MCP with a `credentials`
 entry of its name alone. Before v0.1.2 a host delivered every optional

@@ -98,8 +98,12 @@ CLI commands can read any input path you give them.
 `state_dir` when a configuration written through a link to the default
 path needs them, and an entry in `credentials`, `git` and `storage` for
 each answer, each a reference to a source and never a value; a re-run
-keeps every entry and adds only what a newly entitled pool needs. Without
-a terminal it asks nothing and lists what still has no source. It asks
+keeps every entry and adds only what a newly entitled pool needs. It writes
+no entry for a credential whose target is a
+[catalog variable](credential-variables.md), and asks nothing for it: the
+host reads the variable where submits run. Without a terminal it asks
+nothing, prints one line per entitled agent, ready or not, and lists what
+else still has no source. It asks
 nothing about the broker's CA: the bundle carries it. A `ca_file` the
 configuration keeps overrides the bundle's `ca`, so a stale one hides a
 refreshed CA; `host init BUNDLE` warns when the configuration keeps one and
@@ -167,7 +171,84 @@ manager's command for `openai-api-key`, and the submitting process's
 under `https://github.com/acme/`. `storage` gives pool `build`'s bucket the S3
 access key from a file and the secret key from the password manager, in place
 of the pair the bundle carries; another pool with storage uses the bundle's
-pair, or takes an entry of its own. Each source resolves at each submit.
+pair, or takes an entry of its own. Each distinct source resolves once at
+each submit. A credential whose target is a [catalog variable](credential-variables.md),
+such as `claude-code-oauth-token` at `CLAUDE_CODE_OAUTH_TOKEN`, needs no
+entry when the variable is set where submits run; an entry for it wins over
+the variable.
+
+## Credentials from the submitting process
+
+The host takes each credential of the placed agent from the first source
+it has:
+
+1. the source `credentials` names for the credential's name, `file`, `env`
+   or `command`;
+2. else, when the credential's target is an environment variable that
+   appears in the host's credential catalog, that variable in the process
+   that submits, when it is set and non-empty.
+
+Any other environment target, and every file target, needs an entry in
+`credentials`, so a pool's terms cannot make a host read a variable of the
+operator's choosing. The catalog is the one this binary carries: wherry's
+harness entries and the committed models.dev snapshot, whose variables are
+listed in [Variables read implicitly](credential-variables.md). A required
+credential with neither fails the submit before any record is produced,
+naming the variable to set and the configuration as the alternative; an
+optional one is left out and named `unsupplied`. A configured source that
+fails refuses the task and is never passed over for the variable.
+
+::: warning A set catalog variable reaches every run of its agent
+An optional credential whose variable is set where submits run reaches
+every run of that agent, with no request. Only the
+[catalog's variables](credential-variables.md) are read this way: the model
+providers' keys, the cloud credentials models.dev lists, such as
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AZURE_API_KEY` and
+`GOOGLE_APPLICATION_CREDENTIALS`, and `GITHUB_TOKEN`. `GITHUB_TOKEN` is the
+case to know: it is a catalog variable through models.dev's
+`github-copilot`, so a pool whose terms give an agent's credential that
+target, as the [example](#client-configuration-example)'s `github-token`
+has, gets the token from every submitting process that has it set; the
+example's explicit `env: GITHUB_TOKEN` reads the same variable and reaches
+the same runs. `GH_TOKEN` is not read implicitly. To hold a credential back
+from an agent's runs, unset its variable in the process that submits and
+remove any explicit source for that credential from this configuration: an
+explicit source wins over the variable, so unsetting the variable alone
+leaves a configured source in force.
+:::
+
+`wherry host init` reports one line per entitled agent, ready or not, from
+the sources above, and asks no question for a credential whose target is a
+catalog variable; `wherry host receivers` marks each credential's source
+and status. Neither runs a `command` source, which they report
+`unchecked`. A submit resolves each distinct source once, and a
+resubmission after a lost pool key resolves afresh: a variable unset by then
+leaves its optional credential out, where a configured source that fails is
+an error.
+
+### Passing variables to an MCP server
+
+An MCP server a harness starts sees the harness's environment, so a
+variable exported in the shell that starts the harness reaches
+`wherry host mcp` and its submits. Each harness can also set variables on
+the server entry itself, which is the route when the harness is started
+from a launcher without them; whichever the harness uses, the submitting
+process is the server. Where neither fits, an explicit `credentials` entry
+with a `file` or `command` source is the fallback, and wins over the
+variable.
+
+| Harness | Where its MCP server entries take variables |
+| --- | --- |
+| Claude Code | the `env` map of the server's entry in `.mcp.json`, or `--env VAR=value` to `claude mcp add` |
+| Codex | the `env` table of the server's `[mcp_servers.<name>]` entry in `~/.codex/config.toml` |
+| Gemini CLI | the `env` map of the server's `mcpServers` entry in `settings.json`, where a `$VAR` value expands from the CLI's environment |
+| Cursor | the `env` map of the server's `mcpServers` entry in `.cursor/mcp.json` |
+| Copilot CLI | the `env` map of the server's entry in its MCP configuration, `~/.copilot/mcp-config.json` |
+
+A value written into such an entry is a copy of the credential in a file
+the harness reads; prefer exporting the variable in the harness's
+environment, or a `command` source that reads a keychain or Vault, and keep
+these files out of version control.
 
 ## Bundle
 

@@ -95,8 +95,9 @@ type SubmissionBinding struct {
 	TaskStartedBy int64            `json:"task_started_by"`
 	TaskEndedBy   int64            `json:"task_ended_by"`
 	Credentials   []TaskCredential `json:"credentials,omitzero"`
-	// Supplied names the placed agent's credentials the envelope holds: the required ones and those the task requested,
-	// and on a resubmission also one made optional since.
+	// Supplied names the placed agent's credentials the envelope holds: the required ones and every optional one the host
+	// resolved, from the source its configuration names or the credential's catalog variable; a resubmission names what
+	// resolves at resubmit.
 	Supplied []string         `json:"supplied_credentials,omitzero"`
 	Outputs  []ExpectedOutput `json:"outputs,omitzero"`
 	Git      *GitInput        `json:"git,omitzero"`
