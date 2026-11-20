@@ -323,13 +323,15 @@ func bundlePath(dir, kind string, create bool, names ...string) (string, error) 
 	return filepath.Join(path, names[len(names)-1]+".bundle"), nil
 }
 
-// rebroker rewrites bundle, read from path, with its password when it names a broker other than broker.
-func rebroker(path string, bundle operator.Bundle, broker string) error {
-	if bundle.Broker == broker {
-		return nil
+// refreshBundle rewrites the kept bundle at path, read as kept, as current, the bundle its principal should hold now,
+// keeping the password, when the broker or the CA differs; each is compared on its own, so a CA renewal with the same
+// broker rewrites the bundle too. It reports whether it wrote.
+func refreshBundle(path string, kept, current operator.Bundle) (bool, error) {
+	current.Principal, current.Password = kept.Principal, kept.Password
+	if current == kept {
+		return false, nil
 	}
-	bundle.Broker = broker
-	return operator.ReplaceBundle(path, bundle)
+	return true, operator.ReplaceBundle(path, current)
 }
 
 // objectFile is the file apply reads for name and whether it is a directory: -f's, else dir's kind/name.yaml, else

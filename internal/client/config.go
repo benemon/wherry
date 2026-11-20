@@ -24,7 +24,7 @@ import (
 // credential name to the source of its value. Git names the credential and
 // host key a task cloning under each URL prefix takes. InputRoots are the
 // directories the MCP server sends inputs from. CAFile holds the PEM certificates the host trusts the broker with; without
-// it, the system roots. Storage maps a pool to the credentials of its bucket.
+// it, the bundle's ca, and without that the system roots. Storage maps a pool to the credentials of its bucket.
 type Config struct {
 	Bundle      string                       `yaml:"bundle"`
 	CAFile      string                       `yaml:"ca_file,omitempty"`
@@ -51,7 +51,7 @@ type StorageConfig struct {
 }
 
 // ConfigDir is $XDG_CONFIG_HOME/wherry, by default ~/.config/wherry on every OS: it holds the host's bundle.yaml,
-// host.key, config.yaml and ca.pem.
+// host.key and config.yaml.
 func ConfigDir() (string, error) {
 	return xdgDir("XDG_CONFIG_HOME", ".config")
 }
@@ -170,11 +170,6 @@ func LoadConfig(path string) (Config, error) {
 			return Config{}, err
 		}
 	}
-	if dir, err := ConfigDir(); err == nil && config.CAFile == "" {
-		if _, err := os.Stat(filepath.Join(dir, "ca.pem")); err == nil {
-			config.CAFile = filepath.Join(dir, "ca.pem")
-		}
-	}
 	for name, source := range config.Credentials {
 		if err := source.Validate(); err != nil {
 			return Config{}, fmt.Errorf("config credential %s: %w", name, err)
@@ -258,7 +253,8 @@ func Init(ctx context.Context, config Config) (string, map[string]operator.Terms
 	return keyID, pools, nil
 }
 
-// Connect opens the bundle's TLS and SCRAM-SHA-512 Kafka connection as its host principal; the host logs to logger.
+// Connect opens the bundle's TLS and SCRAM-SHA-512 Kafka connection as its host principal, trusting the broker through
+// the configuration's ca_file, else the bundle's ca, else the system roots; the host logs to logger.
 func Connect(config Config, logger *log.Logger) (*Host, error) {
 	bundle, err := operator.ReadBundle(config.Bundle)
 	if err != nil {
@@ -270,7 +266,7 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 			return nil, fmt.Errorf("ca_file: %w", err)
 		}
 	}
-	opts, err := operator.KafkaOpts(bundle.Broker, ca, bundle.Principal, bundle.Password)
+	opts, err := operator.BundleKafkaOpts(bundle, ca)
 	if err != nil {
 		return nil, fmt.Errorf("bundle: %w", err)
 	}

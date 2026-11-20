@@ -23,23 +23,24 @@ import (
 
 // operatorUsage is each operator command's usage, under "" the operator's.
 var operatorUsage = map[string]string{
-	"":                   "usage: wherry operator <init|pool apply|tenant add|tenant list|tenant pool add|tenant pool remove|tenant host add|tenant host remove|tenant remove|pool suspend|pool resume|pool rotate-key|receiver apply|receiver show|receiver remove|check> [--dir DIR]",
-	"init":               "usage: wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] [--super-user NAME --super-user-password-file FILE|-] [--super-user-mechanism SCRAM-SHA-512|SCRAM-SHA-256]",
-	"pool apply":         "usage: wherry operator pool apply NAME [-f PATH] [--dry-run]",
-	"tenant add":         "usage: wherry operator tenant add TENANT",
-	"tenant list":        "usage: wherry operator tenant list",
-	"tenant remove":      "usage: wherry operator tenant remove TENANT",
-	"tenant pool add":    "usage: wherry operator tenant pool add TENANT POOL",
-	"tenant pool remove": "usage: wherry operator tenant pool remove TENANT POOL",
-	"pool suspend":       "usage: wherry operator pool suspend POOL",
-	"pool resume":        "usage: wherry operator pool resume POOL",
-	"pool rotate-key":    "usage: wherry operator pool rotate-key POOL [--suspect-key KID]...",
-	"receiver apply":     "usage: wherry operator receiver apply NAME [-f PATH] [--dry-run] | NAME --force",
-	"receiver show":      "usage: wherry operator receiver show ID",
-	"receiver remove":    "usage: wherry operator receiver remove RECEIVER [--wait DURATION]",
-	"tenant host add":    "usage: wherry operator tenant host add TENANT HOST [--force]",
-	"tenant host remove": "usage: wherry operator tenant host remove TENANT HOST [--wait DURATION]",
-	"check":              "usage: wherry operator check",
+	"":                    "usage: wherry operator <init|pool apply|tenant add|tenant list|tenant pool add|tenant pool remove|tenant host add|tenant host refresh|tenant host remove|tenant remove|pool suspend|pool resume|pool rotate-key|receiver apply|receiver show|receiver remove|check> [--dir DIR]",
+	"init":                "usage: wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] [--super-user NAME --super-user-password-file FILE|-] [--super-user-mechanism SCRAM-SHA-512|SCRAM-SHA-256]",
+	"pool apply":          "usage: wherry operator pool apply NAME [-f PATH] [--dry-run]",
+	"tenant add":          "usage: wherry operator tenant add TENANT",
+	"tenant list":         "usage: wherry operator tenant list",
+	"tenant remove":       "usage: wherry operator tenant remove TENANT",
+	"tenant pool add":     "usage: wherry operator tenant pool add TENANT POOL",
+	"tenant pool remove":  "usage: wherry operator tenant pool remove TENANT POOL",
+	"pool suspend":        "usage: wherry operator pool suspend POOL",
+	"pool resume":         "usage: wherry operator pool resume POOL",
+	"pool rotate-key":     "usage: wherry operator pool rotate-key POOL [--suspect-key KID]...",
+	"receiver apply":      "usage: wherry operator receiver apply NAME [-f PATH] [--dry-run] | NAME --force",
+	"receiver show":       "usage: wherry operator receiver show ID",
+	"receiver remove":     "usage: wherry operator receiver remove RECEIVER [--wait DURATION]",
+	"tenant host add":     "usage: wherry operator tenant host add TENANT HOST [--force]",
+	"tenant host refresh": "usage: wherry operator tenant host refresh TENANT HOST",
+	"tenant host remove":  "usage: wherry operator tenant host remove TENANT HOST [--wait DURATION]",
+	"check":               "usage: wherry operator check",
 }
 
 func runOperator(args []string, stdout, stderr io.Writer) error {
@@ -154,7 +155,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := receiverLocalFile(ctx, dir, pos[2], path, directory, dryRun, stderr, config, service.Broker, service.CA != nil); err != nil {
+		if err := receiverLocalFile(ctx, dir, pos[2], path, directory, dryRun, stderr, config); err != nil {
 			return err
 		}
 		if dryRun {
@@ -175,7 +176,8 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			if _, err := service.ReceiverUpdate(ctx, config, false); err != nil {
 				return err
 			}
-			return rebroker(bundle, kept, config.Broker)
+			_, err = refreshBundle(bundle, kept, service.Bundle(config.Broker, kept.Principal, kept.Password))
+			return err
 		}
 		return service.ReceiverAdd(ctx, config, config.Broker, bundle)
 
@@ -295,6 +297,25 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		}
 		_, force := options["force"]
 		return service.HostAdd(ctx, pos[3], pos[4], bundle, force)
+	case "tenant host refresh":
+		if len(pos) != 5 {
+			return errors.New(operatorUsage[command])
+		}
+		// The bundle must already be kept, so no directory is made.
+		bundle, err := bundlePath(dir, "hosts", false, pos[3], pos[4])
+		if err != nil {
+			return err
+		}
+		changed, err := service.HostRefresh(ctx, pos[3], pos[4], bundle)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			fmt.Fprintf(stdout, "%s is current\n", bundle)
+			return nil
+		}
+		fmt.Fprintf(stdout, "refreshed %s; hand it to the host, where wherry host init %s installs it\n", bundle, filepath.Base(bundle))
+		return nil
 	case "tenant host remove", "receiver remove":
 		if pos[0] == "tenant" && (len(pos) != 5) {
 			return errors.New(operatorUsage[command])
@@ -497,13 +518,14 @@ func operatorArgs(args []string) ([]string, map[string]string, error) {
 		"receiver apply": {"f": true, "dry-run": true, "force": true},
 		"receiver show":  {},
 		"tenant add":     {}, "tenant list": {}, "tenant remove": {}, "tenant pool add": {}, "tenant pool remove": {},
-		"pool suspend":       {},
-		"pool resume":        {},
-		"pool rotate-key":    {"suspect-key": true},
-		"tenant host add":    {"force": true},
-		"tenant host remove": {"wait": true},
-		"receiver remove":    {"wait": true},
-		"check":              {},
+		"pool suspend":        {},
+		"pool resume":         {},
+		"pool rotate-key":     {"suspect-key": true},
+		"tenant host add":     {"force": true},
+		"tenant host refresh": {},
+		"tenant host remove":  {"wait": true},
+		"receiver remove":     {"wait": true},
+		"check":               {},
 	}[command]
 	if allowed != nil {
 		for _, name := range slices.Sorted(maps.Keys(options)) {

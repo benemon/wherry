@@ -896,20 +896,17 @@ func TestHostCancellationKeepsPairReservations(t *testing.T) {
 	}
 }
 
+// host init asks nothing about the broker: the bundle carries its CA, and no ca_file is written. It hardens the
+// configuration directory and copies the bundle, CA included, unchanged.
 func TestHostBrokerAndBundleModes(t *testing.T) {
 	h := newInitHost(t, nil)
-	dir := t.TempDir()
-	caPath := filepath.Join(dir, "ca.pem")
-	if err := os.Rename(filepath.Join(h.dir, "ca.pem"), caPath); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(dir)
-	scriptForms(t, keys("\r"))
+	scriptForms(t)
 	_, out := h.init(t, h.bundle)
-	if !strings.Contains(out, "\nBroker\n") || strings.Contains(out, "Broker  1") || !strings.Contains(out, "Summary  1 of 1") || strings.Count(out, "Wrote "+h.config) != 1 {
+	// The temporary directory's name holds the test's, so the heading is looked for as a line.
+	if strings.Contains(out, "\nBroker\n") || strings.Contains(out, "CA certificate") || !strings.Contains(out, "Summary  1 of 1") || strings.Count(out, "Wrote "+h.config) != 1 {
 		t.Fatal(out)
 	}
-	if f := h.written(t); f.CAFile != caPath {
+	if f := h.written(t); f.CAFile != "" {
 		t.Fatal(f)
 	}
 	for path, want := range map[string]os.FileMode{h.dir: 0700, filepath.Join(h.dir, "bundle.yaml"): 0600, h.config: 0600, filepath.Join(h.dir, "host.key"): 0600} {
@@ -919,14 +916,16 @@ func TestHostBrokerAndBundleModes(t *testing.T) {
 		}
 	}
 	a, err := operator.ReadBundle(h.bundle)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || a.CA == "" {
+		t.Fatal("the operator's bundle carries no CA", err)
 	}
 	b, err := operator.ReadBundle(filepath.Join(h.dir, "bundle.yaml"))
 	if err != nil || a != b {
 		t.Fatal("bundle changed", err)
 	}
 }
+
+// The CA picker remains the operator's: operator init offers the PEM files in the working directory.
 func TestHostCAOptionsAndRevalidation(t *testing.T) {
 	_, ca := tlsCluster(t)
 	dir := t.TempDir()
@@ -1015,18 +1014,6 @@ func TestHostGitExistingSourceReuse(t *testing.T) {
 	}
 }
 
-func TestHostInterruptBeforeBootstrap(t *testing.T) {
-	h := newInitHost(t, nil)
-	os.Remove(filepath.Join(h.dir, "ca.pem"))
-	scriptForms(t, keys("\x03"))
-	var out bytes.Buffer
-	if err := hostInit(h.ctx, h.config, h.bundle, &out, &out); !errors.Is(err, errInterrupted) {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(h.config); !os.IsNotExist(err) {
-		t.Fatal("bootstrap written before broker answer", err)
-	}
-}
 func TestHostRerunKeepsEntries(t *testing.T) {
 	h := newInitHost(t, map[string]operator.Terms{"a": agentTerms(envCredential("model", "UNSET_TARGET"))})
 	t.Setenv("UNSET_TARGET", "")

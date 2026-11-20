@@ -80,11 +80,14 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 			return err
 		}
 	}
+	// A local ca_file overrides the CA a bundle carries, so a stale one hides a refreshed CA.
+	overridden := false
 	if bundle != "" {
 		contents, err := operator.ReadBundle(bundle)
 		if err != nil {
 			return err
 		}
+		overridden = contents.CA != "" && file.CAFile != ""
 		// The configuration directory is wherry's own and is hardened to 0700; a configuration elsewhere sits in a
 		// directory of the user's, which keeps its mode.
 		if paths.Default {
@@ -119,16 +122,9 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 		wrote = true
 		return nil
 	}
-	if _, err := os.Stat(filepath.Join(dir, "ca.pem")); file.CAFile == "" && errors.Is(err, os.ErrNotExist) && interactive {
-		if err = q.line("\nBroker\n"); err != nil {
+	if overridden {
+		if err = q.line("warning: ca_file %s in %s overrides the CA the bundle carries; remove the line unless the broker is to be trusted through that file alone\n", display(file.CAFile), display(path)); err != nil {
 			return err
-		}
-		ca, err := q.ca()
-		if err != nil {
-			return err
-		}
-		if ca != "" {
-			file.CAFile, changed = ca, true
 		}
 	}
 	if changed {

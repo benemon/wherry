@@ -1541,12 +1541,6 @@ func TestHostPathsDefaultToXDGLocations(t *testing.T) {
 			if err != nil || config.HostKey != filepath.Join(test.config, "host.key") || config.StateDir != test.state || config.CAFile != "" {
 				t.Fatalf("config %+v, %v; want host_key in %s, state_dir %s and no ca_file", config, err, test.config, test.state)
 			}
-			if err := os.WriteFile(filepath.Join(test.config, "ca.pem"), nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if config, err := LoadConfig(path); err != nil || config.CAFile != filepath.Join(test.config, "ca.pem") {
-				t.Fatalf("ca_file %s, %v; want the present %s", config.CAFile, err, filepath.Join(test.config, "ca.pem"))
-			}
 		})
 	}
 }
@@ -1578,8 +1572,8 @@ func TestConfigInputRoots(t *testing.T) {
 	}
 }
 
-// The host trusts the broker through its config's ca_file; without one, through ~/.config/wherry/ca.pem when that file
-// exists, and otherwise the system roots.
+// The host trusts the broker through its config's ca_file alone, expanded; without one it names none, and a ca.pem in
+// the configuration directory, which older hosts read, is not picked up: the bundle carries the CA.
 func TestConfigCAFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1597,17 +1591,17 @@ func TestConfigCAFile(t *testing.T) {
 		return loaded.CAFile
 	}
 	if got := load(""); got != "" {
-		t.Fatalf("ca_file %q without a setting or a default file; want none, for the system roots", got)
+		t.Fatalf("ca_file %q without a setting; want none, for the bundle's ca or the system roots", got)
 	}
-	defaultCA := filepath.Join(home, ".config", "wherry", "ca.pem")
-	if err := os.MkdirAll(filepath.Dir(defaultCA), 0o700); err != nil {
+	oldCA := filepath.Join(home, ".config", "wherry", "ca.pem")
+	if err := os.MkdirAll(filepath.Dir(oldCA), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(defaultCA, []byte("ca"), 0o600); err != nil {
+	if err := os.WriteFile(oldCA, []byte("ca"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := load(""); got != defaultCA {
-		t.Fatalf("ca_file %q without a setting; want the default %s", got, defaultCA)
+	if got := load(""); got != "" {
+		t.Fatalf("ca_file %q without a setting; want %s left alone", got, oldCA)
 	}
 	if got := load("ca_file: ~/private/kafka-ca.pem\n"); got != filepath.Join(home, "private", "kafka-ca.pem") {
 		t.Fatalf("ca_file %q; want the setting expanded", got)
@@ -1681,7 +1675,8 @@ func TestConnectErrorsOmitPassword(t *testing.T) {
 	dir := t.TempDir()
 	config := Config{Bundle: filepath.Join(dir, "bundle.yaml"), HostKey: filepath.Join(dir, "missing.key"), StateDir: dir}
 	for name, bundle := range map[string]string{
-		"missing key": "broker: localhost:9092\nca: x\nprincipal: wherry.tnt.tenant-a.host-a\npassword: " + password + "\n",
+		"missing key": "broker: localhost:9092\nprincipal: wherry.tnt.tenant-a.host-a\npassword: " + password + "\n",
+		"bad ca":      "broker: localhost:9092\nca: " + password + "\nprincipal: wherry.tnt.tenant-a.host-a\npassword: " + password + "\n",
 		"bad yaml":    "broker: [localhost\npassword: " + password + "\n",
 		"wrong type":  "broker: localhost:9092\nprincipal: wherry.tnt.tenant-a.host-a\npassword: [" + password + "]\n",
 		"unknown":     "broker: localhost:9092\npassword: " + password + "\nextra: " + password + "\n",

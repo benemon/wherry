@@ -33,12 +33,11 @@ func receiverCredentials(config operator.ReceiverConfig) []string {
 	return result
 }
 
-const receiverLocalFields = "bundle, ca_file, state_dir, plugin_dir, metrics_addr, drain_timeout and credentials"
+const receiverLocalFields = "bundle, state_dir, plugin_dir, metrics_addr, drain_timeout and credentials"
 
-// receiverLocalFile finds, or asks for and writes, the receiver's local configuration and checks it against config.
-// broker and ca are the operator's broker and whether the operator trusts it through a CA file.
-func receiverLocalFile(ctx context.Context, dir, name, receiverPath string, directory, dryRun bool, out io.Writer, config operator.ReceiverConfig, broker string, ca bool) error {
-	needsCA := config.Broker == broker && ca
+// receiverLocalFile finds, or asks for and writes, the receiver's local configuration and checks it against config. The
+// broker's CA is not asked for: the bundle carries it, and a ca_file in the file overrides the bundle.
+func receiverLocalFile(ctx context.Context, dir, name, receiverPath string, directory, dryRun bool, out io.Writer, config operator.ReceiverConfig) error {
 	path := filepath.Join(dir, "receivers", name+".config.yaml")
 	if directory {
 		candidate := filepath.Join(receiverPath, "config.yaml")
@@ -66,7 +65,7 @@ func receiverLocalFile(ctx context.Context, dir, name, receiverPath string, dire
 		if !promptsEligible(out) {
 			return fmt.Errorf("%s does not exist and there is no terminal to prompt on; write it with %s", path, receiverLocalFields)
 		}
-		local, err = promptReceiverLocal(&questions{ctx, stdin, &promptLatch{out: out}}, config, needsCA)
+		local, err = promptReceiverLocal(&questions{ctx, stdin, &promptLatch{out: out}}, config)
 		if err != nil {
 			return presentationError{err}
 		}
@@ -88,9 +87,6 @@ func receiverLocalFile(ctx context.Context, dir, name, receiverPath string, dire
 			return fmt.Errorf("%s: missing credential source %s", path, name)
 		}
 	}
-	if needsCA && local.CAFile == "" {
-		fmt.Fprintln(out, "warning: local configuration has no ca_file; the broker must be trusted through system roots")
-	}
 	if dryRun {
 		fmt.Fprintf(out, "would use local configuration %s\n", path)
 	}
@@ -100,7 +96,7 @@ func receiverLocalFile(ctx context.Context, dir, name, receiverPath string, dire
 var receiverEnv = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var receiverEnvOther = regexp.MustCompile(`[^A-Z0-9_]`)
 
-func promptReceiverLocal(q *questions, config operator.ReceiverConfig, needsCA bool) (receiverLocalConfig, error) {
+func promptReceiverLocal(q *questions, config operator.ReceiverConfig) (receiverLocalConfig, error) {
 	local := receiverLocalConfig{Credentials: map[string]credential.Source{}}
 	kinds := map[string]bool{}
 	for _, profile := range config.Profiles {
@@ -129,23 +125,6 @@ func promptReceiverLocal(q *questions, config operator.ReceiverConfig, needsCA b
 	if local.Bundle, err = asked("Bundle path", "/etc/wherry/receiver.bundle", notBlank("bundle path")); err != nil {
 		return local, err
 	}
-	ca := "roots"
-	if needsCA {
-		ca = "file"
-	}
-	if _, err := q.pick("Broker CA", "", []huh.Option[string]{option("CA file", "file"), option("System roots", "roots")}, &ca); err != nil {
-		return local, err
-	}
-	answer := "System roots"
-	if ca == "file" {
-		if local.CAFile, err = input("CA file path", "/etc/wherry/kafka-ca.pem", notBlank("CA file path")); err != nil {
-			return local, err
-		}
-		answer = local.CAFile
-	}
-	if err := q.answer("Broker CA", answer); err != nil {
-		return local, err
-	}
 	if local.StateDir, err = asked("State directory (must survive restarts)", "/var/lib/wherry/state", notBlank("state directory")); err != nil {
 		return local, err
 	}
@@ -170,7 +149,7 @@ func promptReceiverLocal(q *questions, config operator.ReceiverConfig, needsCA b
 	if _, err := q.pick("Metrics", "", []huh.Option[string]{option("Listen on an address", "listen"), option("No listener", "none")}, &metrics); err != nil {
 		return local, err
 	}
-	answer = "No listener"
+	answer := "No listener"
 	if metrics == "listen" {
 		if local.MetricsAddr, err = input("Metrics address", ":9464", notBlank("metrics address")); err != nil {
 			return local, err

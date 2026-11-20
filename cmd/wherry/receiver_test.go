@@ -248,12 +248,13 @@ func TestReadBundleIsStrict(t *testing.T) {
 	if _, err := operator.ReadBundle(path); err == nil {
 		t.Fatal("accepted a bundle carrying platform credentials")
 	}
-	// Broker trust is local to each machine, so a bundle carries no CA.
+	// A bundle's ca is the PEM certificates its holder trusts the broker with; one that holds no certificate fails closed
+	// rather than fall back to the system roots.
 	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nca: c\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := operator.ReadBundle(path); err == nil {
-		t.Fatal("accepted a bundle carrying a CA")
+	if _, err := operator.ReadBundle(path); err == nil || err.Error() != "bundle ca holds no PEM certificate" {
+		t.Fatalf("a bundle whose ca holds no certificate: %v; want it refused", err)
 	}
 	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\n"), 0o600); err != nil {
 		t.Fatal(err)

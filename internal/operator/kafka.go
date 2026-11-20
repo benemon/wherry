@@ -37,10 +37,25 @@ type Service struct {
 	LockCeilingMS   int64
 }
 
+// Bundle is a host's or receiver's Kafka identity, as the operator writes it. CA is the PEM certificates its holder
+// trusts the broker with, written when the operator trusts its own broker through a CA file; empty for the system roots.
+// It is a string: yaml marshals a []byte as !!binary, and a bundle is read by people too.
 type Bundle struct {
 	Broker    string `yaml:"broker"`
 	Principal string `yaml:"principal"`
 	Password  string `yaml:"password"`
+	CA        string `yaml:"ca,omitempty"`
+}
+
+// Bundle is the bundle service writes for principal with password at broker. When broker is the operator's own and the
+// operator trusts it through a CA file, the bundle carries that CA, so its holder needs no CA file; a receiver on another
+// address gets none, since the operator knows nothing of that address's CA.
+func (service *Service) Bundle(broker, principal, password string) Bundle {
+	bundle := Bundle{Broker: broker, Principal: principal, Password: password}
+	if broker == service.Broker && len(service.CA) > 0 {
+		bundle.CA = string(service.CA)
+	}
+	return bundle
 }
 
 // DecodeYAML decodes encoded into value, refusing unknown fields. An error names only the lines it found, since the
@@ -58,7 +73,9 @@ func DecodeYAML(encoded []byte, value any) error {
 	return nil
 }
 
-// ReadBundle reads the bundle at path, refusing unknown fields and a bundle without its broker, principal or password.
+// ReadBundle reads the bundle at path, refusing unknown fields, a bundle without its broker, principal or password, and
+// a ca that holds no PEM certificate: a bundle whose CA cannot be trusted is refused rather than fall back to the system
+// roots.
 func ReadBundle(path string) (Bundle, error) {
 	encoded, err := os.ReadFile(path)
 	if err != nil {
@@ -71,7 +88,38 @@ func ReadBundle(path string) (Bundle, error) {
 	if bundle.Broker == "" || bundle.Principal == "" || bundle.Password == "" {
 		return Bundle{}, errors.New("bundle requires broker, principal and password")
 	}
+	if bundle.CA != "" && !x509.NewCertPool().AppendCertsFromPEM([]byte(bundle.CA)) {
+		return Bundle{}, errors.New("bundle ca holds no PEM certificate")
+	}
 	return bundle, nil
+}
+
+// BundleKafkaOpts are KafkaOpts for bundle's principal at its broker. The broker is trusted through local, the holder's
+// own ca_file, when it names one; else through the bundle's ca; else through the system roots. A local file overrides the
+// bundle, so a stale one hides a refreshed CA.
+func BundleKafkaOpts(bundle Bundle, local []byte) ([]kgo.Opt, error) {
+	ca := local
+	if ca == nil && bundle.CA != "" {
+		ca = []byte(bundle.CA)
+	}
+	return KafkaOpts(bundle.Broker, ca, bundle.Principal, bundle.Password)
+}
+
+// UnknownAuthority reports whether err is a connection the broker's certificate failed because it chains to no CA the
+// connection trusts: Go's x509 error, which franz-go's dial error wraps.
+func UnknownAuthority(err error) bool {
+	var unknown x509.UnknownAuthorityError
+	return errors.As(err, &unknown)
+}
+
+// ExplainUnknownAuthority is err with, when UnknownAuthority, what to do: a bundle the operator wrote before it trusted
+// the broker through a CA file carries no ca, and refresh, the operator command that rewrites the bundle, gives it one.
+// Any other err is returned as it is.
+func ExplainUnknownAuthority(err error, refresh string) error {
+	if !UnknownAuthority(err) {
+		return err
+	}
+	return fmt.Errorf("%w; the broker's certificate chains to a CA this connection does not trust: a bundle written before the operator trusted the broker through a CA file carries none, so install the bundle %s writes, or name the CA as ca_file", err, refresh)
 }
 
 var yamlLine = regexp.MustCompile(`line \d+`)
@@ -426,7 +474,7 @@ func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, 
 	if err := service.converge(ctx); err != nil {
 		return err
 	}
-	return writeBundle(bundle, Bundle{broker, ReceiverPrincipal(config.Receiver), password})
+	return writeBundle(bundle, service.Bundle(broker, ReceiverPrincipal(config.Receiver), password))
 }
 
 // ReceiverReissue gives a live receiver a new password and writes its bundle, naming broker, to bundlePath, replacing
@@ -471,7 +519,7 @@ func (service *Service) reissue(ctx context.Context, principal, broker, bundlePa
 		rotated = false
 		return fmt.Errorf("%s cannot return after its membership end", principal)
 	}
-	return writeBundle(bundle, Bundle{broker, principal, password})
+	return writeBundle(bundle, service.Bundle(broker, principal, password))
 }
 
 // ReceiverUpdate records a new configuration for an existing receiver in its
@@ -594,7 +642,45 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	if err := service.applyQuota(ctx, state, tenant, principal); err != nil {
 		return err
 	}
-	return writeBundle(bundle, Bundle{service.Broker, principal, password})
+	return writeBundle(bundle, service.Bundle(service.Broker, principal, password))
+}
+
+// HostRefresh rewrites the kept bundle at bundlePath of host in tenant with the operator's broker and the CA it trusts
+// the broker through, keeping the principal and password, and reports whether the bundle changed; a bundle already
+// current is left as it is, so a refresh can be rerun. It refuses an absent, revoking or ended host, as HostAdd does, a
+// missing bundle, which --force reissues, and a bundle that is another principal's.
+func (service *Service) HostRefresh(ctx context.Context, tenant, host, bundlePath string) (bool, error) {
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return false, err
+	}
+	if err := state.LiveTenant(tenant); err != nil {
+		return false, err
+	}
+	principal := TenantPrincipal(tenant, host)
+	if _, exists := state.Hosts[principal]; !exists {
+		return false, errors.New("no host by that name")
+	}
+	if state.Ended[principal] {
+		return false, errors.New("host cannot return after its membership end")
+	}
+	if state.Revoking[principal] {
+		return false, errors.New("host is revoking")
+	}
+	kept, err := ReadBundle(bundlePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("%s does not exist; tenant host add %s %s --force gives the host a new password and bundle", bundlePath, tenant, host)
+	} else if err != nil {
+		return false, err
+	}
+	if kept.Principal != principal {
+		return false, fmt.Errorf("%s is the bundle of %s, not of %s", bundlePath, kept.Principal, principal)
+	}
+	refreshed := service.Bundle(service.Broker, principal, kept.Password)
+	if refreshed == kept {
+		return false, nil
+	}
+	return true, ReplaceBundle(bundlePath, refreshed)
 }
 
 func (service *Service) TenantPoolAdd(ctx context.Context, tenant, pool string) error {
