@@ -427,3 +427,34 @@ Check broker connectivity and latency. Before each Dispatch, Stop, Purge
 2 seconds, including waiting for another renewal. A slow broker or process
 pause can therefore end a still-held run and spend a delivery. Parent
 cancellation and stopping the renewer do not count as claim loss.
+
+## Rotate a tenant's storage keys
+
+A tenant's S3 key pair is recorded once with `wherry operator tenant storage`
+and travels in every host bundle of the tenant
+([S3 storage](operations-hosts.md#s3-storage)). `tenant host remove` ends a
+Kafka principal only: the pair stays valid on every host that holds a bundle
+until the store's administrator disables it. Rotate with an overlap, so no
+host loses its storage:
+
+1. The store's administrator issues a new pair for the tenant's user and
+   keeps the old one valid.
+2. Run `wherry operator tenant storage TENANT`, or pipe the new pair in
+   with `-`. It checks both keys before it writes and replaces the file
+   atomically, so a refused or failed run keeps the old pair; run it again.
+3. Run `wherry operator tenant host refresh TENANT HOST` for each remaining
+   host of the tenant. Each rewrites the host's kept bundle with the new pair
+   and the same password; a rerun reports a refreshed bundle as current, so
+   a run interrupted part way is run again for every host and converges.
+4. Hand each refreshed bundle to its host over a channel you trust. The
+   host's user runs `wherry host init BUNDLE`, which replaces the host's
+   copy, and restarts the harness sessions that run `wherry host mcp`, which
+   read the bundle at start. A host that maps the pool to credentials of its
+   own in its configuration keeps using them; update those sources too.
+5. Once every host runs on the new pair, the administrator disables the old
+   one.
+
+For a compromised host, the administrator disables the pair at once and
+accepts the outage: every host of the tenant loses storage until it holds a
+bundle with the new pair. Then run `wherry operator tenant host remove
+TENANT HOST` for the compromised host and the steps above for the rest.

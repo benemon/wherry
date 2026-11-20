@@ -39,10 +39,11 @@ Bundles carry the broker's CA as `ca` when `operator.yaml` names a
 reads `ca.pem` from its configuration directory, and neither `host init` nor
 `receiver apply` asks for a CA.
 
-An older binary refuses a bundle that carries `ca`, since unknown fields are
-errors; the new binary with an older bundle and no `ca_file` cannot reach a
-broker under a private CA. Each host and receiver therefore takes the new
-binary and its refreshed bundle in one step:
+An older binary refuses a bundle that carries `ca`, or the `storage` pair a
+host bundle carries once `tenant storage` recorded it, since unknown fields
+are errors; the new binary with an older bundle and no `ca_file` cannot
+reach a broker under a private CA. Each host and receiver therefore takes
+the new binary and its refreshed bundle in one step:
 
 1. Upgrade the operator's binary.
 2. Run `wherry operator tenant host refresh TENANT HOST` for each host and

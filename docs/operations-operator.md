@@ -369,16 +369,27 @@ Prerequisites: the working directory
    wherry operator tenant pool add acme build
    ```
 
-2. Add each host the tenant submits from:
+2. When a pool has [S3 storage](operations-hosts.md#s3-storage), record the
+   S3 key pair the store's administrator issued for the tenant, from the
+   masked prompts or piped in:
+
+   ```sh
+   wherry operator tenant storage acme
+   ```
+
+3. Add each host the tenant submits from:
 
    ```sh
    wherry operator tenant host add acme laptop
    ```
 
-3. Hand the bundle, `bundles/hosts/acme/laptop.bundle`, to the host's user over
-   a channel you trust. It holds the host's Kafka password and, when
-   `operator.yaml` names a `ca_file`, the broker's CA, so the host needs
-   nothing else to reach the broker.
+   It prints the bundle's path and the command that installs it.
+
+4. Hand the bundle, `bundles/hosts/acme/laptop.bundle`, to the host's user over
+   a channel you trust. It holds the host's Kafka password, the broker's CA
+   when `operator.yaml` names a `ca_file`, and the tenant's S3 key pair
+   when one is recorded, so the host needs nothing else to reach the broker
+   and its pools' storage.
 
 The host's user then runs `wherry host init <bundle>`, which places the
 bundle, registers the host key and writes the
@@ -797,9 +808,10 @@ To onboard a tenant:
 
 1. Run `wherry operator tenant add acme`.
 2. Run `wherry operator tenant pool add acme build`.
-3. Run `wherry operator tenant host add acme laptop`.
-4. Deliver the bundle over a channel you trust.
-5. Run `wherry host init laptop.bundle` on the host.
+3. Run `wherry operator tenant storage acme` when a pool has storage.
+4. Run `wherry operator tenant host add acme laptop`.
+5. Deliver the bundle over a channel you trust.
+6. Run `wherry host init laptop.bundle` on the host.
 
 Collect results before removing an entitlement.
 `wherry operator tenant pool remove acme build` withdraws the hosts' pool access.
