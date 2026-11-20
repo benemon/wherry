@@ -17,7 +17,8 @@ operator command takes `--dir DIR`, the current directory by default.
     hosts/<tenant>/          mode 0700
       <host>.bundle          mode 0600
     receivers/<receiver>.bundle  mode 0600
-  .gitignore                 operator init appends operator.password and bundles/
+  storage/<tenant>.yaml      the tenant's S3 key pair, written by tenant storage, mode 0600 in a directory mode 0700
+  .gitignore                 operator init appends operator.password, bundles/ and storage/
 ```
 
 In `operator.yaml`, unknown and duplicate fields are errors, a decode error
@@ -34,7 +35,8 @@ It holds nothing about the Kafka super user, which only
 consumed: change one and apply it again. There is no local state: the
 `wherry.operator` topic is the state, and when a kept file and the topic
 differ, the topic is what runs until the file is applied. The directory holds
-every principal's password, in `operator.password` and each bundle
+every principal's password, in `operator.password` and each bundle, and
+every tenant's S3 key pair, in `storage/` and each host bundle
 ([Security](security.md#the-operator-working-directory)).
 
 ## Pool terms

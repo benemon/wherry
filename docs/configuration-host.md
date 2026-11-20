@@ -33,7 +33,7 @@ The host's paths are the same on every OS, macOS included:
 | `state_dir` | path | the host state directory, or `<path>.state/` beside a configuration [away from the default path](#a-configuration-away-from-the-default-path) | Store local run records here. |
 | `credentials` | mapping | none | Map credential names to [sources](security.md#credential-sources). |
 | `git` | list | none | Map URL prefixes to credential names and SSH known-hosts files. |
-| `storage` | mapping | none | Map pool names to S3 `access_key` and `secret_key` credential names. |
+| `storage` | mapping | none | Map pool names to S3 `access_key` and `secret_key` credential names, which win over the `storage` pair the bundle carries for that pool. |
 | `input_roots` | list of paths | MCP server working directory | Allow the MCP server to send inputs from these directories. |
 
 Without a `ca_file`, the host trusts the broker through the bundle's `ca`, and without that through the system roots.
@@ -89,7 +89,8 @@ Git entries contain `url`, optional `credential` and `host_key`.
 An SSH remote requires `host_key`.
 An HTTPS remote refuses `host_key`.
 See [Git credentials](security.md#git-credentials).
-A pool without a storage entry has no S3 lane on this host.
+A pool without a storage entry uses the pair the bundle carries as
+`storage`; without that it has no S3 lane on this host.
 MCP input roots must be absolute paths to existing directories.
 CLI commands can read any input path you give them.
 
@@ -164,9 +165,9 @@ storage:
 manager's command for `openai-api-key`, and the submitting process's
 `GITHUB_TOKEN` for `github-token`, which `git` also gives every task cloning
 under `https://github.com/acme/`. `storage` gives pool `build`'s bucket the S3
-access key from a file and the secret key from the password manager; another
-pool with storage takes its own entry. Each source resolves at
-each submit.
+access key from a file and the secret key from the password manager, in place
+of the pair the bundle carries; another pool with storage uses the bundle's
+pair, or takes an entry of its own. Each source resolves at each submit.
 
 ## Bundle
 
@@ -174,7 +175,7 @@ A YAML file that `wherry operator` writes with mode 0600 under the working
 directory's `bundles/`. Unknown fields are errors, and `broker`, `principal`
 and `password` are required; a decode error names only its line numbers. A
 trailing line break ends the password and is not part of it, and a password
-of nothing else is refused.
+of nothing else is refused. A `storage` block holds both keys or is refused.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -182,6 +183,7 @@ of nothing else is refused.
 | `principal` | string | required | SCRAM-SHA-512 user name |
 | `password` | string | required | SCRAM password |
 | `ca` | string | none | PEM CA certificates the host trusts the broker with, written when `operator.yaml` names a `ca_file` |
+| `storage` | mapping | none | the tenant's S3 `access_key` and `secret_key`, plain strings, written when [`tenant storage`](commands.md#wherry-operator-tenant-storage-tenant) recorded them; used for every pool with storage that `storage` in the configuration does not map |
 
 The Kafka platform owns and renews its CA. The operator trusts it through
 `operator.yaml`'s `ca_file`, and every bundle it writes for its broker
@@ -205,9 +207,12 @@ bundle, as [Broker trust](security.md#broker-trust) describes.
 
 Go's TLS stack reads `SSL_CERT_FILE` as its
 [crypto/x509](https://pkg.go.dev/crypto/x509#SystemCertPool) package
-documents. On Linux, a broker connection without `ca_file`, in any wherry
-command, trusts the roots it names. macOS ignores it for that connection:
-use `ca_file` there. The host's S3 client adds the certificates in
+documents. On Linux, a broker connection that falls back to the system
+roots, with neither a `ca_file` nor a bundle `ca` for a host or receiver and
+no `ca_file` for the operator, trusts the roots it names; a `ca_file` or a
+bundle `ca` replaces the system roots, so `SSL_CERT_FILE` then has no
+effect on that connection. macOS ignores it for the broker connection: use
+`ca_file` there. The host's S3 client adds the certificates in
 `SSL_CERT_FILE` to the system roots for a pool's storage endpoint on every
 OS.
 

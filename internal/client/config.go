@@ -284,7 +284,7 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 		kafka.Close()
 		return nil, fmt.Errorf("load host key: %w", err)
 	}
-	host.storage = config.Storage
+	host.storage, host.bundleStorage = config.Storage, bundle.Storage
 	return host, nil
 }
 

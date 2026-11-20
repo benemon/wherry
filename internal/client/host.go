@@ -26,7 +26,6 @@ import (
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
-	"github.com/minio/minio-go/v7"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -170,9 +169,13 @@ type Host struct {
 	stateDir    string
 	credentials map[string]credential.Source
 	git         []GitCredential
-	// storage holds the host's S3 credentials by pool; a pool without an entry has no storage on this host.
+	// storage holds the host's S3 credentials by pool; a pool without an entry uses bundleStorage, and without that has
+	// no storage on this host.
 	storage map[string]StorageConfig
-	logger  *log.Logger
+	// bundleStorage is the tenant's S3 key pair the bundle carries, zero for none: the keys of every pool with storage
+	// that storage does not map. It is no credential, so no pool's terms can request it.
+	bundleStorage operator.StorageKeys
+	logger        *log.Logger
 	// follower is the host's reader of the tenant feed, kept while its context lasts.
 	followMu sync.Mutex
 	follower *follower
@@ -416,8 +419,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err := wire.ValidateInputs(input.Parts, math.MaxInt64); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
-	_, credentialed := h.storage[pool]
-	storable := v.state.Pools[pool].Storage != nil && credentialed
+	storable := v.state.Pools[pool].Storage != nil && h.credentialed(pool)
 	if continued.last != nil && !storable {
 		return SubmitResult{}, fmt.Errorf("%w: continue needs a pool with storage and a host storage credential: the bundles travel through S3", ErrInvalidInput)
 	}
@@ -480,7 +482,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		}
 	}
 	storage := v.state.Pools[pool].Storage
-	var store *minio.Client
+	var store *store
 	if stored {
 		if store, err = h.bucket(ctx, pool, storage); err != nil {
 			return SubmitResult{}, err
@@ -510,8 +512,8 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	}
 	if err != nil {
 		if stored {
-			if cleanupErr := h.removePrefix(ctx, store, storage.Bucket, wire.S3Prefix(h.tenant, runID)); cleanupErr != nil {
-				h.logger.Printf("run %s: delete the S3 inputs of a task not published: %v", runID, cleanupErr)
+			if cleanupErr := store.removePrefix(ctx, storage.Bucket, wire.S3Prefix(h.tenant, runID)); cleanupErr != nil {
+				store.logf("run %s: delete the S3 inputs of a task not published: %v", runID, cleanupErr)
 			}
 		}
 		return SubmitResult{}, err
@@ -569,7 +571,7 @@ func (h *Host) poolKey(ctx context.Context, v view, pool string) (*ecdsa.PublicK
 // enveloped signs submission with an envelope of its credentials, its S3 links and redactionKey, under a fresh content
 // key wrapped to poolKey. Credentials resolve here, a command source's child with the task's task_ended_by; GET links
 // last until task_started_by plus getLifetime and PUT links until task_ended_by.
-func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms operator.Terms, poolKey *ecdsa.PublicKey, store *minio.Client, redactionKey []byte) ([]byte, error) {
+func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms operator.Terms, poolKey *ecdsa.PublicKey, store *store, redactionKey []byte) ([]byte, error) {
 	binding := submission.Wherry
 	values := signed.EnvelopeValues{Binding: binding.EnvelopeBinding(), Credentials: map[string][]byte{}, S3Inputs: map[string]string{}, S3Outputs: map[string]string{}, RedactionKey: redactionKey}
 	names := slices.Clone(binding.Supplied)

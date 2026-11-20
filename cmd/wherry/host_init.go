@@ -160,6 +160,14 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 	if err != nil {
 		return err
 	}
+	// A bundle carrying the tenant's storage keys serves every entitled pool with storage, so no storage question is
+	// asked and none is listed as missing; a pool the configuration maps to credentials of its own keeps them. Init read
+	// the bundle to connect, so it is there to read again.
+	installed, err := operator.ReadBundle(config.Bundle)
+	if err != nil {
+		return err
+	}
+	bundled := installed.Storage != (operator.StorageKeys{})
 	if !interactive || !sameTerminal(stdout, prompts) {
 		if _, err = fmt.Fprintln(stdout, keyID); err != nil {
 			return err
@@ -186,7 +194,7 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 			}
 		}
 		hosts = append(hosts, terms.VCS...)
-		if _, ok := file.Storage[pool]; !ok && terms.Storage != nil {
+		if _, ok := file.Storage[pool]; !ok && terms.Storage != nil && !bundled {
 			storage = append(storage, pool)
 		}
 	}

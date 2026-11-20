@@ -33,13 +33,38 @@ func AddForms(forms []Form, key []byte, values map[string][]byte, short func(nam
 			short(name)
 			continue
 		}
-		escaped, _ := jsontext.AppendQuote(nil, trimmed) // invalid UTF-8 is replaced, and that form never appears in a transcript
-		marker := []byte(signed.RedactionMarker(key, name))
-		forms = append(forms, Form{Value: trimmed, Marker: marker})
-		if escaped = escaped[1 : len(escaped)-1]; !bytes.Equal(escaped, trimmed) {
-			forms = append(forms, Form{Value: escaped, Marker: marker})
-		}
+		forms = addValue(forms, key, name, trimmed)
 	}
+	return finish(forms)
+}
+
+// AddExact returns forms with each of values added whatever its length, as its exact bytes and that form escaped as a
+// JSON string, under the marker of its name under key. It serves values that are secret at every length the system
+// accepts, such as a host's storage keys, which AddForms would leave when short; a value of a few bytes then also
+// replaces the ordinary text it matches. An empty value is no secret and is skipped. The [*] rule of AddForms applies.
+func AddExact(forms []Form, key []byte, values map[string][]byte) []Form {
+	for name, value := range values {
+		if len(value) == 0 {
+			continue
+		}
+		forms = addValue(forms, key, name, value)
+	}
+	return finish(forms)
+}
+
+// addValue appends value and, when it differs, its JSON-escaped form, both under the marker of name under key.
+func addValue(forms []Form, key []byte, name string, value []byte) []Form {
+	escaped, _ := jsontext.AppendQuote(nil, value) // invalid UTF-8 is replaced, and that form never appears in a transcript
+	marker := []byte(signed.RedactionMarker(key, name))
+	forms = append(forms, Form{Value: value, Marker: marker})
+	if escaped = escaped[1 : len(escaped)-1]; !bytes.Equal(escaped, value) {
+		forms = append(forms, Form{Value: escaped, Marker: marker})
+	}
+	return forms
+}
+
+// finish replaces every marker that holds a form of any value with [*] and sorts forms longest first.
+func finish(forms []Form) []Form {
 	for i, form := range forms {
 		if slices.ContainsFunc(forms, func(other Form) bool { return bytes.Contains(form.Marker, other.Value) }) {
 			forms[i].Marker = []byte("[*]")

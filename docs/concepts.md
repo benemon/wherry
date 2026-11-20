@@ -50,7 +50,9 @@ generated password, and writes a **bundle**: a file, mode 0600, holding the
 broker address, the principal and its password, and the broker's CA when
 the operator trusts it through a CA file: each machine trusts the broker
 through a CA file in its own configuration, else the bundle's CA, else the
-system roots. The operator hands the bundle to the host or receiver. It never travels over Kafka.
+system roots. A host's bundle also carries its tenant's S3 key pair when the
+operator recorded one. The operator hands the bundle to the host or
+receiver. It never travels over Kafka.
 
 | Principal | Name |
 | --- | --- |

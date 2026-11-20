@@ -23,11 +23,12 @@ import (
 
 // operatorUsage is each operator command's usage, under "" the operator's.
 var operatorUsage = map[string]string{
-	"":                    "usage: wherry operator <init|pool apply|tenant add|tenant list|tenant pool add|tenant pool remove|tenant host add|tenant host refresh|tenant host remove|tenant remove|pool suspend|pool resume|pool rotate-key|receiver apply|receiver show|receiver remove|check> [--dir DIR]",
+	"":                    "usage: wherry operator <init|pool apply|tenant add|tenant list|tenant storage|tenant pool add|tenant pool remove|tenant host add|tenant host refresh|tenant host remove|tenant remove|pool suspend|pool resume|pool rotate-key|receiver apply|receiver show|receiver remove|check> [--dir DIR]",
 	"init":                "usage: wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] [--super-user NAME --super-user-password-file FILE|-] [--super-user-mechanism SCRAM-SHA-512|SCRAM-SHA-256]",
 	"pool apply":          "usage: wherry operator pool apply NAME [-f PATH] [--dry-run]",
 	"tenant add":          "usage: wherry operator tenant add TENANT",
 	"tenant list":         "usage: wherry operator tenant list",
+	"tenant storage":      "usage: wherry operator tenant storage TENANT [-]",
 	"tenant remove":       "usage: wherry operator tenant remove TENANT",
 	"tenant pool add":     "usage: wherry operator tenant pool add TENANT POOL",
 	"tenant pool remove":  "usage: wherry operator tenant pool remove TENANT POOL",
@@ -137,7 +138,10 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			if _, err := bundlePath(dir, "receivers", true, pos[2]); err != nil {
 				return err
 			}
-			return service.ReceiverReissue(ctx, pos[2], broker, bundle)
+			if err := service.ReceiverReissue(ctx, pos[2], broker, bundle); err != nil {
+				return err
+			}
+			return receiverBundleNext(stdout, "wrote", bundle, "start")
 		}
 		config.Receiver, config.Broker = pos[2], cmp.Or(config.Broker, service.Broker)
 		if exists && config.Pool != "" && config.Pool != current.Pool {
@@ -173,13 +177,24 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			} else if err != nil {
 				return err
 			}
+			// A kept bundle of another principal would be rewritten as this receiver's and handed to it; refused before
+			// the record changes, as a host refresh refuses one.
+			if principal := operator.ReceiverPrincipal(pos[2]); kept.Principal != principal {
+				return fmt.Errorf("%s is the bundle of %s, not of %s", bundle, kept.Principal, principal)
+			}
 			if _, err := service.ReceiverUpdate(ctx, config, false); err != nil {
 				return err
 			}
-			_, err = refreshBundle(bundle, kept, service.Bundle(config.Broker, kept.Principal, kept.Password))
+			written, err := refreshBundle(bundle, kept, service.Bundle(config.Broker, kept.Principal, kept.Password))
+			if err != nil || !written {
+				return err
+			}
+			return receiverBundleNext(stdout, "refreshed", bundle, "restart")
+		}
+		if err := service.ReceiverAdd(ctx, config, config.Broker, bundle); err != nil {
 			return err
 		}
-		return service.ReceiverAdd(ctx, config, config.Broker, bundle)
+		return receiverBundleNext(stdout, "wrote", bundle, "start")
 
 	case "receiver show":
 		if len(pos) != 3 {
@@ -203,6 +218,12 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			return errors.New(operatorUsage[command])
 		}
 		return service.TenantAdd(ctx, pos[2])
+	case "tenant storage":
+		// A trailing - takes the pair from standard input.
+		if len(pos) != 3 && !(len(pos) == 4 && pos[3] == "-") {
+			return errors.New(operatorUsage[command])
+		}
+		return tenantStorage(ctx, service, dir, pos[2], len(pos) == 4, stdout, stderr)
 	case "tenant list":
 		if len(pos) != 2 {
 			return errors.New(operatorUsage[command])
@@ -296,7 +317,11 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		_, force := options["force"]
-		return service.HostAdd(ctx, pos[3], pos[4], bundle, force)
+		if err := service.HostAdd(ctx, pos[3], pos[4], bundle, force); err != nil {
+			return err
+		}
+		// The bundle is the invite: it carries everything the operator hands over, so the next step is named with it.
+		return hostBundleNext(stdout, "wrote", bundle)
 	case "tenant host refresh":
 		if len(pos) != 5 {
 			return errors.New(operatorUsage[command])
@@ -314,8 +339,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			fmt.Fprintf(stdout, "%s is current\n", bundle)
 			return nil
 		}
-		fmt.Fprintf(stdout, "refreshed %s; hand it to the host, where wherry host init %s installs it\n", bundle, filepath.Base(bundle))
-		return nil
+		return hostBundleNext(stdout, "refreshed", bundle)
 	case "tenant host remove", "receiver remove":
 		if pos[0] == "tenant" && (len(pos) != 5) {
 			return errors.New(operatorUsage[command])
@@ -376,6 +400,21 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 	default:
 		return errors.New("unknown operator command")
 	}
+}
+
+// hostBundleNext says that a host bundle was written or refreshed, as did, and names the next step: the bundle is handed
+// to the host, where host init installs it.
+func hostBundleNext(out io.Writer, did, bundle string) error {
+	_, err := fmt.Fprintf(out, "%s %s; hand it to the host, where wherry host init %s installs it\n", did, bundle, filepath.Base(bundle))
+	return err
+}
+
+// receiverBundleNext says that a receiver bundle was written or refreshed, as did, and names the next step: the bundle
+// is handed to the receiver's platform, whose install guide's bundle step installs it, and the receiver is started, or
+// restarted, as then says.
+func receiverBundleNext(out io.Writer, did, bundle, then string) error {
+	_, err := fmt.Fprintf(out, "%s %s; hand it to the receiver's platform, whose install guide's bundle step installs it, then %s the receiver\n", did, bundle, then)
+	return err
 }
 
 // revocationProbe is the probe a remove runs: the service's, which asks every broker as the principal. A variable so
@@ -517,7 +556,7 @@ func operatorArgs(args []string) ([]string, map[string]string, error) {
 		"pool apply":     {"f": true, "dry-run": true},
 		"receiver apply": {"f": true, "dry-run": true, "force": true},
 		"receiver show":  {},
-		"tenant add":     {}, "tenant list": {}, "tenant remove": {}, "tenant pool add": {}, "tenant pool remove": {},
+		"tenant add":     {}, "tenant list": {}, "tenant storage": {}, "tenant remove": {}, "tenant pool add": {}, "tenant pool remove": {},
 		"pool suspend":        {},
 		"pool resume":         {},
 		"pool rotate-key":     {"suspect-key": true},
