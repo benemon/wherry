@@ -635,8 +635,8 @@ func TestMCPSuppliesAgentCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tool := range tools.Tools {
-		for _, stale := range []string{"only when requested", "only when its credentials name it", "unrequested"} {
-			if strings.Contains(tool.Description, stale) {
+		for _, stale := range askFirstLanguage {
+			if strings.Contains(strings.ToLower(tool.Description), stale) {
 				t.Errorf("%s description still says %q", tool.Name, stale)
 			}
 		}

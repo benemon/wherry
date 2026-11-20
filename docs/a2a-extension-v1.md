@@ -537,9 +537,12 @@ agent text. It names one of the credentials the prompt lists, including an
 optional one the prompt marks `(not supplied)`, or another the run needs and
 was not given. The run has ended and is not resumed. `TASK_STATE_AUTH_REQUIRED`
 is not a terminal state in wherry, and no record a receiver writes holds it.
-The host submits a new run once it holds the credential: for an optional
-credential marked `(not supplied)` that the host has a source for, a new run
-that requests it; otherwise once the host has a source for it.
+The host submits a new run once it can resolve the credential. A host
+supplies every credential of the agent it resolves, so an optional one
+marked `(not supplied)` is one the host could not resolve at submit: the new
+run follows a source added for it, or its catalog variable set where submits
+run, and the task may name it so that the new submit fails rather than go
+without it again.
 
 ## Chunk
 

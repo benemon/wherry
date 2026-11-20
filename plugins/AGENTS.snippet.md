@@ -28,12 +28,17 @@ clones itself.
    record limit or a matching profile's limit go through S3 when the pool
    and host have storage, and otherwise submit refuses before publishing.
    Add `--credential NAME:file=FILE` or `--credential NAME:env=VAR` for each
-   configured credential it needs as a file or an environment variable, and
-   `--credential NAME` for each optional credential of the agent the task
-   needs (`wherry host receivers` marks them `optional`): an optional
-   credential reaches the agent only when requested, and the `submit` line's
-   `unrequested=` names those left out. Leave billing credentials such as an
-   API key unrequested unless the user asks for them. Add `--output NAME[:required]` for each file you want back. Where the
+   configured credential it needs as a file or an environment variable.
+   Every credential of the agent this host can resolve is delivered at the
+   agent's own target, required or optional (`wherry host receivers` marks
+   them `optional`), whether or not the task names it; `--credential NAME`
+   names an optional one the task cannot go without, so `submit` fails
+   rather than send the run without it, and the `submit` line's
+   `unsupplied=` names the optional credentials the host could not resolve.
+   Leaving a credential unnamed does not withhold it: the user withholds
+   one, a billing credential such as an API key included, by removing its
+   source from their wherry configuration and unsetting its variable where
+   `wherry` runs. Add `--output NAME[:required]` for each file you want back. Where the
    pool has storage and your configuration a storage credential for it,
    `--input FILE:s3` sends a larger file (5 GiB at most) through the pool's
    bucket, and `--output NAME:s3` returns one that way. Keep working.
@@ -49,10 +54,12 @@ clones itself.
    host's configuration` when the host has no source for a credential the
    agent requires or the task names, and names the credential when its
    source fails. A run whose agent needs a credential it lacks ends
-   `TASK_STATE_FAILED`, and its message names the credential. When it is an
-   optional credential the run was not given because the task did not
-   request it, and `wherry host receivers` shows it without `missing`,
-   submit again with `--credential NAME` rather than adding a source.
+   `TASK_STATE_FAILED`, and its message names the credential. The host
+   sends every credential it can resolve, so the run went without one the
+   host could not resolve when it submitted. When `wherry host receivers`
+   now shows the credential without `missing`, a source or variable arrived
+   since: submit again with `--credential NAME`, so the new submit fails
+   rather than go without it again.
    Otherwise tell the user which credential it names, and to run
    `wherry host init`, which asks for a source for it (a file, an environment
    variable or a command), or to add one under `credentials` in their wherry

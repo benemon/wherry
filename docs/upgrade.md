@@ -75,8 +75,25 @@ alone, now means the task cannot go without it, failing the submit when the
 host cannot resolve it.
 
 - `submit` prints `unsupplied=<name,...>`, and the MCP `submit` tool returns
-  `unsupplied`, naming the optional credentials the host could not resolve;
-  `unrequested` is gone.
+  `unsupplied`, naming the optional credentials the host could not resolve,
+  in place of the earlier report of the ones a task left out.
+- Pools must be re-applied with catalog agent names. `wherry operator pool
+  apply` derives a catalog agent's model credentials from its name, and
+  terms change only when the operator re-applies: rename each agent in
+  `pools/<pool>.yaml` to its
+  [credential catalog id](configuration-operator.md#catalog-agents), for
+  example `claude` to `claude-code` and `gemini` to `google`, remove the
+  model credentials written for it by hand, and apply the pool. Receivers
+  need no change; a host's `wherry host receivers` shows the derived names.
+- A non-catalog agent, one that keeps a name that is no catalog id and its
+  explicit credential list, with an optional billing credential the host can
+  resolve now receives it on every run. An optional `anthropic-api-key`
+  beside a Claude subscription token switches Claude Code to API billing on
+  every run from a host that has `ANTHROPIC_API_KEY` set where submits run
+  or a source for it configured, where before only a task that named it was
+  billed that way. Decide in the terms, by removing the credential or making
+  it required, or on the host, by removing its source and unsetting its
+  variable.
 - A host whose configuration names no source for a credential whose target
   is a catalog variable reads the variable where submits run, the MCP server
   a harness starts included. A set variable reaches every run of that agent:

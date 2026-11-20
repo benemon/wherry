@@ -1473,8 +1473,8 @@ invalid input: task credential deploy-key takes the environment variable GH_TOKE
 ```
 
 A task credential named as one of the agent's credentials that the run
-gets, a required or a requested one, travels once in the envelope and is
-delivered at both targets.
+gets, a required one or an optional one the host resolves, travels once in
+the envelope and is delivered at both targets.
 
 `submit` refuses, before it publishes, a task credential, a required
 credential of the placed agent, or one `--credential NAME` names, that the
@@ -1504,8 +1504,11 @@ invalid input: requested credential vault-token is not one of agent claude's cre
 ```
 
 A task credential with a target is not a request: a `github-token` task
-credential, such as a git entry's, does not also deliver the agent's
-`github-token` at its target unless `--credential github-token` asks for it.
+credential, such as a git entry's, is delivered at the target the task gives
+it, and the agent's `github-token` reaches its own target because the host
+resolves the same source for it, as for every agent credential;
+`--credential github-token` makes the agent's one the task cannot go
+without.
 
 `--input FILE:s3` and `--output NAME:s3` use the pool's [S3 lane](a2a-extension-v1.md#s3-inputs-and-outputs).
 `submit` refuses them, before it uploads or publishes anything, when the

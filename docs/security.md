@@ -338,8 +338,11 @@ per-workspace keys.
 
    The credential is required unless the entry sets `required: false`, so
    `wherry submit` refuses a task for the agent from a host with no source
-   for it. An optional credential reaches only the runs whose task requests
-   it.
+   for it. An optional credential reaches every run whose host resolves it,
+   from the source its configuration names or, for a target the
+   [catalog reads](credential-variables.md), from that variable where
+   submits run; a host keeps it from the pool's runs by removing its source
+   and unsetting its variable, not by leaving it out of a task.
 
 5. On each host, run `wherry host receivers` and check that the agent lists
    `build-anthropic-api-key` without `missing`.
