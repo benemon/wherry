@@ -1033,7 +1033,7 @@ func TestSubmitCountsOnlyLiveSpareForASignature(t *testing.T) {
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].Replicas = 1 })
 	// A stale advertisement for eu's signature, with spare enough to win were it live.
 	f.addReceiver(t, "receiver-c", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) {
-		ad.Offers[0].Replicas, ad.AtMS = 50, time.Now().Add(-10*liveness).UnixMilli()
+		ad.Offers[0].Replicas, ad.AtMS = 50, time.Now().Add(-10*operator.Liveness).UnixMilli()
 	})
 	want := operator.SignatureTopic("pool-a", "claude", us.Labels)
 	result := f.submit(t, defaultSelector())
@@ -1533,7 +1533,7 @@ func TestHostPathsDefaultToXDGLocations(t *testing.T) {
 			if err := os.MkdirAll(test.config, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			path := filepath.Join(t.TempDir(), "config.yaml")
+			path := filepath.Join(test.config, "config.yaml")
 			if err := os.WriteFile(path, []byte("bundle: bundle.yaml\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}

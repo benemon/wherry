@@ -551,8 +551,10 @@ host that meets [Run a receiver](operations-receivers.md#run-a-receiver).
    profile container: credential "nomad-token" has no source in the receiver's configuration
    ```
 
-7. On a host of an entitled tenant, check that `wherry host receivers` shows the
-   receiver `live` with each profile `ready=true`.
+7. Check that `wherry operator receiver show nomad-1` reports
+   `status: live`, which it does once the receiver's first advertisement is
+   verified against its key topic. On a host of an entitled tenant,
+   `wherry host receivers` shows the same status with each profile `ready=true`.
 
 To rotate a platform credential, replace the value at its source and
 restart the receiver; the bundle stays as it is.

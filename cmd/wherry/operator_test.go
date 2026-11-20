@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
@@ -20,6 +21,8 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/operator"
+	"github.com/benemon/wherry/internal/signed"
+	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"
@@ -198,13 +201,109 @@ func TestReceiverShowPrintsWholeNumbersAsIntegers(t *testing.T) {
 	var out bytes.Buffer
 	config := operator.ReceiverConfig{Profiles: []operator.ProfileSettings{{Name: "p", Plugin: "nomad", Agent: "claude",
 		Config: map[string]any{"memory_mb": float64(1 << 20), "ratio": 0.5, "sizes": []any{float64(2048000)}}}}}
-	if err := showReceiver(&out, config); err != nil {
+	if err := showReceiver(&out, config, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"memory_mb: 1048576", "ratio: 0.5", "- 2048000"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("show printed\n%s\nwant %q", out.String(), want)
 		}
+	}
+}
+
+// receiver show reports the receiver's liveness as a host does: live within 120 s of its latest authorised
+// advertisement, stale beyond it, past or future, silent without one and ended once revoked; only the receiver's own
+// key signs an advertisement that counts.
+func TestReceiverShowReportsLiveness(t *testing.T) {
+	service := operatorEnv(t)
+	ctx := context.Background()
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
+		t.Fatal(err)
+	}
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{{Name: "claude", Plugin: "nomad", Agent: "claude"}}, PluginSHA256: map[string]string{"nomad": fakeSHA256}}
+	path, err := bundlePath(".", "receivers", true, "receiver-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ReceiverAdd(ctx, config, service.Broker, path); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := operator.ReadBundle(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := connectTLS(t, bundle.Broker, string(service.CA), bundle.Principal, bundle.Password)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, stranger, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	produce := func(topic, recordKey string, value []byte) {
+		t.Helper()
+		if err := receiver.ProduceSync(ctx, &kgo.Record{Topic: topic, Key: []byte(recordKey), Value: value}).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	advertise := func(at time.Time, key ed25519.PrivateKey) {
+		t.Helper()
+		encoded, err := wire.SignRecord(&wire.Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []wire.Offer{{Profile: "claude", Agent: "claude"}}, Capacity: 1, AtMS: at.UnixMilli()}, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		produce(operator.PoolReceiversTopic("pool-a"), "receiver-a", encoded)
+	}
+	status := func() (string, string) {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := runOperator([]string{"receiver", "show", "receiver-a"}, &stdout, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.SplitN(stdout.String(), "\n", 3)
+		if !strings.HasPrefix(lines[0], "status: ") {
+			t.Fatalf("show printed\n%s\nwant the status first", stdout.String())
+		}
+		advertised := ""
+		if strings.HasPrefix(lines[1], "last_advertised: ") {
+			advertised = strings.TrimPrefix(lines[1], "last_advertised: ")
+		}
+		return strings.TrimPrefix(lines[0], "status: "), advertised
+	}
+	if got, at := status(); got != "silent" || at != "" {
+		t.Fatalf("status before any advertisement %q at %q; want silent", got, at)
+	}
+	registration, err := signed.RegisterKey("receiver-a", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	produce(operator.ReceiverTopic("receiver-a"), "receiver-a", registration)
+	advertise(time.Now(), stranger)
+	if got, _ := status(); got != "silent" {
+		t.Fatalf("status with an advertisement under another key %q; want silent", got)
+	}
+	old := time.Now().Add(-121 * time.Second)
+	advertise(old, key)
+	if got, at := status(); got != "stale" || !strings.HasPrefix(at, old.UTC().Format(time.RFC3339)[:19]) {
+		t.Fatalf("status with a 121 s old advertisement %q at %q; want stale at %s", got, at, old.UTC().Format(time.RFC3339))
+	}
+	advertise(time.Now(), key)
+	if got, at := status(); got != "live" || at == "" {
+		t.Fatalf("status with a current advertisement %q at %q; want live with its time", got, at)
+	}
+	// The latest advertisement by its own date counts, so one dated ahead masks the receiver until that time passes.
+	advertise(time.Now().Add(121*time.Second), key)
+	if got, _ := status(); got != "stale" {
+		t.Fatalf("status with an advertisement dated 121 s ahead %q; want stale", got)
+	}
+	revocationBounds(t, service, "1")
+	if result := service.RevokeReceiver(ctx, "receiver-a", 0, deniedProbe(service, ""), nil); !result.Complete {
+		t.Fatalf("revocation incomplete: %+v", result)
+	}
+	if got, at := status(); got != "ended" || at != "" {
+		t.Fatalf("status after revocation %q at %q; want ended", got, at)
 	}
 }
 
@@ -253,8 +352,9 @@ profiles:
       signature: "claude\n"
       topic: wherry.pool.pool-a.tasks.claude.98038b25280788a45a2f06c209513024c99adee81c6416b691b4b5872db7e027
 `
-	if got := wherry("receiver", "show", "receiver-a"); got != shown {
-		t.Fatalf("show printed\n%s\nwant\n%s", got, shown)
+	// Nothing has advertised as receiver-a, so show reports it silent before the record.
+	if got := wherry("receiver", "show", "receiver-a"); got != "status: silent\n"+shown {
+		t.Fatalf("show printed\n%s\nwant\n%s", got, "status: silent\n"+shown)
 	}
 	profile := item("name: claude\nagent: claude\nlabels: {tier: batch}\nconfig: {runtime: {config: {image: claude:1}}}\n", "      ")
 	receiverFile := func(head string) string {
@@ -307,7 +407,7 @@ profiles:
 	if err := runOperator([]string{"receiver", "show", "receiver-b"}, io.Discard, io.Discard); err == nil {
 		t.Fatal("apply --dry-run recorded receiver-b")
 	}
-	if got := wherry("receiver", "show", "receiver-a"); got != shown {
+	if got := wherry("receiver", "show", "receiver-a"); got != "status: silent\n"+shown {
 		t.Fatalf("after a dry run, show printed\n%s\nwant the recorded configuration", got)
 	}
 	outside := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": "plugin_sha256: {nomad: " + fakeSHA256 + "}\n" + basePlugin + item("name: codex\nagent: codex\n", "      ")}), "receiver.yaml")

@@ -659,7 +659,8 @@ func TestReceiverLocalApplyDryRun(t *testing.T) {
 				if err := runOperator([]string{"receiver", "show", "r"}, &show, io.Discard); err != nil {
 					t.Fatal(err)
 				}
-				if stdout.String() != show.String() {
+				// show reports the recorded receiver's liveness first; a dry run has no receiver to report on.
+				if "status: silent\n"+stdout.String() != show.String() {
 					t.Fatalf("dry run differs from show: %s / %s", stdout.String(), show.String())
 				}
 			})

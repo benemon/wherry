@@ -629,7 +629,8 @@ receiver's configuration record, and takes no `-f` or `--dry-run`.
 wherry operator receiver show RECEIVER
 ```
 
-Prints the receiver's recorded configuration as YAML: `plugin_sha256`, the SHA-256 pinned for each plugin type, then
+Prints the receiver's liveness and recorded configuration as YAML: `status`,
+then `last_advertised` when it has advertised, then `plugin_sha256`, the SHA-256 pinned for each plugin type, then
 `profiles`, each plugin profile resolved, in recorded order, with its
 `name`, `plugin`, `agent`, `replicas` when above 1, `labels` and merged `config`, in that order
 ([Plugin profile merge](configuration-receiver.md#plugin-profile-merge)),
@@ -637,6 +638,8 @@ its `signature`, the agent and every label, double-quoted with each line
 feed shown as `\n`, and the signature's task `topic`:
 
 ```yaml
+status: live
+last_advertised: 2026-11-20T09:41:07.312Z
 plugin_sha256:
     nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 profiles:
@@ -658,6 +661,18 @@ profiles:
 
 A `credential` key shows the credential's name, which is all the record
 holds; neither `show` nor `--dry-run` prints a credential value.
+
+`status` is what [`wherry host receivers`](#wherry-host-receivers) reports
+for the receiver, read the same way: the operator reads the pool's receivers
+topic and verifies each advertisement against the receiver's key topic.
+The receiver is `live` when its latest authorised advertisement is dated
+within 120 seconds of now, either side; `stale` when it is dated beyond that,
+in the past or the future; `silent` when it has none; and `ended` once
+revoked. `last_advertised` is that advertisement's time, in UTC, and is
+absent for a silent or ended receiver. The latest advertisement is the one
+with the latest date, so one dated ahead counts until that time passes. A
+`--dry-run` of `receiver apply` prints no status: the record it would hold
+has no receiver to be live.
 
 ### `wherry operator tenant host remove TENANT HOST`
 

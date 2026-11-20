@@ -158,7 +158,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		if dryRun {
-			return showReceiver(stdout, recorded)
+			return showReceiver(stdout, recorded, nil)
 		}
 		// The bundle directories are made, or hardened to 0700, only once both configurations have passed their checks.
 		if _, err := bundlePath(dir, "receivers", true, pos[2]); err != nil {
@@ -191,7 +191,11 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		if !ok {
 			return errors.New("no receiver by that name")
 		}
-		return showReceiver(stdout, config)
+		liveness, err := readReceiverLiveness(ctx, service, state, pos[2])
+		if err != nil {
+			return err
+		}
+		return showReceiver(stdout, config, liveness)
 	case "tenant add":
 		if len(pos) != 3 {
 			return errors.New(operatorUsage[command])
@@ -381,8 +385,37 @@ func writeRotateReport(out io.Writer, pool string, report operator.RotateReport,
 	fmt.Fprintf(out, "tasks=%d\n", len(report.Tasks))
 }
 
-// showReceiver writes resolved profiles and plugin pins as YAML.
-func showReceiver(out io.Writer, config operator.ReceiverConfig) error {
+// receiverLiveness is a receiver's status and the time of its latest authorised advertisement, which the operator reads
+// as a host does, verifying the receiver's signature against its key topic.
+type receiverLiveness struct {
+	Status         string    `yaml:"status"`
+	LastAdvertised time.Time `yaml:"last_advertised,omitempty"`
+}
+
+func readReceiverLiveness(ctx context.Context, service *operator.Service, state operator.State, receiver string) (*receiverLiveness, error) {
+	pool := state.Receivers[receiver].Pool
+	reader := operator.NewReader(service.Operator)
+	defer reader.Close()
+	keys, err := reader.ReadKeys(ctx, operator.PoolKeyTopics(state, pool))
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	// Every age, so a receiver that stopped advertising shows as stale with the time it was last heard, not as silent.
+	ads, err := reader.ReadAdvertisements(ctx, state, keys, []string{pool}, now, math.MaxInt64)
+	if err != nil {
+		return nil, err
+	}
+	liveness := &receiverLiveness{Status: operator.ReceiverStatus(state, ads, receiver, now)}
+	if ad, advertised := ads[receiver]; advertised && liveness.Status != "ended" {
+		liveness.LastAdvertised = time.UnixMilli(ad.AtMS).UTC()
+	}
+	return liveness, nil
+}
+
+// showReceiver writes the receiver's liveness, when given, then its resolved profiles and plugin pins as YAML. A dry run
+// gives none: the record it would hold has no receiver to be live.
+func showReceiver(out io.Writer, config operator.ReceiverConfig, liveness *receiverLiveness) error {
 	type shown struct {
 		operator.ProfileSettings `yaml:",inline"`
 		Signature                yaml.Node `yaml:"signature"`
@@ -399,9 +432,10 @@ func showReceiver(out io.Writer, config operator.ReceiverConfig) error {
 		profiles = append(profiles, shown{profile, signature, operator.SignatureTopic(config.Pool, profile.Agent, profile.Labels)})
 	}
 	encoded, err := yaml.Marshal(struct {
-		PluginSHA256 map[string]string `yaml:"plugin_sha256,omitempty"`
-		Profiles     []shown           `yaml:"profiles"`
-	}{config.PluginSHA256, profiles})
+		*receiverLiveness `yaml:",inline"`
+		PluginSHA256      map[string]string `yaml:"plugin_sha256,omitempty"`
+		Profiles          []shown           `yaml:"profiles"`
+	}{liveness, config.PluginSHA256, profiles})
 	if err != nil {
 		return err
 	}

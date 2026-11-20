@@ -49,9 +49,6 @@ var (
 // errUndecodable wraps a local state file that does not decode.
 var errUndecodable = errors.New("decode")
 
-// liveness is how old an advertisement may be for its receiver to count as live.
-const liveness = 120 * time.Second
-
 // SubmitInput is a root task's routing, prompt, inputs and requested outputs.
 type SubmitInput struct {
 	// Agent names what runs; empty takes the pool's default.
@@ -382,7 +379,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	ads := maps.Clone(declared)
 	maps.DeleteFunc(ads, func(_ string, ad wire.Advertisement) bool {
 		age := now.Sub(time.UnixMilli(ad.AtMS))
-		return age > liveness || age < -liveness
+		return age > operator.Liveness || age < -operator.Liveness
 	})
 	pool, placement, topic, err := resolvePlacement(v.state, h.tenant, input.Agent, input.Model, input.Selector, ads)
 	if err != nil {
@@ -788,8 +785,8 @@ func (h *Host) produceTask(ctx context.Context, topic string, binding wire.Submi
 	return err
 }
 
-// Receivers returns the receivers of the pools the tenant is entitled to, with their latest advertisement. An
-// advertisement dated beyond the liveness window either side of now is not live.
+// Receivers returns the receivers of the pools the tenant is entitled to, with their latest advertisement and the
+// status operator.ReceiverStatus gives it.
 func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 	v, err := h.load(ctx)
 	if err != nil {
@@ -806,19 +803,15 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 			continue
 		}
 		receiver := Receiver{
-			ReceiverID: id, Pool: config.Pool, Profiles: []Profile{}, Status: "silent",
+			ReceiverID: id, Pool: config.Pool, Profiles: []Profile{}, Status: operator.ReceiverStatus(v.state, ads, id, now),
 		}
-		ended := v.state.Ended[operator.ReceiverPrincipal(id)]
+		ended := receiver.Status == "ended"
 		ad, advertised := ads[id]
-		if ended {
-			receiver.Status = "ended"
-		} else if advertised {
-			age := now.Sub(time.UnixMilli(ad.AtMS))
+		if !ended && advertised {
 			receiver.Capacity, receiver.InFlight = ad.Capacity, ad.InFlight
 			receiver.LastAdvertised = time.UnixMilli(ad.AtMS).UTC()
-			receiver.Status = "stale"
-			if age <= liveness && age >= -liveness {
-				receiver.Status, receiver.Gated = "live", ad.Gated
+			if receiver.Status == "live" {
+				receiver.Gated = ad.Gated
 			}
 		}
 		for _, profile := range config.Profiles {
