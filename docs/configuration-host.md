@@ -233,8 +233,9 @@ be set in the server's environment, and a harness decides what that
 environment holds. A variable exported in the shell that starts the
 harness reaches `wherry host mcp` only where the harness passes its own
 environment through: Gemini CLI strips variables that look like secrets,
-model keys among them, from what its servers inherit, and Codex forwards
-only the parent variables the server's entry names. Each harness's server
+model keys among them, from what its servers inherit, and Codex starts its
+servers with a baseline environment of its own, to which the server's
+entry adds the parent variables it allowlists. Each harness's server
 entry can forward or set variables itself, which is also the route when
 the harness is started from a launcher without them. Where neither fits,
 an explicit `credentials` entry with a `file` or `command` source is the
@@ -243,7 +244,7 @@ fallback, and wins over the variable.
 | Harness | How a variable reaches its MCP server, per its documentation |
 | --- | --- |
 | Claude Code | the `env` map of the server's entry in `.mcp.json`, or `--env VAR=value` to `claude mcp add` |
-| Codex | `env_vars` of the server's `[mcp_servers.<name>]` table in `~/.codex/config.toml` names the parent variables to forward, for example `env_vars = ["CODEX_API_KEY"]`; its `env` table sets literal values |
+| Codex | `env_vars` of the server's `[mcp_servers.<name>]` table in `~/.codex/config.toml` names the parent variables added, as an allowlist, to the baseline environment Codex gives every server, for example `env_vars = ["CODEX_API_KEY"]`; its `env` table sets literal values |
 | Gemini CLI | the `env` map of the server's `mcpServers` entry in `settings.json`, with a `$VAR` value that expands from the CLI's environment, for example `"GEMINI_API_KEY": "$GEMINI_API_KEY"`; sensitive variables are removed from the inherited environment and need such an entry |
 | Cursor | the `env` map of the server's `mcpServers` entry in `.cursor/mcp.json` |
 | Copilot CLI | the `env` map of the server's entry in its MCP configuration, `~/.copilot/mcp-config.json` |
