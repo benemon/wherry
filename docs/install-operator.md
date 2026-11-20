@@ -23,23 +23,22 @@ cd wherry-prod
 cp /path/to/your/kafka-ca.pem kafka-ca.pem
 ```
 
-Put the super user's password in a private temporary file.
-`read -rs` keeps it off the screen, and `printf %s` writes it without a trailing newline:
-
-```sh
-password_file=$(mktemp) && trap 'rm -f "$password_file"' EXIT
-printf "Kafka super user's password: " && read -rs password && printf %s "$password" > "$password_file" && unset password
-```
-
-The `trap` deletes the file when this shell exits, even if a step fails.
-Initialise the directory, then delete the password file:
+Initialise the directory. It asks for the super user's password and masks what you type:
 
 ```sh
 wherry operator init --broker kafka.example.com:9093 --ca-file kafka-ca.pem \
-  --super-user kafka-admin --super-user-password-file "$password_file"
-rm "$password_file"
+  --super-user kafka-admin
 ```
 
+Or pipe the password from a password manager, with `-` for the password file:
+
+```sh
+op read "op://Infra/kafka-admin/password" | wherry operator init \
+  --broker kafka.example.com:9093 --ca-file kafka-ca.pem \
+  --super-user kafka-admin --super-user-password-file -
+```
+
+Either way the password touches no file.
 `operator init` creates the principal `wherry.operator` and grants it what wherry needs.
 It doesn't keep the super user's password.
 Every later `wherry operator` command in this directory connects as `wherry.operator`.
