@@ -7,11 +7,8 @@ import (
 	"github.com/benemon/wherry/internal/catalog"
 )
 
-// Expand gives each agent whose name is a usable catalog id the credentials the entry derives, before the agent's own,
-// each agent on its own: an agent whose name is no usable id keeps its list as written. The operator writes no model
-// credential for a catalog agent, and may list further credentials; one that repeats a derived credential's name or
-// target is an error, so a pool file written before the agent's name was in the catalog is refused rather than
-// doubled.
+// Expand gives each agent named by a usable catalog id the credentials its entry derives before its own, each agent on
+// its own; one of its own that repeats a derived name or target is an error.
 func Expand(terms Terms, c *catalog.Catalog) (Terms, error) {
 	terms.Agents = slices.Clone(terms.Agents)
 	for i, agent := range terms.Agents {

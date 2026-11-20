@@ -40,10 +40,8 @@ type Service struct {
 	LockCeilingMS   int64
 }
 
-// Bundle is a host's or receiver's Kafka identity, as the operator writes it. CA is the PEM certificates its holder
-// trusts the broker with, written when the operator trusts its own broker through a CA file; empty for the system roots.
-// It is a string: yaml marshals a []byte as !!binary, and a bundle is read by people too. Storage is the tenant's S3 key
-// pair, carried by a host bundle when the operator recorded one for the tenant; a receiver bundle never carries it.
+// Bundle is a host's or receiver's Kafka identity, as the operator writes it, with CA as PEM in a string, since yaml
+// marshals a []byte as !!binary, and Storage the tenant's S3 key pair, which only a host bundle carries.
 type Bundle struct {
 	Broker    string      `yaml:"broker"`
 	Principal string      `yaml:"principal"`
@@ -59,9 +57,8 @@ type StorageKeys struct {
 	SecretKey string `yaml:"secret_key"`
 }
 
-// Bundle is the bundle service writes for principal with password at broker. When broker is the operator's own and the
-// operator trusts it through a CA file, the bundle carries that CA, so its holder needs no CA file; a receiver on another
-// address gets none, since the operator knows nothing of that address's CA.
+// Bundle is the bundle service writes for principal with password at broker, carrying the operator's CA only when broker
+// is the operator's own: the operator knows nothing of another address's CA.
 func (service *Service) Bundle(broker, principal, password string) Bundle {
 	bundle := Bundle{Broker: broker, Principal: principal, Password: password}
 	if broker == service.Broker && len(service.CA) > 0 {
@@ -101,9 +98,8 @@ func DecodeYAML(encoded []byte, value any) error {
 	return nil
 }
 
-// ReadBundle reads the bundle at path, refusing unknown fields, a bundle without its broker, principal or password, a
-// ca that holds no PEM certificate, since a bundle whose CA cannot be trusted is refused rather than fall back to the
-// system roots, and a storage block missing either key.
+// ReadBundle reads the bundle at path, refusing unknown fields, a missing broker, principal or password, a ca that holds
+// no PEM certificate, rather than fall back to the system roots, and a storage block missing either key.
 func ReadBundle(path string) (Bundle, error) {
 	encoded, err := os.ReadFile(path)
 	if err != nil {
@@ -168,9 +164,8 @@ func ReplaceStorageKeys(path string, keys StorageKeys) (err error) {
 	return err
 }
 
-// BundleKafkaOpts are KafkaOpts for bundle's principal at its broker. The broker is trusted through local, the holder's
-// own ca_file, when it names one; else through the bundle's ca; else through the system roots. A local file overrides the
-// bundle, so a stale one hides a refreshed CA.
+// BundleKafkaOpts are KafkaOpts for bundle's principal, trusting the broker through local, the holder's own ca_file, else
+// the bundle's ca, else the system roots; a stale local file hides a refreshed CA.
 func BundleKafkaOpts(bundle Bundle, local []byte) ([]kgo.Opt, error) {
 	ca := local
 	if ca == nil && bundle.CA != "" {
@@ -186,9 +181,8 @@ func UnknownAuthority(err error) bool {
 	return errors.As(err, &unknown)
 }
 
-// ExplainUnknownAuthority is err with, when UnknownAuthority, what to do: a bundle the operator wrote before it trusted
-// the broker through a CA file carries no ca, and refresh, the operator command that rewrites the bundle, gives it one.
-// Any other err is returned as it is.
+// ExplainUnknownAuthority adds to err, when UnknownAuthority, that a bundle written before the operator trusted the
+// broker through a CA file carries no ca and that refresh rewrites it; any other err is returned as it is.
 func ExplainUnknownAuthority(err error, refresh string) error {
 	if !UnknownAuthority(err) {
 		return err
@@ -732,10 +726,10 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	return writeBundle(bundle, service.hostBundle(principal, password, storage))
 }
 
-// HostRefresh rewrites the kept bundle at bundlePath of host in tenant with the operator's broker, the CA it trusts
-// the broker through and the tenant's storage keys, keeping the principal and password, and reports whether the bundle
-// changed; a bundle already current is left as it is, so a refresh can be rerun. It refuses an absent, revoking or
-// ended host, as HostAdd does, a missing bundle, which --force reissues, and a bundle that is another principal's.
+// HostRefresh rewrites the kept bundle at bundlePath of host in tenant with the operator's broker and CA and the tenant's
+// storage keys, keeping the principal and password, and reports whether it changed, a current bundle being left so a
+// refresh reruns; it refuses an absent, revoking or ended host, a missing bundle, which --force reissues, and another
+// principal's bundle.
 func (service *Service) HostRefresh(ctx context.Context, tenant, host, bundlePath string) (bool, error) {
 	state, err := service.LoadState(ctx)
 	if err != nil {

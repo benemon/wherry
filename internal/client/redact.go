@@ -7,9 +7,9 @@ import (
 	"github.com/benemon/wherry/internal/redact"
 )
 
-// held are the forms of every credential value this process resolved, each with the marker of its name under no key;
-// seen keys the name, value and kind of each registration, so a value resolved again adds no forms. The kinds are
-// recorded apart: a value hold saw, and left as short, is still registered exactly when holdStorageKey sees it later.
+// held are the forms of every credential value this process resolved; seen keys each registration's name, value and
+// kind, so a value resolved again adds no forms and a short value hold left is still registered when holdStorageKey
+// sees it.
 var held struct {
 	sync.Mutex
 	forms []redact.Form

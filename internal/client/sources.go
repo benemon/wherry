@@ -38,10 +38,8 @@ const (
 )
 
 // agentSource is one of an agent's credentials with where this host takes its value: the explicit source its
-// configuration names for the credential's name, else, when the credential's target is an environment variable that
-// appears in the host's catalog, that variable in this process. Any other environment target and every file target
-// has no source on this host without an explicit one, so terms an operator writes cannot make a host read a variable
-// of their choosing.
+// configuration names, else, for a target variable in the host's catalog, that variable in this process; any other
+// target has no source without an explicit one, so terms cannot make a host read a variable of the operator's choosing.
 type agentSource struct {
 	operator.AgentCredential
 	source credential.Source
@@ -155,10 +153,9 @@ func (r *resolver) resolve(name string, source credential.Source) ([]byte, error
 }
 
 // supplied selects and resolves, through r, the credentials of agent's terms a task supplies, in terms order, and names
-// the optional ones the run goes without. A required credential, and an optional one named in requested, must resolve:
-// one without a source fails auth required, and one whose source fails names the cause. Every other optional credential
-// is supplied when it resolves: its explicit source failing is an error, as for every credential, while its catalog
-// variable unset leaves it out.
+// the optional ones the run goes without: a required credential, and an optional one in requested, must resolve, and
+// any other optional one is supplied when it resolves, its explicit source failing being an error and its catalog
+// variable unset leaving it out.
 func (h *Host) supplied(agent operator.AgentTerms, requested []string, r *resolver) (supplied, unsupplied []string, err error) {
 	for _, s := range h.sources(agent) {
 		needed := !s.Optional() || slices.Contains(requested, s.Name)
@@ -204,9 +201,8 @@ func (h *Host) modelCredentials(agent operator.AgentTerms) []operator.AgentCrede
 	return model
 }
 
-// atLeastOne refuses a task of an agent whose model credentials are all optional when supplied holds none of them: the
-// run would reach the vendor with no credential at all. Other credentials of the agent neither satisfy nor disable the
-// check, and an agent with no model credential in its terms is not checked.
+// atLeastOne refuses a task of an agent whose model credentials are all optional when supplied holds none of them, since
+// the run would reach the vendor with no credential; other credentials neither satisfy nor disable the check.
 func (h *Host) atLeastOne(agent operator.AgentTerms, supplied []string) error {
 	model := h.modelCredentials(agent)
 	if len(model) == 0 {

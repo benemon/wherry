@@ -1,6 +1,5 @@
-// Package snapshot reads and writes the credential catalog's files in their committed form. It is the part of the catalog
-// the updater needs, standard library alone: no validation of ids or variables, which the catalog package does at run
-// time with the wire rules.
+// Package snapshot reads and writes the credential catalog's files in their committed form, from the standard library
+// alone, so the updater can build on it; the catalog package validates ids and variables.
 package snapshot
 
 import (

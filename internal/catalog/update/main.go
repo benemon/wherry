@@ -1,9 +1,7 @@
-// Command update refreshes the credential catalog's models.dev snapshot. It fetches https://models.dev/api.json, drops
-// each provider's models, and rewrites models.dev.json and SOURCE in the catalog directory, only once the whole response
-// is read and decoded; a failed fetch, decode or write leaves both files as they were, and the two change together or
-// not at all. The output is deterministic: the same response bytes give the same models.dev.json. Run it from the
-// repository root as go run ./internal/catalog/update and commit the result. It builds from the standard library and
-// the catalog's snapshot package alone.
+// Command update refreshes the credential catalog's models.dev snapshot: it fetches https://models.dev/api.json, drops
+// each provider's models and rewrites models.dev.json and SOURCE together, deterministically, once the whole response
+// is read. Run it from the repository root as go run ./internal/catalog/update and commit the result. It builds from
+// the standard library and the snapshot package alone.
 package main
 
 import (
@@ -88,11 +86,9 @@ func fetch(ctx context.Context, client *http.Client, url string) ([]byte, error)
 // rename is a variable so tests can fail a rename after the first one succeeded.
 var rename = os.Rename
 
-// writeFiles writes each file into dir through a temporary file in dir, then commits them all or none: a hard link keeps
-// each existing file under a backup name, the temporary files are renamed into place one by one, and a rename that
-// fails has every file renamed so far put back from its backup, so a failure at any point leaves the committed files as
-// they were. A target that exists and is not a regular file is refused before anything is renamed. Nothing temporary
-// is left behind.
+// writeFiles writes each file into dir through a temporary file, then renames them all into place or, when a rename
+// fails, puts every renamed file back from a hard-link backup, so the committed files change together or not at all; a
+// target that is not a regular file is refused before any rename.
 func writeFiles(dir string, files map[string][]byte) (err error) {
 	var temporary []string
 	defer func() {
@@ -123,15 +119,14 @@ func writeFiles(dir string, files map[string][]byte) (err error) {
 		}
 		targets[name] = file.Name()
 	}
-	// Each existing file is kept under a second name before any is replaced; the link shares the file, so nothing is
-	// copied and the original is whole whatever happens to the name it was committed under.
+	// A hard link keeps each existing file whole under a backup name until every rename has succeeded.
 	backups := map[string]string{}
 	for _, name := range names {
 		target := filepath.Join(dir, name)
 		if _, statErr := os.Lstat(target); errors.Is(statErr, os.ErrNotExist) {
 			continue
 		}
-		// A backup left by an interrupted run is stale: the committed file is the one that counts.
+		// A backup an interrupted run left is stale.
 		backup := filepath.Join(dir, "."+name+".backup")
 		if err := os.Remove(backup); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err

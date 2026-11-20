@@ -88,11 +88,9 @@ func (h *Host) credentialed(pool string) bool {
 	return mapped || h.bundleStorage != (operator.StorageKeys{})
 }
 
-// bucket opens a pool's bucket, path-style, with this host's storage keys, which never leave the host: the receiver
-// and the agent see only URLs it presigns. The keys are the credentials the configuration maps the pool to, which win,
-// resolved through resolver so a source a credential of the submission shares runs once, else the pair the bundle
-// carries; either pair is held for redaction before any storage call, whatever its length, and the store replaces both
-// values in everything it returns or logs.
+// bucket opens a pool's bucket, path-style, with the keys the configuration maps the pool to, resolved through resolver,
+// else the bundle's pair; the keys never leave the host, and either pair is held for redaction before any storage call,
+// whatever its length.
 func (h *Host) bucket(ctx context.Context, pool string, storage *operator.Storage, resolver *resolver) (*store, error) {
 	keyNames, mapped := h.storage[pool]
 	if !h.credentialed(pool) {
@@ -154,9 +152,9 @@ func (s *store) presignPut(ctx context.Context, bucket, key string, lifetime tim
 	return put.String(), nil
 }
 
-// get opens the object at key in bucket for reading. The store fetches the object at the first Read, so a refusal
-// naming the signing key arrives there, not here; the reader wraps every error its Read and Close return as the store's
-// other calls do, and passes io.EOF through unchanged, which io.Copy and io.ReadAll compare by identity.
+// get opens the object at key in bucket for reading through a reader that wraps its errors as the store's other calls do
+// and passes io.EOF through by identity; the store fetches at the first Read, so a refusal naming the signing key
+// arrives there.
 func (s *store) get(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
 	object, err := s.client.GetObject(ctx, bucket, key, minio.GetObjectOptions{})
 	if err != nil {

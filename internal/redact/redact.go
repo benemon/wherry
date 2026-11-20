@@ -38,10 +38,9 @@ func AddForms(forms []Form, key []byte, values map[string][]byte, short func(nam
 	return finish(forms)
 }
 
-// AddExact returns forms with each of values added whatever its length, as its exact bytes and that form escaped as a
-// JSON string, under the marker of its name under key. It serves values that are secret at every length the system
-// accepts, such as a host's storage keys, which AddForms would leave when short; a value of a few bytes then also
-// replaces the ordinary text it matches. An empty value is no secret and is skipped. The [*] rule of AddForms applies.
+// AddExact returns forms with each of values added whatever its length, exact and JSON-escaped, under the marker of its
+// name under key, for values secret at every length, such as storage keys, which AddForms would leave when short; an
+// empty value is skipped, and the [*] rule of AddForms applies.
 func AddExact(forms []Form, key []byte, values map[string][]byte) []Form {
 	for name, value := range values {
 		if len(value) == 0 {

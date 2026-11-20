@@ -418,8 +418,8 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, fmt.Errorf("%w: requested credential %s is not one of agent %s's credentials", ErrInvalidInput, name, agent.Name)
 		}
 	}
-	// Every source of the submission resolves here once, through resolver: the bytes that decide what is supplied are
-	// the bytes the envelope carries and the storage keys sign with.
+	// One resolver: the bytes that decide what is supplied are the bytes the envelope carries and the storage keys sign
+	// with.
 	resolver := newResolver(ctx, wire.RFC3339(input.EndBy.Unix()))
 	supplied, unsupplied, err := h.supplied(agent, input.Requested, resolver)
 	if err != nil {
