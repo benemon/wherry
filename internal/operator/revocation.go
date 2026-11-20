@@ -41,37 +41,53 @@ type RevocationResult struct {
 // false, since its wait is usually the longest. The ones it is told as they end are the result's steps.
 type RevocationProgress func(RevocationStep)
 
-// RevokeReceiver runs the revocation steps for receiver; progress may be nil.
+// RevokeReceiver runs the revocation steps for receiver; progress may be nil. A receiver whose membership already ended
+// is converged and reported complete, as a host is: its earlier revocation served its wait, so a retry of the cleanup
+// that follows needs no new one.
 func (service *Service) RevokeReceiver(ctx context.Context, receiver string, wait time.Duration, probe func(context.Context, string, string) error, progress RevocationProgress) RevocationResult {
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return reported(progress, RevocationResult{Steps: []RevocationStep{{Number: 1, Err: err}}})
+	}
+	if state.Ended[ReceiverPrincipal(receiver)] {
+		return reported(progress, service.alreadyEnded(ctx))
+	}
 	return service.revoke(ctx, Record{Kind: "end", Receiver: receiver}, ReceiverPrincipal(receiver), wait, probe, progress)
 }
 
 // RevokeHost runs the revocation steps for tenant's host; progress may be nil.
 func (service *Service) RevokeHost(ctx context.Context, tenant, host string, wait time.Duration, probe func(context.Context, string, string) error, progress RevocationProgress) RevocationResult {
-	// The steps decided here, before any runs, are reported as the run ones are.
-	reported := func(result RevocationResult) RevocationResult {
-		if progress != nil {
-			for _, step := range result.Steps {
-				progress(step)
-			}
-		}
-		return result
-	}
 	state, err := service.LoadState(ctx)
 	if err == nil {
 		err = state.LiveTenant(tenant)
 	}
 	if err != nil {
-		return reported(RevocationResult{Steps: []RevocationStep{{Number: 1, Err: err}}})
+		return reported(progress, RevocationResult{Steps: []RevocationStep{{Number: 1, Err: err}}})
 	}
 	if state.Ended[TenantPrincipal(tenant, host)] {
-		err = service.converge(ctx)
-		return reported(RevocationResult{Complete: err == nil, Steps: []RevocationStep{{Number: 6, Name: "already ended", Complete: err == nil, Err: err}}})
+		return reported(progress, service.alreadyEnded(ctx))
 	}
 	if _, exists := state.Hosts[TenantPrincipal(tenant, host)]; !exists {
-		return reported(RevocationResult{Steps: []RevocationStep{{Number: 1, Err: errors.New("unknown host")}}})
+		return reported(progress, RevocationResult{Steps: []RevocationStep{{Number: 1, Err: errors.New("unknown host")}}})
 	}
 	return service.revoke(ctx, Record{Kind: "end", Tenant: tenant, Host: host}, TenantPrincipal(tenant, host), wait, probe, progress)
+}
+
+// alreadyEnded converges Kafka for a principal whose membership has ended and reports that as the one step of a complete
+// revocation; a failed convergence is the step's error.
+func (service *Service) alreadyEnded(ctx context.Context) RevocationResult {
+	err := service.converge(ctx)
+	return RevocationResult{Complete: err == nil, Steps: []RevocationStep{{Number: 6, Name: "already ended", Complete: err == nil, Err: err}}}
+}
+
+// reported tells progress, when set, the steps of a result decided before any step ran, as the run ones are told.
+func reported(progress RevocationProgress, result RevocationResult) RevocationResult {
+	if progress != nil {
+		for _, step := range result.Steps {
+			progress(step)
+		}
+	}
+	return result
 }
 
 func (service *Service) revoke(ctx context.Context, end Record, principal string, wait time.Duration, probe func(context.Context, string, string) error, progress RevocationProgress) RevocationResult {

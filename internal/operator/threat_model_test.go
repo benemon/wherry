@@ -1034,13 +1034,18 @@ func TestRevocationProbeRetriesWhileBrokersSettle(t *testing.T) {
 	if step := stepThree(service.RevokeReceiver(ctx, "receiver-b", time.Millisecond, settling, nil)); !step.Complete || *calls != 2 {
 		t.Fatalf("broker without the rotated credential yet: step %+v after %d probes; want complete after 2", step, *calls)
 	}
+	// receiver-b has ended, and an ended receiver is not revoked again; the failing probes each leave receiver-c revoking,
+	// so every rerun on it reaches step 3.
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-c", "pool-a"), service.Broker, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+		t.Fatal(err)
+	}
 	failed, calls, _ := probe(errors.New("broker down"))
-	if step := stepThree(service.RevokeReceiver(ctx, "receiver-b", time.Millisecond, failed, nil)); step.Complete || *calls != 1 {
+	if step := stepThree(service.RevokeReceiver(ctx, "receiver-c", time.Millisecond, failed, nil)); step.Complete || *calls != 1 {
 		t.Fatalf("failed probe: step %+v after %d probes; want one failed probe", step, *calls)
 	}
 	probeWindow = 5 * time.Millisecond
 	refused, _, password := probe(errLoginRefused)
-	step := stepThree(service.RevokeReceiver(ctx, "receiver-b", time.Millisecond, refused, nil))
+	step := stepThree(service.RevokeReceiver(ctx, "receiver-c", time.Millisecond, refused, nil))
 	if step.Complete || !errors.Is(step.Err, errLoginRefused) {
 		t.Fatalf("login never accepted: step %+v; want failure after the probe window", step)
 	}
@@ -1048,7 +1053,7 @@ func TestRevocationProbeRetriesWhileBrokersSettle(t *testing.T) {
 		t.Fatal("a revocation step error carries the rotated password")
 	}
 	stuck, _, _ := probe(ErrStillAuthorised)
-	if step := stepThree(service.RevokeReceiver(ctx, "receiver-b", time.Millisecond, stuck, nil)); step.Complete || !errors.Is(step.Err, ErrStillAuthorised) {
+	if step := stepThree(service.RevokeReceiver(ctx, "receiver-c", time.Millisecond, stuck, nil)); step.Complete || !errors.Is(step.Err, ErrStillAuthorised) {
 		t.Fatalf("broker never denies: step %+v; want failure after the probe window", step)
 	}
 }

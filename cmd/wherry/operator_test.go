@@ -607,6 +607,44 @@ func TestRemoveDeletesTheBundleOnceRevocationCompletes(t *testing.T) {
 	}
 }
 
+// A receiver remove retried after the receiver's revocation completed but its bundle was left behind finds the receiver
+// already ended: it runs no new revocation, so it completes although the broker's timeouts would now refuse one, and
+// deletes the leftover bundle; a further rerun without a bundle is no error.
+func TestReceiverRemoveRetryDeletesTheBundleOfAnEndedReceiver(t *testing.T) {
+	service := operatorEnv(t)
+	ctx := context.Background()
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := bundlePath(".", "receivers", true, "receiver-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{{Name: "claude", Plugin: "nomad", Agent: "claude"}}, PluginSHA256: map[string]string{"nomad": fakeSHA256}}
+	if err := service.ReceiverAdd(ctx, config, service.Broker, bundle); err != nil {
+		t.Fatal(err)
+	}
+	revocationBounds(t, service, "1")
+	// The revocation completes without the command, which is what leaves its bundle: a cleanup interrupted after step 6.
+	if result := service.RevokeReceiver(ctx, "receiver-a", 0, deniedProbe(service, ""), nil); !result.Complete {
+		t.Fatalf("revocation incomplete: %+v", result)
+	}
+	// Unbounded timeouts refuse any new revocation at step 1, so only a retry that recognises the ended receiver completes.
+	revocationBounds(t, service, "0")
+	stubProbe(t, deniedProbe)
+	var stdout bytes.Buffer
+	if err := runOperator([]string{"receiver", "remove", "receiver-a"}, &stdout, io.Discard); err != nil || !strings.HasPrefix(stdout.String(), "step=6 complete=true name=already ended") {
+		t.Fatalf("retry = %v with output %q; want the already-ended step", err, stdout.String())
+	}
+	if _, err := os.Stat(bundle); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retry left %s (%v); want the ended receiver's bundle deleted", bundle, err)
+	}
+	if err := runOperator([]string{"receiver", "remove", "receiver-a"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("rerun without a bundle = %v", err)
+	}
+}
+
 // pool apply creates a pool, records other terms for it and re-applies the share group's delivery limit and lock
 // duration, records nothing for the same terms, and with --dry-run writes nothing. A lock duration above the broker's
 // ceiling is refused before anything is recorded (agb-345n).
