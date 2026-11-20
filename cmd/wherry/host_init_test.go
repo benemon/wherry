@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -325,6 +326,61 @@ func TestHostInitKeepsAnExplicitBundle(t *testing.T) {
 	absent(t, other+".bundle.yaml")
 	if stdout.Len() > 0 {
 		t.Fatalf("init printed %q; want no key registered", stdout.String())
+	}
+}
+
+// plantPrivateValueInX5U writes a private Ed25519 JWK at path whose x5u member also holds its private d value, as
+// ":<d>", which no URL parser accepts, and returns d. An error that echoes the field echoes the key.
+func plantPrivateValueInX5U(t *testing.T, path string) string {
+	t.Helper()
+	if _, err := trust.GenerateSigningKeyFile(path); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var members map[string]any
+	if err := json.Unmarshal(encoded, &members); err != nil {
+		t.Fatal(err)
+	}
+	d, ok := members["d"].(string)
+	if !ok || d == "" {
+		t.Fatalf("key file %s has no d member", path)
+	}
+	members["x5u"] = ":" + d
+	if encoded, err = json.Marshal(members); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+// A malformed host key fails init with an error that names the file and echoes nothing it holds: the private value
+// planted in x5u reaches neither the error, nor standard output, nor standard error.
+func TestHostInitMalformedHostKeyEchoesNoKeyMaterial(t *testing.T) {
+	h := newInitHost(t, nil)
+	noTerminal(t)
+	dir := t.TempDir()
+	own, keyPath := filepath.Join(dir, "own.yaml"), filepath.Join(dir, "my.key")
+	d := plantPrivateValueInX5U(t, keyPath)
+	if err := writeYAML(own, busclient.Config{HostKey: keyPath}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, prompts bytes.Buffer
+	err := run([]string{"host", "init", h.bundle, "--config-file", own}, &stdout, &prompts)
+	if err == nil {
+		t.Fatal("init with a malformed host key succeeded")
+	}
+	if !strings.Contains(err.Error(), keyPath) {
+		t.Errorf("init = %s; want the key file named", strings.ReplaceAll(err.Error(), d, "<d>"))
+	}
+	for name, text := range map[string]string{"error": err.Error(), "standard output": stdout.String(), "standard error": prompts.String()} {
+		if strings.Contains(text, d) {
+			t.Errorf("init's %s echoes the host key's private value:\n%s", name, strings.ReplaceAll(text, d, "<d>"))
+		}
 	}
 }
 
