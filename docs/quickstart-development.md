@@ -78,11 +78,15 @@ already there, or `WHERRY_CONFIG` is set, `up` writes the host inside the
 instance and prints `export WHERRY_CONFIG=<path>`
 ([`wherry dev up`](commands-dev.md#wherry-dev-up)). The `claude:` line
 registers the MCP server with Claude Code, so a session submits through the
-`wherry-default` tools. `up` copies
-`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CODEX_API_KEY` (or
-`OPENAI_API_KEY`) and `GEMINI_API_KEY` from its environment into the host's
-credential files when they are set, and Nomad keeps them out of the agents'
-environment, so they reach an agent only through its run.
+`wherry-default` tools. The pool's agents are named by their
+[credential catalog ids](configuration-operator.md#catalog-agents):
+`claude-code` and `anthropic` run Claude Code, `codex` runs Codex and
+`google` runs Gemini, and the `agents:` line names them with the default.
+`up` copies `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CODEX_API_KEY`,
+`GOOGLE_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY` and `GEMINI_API_KEY` from
+its environment into the host's credential files when they are set, each
+for its own agent, and Nomad keeps them out of the agents' environment, so
+they reach an agent only through its run.
 `--agent-image NAME=IMAGE` runs agent `NAME` in a container image, such as
 one [`agent.Containerfile`](https://github.com/benemon/wherry/blob/main/docs/agent.Containerfile)
 builds.

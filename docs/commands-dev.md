@@ -60,8 +60,9 @@ terminal, and fails with `found claude and codex; choose the default with
 --agent` without one. With none and no `--agent` it fails with
 `no agent harness found on PATH (looked for claude, codex, gemini); install one, or choose --agent mock`
 before it downloads anything. `--agent NAME` takes a harness it found or
-`mock`. `init` without `--storage-enabled` drops storage from an instance
-that has it.
+`mock`; `up` makes the agent that runs the harness pool `dev`'s default agent
+([`wherry dev up`](#wherry-dev-up)). `init` without `--storage-enabled` drops
+storage from an instance that has it.
 
 `init` sends `GH_TOKEN`, else `GITHUB_TOKEN`, to GitHub's API as a bearer
 token when one is set. Without one, GitHub allows 60 API requests an hour
@@ -89,11 +90,18 @@ returns once a run of the mock agent completes. Its steps:
    manifest's, with a port in use (`port 9093 is in use`), and when the
    running binary differs from the copy (`the running wherry differs from
    the snapshot; run wherry dev init`).
-2. `harnesses`, `credentials`: the agents are the harnesses `init` found,
-   the `--agent-image` names and `mock`. For each, the set variables of
-   `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CODEX_API_KEY` (else
-   `OPENAI_API_KEY`), `GEMINI_API_KEY` and `WHERRY_DEV_MOCK_TOKEN` are
-   copied into `env/host/credentials/`, mode 0600.
+2. `harnesses`, `credentials`: the agents are those of the harnesses `init`
+   found, the `--agent-image` names and `mock`, each named by its
+   [credential catalog id](configuration-operator.md#catalog-agents):
+   `claude-code` and `anthropic` run `claude`, `codex` runs `codex`,
+   `google` runs `gemini`. For each agent, the set variables the catalog
+   names for it are copied into `env/host/credentials/`, mode 0600, each
+   under its own credential name: `CLAUDE_CODE_OAUTH_TOKEN` as
+   `claude-code-oauth-token`, `ANTHROPIC_API_KEY` as `anthropic-api-key`,
+   `CODEX_API_KEY` as `codex-api-key` (never `OPENAI_API_KEY`),
+   `GOOGLE_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY` and `GEMINI_API_KEY` as
+   `google-api-key`, `google-generative-ai-api-key` and `gemini-api-key`,
+   and `WHERRY_DEV_MOCK_TOKEN` as `mock-token`, the mock's own credential.
 3. `tls`, `super-user`: an instance CA, the broker's certificate for
    127.0.0.1, and the password of the Kafka super user `wherry-admin`, the
    only SCRAM credential the broker starts with. These are the Kafka
@@ -121,12 +129,17 @@ returns once a run of the mock agent completes. Its steps:
    `dev`, tenant `dev`, host `dev` and receiver `dev-1` with a plugin
    profile per agent, their bundles under `env/operator/bundles/`. The
    receiver's `config.yaml` names the instance CA as `ca_file`. Pool `dev`'s
-   terms make each credential step 2 copied required, so every run gets it
-   without asking, and the rest optional. For `claude`,
-   `anthropic-api-key` stays optional when `claude-oauth-token` was copied,
-   so a run uses the subscription token and never the API key unless its
-   task requests it with `--credential anthropic-api-key`; the API key is
-   required only when it is the only credential copied for `claude`.
+   terms list each agent by its catalog id with no credential of its own,
+   and `pool apply` expands them as it does for any pool: `claude-code`,
+   `anthropic` and `codex` each take their one variable, required, and
+   `google` its three, each optional; a run of `google` gets the ones its
+   task requests with `--credential`. `mock` keeps its explicit
+   `mock-token`, required when step 2 copied it and optional otherwise. A
+   submit to an agent whose required credential step 2 did not copy fails
+   naming it. The default agent is the one that runs the harness `init`
+   chose, `codex` or `google`, and for `claude` it is `claude-code`, or
+   `anthropic` when `ANTHROPIC_API_KEY` was copied and
+   `CLAUDE_CODE_OAUTH_TOKEN` was not.
 9. `host` writes the host's `config.yaml`, bundle and key, and registers
    the key. For instance `default`, unless `WHERRY_CONFIG` is set, they go
    at the standard [host paths](configuration-host.md#client-configuration);
@@ -145,7 +158,8 @@ returns once a run of the mock agent completes. Its steps:
 10. `receiver` runs `wherry receiver run` from the copy as a `raw_exec` job
     and waits for `dev-1` to be live with every profile ready.
 11. `smoke` runs the mock agent and checks the output it returns. `ready`
-    writes `env/up.json` and prints the summary, a `submit:` line and an
+    writes `env/up.json` and prints the summary, an `agents:` line naming
+    pool `dev`'s agents with its default marked, a `submit:` line and an
     `mcp add` line for each harness. When the config is in `env/host/`, it
     prints `export WHERRY_CONFIG=<path>` first, and each `mcp add` line
     passes `WHERRY_CONFIG` to the server; otherwise neither names the
@@ -154,11 +168,12 @@ returns once a run of the mock agent completes. Its steps:
 The harness profiles and `mock` run under `raw_exec` with label
 `isolation: host`. `--agent-image NAME=IMAGE` splits at the first `=`. It
 runs agent `NAME` in `IMAGE` with label `isolation: container`, never
-pulled, so the image must be in the runtime. For `claude`, `codex` and
-`gemini` the profile runs the harness from `/local`. Any other `NAME` runs
-the image's entrypoint, which meets the
+pulled, so the image must be in the runtime. For `claude-code`, `anthropic`,
+`codex` and `google` the profile runs the agent's harness from `/local`,
+and the agent is in the pool whether or not `init` found the harness. Any
+other `NAME` runs the image's entrypoint, which meets the
 [agent contract](configuration-receiver.md#agent-contract).
-[`agent.Containerfile`](https://github.com/benemon/wherry/blob/main/docs/agent.Containerfile) builds one for `claude`.
+[`agent.Containerfile`](https://github.com/benemon/wherry/blob/main/docs/agent.Containerfile) builds one for `claude-code`.
 
 With storage, `storage`, `s3-user` and `bucket` run after `kafka`. ceph-aio
 serves S3 on `http://127.0.0.1:18080`. `s3-user` has `radosgw-admin`

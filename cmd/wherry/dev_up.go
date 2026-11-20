@@ -33,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/benemon/wherry/internal/catalog"
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/operator"
@@ -70,21 +71,40 @@ var nomadDenylist = []string{
 	"GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_OAUTH_ACCESS_TOKEN",
 }
 
-// devCredential is a credential an agent's terms take, at its environment target, and the variables up copies it
-// from, the first one set.
+// devCredential is a credential an agent's terms take, at its environment target, and the variable up copies it from.
 type devCredential struct {
-	name, target string
-	from         []string
+	name, target, from string
 }
 
-var devCredentials = map[string][]devCredential{
-	"claude": {{"claude-oauth-token", "CLAUDE_CODE_OAUTH_TOKEN", []string{"CLAUDE_CODE_OAUTH_TOKEN"}}, {"anthropic-api-key", "ANTHROPIC_API_KEY", []string{"ANTHROPIC_API_KEY"}}},
-	"codex":  {{"openai-api-key", "CODEX_API_KEY", []string{"CODEX_API_KEY", "OPENAI_API_KEY"}}},
-	"gemini": {{"gemini-api-key", "GEMINI_API_KEY", []string{"GEMINI_API_KEY"}}},
-	"mock":   {{"mock-token", "MOCK_TOKEN", []string{"WHERRY_DEV_MOCK_TOKEN"}}},
+// devCatalogAgents are the dev agents of the harnesses, in profile order, each named by its credential catalog id, and
+// devHarness the harness each runs: claude-code and anthropic run claude, google runs gemini.
+var (
+	devCatalogAgents = []string{"claude-code", "anthropic", "codex", "google"}
+	devHarness       = map[string]string{"claude-code": "claude", "anthropic": "claude", "codex": "codex", "google": "gemini"}
+	// mockCredential is mock's explicit credential, outside the catalog.
+	mockCredential = devCredential{"mock-token", "MOCK_TOKEN", "WHERRY_DEV_MOCK_TOKEN"}
+)
+
+// devCredentials are the credentials up copies for agent, each from the variable at its own target: the ones the
+// credential catalog derives for a catalog agent, and mock's from WHERRY_DEV_MOCK_TOKEN. An agent outside both takes
+// none.
+func devCredentials(agent string) ([]devCredential, error) {
+	if agent == "mock" {
+		return []devCredential{mockCredential}, nil
+	}
+	c, err := catalog.Embedded()
+	if err != nil {
+		return nil, err
+	}
+	derived, _ := c.Expand(agent)
+	credentials := make([]devCredential, 0, len(derived))
+	for _, credential := range derived {
+		credentials = append(credentials, devCredential{credential.Name, credential.Env, credential.Env})
+	}
+	return credentials, nil
 }
 
-// devCommands are the harness commands of the raw_exec profiles; container profiles run them from /local.
+// devCommands are the harness commands of the raw_exec profiles, by harness; container profiles run them from /local.
 var devCommands = map[string]string{
 	"claude": `exec claude -p --output-format stream-json --verbose --allowedTools "Read,Write,Edit,Glob,Grep,Bash" --add-dir "$WHERRY_INPUT_DIR" --add-dir "$WHERRY_OUTPUT_DIR" < prompt.txt`,
 	"codex":  `exec codex exec --json --ephemeral --skip-git-repo-check --sandbox workspace-write - < prompt.txt`,
@@ -105,6 +125,9 @@ type devEnv struct {
 	selinux  bool
 	denylist []string
 	images   devAgentImages
+	// agents are pool dev's agents and defaultAgent its default, set once up has copied the credentials.
+	agents       []string
+	defaultAgent string
 }
 
 func (e devEnv) storage() bool { return e.manifest.Storage != nil }
@@ -174,23 +197,25 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 	sources := map[string]credential.Source{}
 	copied := []string{}
 	for _, agent := range agents {
-		for _, devCredential := range devCredentials[agent] {
-			for _, variable := range devCredential.from {
-				value := os.Getenv(variable)
-				if value == "" {
-					continue
-				}
-				path := instance.env("host", "credentials", devCredential.name)
-				if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
-					return err
-				}
-				sources[devCredential.name] = credential.Source{File: path}
-				copied = append(copied, variable)
-				break
+		credentials, err := devCredentials(agent)
+		if err != nil {
+			return err
+		}
+		for _, devCredential := range credentials {
+			value := os.Getenv(devCredential.from)
+			if value == "" {
+				continue
 			}
+			path := instance.env("host", "credentials", devCredential.name)
+			if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+				return err
+			}
+			sources[devCredential.name] = credential.Source{File: path}
+			copied = append(copied, devCredential.from)
 		}
 	}
 	env.denylist = denylist(manifest.EnvDenylist, copied)
+	env.agents, env.defaultAgent = agents, devDefaultAgent(manifest.DefaultAgent, sources)
 
 	step("tls")
 	ca, err := devTLS(instance)
@@ -354,12 +379,13 @@ func portFree(port int) error {
 	return listener.Close()
 }
 
-// devAgents are the manifest's harnesses, the --agent-image names and mock: claude, codex, gemini, mock, then the
-// image agents outside that list, in flag order.
+// devAgents are the agents of the manifest's harnesses, the --agent-image names and mock: claude-code, anthropic,
+// codex, google, mock, then the image agents outside that list, in flag order. A harness init found adds every agent
+// that runs it; an image named after one of them adds that agent alone.
 func devAgents(manifest devManifest, images devAgentImages) []string {
 	var agents []string
-	for _, name := range []string{"claude", "codex", "gemini", "mock"} {
-		if name == "mock" || slices.Contains(manifest.Agents, name) || slices.ContainsFunc(images, func(image devAgentImage) bool { return image.name == name }) {
+	for _, name := range append(slices.Clone(devCatalogAgents), "mock") {
+		if name == "mock" || slices.Contains(manifest.Agents, devHarness[name]) || slices.ContainsFunc(images, func(image devAgentImage) bool { return image.name == name }) {
 			agents = append(agents, name)
 		}
 	}
@@ -837,17 +863,36 @@ func createBucket(ctx context.Context, keys [2]string) error {
 	return poll(ctx, time.Minute, func() error { return store.MakeBucket(ctx, devBucket, minio.MakeBucketOptions{}) })
 }
 
-// devTerms are pool dev's terms: each agent with its credentials, required where dev up copied a source for one.
-func devTerms(agents []string, defaultAgent string, storage bool, copied map[string]credential.Source) operator.Terms {
+// devDefaultAgent is pool dev's default agent for the manifest's default, a harness or mock: the agent that runs the
+// harness, and for claude, claude-code unless up copied ANTHROPIC_API_KEY and not CLAUDE_CODE_OAUTH_TOKEN, when it is
+// anthropic, so a submit naming no agent runs with the credential the environment holds.
+func devDefaultAgent(defaultHarness string, copied map[string]credential.Source) string {
+	switch defaultHarness {
+	case "claude":
+		_, token := copied["claude-code-oauth-token"]
+		if _, key := copied["anthropic-api-key"]; key && !token {
+			return "anthropic"
+		}
+		return "claude-code"
+	case "codex":
+		return "codex"
+	case "gemini":
+		return "google"
+	}
+	return defaultHarness
+}
+
+// devTerms are pool dev's terms: each agent with its credentials. A catalog agent lists none, since pool apply derives
+// them from the credential catalog as it does for any pool (operator.Expand); mock's explicit credential is required
+// where up copied a source for it. The default agent is devDefaultAgent's for the manifest's default.
+func devTerms(agents []string, defaultHarness string, storage bool, copied map[string]credential.Source) operator.Terms {
 	optional := false
-	terms := operator.Terms{DefaultAgent: defaultAgent, DeliveryLimit: 2, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 10}
-	_, token := copied["claude-oauth-token"]
+	terms := operator.Terms{DefaultAgent: devDefaultAgent(defaultHarness, copied), DeliveryLimit: 2, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 10}
 	for _, agent := range agents {
 		agentTerms := operator.AgentTerms{Name: agent, Credentials: []operator.AgentCredential{}}
-		for _, credential := range devCredentials[agent] {
-			agentCredential := operator.AgentCredential{TaskCredential: wire.TaskCredential{Name: credential.name, Env: credential.target}}
-			// Claude Code prefers ANTHROPIC_API_KEY to its subscription token, so the key is required only without the token.
-			if _, required := copied[credential.name]; !required || agent == "claude" && credential.name == "anthropic-api-key" && token {
+		if agent == "mock" {
+			agentCredential := operator.AgentCredential{TaskCredential: wire.TaskCredential{Name: mockCredential.name, Env: mockCredential.target}}
+			if _, required := copied[mockCredential.name]; !required {
 				agentCredential.Required = &optional
 			}
 			agentTerms.Credentials = append(agentTerms.Credentials, agentCredential)
@@ -870,7 +915,7 @@ func devProfiles(env devEnv, agents []string) []operator.ProfileSettings {
 		labels := map[string]string{"isolation": "host"}
 		if index := slices.IndexFunc(images, func(image devAgentImage) bool { return image.name == agent }); index >= 0 {
 			config := map[string]any{"image": images[index].image, "force_pull": false}
-			if command, ok := devCommands[agent]; ok {
+			if command, ok := devCommands[devHarness[agent]]; ok {
 				config["command"], config["args"] = "/bin/sh", []string{"-c", `mkdir -p "$WHERRY_OUTPUT_DIR" && cd /local && ` + command}
 			}
 			runtimeConfig = map[string]any{"driver": env.driver, "config": config}
@@ -878,7 +923,7 @@ func devProfiles(env devEnv, agents []string) []operator.ProfileSettings {
 		} else if agent == "mock" {
 			runtimeConfig["config"] = map[string]any{"command": "/bin/sh", "args": []string{"-c", `cd "$NOMAD_TASK_DIR" && exec '` + env.instance.cache("wherry") + `' dev mock`}}
 		} else {
-			runtimeConfig["config"] = map[string]any{"command": "/bin/sh", "args": []string{"-c", `mkdir -p "$WHERRY_OUTPUT_DIR" && cd "$NOMAD_TASK_DIR" && ` + devCommands[agent]}}
+			runtimeConfig["config"] = map[string]any{"command": "/bin/sh", "args": []string{"-c", `mkdir -p "$WHERRY_OUTPUT_DIR" && cd "$NOMAD_TASK_DIR" && ` + devCommands[devHarness[agent]]}}
 		}
 		profiles = append(profiles, operator.ProfileSettings{
 			Name: agent, Plugin: "nomad", Agent: agent, Labels: labels,
@@ -1274,12 +1319,19 @@ func smoke(ctx context.Context, env devEnv, hostConfig busclient.Config) error {
 }
 
 // printReady names config in the commands it prints unless up wrote it at the standard path, where every host command
-// reads it by default.
+// reads it by default. It lists pool dev's agents, marking the default, so a submit can name one.
 func printReady(stdout io.Writer, env devEnv, config string) {
 	m := env.manifest
 	fmt.Fprintf(stdout, "ready: instance %s (nomad %s, kafka %s, plugin %s, wherry %s)\n",
 		env.instance.name, m.Nomad.Version, strings.TrimPrefix(m.Images["kafka"].Digest, "sha256:")[:12], m.Plugin.Tag, m.Snapshot.Version)
 	fmt.Fprintf(stdout, "config: %s\n", config)
+	if len(env.agents) > 0 {
+		agents := slices.Clone(env.agents)
+		if index := slices.Index(agents, env.defaultAgent); index >= 0 {
+			agents[index] += " (default)"
+		}
+		fmt.Fprintf(stdout, "agents: %s\n", strings.Join(agents, ", "))
+	}
 	variable := ""
 	if m.HostFiles == nil {
 		variable = "--env WHERRY_CONFIG=" + shellQuote(config) + " "

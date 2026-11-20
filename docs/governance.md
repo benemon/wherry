@@ -74,3 +74,4 @@ wherry has no hosted control plane.
 Kafka client telemetry is disabled.
 An agent's external calls go where its own environment and configuration send them.
 wherry and its plugins use the Mozilla Public License 2.0.
+The credential catalog embeds provider data from [models.dev](https://models.dev), under the MIT licence; its notice is `internal/catalog/LICENSE.models.dev`.

@@ -20,14 +20,14 @@ func TestResolvePlacementPrefersTheProfileWithRoomOverReceiverSpare(t *testing.T
 	state.Pools["pool-a"], state.Pools["pool-b"] = testTerms(), testTerms()
 	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true, "pool-b": true}
 	state.Receivers["nomad-1"] = operator.ReceiverConfig{Receiver: "nomad-1", Pool: "pool-a", Profiles: []operator.ProfileSettings{
-		{Name: "claude", Plugin: "nomad", Agent: "claude"}, {Name: "codex", Plugin: "nomad", Agent: "codex", Replicas: 2},
+		{Name: "claude", Plugin: "nomad", Agent: "claude"}, {Name: "coder", Plugin: "nomad", Agent: "coder", Replicas: 2},
 	}}
 	state.Receivers["nomad-2"] = operator.ReceiverConfig{Receiver: "nomad-2", Pool: "pool-b", Profiles: []operator.ProfileSettings{
 		{Name: "claude", Plugin: "nomad", Agent: "claude"},
 	}}
 	ads := map[string]wire.Advertisement{
 		"nomad-1": {Receiver: "nomad-1", Pool: "pool-a", Capacity: 3, InFlight: 1, Offers: []wire.Offer{
-			{Profile: "claude", Agent: "claude", Replicas: 1, InFlight: 1}, {Profile: "codex", Agent: "codex", Replicas: 2},
+			{Profile: "claude", Agent: "claude", Replicas: 1, InFlight: 1}, {Profile: "coder", Agent: "coder", Replicas: 2},
 		}},
 		"nomad-2": {Receiver: "nomad-2", Pool: "pool-b", Capacity: 1, Offers: []wire.Offer{{Profile: "claude", Agent: "claude", Replicas: 1}}},
 	}
@@ -214,12 +214,12 @@ func TestAQueuedRunOnAFullProfileSaysSo(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiverConfig(t, operator.ReceiverConfig{Receiver: "nomad-1", Pool: "pool-a", Profiles: []operator.ProfileSettings{
 		{Name: "claude", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman"}},
-		{Name: "codex", Plugin: "nomad", Agent: "codex", Labels: map[string]string{"runtime": "podman"}},
+		{Name: "coder", Plugin: "nomad", Agent: "coder", Labels: map[string]string{"runtime": "podman"}},
 		{Name: "exec", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "exec"}},
 	}, PluginSHA256: map[string]string{"nomad": strings.Repeat("ab", 32)}}).advertise(t, f.ctx, func(ad *wire.Advertisement) {
 		ad.Capacity, ad.InFlight = 3, 1
 		ad.Offers = []wire.Offer{
-			{Profile: "claude", Agent: "claude", Replicas: 1, InFlight: 1}, {Profile: "codex", Agent: "codex", Replicas: 1}, {Profile: "exec", Agent: "claude", Replicas: 1},
+			{Profile: "claude", Agent: "claude", Replicas: 1, InFlight: 1}, {Profile: "coder", Agent: "coder", Replicas: 1}, {Profile: "exec", Agent: "claude", Replicas: 1},
 		}
 	})
 	submitted, err := f.host.Submit(f.ctx, SubmitInput{Agent: "claude", Selector: defaultSelector(), Prompt: "work", EndBy: time.Now().Add(time.Hour), StartBy: time.Now().Add(10 * time.Minute)})

@@ -261,7 +261,7 @@ plugins:
         resources: {cpu: 1000, memory_mb: 2048}
     profiles:
       - name: claude
-        agent: claude
+        agent: claude-code
         config: {runtime: {config: {image: registry.example.com/claude-agent:1.0}}}
       - name: host
         agent: codex
@@ -336,7 +336,7 @@ plugins:
       credential: nomad-token
     profiles:
       - name: container
-        agent: claude
+        agent: claude-code
         labels:
           isolation: container
         config:
@@ -398,7 +398,7 @@ config:
 
 ```yaml
 name: container
-agent: claude
+agent: claude-code
 labels:
   isolation: container
 config:

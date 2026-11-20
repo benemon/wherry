@@ -25,7 +25,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/benemon/wherry/internal/catalog"
 	"github.com/benemon/wherry/internal/credential"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/hashicorp/nomad/api"
 	"github.com/sigstore/sigstore-go/pkg/root"
 )
@@ -450,63 +452,113 @@ func TestDevProfilesAndTerms(t *testing.T) {
 	}
 	manifest := devManifest{Agents: []string{"claude", "gemini"}, DefaultAgent: "claude"}
 	agents := devAgents(manifest, images)
-	if want := []string{"claude", "codex", "gemini", "mock", "coder"}; !slices.Equal(agents, want) {
+	if want := []string{"claude-code", "anthropic", "codex", "google", "mock", "coder"}; !slices.Equal(agents, want) {
 		t.Fatalf("agents %v; want %v", agents, want)
 	}
 	env := devEnv{instance: instance, driver: "docker", images: images}
 	profiles := devProfiles(env, agents)
-	isolation := map[string]string{}
+	isolation, commands := map[string]string{}, map[string]string{}
 	for _, profile := range profiles {
 		isolation[profile.Name] = profile.Labels["isolation"]
+		config, _ := json.Marshal(profile.Config)
+		commands[profile.Name] = string(config)
 	}
-	if want := map[string]string{"claude": "host", "codex": "container", "gemini": "host", "mock": "host", "coder": "container"}; !reflect.DeepEqual(isolation, want) {
+	if want := map[string]string{"claude-code": "host", "anthropic": "host", "codex": "container", "google": "host", "mock": "host", "coder": "container"}; !reflect.DeepEqual(isolation, want) {
 		t.Fatalf("isolation %v; want %v", isolation, want)
 	}
-	mock, _ := json.Marshal(profiles[3].Config)
-	if !strings.Contains(string(mock), `"driver":"raw_exec"`) || !strings.Contains(string(mock), instance.cache("wherry")+`' dev mock`) {
-		t.Fatalf("mock profile %s", mock)
+	// Each dev agent's command invokes its harness: claude-code and anthropic run claude, google runs gemini, and codex,
+	// in its container, runs codex from /local.
+	for agent, harness := range map[string]string{"claude-code": `cd \"$NOMAD_TASK_DIR\" && exec claude `, "anthropic": `cd \"$NOMAD_TASK_DIR\" && exec claude `, "codex": "cd /local && exec codex ", "google": `cd \"$NOMAD_TASK_DIR\" && exec gemini `} {
+		if !strings.Contains(commands[agent], harness) {
+			t.Errorf("profile %s runs %s; want %q", agent, commands[agent], harness)
+		}
+	}
+	if strings.Contains(commands["coder"], "exec ") || !strings.Contains(commands["coder"], `"image":"reg/coder@sha256:ab"`) {
+		t.Errorf("coder profile %s; want the image's entrypoint", commands["coder"])
+	}
+	if !strings.Contains(commands["mock"], `"driver":"raw_exec"`) || !strings.Contains(commands["mock"], instance.cache("wherry")+`' dev mock`) {
+		t.Fatalf("mock profile %s", commands["mock"])
 	}
 	terms := devTerms(agents, "claude", true, nil)
 	if terms.Storage == nil || terms.Storage.Endpoint != "http://127.0.0.1:18080" || terms.Storage.Secure() {
 		t.Fatalf("storage %+v; want plain http on 127.0.0.1:18080", terms.Storage)
 	}
-	names := map[string][]string{}
-	for _, agent := range terms.Agents {
-		for _, credential := range agent.Credentials {
-			if !credential.Optional() {
-				t.Errorf("agent %s credential %s is required though dev up copied none", agent.Name, credential.Name)
+	// A catalog agent lists no credential of its own; mock keeps its explicit one, optional while up copied none.
+	credentialsOf := func(terms operator.Terms) map[string][]string {
+		names := map[string][]string{}
+		for _, agent := range terms.Agents {
+			names[agent.Name] = []string{}
+			for _, credential := range agent.Credentials {
+				entry := credential.Name + "=" + credential.Env
+				if credential.Optional() {
+					entry += " (optional)"
+				}
+				names[agent.Name] = append(names[agent.Name], entry)
 			}
-			names[agent.Name] = append(names[agent.Name], credential.Name+"="+credential.Env)
 		}
+		return names
+	}
+	if want := map[string][]string{"claude-code": {}, "anthropic": {}, "codex": {}, "google": {}, "mock": {"mock-token=MOCK_TOKEN (optional)"}, "coder": {}}; !reflect.DeepEqual(credentialsOf(terms), want) {
+		t.Fatalf("credentials %v; want %v", credentialsOf(terms), want)
+	}
+	// pool apply expands them: each catalog agent gets its entry's credentials, at the entry's variables.
+	c, err := catalog.Embedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expanded, err := operator.Expand(terms, c)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if want := map[string][]string{
-		"claude": {"claude-oauth-token=CLAUDE_CODE_OAUTH_TOKEN", "anthropic-api-key=ANTHROPIC_API_KEY"},
-		"codex":  {"openai-api-key=CODEX_API_KEY"}, "gemini": {"gemini-api-key=GEMINI_API_KEY"}, "mock": {"mock-token=MOCK_TOKEN"},
-	}; !reflect.DeepEqual(names, want) {
-		t.Fatalf("credentials %v; want %v", names, want)
+		"claude-code": {"claude-code-oauth-token=CLAUDE_CODE_OAUTH_TOKEN"}, "anthropic": {"anthropic-api-key=ANTHROPIC_API_KEY"}, "codex": {"codex-api-key=CODEX_API_KEY"},
+		"google": {"google-api-key=GOOGLE_API_KEY (optional)", "google-generative-ai-api-key=GOOGLE_GENERATIVE_AI_API_KEY (optional)", "gemini-api-key=GEMINI_API_KEY (optional)"},
+		"mock":   {"mock-token=MOCK_TOKEN (optional)"}, "coder": {},
+	}; !reflect.DeepEqual(credentialsOf(expanded), want) {
+		t.Fatalf("expanded credentials %v; want %v", credentialsOf(expanded), want)
 	}
+	// mock's credential is required once up copied it, and the default agent follows the manifest's default harness
+	// and, for claude, the credential copied.
 	for _, test := range []struct {
-		copied []string
-		want   []string
+		defaultHarness string
+		copied         []string
+		wantDefault    string
+		wantMock       string
 	}{
-		{[]string{"claude-oauth-token", "anthropic-api-key", "mock-token"}, []string{"claude-oauth-token", "mock-token"}},
-		{[]string{"anthropic-api-key", "openai-api-key"}, []string{"anthropic-api-key", "openai-api-key"}},
-		{[]string{"claude-oauth-token"}, []string{"claude-oauth-token"}},
+		{"claude", nil, "claude-code", "mock-token=MOCK_TOKEN (optional)"},
+		{"claude", []string{"anthropic-api-key", "mock-token"}, "anthropic", "mock-token=MOCK_TOKEN"},
+		{"claude", []string{"claude-code-oauth-token", "anthropic-api-key"}, "claude-code", "mock-token=MOCK_TOKEN (optional)"},
+		{"claude", []string{"claude-code-oauth-token"}, "claude-code", "mock-token=MOCK_TOKEN (optional)"},
+		{"codex", []string{"codex-api-key"}, "codex", "mock-token=MOCK_TOKEN (optional)"},
+		{"gemini", []string{"gemini-api-key"}, "google", "mock-token=MOCK_TOKEN (optional)"},
+		{"mock", []string{"mock-token"}, "mock", "mock-token=MOCK_TOKEN"},
 	} {
 		copied := map[string]credential.Source{}
 		for _, name := range test.copied {
 			copied[name] = credential.Source{File: name}
 		}
-		var required []string
-		for _, agent := range devTerms(agents, "claude", true, copied).Agents {
-			for _, credential := range agent.Credentials {
-				if !credential.Optional() {
-					required = append(required, credential.Name)
-				}
-			}
+		terms := devTerms(agents, test.defaultHarness, true, copied)
+		if mock := credentialsOf(terms)["mock"]; terms.DefaultAgent != test.wantDefault || !slices.Equal(mock, []string{test.wantMock}) {
+			t.Errorf("default %s with %v copied: default agent %s, mock %v; want %s, %s", test.defaultHarness, test.copied, terms.DefaultAgent, mock, test.wantDefault, test.wantMock)
 		}
-		if !reflect.DeepEqual(required, test.want) {
-			t.Errorf("dev up copied %v: required %v; want %v", test.copied, required, test.want)
+	}
+}
+
+// up copies each dev agent's variables into its own credentials: CODEX_API_KEY alone for codex, never OPENAI_API_KEY;
+// google's three; mock's from WHERRY_DEV_MOCK_TOKEN; none for an agent outside the catalog.
+func TestDevCredentialsAreEachAgentsOwn(t *testing.T) {
+	want := map[string][]devCredential{
+		"claude-code": {{"claude-code-oauth-token", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}},
+		"anthropic":   {{"anthropic-api-key", "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"}},
+		"codex":       {{"codex-api-key", "CODEX_API_KEY", "CODEX_API_KEY"}},
+		"google":      {{"google-api-key", "GOOGLE_API_KEY", "GOOGLE_API_KEY"}, {"google-generative-ai-api-key", "GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"}, {"gemini-api-key", "GEMINI_API_KEY", "GEMINI_API_KEY"}},
+		"mock":        {{"mock-token", "MOCK_TOKEN", "WHERRY_DEV_MOCK_TOKEN"}},
+		"coder":       {},
+	}
+	for agent, wantCredentials := range want {
+		credentials, err := devCredentials(agent)
+		if err != nil || !reflect.DeepEqual(credentials, wantCredentials) {
+			t.Errorf("devCredentials(%s) = %v, %v; want %v", agent, credentials, err, wantCredentials)
 		}
 	}
 }

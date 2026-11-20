@@ -249,9 +249,14 @@ func kafkaOpts(broker string, ca []byte, user, password string, mechanism func(s
 
 // PoolApply records terms for pool and converges its topics and share group: an absent pool is created, a present one
 // with other terms is updated, and one with the same terms has its missing topics completed. With dryRun it makes the
-// checks and writes nothing.
+// checks and writes nothing. Each agent named by a usable credential catalog id first gets the credentials its entry
+// derives (Expand); the terms recorded are the expanded ones.
 func (service *Service) PoolApply(ctx context.Context, pool string, terms Terms, dryRun bool) error {
 	if err := validateNames(pool); err != nil {
+		return err
+	}
+	terms, err := expand(terms)
+	if err != nil {
 		return err
 	}
 	effective := withDefaults(terms)

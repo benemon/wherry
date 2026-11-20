@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/benemon/wherry/internal/catalog"
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/charmbracelet/huh"
@@ -533,6 +534,10 @@ type poolAgent struct {
 
 func promptPool(q *questions) (any, error) {
 	var file poolFile
+	c, err := catalog.Embedded()
+	if err != nil {
+		return nil, err
+	}
 	validName := func(s string) error {
 		if !wire.ValidName(s) {
 			return errors.New("invalid name")
@@ -548,6 +553,22 @@ func promptPool(q *questions) (any, error) {
 			return nil, err
 		}
 		agent := poolAgent{Name: name, Credentials: []map[string]any{}}
+		// A catalog agent's derived credentials are shown, and take part in the checks on the ones added here.
+		var targets []wire.TaskCredential
+		if derived, ok := c.Expand(name); ok {
+			var shown []string
+			for _, credential := range derived {
+				targets = append(targets, credential.TaskCredential())
+				required := "required"
+				if !credential.Required {
+					required = "optional"
+				}
+				shown = append(shown, credential.Name+" at "+credential.Env+", "+required)
+			}
+			if err := q.answer("Catalog credentials of "+name, strings.Join(shown, "; ")); err != nil {
+				return nil, err
+			}
+		}
 		for {
 			model, err := q.input("Model (blank ends the list)", "Leave blank for the profiles' choice", "", "", func(string) error { return nil })
 			if err != nil {
@@ -565,7 +586,6 @@ func promptPool(q *questions) (any, error) {
 		if err := q.answer("Models of "+name, models); err != nil {
 			return nil, err
 		}
-		var targets []wire.TaskCredential
 		for {
 			choice := "add"
 			if _, err := q.pick("Credentials of "+name, "", []huh.Option[string]{option("Add credential...", "add"), option("Done", "done")}, &choice); err != nil {
@@ -656,7 +676,7 @@ func promptPool(q *questions) (any, error) {
 	if err := q.answer("Default agent", file.DefaultAgent); err != nil {
 		return nil, err
 	}
-	_, err := q.ask("Producer byte rate per host, bytes a second", "", "1048576", "", func(s string) error {
+	_, err = q.ask("Producer byte rate per host, bytes a second", "", "1048576", "", func(s string) error {
 		value, err := strconv.ParseInt(s, 10, 64)
 		if err != nil || value <= 0 {
 			return errors.New("producer byte rate must be greater than 0")

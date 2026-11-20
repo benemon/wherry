@@ -97,7 +97,7 @@ func TestSubmitGoesWithoutAnOptionalCredential(t *testing.T) {
 	f := newFixture(t)
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = bothOffers() })
-	submitted, err := f.host.Submit(f.ctx, SubmitInput{Agent: "codex", Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}},
+	submitted, err := f.host.Submit(f.ctx, SubmitInput{Agent: "coder", Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}},
 		Prompt: "p", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
@@ -110,9 +110,9 @@ func TestSubmitGoesWithoutAnOptionalCredential(t *testing.T) {
 	}
 }
 
-// codexTask is input for agent codex, whose openai credential is required and github-token optional.
-func codexTask(input SubmitInput) SubmitInput {
-	input.Agent, input.Selector, input.Prompt = "codex", []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, "p"
+// coderTask is input for agent coder, whose openai credential is required and github-token optional.
+func coderTask(input SubmitInput) SubmitInput {
+	input.Agent, input.Selector, input.Prompt = "coder", []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, "p"
 	input.StartBy, input.EndBy = time.Now().Add(time.Minute), time.Now().Add(time.Minute)
 	return input
 }
@@ -139,7 +139,7 @@ func TestAnOptionalCredentialIsDeliveredOnlyOnRequest(t *testing.T) {
 			f.host.credentials["github-token"] = credential.Source{File: f.secret}
 			receiver := f.addReceiver(t, "receiver-a", "pool-a")
 			receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = bothOffers() })
-			submitted, err := f.host.Submit(f.ctx, codexTask(test.input))
+			submitted, err := f.host.Submit(f.ctx, coderTask(test.input))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -180,15 +180,15 @@ func TestSubmitRefusesAnUnmetRequest(t *testing.T) {
 		want      string
 	}{
 		"unconfigured":          {"github-token", "invalid input: auth required: credential github-token is not in this host's configuration"},
-		"another agent's":       {"model", "invalid input: requested credential model is not one of agent codex's credentials"},
-		"no agent's credential": {"vault-token", "invalid input: requested credential vault-token is not one of agent codex's credentials"},
+		"another agent's":       {"model", "invalid input: requested credential model is not one of agent coder's credentials"},
+		"no agent's credential": {"vault-token", "invalid input: requested credential vault-token is not one of agent coder's credentials"},
 		"a pasted value":        {"ghp_NOT-A-REAL-TOKEN", "invalid input: a requested credential is not a valid credential name"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t)
 			f.host.credentials["vault-token"] = credential.Source{File: f.secret}
 			f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = bothOffers() })
-			_, err := f.host.Submit(f.ctx, codexTask(SubmitInput{Requested: []string{test.requested}}))
+			_, err := f.host.Submit(f.ctx, coderTask(SubmitInput{Requested: []string{test.requested}}))
 			if !errors.Is(err, ErrInvalidInput) || err.Error() != test.want {
 				t.Fatalf("submit = %v; want %q", err, test.want)
 			}
@@ -245,12 +245,12 @@ func TestAReplacementKeepsTheRequests(t *testing.T) {
 	}
 }
 
-// keyLostCodex submits a codex task requesting requested and ends it key-lost after receiver-a claims it.
+// keyLostCodex submits a coder task requesting requested and ends it key-lost after receiver-a claims it.
 func (f *fixture) keyLostCodex(t *testing.T, requested []string) (SubmitResult, claimed) {
 	t.Helper()
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = bothOffers() })
-	submitted, err := f.host.Submit(f.ctx, codexTask(SubmitInput{Requested: requested}))
+	submitted, err := f.host.Submit(f.ctx, coderTask(SubmitInput{Requested: requested}))
 	if err != nil {
 		t.Fatal(err)
 	}

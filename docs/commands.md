@@ -272,9 +272,13 @@ wherry operator pool apply POOL [-f PATH] [--dry-run]
 
 Creates the pool, or records new terms for it, from the
 [pool terms](configuration-operator.md#pool-terms) at `PATH` or in
-`pools/<pool>.yaml`. The [guided path](#operator-commands) asks for the
+`pools/<pool>.yaml`. An agent named by a
+[credential catalog id](configuration-operator.md#catalog-agents) gets the
+model credentials its entry derives, before any it lists; the terms recorded
+are the expanded ones. The [guided path](#operator-commands) asks for the
 agents one at a time, each one's models and credentials, then the default agent
-from the entered names. Each credential asks for its name, delivery as an
+from the entered names. After a catalog agent's name it prints the credentials
+the catalog derives and asks only for further ones. Each credential asks for its name, delivery as an
 environment variable or file, target, whether it is required, and an optional
 description. The remaining questions are `producer_byte_rate` (default
 1048576), `request_percentage` (default 10) and `start_by_limit` (default
@@ -301,7 +305,8 @@ It sets these on new and existing topics. [Topics](design.md#topics-1) gives
 the reasons.
 
 It refuses, before it reads the broker, terms whose agent credentials
-break the [pool terms](configuration-operator.md#pool-terms) rules, and a
+break the [pool terms](configuration-operator.md#pool-terms) rules, a
+catalog agent listing a credential the catalog derives for it, and a
 `start_by_limit` above 29 days and 18 hours. For a pool with `storage` it
 refuses a `start_by_limit` that with six hours added exceeds 7 days, the
 longest an S3 SigV4 presigned URL lasts, with `start_by_limit plus the 6h
