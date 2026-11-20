@@ -58,7 +58,8 @@ Confirm it:
      restart the supervisor is expected to make, once the runs the
      receiver holds have ended.
 3. Run `wherry operator receiver show RECEIVER` to check the receiver has a
-   configuration.
+   configuration, and its `status`: `live` within 120 seconds of its latest
+   advertisement, `stale` beyond that, `silent` when it has never advertised.
 
 Then:
 

@@ -629,7 +629,8 @@ receiver's configuration record, and takes no `-f` or `--dry-run`.
 wherry operator receiver show RECEIVER
 ```
 
-Prints the receiver's recorded configuration as YAML: `plugin_sha256`, the SHA-256 pinned for each plugin type, then
+Prints the receiver's liveness and recorded configuration as YAML: `status`,
+then `last_advertised` when it has advertised, then `plugin_sha256`, the SHA-256 pinned for each plugin type, then
 `profiles`, each plugin profile resolved, in recorded order, with its
 `name`, `plugin`, `agent`, `replicas` when above 1, `labels` and merged `config`, in that order
 ([Plugin profile merge](configuration-receiver.md#plugin-profile-merge)),
@@ -637,6 +638,8 @@ its `signature`, the agent and every label, double-quoted with each line
 feed shown as `\n`, and the signature's task `topic`:
 
 ```yaml
+status: live
+last_advertised: 2026-11-20T09:41:07.312Z
 plugin_sha256:
     nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 profiles:
@@ -659,6 +662,18 @@ profiles:
 A `credential` key shows the credential's name, which is all the record
 holds; neither `show` nor `--dry-run` prints a credential value.
 
+`status` is what [`wherry host receivers`](#wherry-host-receivers) reports
+for the receiver, read the same way: the operator reads the pool's receivers
+topic and verifies each advertisement against the receiver's key topic.
+The receiver is `live` when its latest authorised advertisement is dated
+within 120 seconds of now, either side; `stale` when it is dated beyond that,
+in the past or the future; `silent` when it has none; and `ended` once
+revoked. `last_advertised` is that advertisement's time, in UTC, and is
+absent for a silent or ended receiver. The latest advertisement is the one
+with the latest date, so one dated ahead counts until that time passes. A
+`--dry-run` of `receiver apply` prints no status: the record it would hold
+has no receiver to be live.
+
 ### `wherry operator tenant host remove TENANT HOST`
 
 ```sh
@@ -667,7 +682,8 @@ wherry operator tenant host remove TENANT HOST [--wait DURATION]
 
 Runs the [revocation](concepts.md#revocation) steps for the host, as
 [`receiver remove`](#wherry-operator-receiver-remove-receiver) does for a
-receiver.
+receiver, and once they are complete deletes the host's bundle,
+`bundles/hosts/TENANT/HOST.bundle`.
 
 ### `wherry operator receiver remove RECEIVER`
 
@@ -675,15 +691,27 @@ receiver.
 wherry operator receiver remove RECEIVER [--wait DURATION]
 ```
 
-Runs the [revocation](concepts.md#revocation) steps. When it ends, it
-prints one line per step it ran:
+Runs the [revocation](concepts.md#revocation) steps. It prints one line per
+step as the step ends:
 
 ```
 step=<n> complete=<bool> name=<step name>
 ```
 
 The line of a failed step ends in ` error=<cause>`. It stops at the first
-incomplete step and fails with `revocation incomplete`. The probe asks every
+incomplete step and fails with `revocation incomplete`. Before step 5 waits,
+it prints when the wait ends, in UTC:
+
+```
+step=5 started name=wait until=<RFC 3339 time>
+```
+
+Once the revocation is complete, it deletes the receiver's bundle,
+`bundles/receivers/RECEIVER.bundle`: its principal can never log in again.
+An incomplete revocation keeps the bundle, and a rerun deletes it once it
+finds the principal ended; a bundle already gone is no error. When the
+deletion itself fails, the command fails naming the file, with the
+revocation complete. The probe asks every
 broker for the metadata of the principal's own key topic, and step 3
 completes when every broker answers `TOPIC_AUTHORIZATION_FAILED`. While a
 broker still authorises the principal, step 3 probes again every second for
@@ -994,14 +1022,26 @@ wherry host init [BUNDLE] [--config-file FILE]
 Sets the host up from its bundle, and configures it for every pool its tenant
 is entitled to:
 
-1. With `BUNDLE`, it reads the bundle and copies it to `bundle.yaml` in the
+1. With `BUNDLE`, it reads the bundle and copies it to the configuration's
+   bundle. For the default configuration that is always `bundle.yaml` in the
    [configuration directory](configuration-host.md#client-configuration),
-   `$XDG_CONFIG_HOME/wherry/` or by default `~/.config/wherry/`, mode 0600 in
-   a directory of mode 0700,
-   replacing any file there atomically, and names it as `bundle` in the
-   configuration, even when the configuration named another bundle. Without
-   `BUNDLE`, it uses the bundle the configuration names, and refuses when it
-   names none.
+   `$XDG_CONFIG_HOME/wherry/` or by default `~/.config/wherry/`, named as
+   `bundle` in the configuration even when it named another bundle. A
+   configuration at any other `<path>` keeps the `bundle` it names and gets
+   the copy there; one naming none gets it at the
+   [default bundle path](configuration-host.md#a-configuration-away-from-the-default-path),
+   `<path>.bundle.yaml`, named as its `bundle`. The copy is mode 0600. The
+   configuration directory is made mode 0700; elsewhere, a directory init
+   creates is mode 0700 and an existing one keeps its mode. It replaces the
+   file there atomically. Before writing anything it refuses when the
+   bundle's destination, `<path>.host.key` or `<path>.state` exists and is
+   not the file the configuration already names, such as another
+   configuration or another host's bundle or key, naming the path and the
+   setting (`bundle`, `host_key`, `state_dir`) that avoids it; a rerun on an
+   initialised configuration succeeds, and explicit `host_key` and
+   `state_dir` paths and the configuration directory's files are not
+   checked. Without `BUNDLE`, it uses the bundle the configuration names,
+   and refuses when it names none.
 2. On a terminal, when the configuration names no `ca_file` and the
    configuration directory holds no `ca.pem`, Broker offers up to eight
    eligible local CA files, System roots and Other file. Other file asks
@@ -1011,7 +1051,9 @@ is entitled to:
    `ca.pem` in place, or `ca_file` in the configuration, before `host init`.
    When the file is new or step 1 or 2 changed it, init writes the
    configuration now, before it connects.
-3. It creates the host key at `host_key`, a private JWK (RFC 7517) with mode
+3. It creates the host key at `host_key`, by default `host.key` in the
+   configuration directory for the default configuration and `<path>.host.key`
+   beside any other, a private JWK (RFC 7517) with mode
    0600, unless the file exists, creating its directory with mode 0700. It
    registers the key on the host's key topic when the topic holds none, and
    prints the key ID alone when standard input or standard error is not a
@@ -1059,7 +1101,13 @@ answers not yet written. If the terminal misbehaves after an abnormal exit,
 run `stty sane`.
 
 The configuration path is `--config-file` or `WHERRY_CONFIG`, else
-`config.yaml` in the configuration directory. Writes use mode 0600 even
+`config.yaml` in the configuration directory. A configuration at any other
+path, made absolute with no symlink resolved, keeps its bundle, host key
+and state directory beside it, as `<path>.bundle.yaml`, `<path>.host.key`
+and `<path>.state/`, so two configurations never share a host key; the
+default configuration named relatively, or through a link to it once it
+exists, is still the default. Explicit `bundle`, `host_key` and
+`state_dir` values are kept. Writes use mode 0600 even
 for existing files, with references to sources, never values. A re-run
 keeps existing entries and asks only for missing settings. When standard
 input or standard error is not a terminal, or with `TERM=dumb`, init asks nothing and lists missing

@@ -81,7 +81,62 @@ func DefaultConfigPath() (string, error) {
 	return filepath.Join(dir, "config.yaml"), nil
 }
 
-// LoadConfig decodes the config at path, defaulting host_key and state_dir.
+// Paths are the files a host configuration takes when it names none: Config is the configuration's path, with ~
+// expanded and made absolute, and Default says it is the default configuration.
+type Paths struct {
+	Config, Bundle, HostKey, StateDir string
+	Default                           bool
+}
+
+// DefaultPaths derives the bundle, host key and state directory of the configuration at path. The default configuration
+// keeps the configuration directory's bundle.yaml and host.key and the state directory: deriving them from its path
+// would give an existing host a second key. Any other configuration takes its own path plus .bundle.yaml, .host.key and
+// .state, nothing stripped, so two configurations never share a file or a host key, however alike their names. The path
+// is made absolute and no symlink is resolved, so a missing file needs no special case: it is the default when it equals
+// DefaultConfigPath's, or when both exist and are one file, however that file is reached.
+func DefaultPaths(path string) (Paths, error) {
+	path, err := absolute(path)
+	if err != nil {
+		return Paths{}, err
+	}
+	standard, err := DefaultConfigPath()
+	if err != nil {
+		return Paths{}, err
+	}
+	if standard, err = absolute(standard); err != nil {
+		return Paths{}, err
+	}
+	if path != standard && !sameExistingFile(path, standard) {
+		return Paths{Config: path, Bundle: path + ".bundle.yaml", HostKey: path + ".host.key", StateDir: path + ".state"}, nil
+	}
+	dir, err := ConfigDir()
+	if err != nil {
+		return Paths{}, err
+	}
+	state, err := StateDir()
+	if err != nil {
+		return Paths{}, err
+	}
+	return Paths{Config: path, Bundle: filepath.Join(dir, "bundle.yaml"), HostKey: filepath.Join(dir, "host.key"), StateDir: state, Default: true}, nil
+}
+
+// absolute is path with ~ expanded and made absolute, symlinks kept.
+func absolute(path string) (string, error) {
+	path, err := ExpandHome(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Abs(path)
+}
+
+// sameExistingFile reports whether a and b both exist and are one file.
+func sameExistingFile(a, b string) bool {
+	infoA, errA := os.Stat(a)
+	infoB, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(infoA, infoB)
+}
+
+// LoadConfig decodes the config at path, defaulting host_key and state_dir to DefaultPaths' for path.
 func LoadConfig(path string) (Config, error) {
 	path, err := ExpandHome(path)
 	if err != nil {
@@ -98,16 +153,16 @@ func LoadConfig(path string) (Config, error) {
 	if config.Bundle == "" {
 		return Config{}, errors.New("config requires bundle")
 	}
-	if config.HostKey == "" {
-		dir, err := ConfigDir()
+	if config.HostKey == "" || config.StateDir == "" {
+		paths, err := DefaultPaths(path)
 		if err != nil {
 			return Config{}, err
 		}
-		config.HostKey = filepath.Join(dir, "host.key")
-	}
-	if config.StateDir == "" {
-		if config.StateDir, err = StateDir(); err != nil {
-			return Config{}, err
+		if config.HostKey == "" {
+			config.HostKey = paths.HostKey
+		}
+		if config.StateDir == "" {
+			config.StateDir = paths.StateDir
 		}
 	}
 	for _, path := range []*string{&config.Bundle, &config.HostKey, &config.StateDir, &config.CAFile} {

@@ -45,6 +45,12 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 	if path, err = busclient.ExpandHome(path); err != nil {
 		return err
 	}
+	// Each configuration's bundle and host key go with it, so two configurations never come to share a host identity
+	// (agb-d1hh); the default configuration keeps the configuration directory's.
+	paths, err := busclient.DefaultPaths(path)
+	if err != nil {
+		return err
+	}
 	var file busclient.Config
 	_, statErr := os.Stat(path)
 	changed := errors.Is(statErr, os.ErrNotExist)
@@ -53,23 +59,52 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 			return fmt.Errorf("%s: %w", path, err)
 		}
 	}
+	// BUNDLE is copied to the bundle a configuration away from the default path names, which it keeps, else to the derived
+	// path; the default configuration's copy is always the configuration directory's bundle.yaml.
+	destination, explicit := paths.Bundle, !paths.Default && file.Bundle != ""
+	if explicit {
+		if destination, err = busclient.ExpandHome(file.Bundle); err != nil {
+			return err
+		}
+	}
+	// A destination that exists is written to, or taken as this host's key or state, only when this configuration already
+	// names it: anything else there is another configuration, or another host's bundle or key, and is left as it is.
+	// Explicit host_key and state_dir paths are the user's choice and are not checked; the configuration directory is
+	// wherry's own, so the default configuration's files are not checked either.
+	if !paths.Default {
+		copying := ""
+		if bundle != "" {
+			copying = destination
+		}
+		if err := refuseForeignFiles(path, paths, file, !changed, copying); err != nil {
+			return err
+		}
+	}
 	if bundle != "" {
 		contents, err := operator.ReadBundle(bundle)
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return err
-		}
-		if err := os.Chmod(dir, 0o700); err != nil {
+		// The configuration directory is wherry's own and is hardened to 0700; a configuration elsewhere sits in a
+		// directory of the user's, which keeps its mode.
+		if paths.Default {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				return err
+			}
+			if err := os.Chmod(dir, 0o700); err != nil {
+				return err
+			}
+		} else if err := makePrivateDir(filepath.Dir(destination)); err != nil {
 			return err
 		}
 		// Bundles hold a password: ReplaceBundle writes mode 0600 and renames over the old file.
-		if err := operator.ReplaceBundle(filepath.Join(dir, "bundle.yaml"), contents); err != nil {
+		if err := operator.ReplaceBundle(destination, contents); err != nil {
 			return err
 		}
-		changed = changed || file.Bundle != filepath.Join(dir, "bundle.yaml")
-		file.Bundle = filepath.Join(dir, "bundle.yaml")
+		if !explicit {
+			changed = changed || file.Bundle != paths.Bundle
+			file.Bundle = paths.Bundle
+		}
 	} else if file.Bundle == "" {
 		return fmt.Errorf("%s names no bundle; run wherry host init BUNDLE", path)
 	}
@@ -99,6 +134,26 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 	if changed {
 		if err := write(); err != nil {
 			return err
+		}
+		// Writing the configuration can make it the default file: a link to the default path whose target did not exist
+		// until now. The host key and state directory chosen above stay this configuration's; they are named in it, so
+		// this load and every later one agree with the files it was given.
+		if !paths.Default {
+			after, err := busclient.DefaultPaths(path)
+			if err != nil {
+				return err
+			}
+			if after.Default && (file.HostKey == "" || file.StateDir == "") {
+				if file.HostKey == "" {
+					file.HostKey = paths.HostKey
+				}
+				if file.StateDir == "" {
+					file.StateDir = paths.StateDir
+				}
+				if err := write(); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	config, err := busclient.LoadConfig(path)
@@ -433,8 +488,80 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 	return nil
 }
 
+// refuseForeignFiles fails when a destination of the configuration at path exists and is not its own. A configuration on
+// disk (exists) owns the bundle it names and, by default, its derived host key and state directory; one not yet written
+// owns nothing. bundle is where BUNDLE is copied, empty without one.
+func refuseForeignFiles(path string, paths busclient.Paths, file busclient.Config, exists bool, bundle string) error {
+	type destination struct {
+		path, setting, what string
+		named               bool // the configuration names it already
+		dir                 bool // it is a directory
+	}
+	var destinations []destination
+	if bundle != "" {
+		destinations = append(destinations, destination{bundle, "bundle", "bundle", exists && sameFile(file.Bundle, bundle), false})
+	}
+	if file.HostKey == "" {
+		destinations = append(destinations, destination{paths.HostKey, "host_key", "host key", exists, false})
+	}
+	if file.StateDir == "" {
+		destinations = append(destinations, destination{paths.StateDir, "state_dir", "state directory", exists, true})
+	}
+	for _, d := range destinations {
+		// The entry itself decides whether the destination is occupied, so a dangling symlink there is refused rather
+		// than written through; the link is followed only to establish what it is and whether it is this configuration's.
+		if _, err := os.Lstat(d.path); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if info, err := os.Stat(d.path); err == nil && d.named && info.IsDir() == d.dir {
+			continue
+		}
+		return fmt.Errorf("%s exists and is not the %s of configuration %s; set %s in %s to a path of its own", d.path, d.what, path, d.setting, path)
+	}
+	return nil
+}
+
+// sameFile reports whether named, a path from a configuration, and path are one existing file.
+func sameFile(named, path string) bool {
+	named, err := busclient.ExpandHome(named)
+	if err != nil || named == "" {
+		return false
+	}
+	a, errA := os.Stat(named)
+	b, errB := os.Stat(path)
+	return errA == nil && errB == nil && os.SameFile(a, b)
+}
+
+// makePrivateDir creates path's missing directories with mode 0700, whatever the umask, and leaves an existing one as
+// it is: a configuration placed in a user's own directory does not take the directory over.
+func makePrivateDir(path string) error {
+	var created []string
+	for dir := path; ; dir = filepath.Dir(dir) {
+		if _, err := os.Stat(dir); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		created = append(created, dir)
+		if dir == filepath.Dir(dir) {
+			break
+		}
+	}
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	for _, dir := range created {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func writeHostConfig(path string, file busclient.Config) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := makePrivateDir(filepath.Dir(path)); err != nil {
 		return err
 	}
 	if err := writeYAML(path, file); err != nil {

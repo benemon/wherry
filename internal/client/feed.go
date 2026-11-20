@@ -840,7 +840,7 @@ func (r *runView) cancelRequested() string {
 
 // liveAds reads the live advertisements of the pools the tenant is entitled to. A variable so tests can count reads.
 var liveAds = func(ctx context.Context, h *Host, v view) (map[string]wire.Advertisement, error) {
-	return h.reader.ReadAdvertisements(ctx, v.state, v.keys, slices.Sorted(maps.Keys(v.state.Entitlements[h.tenant])), time.Now(), liveness)
+	return h.reader.ReadAdvertisements(ctx, v.state, v.keys, slices.Sorted(maps.Keys(v.state.Entitlements[h.tenant])), time.Now(), operator.Liveness)
 }
 
 // unclaimed says that the run's task_started_by passed at now with no status from a receiver, and is empty otherwise.

@@ -504,6 +504,26 @@ func HostKeyTopics(state State, pool string) map[string]string {
 	return topics
 }
 
+// Liveness is how far from now, either side, an advertisement may be dated for its receiver to count as live.
+const Liveness = 120 * time.Second
+
+// ReceiverStatus is receiver's status at now from ads, the latest advertisements ReadAdvertisements returned with no
+// age limit: ended once its membership ended, else live when its advertisement is dated within Liveness either side of
+// now, stale when it is dated beyond that, and silent without one. Hosts and the operator report the same statuses.
+func ReceiverStatus(state State, ads map[string]wire.Advertisement, receiver string, now time.Time) string {
+	if state.Ended[ReceiverPrincipal(receiver)] {
+		return "ended"
+	}
+	ad, advertised := ads[receiver]
+	if !advertised {
+		return "silent"
+	}
+	if age := now.Sub(time.UnixMilli(ad.AtMS)); age > Liveness || age < -Liveness {
+		return "stale"
+	}
+	return "live"
+}
+
 // ReadAdvertisements returns each receiver's latest authorised advertisement on the receivers topics of pools, read
 // together, that is no older than liveness at now and no later than liveness ahead of it. A record naming another pool
 // than its topic's is refused.

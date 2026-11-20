@@ -27,10 +27,10 @@ The host's paths are the same on every OS, macOS included:
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `bundle` | path | required | Read the host's bundle from this file. |
+| `bundle` | path | required; `host init BUNDLE` writes the [default bundle path](#a-configuration-away-from-the-default-path) when the configuration names none | Read the host's bundle from this file; `host init BUNDLE` copies the bundle here. |
 | `ca_file` | path | `ca.pem` in the configuration directory if present | Trust these PEM CA certificates for the broker connection. |
-| `host_key` | path | `host.key` in the configuration directory | Read the host's private Ed25519 JWK. |
-| `state_dir` | path | the host state directory | Store local run records here. |
+| `host_key` | path | `host.key` in the configuration directory, or `<path>.host.key` beside a configuration [away from the default path](#a-configuration-away-from-the-default-path) | Read the host's private Ed25519 JWK. |
+| `state_dir` | path | the host state directory, or `<path>.state/` beside a configuration [away from the default path](#a-configuration-away-from-the-default-path) | Store local run records here. |
 | `credentials` | mapping | none | Map credential names to [sources](security.md#credential-sources). |
 | `git` | list | none | Map URL prefixes to credential names and SSH known-hosts files. |
 | `storage` | mapping | none | Map pool names to S3 `access_key` and `secret_key` credential names. |
@@ -38,6 +38,53 @@ The host's paths are the same on every OS, macOS included:
 
 Without a CA file, the host trusts system roots.
 Each credential source uses exactly one of `file`, `env` and `command`.
+
+### A configuration away from the default path
+
+A host identity is its host key, and a configuration names one. A
+configuration at any path other than the default keeps its files beside
+it, named from its whole path, nothing stripped:
+
+| File | Default configuration | Configuration at `<path>` |
+| --- | --- | --- |
+| the bundle, where `host init BUNDLE` copies it when the configuration names none | `bundle.yaml` in the configuration directory, always | `<path>.bundle.yaml` |
+| the host key file | `host.key` in the configuration directory | `<path>.host.key` |
+| the state directory | the state directory | `<path>.state/` |
+
+So `--config-file /work/a.yaml` and `--config-file /work/b.yaml` are two
+hosts with two keys, and never share one; `/work/a` and `/work/a.yaml` are
+distinct too. The path is made absolute and no symlink is resolved: it is
+the default when it is the default path, so the default configuration
+named relatively keeps the configuration directory's files, or when both
+exist and are one file, so a symlink or hard link to an existing default
+configuration does too. A link to a file not yet written is a
+configuration of its own, with its files beside the link, and stays one
+when that file is the default configuration: writing through the link
+makes it the default file, so `host init` names the `host_key` and
+`state_dir` it chose beside the link in the configuration it writes, and
+every later load, through the link or the default path, keeps them.
+Explicit `bundle`, `host_key` and `state_dir` values are kept wherever the
+configuration is: `host init BUNDLE` copies the bundle to the `bundle` a
+configuration away from the default path names, and to `<path>.bundle.yaml`
+only when it names none; the default configuration's copy is always
+`bundle.yaml` in the configuration directory. `host init` makes the
+configuration directory mode 0700; elsewhere it creates a missing directory
+for these files with mode 0700 and leaves an existing one's mode alone.
+
+Before it writes anything, `host init` refuses when the bundle's
+destination or one of the derived paths already exists and is not the file
+the configuration names: another configuration at `<path>.bundle.yaml`,
+another host's key at `<path>.host.key`, a file where `<path>.state/` would
+go, a directory where the named `bundle` would go, or a symlink to any of
+these or to nothing. A symlink is refused or accepted by what it points at:
+one to the file the configuration names is its own, one whose target does
+not exist is refused rather than written through. The error names the
+path and the setting, `bundle`, `host_key` or `state_dir`, that avoids it.
+A rerun on an initialised configuration, whose files it already names,
+succeeds. Explicit `host_key` and `state_dir` paths are not checked this
+way, and nor are the default configuration's files in the configuration
+directory.
+
 Git entries contain `url`, optional `credential` and `host_key`.
 An SSH remote requires `host_key`.
 An HTTPS remote refuses `host_key`.
@@ -46,13 +93,15 @@ A pool without a storage entry has no S3 lane on this host.
 MCP input roots must be absolute paths to existing directories.
 CLI commands can read any input path you give them.
 
-`host init` writes `bundle`, a `ca_file` it asked for, and an entry in
-`credentials`, `git` and `storage` for each answer, each a reference to a
-source and never a value; a re-run keeps every entry and adds only what a
-newly entitled pool needs. Without a terminal it asks nothing and lists what
-still has no source. It asks for the CA only on a terminal, so without one a
-broker under a private CA needs `ca.pem` in the configuration directory, or
-`ca_file` in the file, before `host init` runs.
+`host init` writes `bundle`, a `ca_file` it asked for, `host_key` and
+`state_dir` when a configuration written through a link to the default
+path needs them, and an entry in `credentials`, `git` and `storage` for
+each answer, each a reference to a source and never a value; a re-run
+keeps every entry and adds only what a newly entitled pool needs. Without
+a terminal it asks nothing and lists what still has no source. It asks for
+the CA only on a terminal, so without one a broker under a private CA
+needs `ca.pem` in the configuration directory, or `ca_file` in the file,
+before `host init` runs.
 
 `state_dir` holds:
 

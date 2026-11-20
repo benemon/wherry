@@ -788,7 +788,7 @@ func TestAdoptionFallsBackToStartedWithoutTheHoldersProgress(t *testing.T) {
 			switch cause {
 			case "ended":
 				revocationBounds(t, f.service, "1")
-				result := f.service.RevokeReceiver(f.ctx, "receiver-peer", time.Millisecond, func(context.Context, string, string) error { return operator.ErrAuthorizationDenied })
+				result := f.service.RevokeReceiver(f.ctx, "receiver-peer", time.Millisecond, func(context.Context, string, string) error { return operator.ErrAuthorizationDenied }, nil)
 				revocationBounds(t, f.service, "")
 				if !result.Complete {
 					t.Fatalf("incomplete revocation: %+v", result)
@@ -826,7 +826,7 @@ func TestLastOffsetSkipsOnlyAnEndedHoldersTopicDenial(t *testing.T) {
 	f.holding(t, task, hash, "receiver-peer", peerSigning, "claimed", nil)
 	f.produce(t, operator.ReceiverProgressTopic("receiver-peer"), testRun("run-peer"), progressRecord(t, hash, 42, nil))
 	revocationBounds(t, f.service, "1")
-	result := f.service.RevokeReceiver(f.ctx, "receiver-peer", time.Millisecond, func(context.Context, string, string) error { return operator.ErrAuthorizationDenied })
+	result := f.service.RevokeReceiver(f.ctx, "receiver-peer", time.Millisecond, func(context.Context, string, string) error { return operator.ErrAuthorizationDenied }, nil)
 	revocationBounds(t, f.service, "")
 	if !result.Complete {
 		t.Fatalf("incomplete revocation: %+v", result)

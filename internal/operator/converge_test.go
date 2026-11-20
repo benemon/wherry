@@ -106,7 +106,7 @@ func removeUndoesAStaleHostAddForce(t *testing.T, service *Service, pool, tenant
 		return service.reconcileACLs(ctx, loaded)
 	})
 	bound()
-	if result := service.RevokeHost(ctx, tenant, host, 0, probe); !result.Complete {
+	if result := service.RevokeHost(ctx, tenant, host, 0, probe, nil); !result.Complete {
 		t.Fatalf("incomplete revocation: %+v", result)
 	}
 	if count, err := principalACLs(ctx, service, principal); err != nil || count != 0 {
@@ -137,7 +137,7 @@ func TestNextCommandWithdrawsARemovedReceiversRestoredGrants(t *testing.T) {
 	}
 	revocationBounds(t, service, "1", "1", "1")
 	afterRecord(t, "host", func() error {
-		if result := service.RevokeReceiver(ctx, "receiver-a", 0, denied); !result.Complete {
+		if result := service.RevokeReceiver(ctx, "receiver-a", 0, denied, nil); !result.Complete {
 			return errors.New("incomplete revocation")
 		}
 		return service.reconcileACLs(ctx, loaded)
@@ -172,7 +172,7 @@ func TestRemovalWithdrawsPeersReadOnTheProgressTopic(t *testing.T) {
 		t.Fatalf("peer lacks READ on a live receiver's progress topic: %v", err)
 	}
 	revocationBounds(t, service, "1", "1", "1")
-	if result := service.RevokeReceiver(ctx, "receiver-a", 0, denied); !result.Complete {
+	if result := service.RevokeReceiver(ctx, "receiver-a", 0, denied, nil); !result.Complete {
 		t.Fatalf("incomplete revocation: %+v", result)
 	}
 	if ok, err := granted(ctx, service, progress); err != nil || ok {
@@ -221,7 +221,7 @@ func TestConvergeTouchesOnlyWhatWherryManages(t *testing.T) {
 		func() error { return service.PoolSuspend(ctx, "pool-a", false) },
 		func() error {
 			revocationBounds(t, service, "1", "1", "1")
-			if result := service.RevokeReceiver(ctx, "receiver-a", 0, denied); !result.Complete {
+			if result := service.RevokeReceiver(ctx, "receiver-a", 0, denied, nil); !result.Complete {
 				return errors.New("incomplete revocation")
 			}
 			return nil
@@ -382,7 +382,7 @@ func TestStaleReissueRefusesAndWritesNoBundle(t *testing.T) {
 	entitledHost(t, service)
 	revocationBounds(t, service, "1", "1", "1")
 	duringPass(t, func() error {
-		if result := service.RevokeHost(ctx, "tenant-a", "host-a", 0, denied); !result.Complete {
+		if result := service.RevokeHost(ctx, "tenant-a", "host-a", 0, denied, nil); !result.Complete {
 			return errors.New("incomplete revocation")
 		}
 		return nil
@@ -439,7 +439,7 @@ func TestRevocationFailingAfterAStaleRestoreConverges(t *testing.T) {
 		}
 		return errors.New("broker unreachable")
 	}
-	result := service.RevokeReceiver(ctx, "receiver-a", 0, probe)
+	result := service.RevokeReceiver(ctx, "receiver-a", 0, probe, nil)
 	if result.Complete || len(result.Steps) != 3 || result.Steps[2].Err == nil {
 		t.Fatalf("revocation %+v, want a failure at step 3", result)
 	}
@@ -456,7 +456,7 @@ func TestWithdrawFailsOnASCRAMDescribeError(t *testing.T) {
 	entitledHost(t, service)
 	revocationBounds(t, service, "1", "1", "1")
 	principal := TenantPrincipal("tenant-a", "host-a")
-	if result := service.RevokeHost(ctx, "tenant-a", "host-a", 0, denied); !result.Complete {
+	if result := service.RevokeHost(ctx, "tenant-a", "host-a", 0, denied, nil); !result.Complete {
 		t.Fatalf("incomplete revocation: %+v", result)
 	}
 	if _, err := service.upsertUser(ctx, principal); err != nil {

@@ -20,8 +20,9 @@ For Nomad, follow the plugin's [receiver policy](https://github.com/benemon/wher
    Without the flag, it reads `/etc/wherry/config.yaml`.
 6. Check the logs for `registered key: signing=<key id>` and `configured: pool=<pool> profiles=<n> replicas=<n>`.
    `waiting for configuration` means the configuration record is missing.
-7. Run `wherry host receivers` from an entitled tenant's host.
-   Check that the receiver is `live` after its first advertisement.
+7. Run `wherry operator receiver show RECEIVER` and check `status: live`
+   after the receiver's first advertisement. `wherry host receivers` from an
+   entitled tenant's host shows the same status.
 
 Losing the signing key prevents reuse of the receiver's identity.
 Losing pool keys can fail tasks that depend on them.

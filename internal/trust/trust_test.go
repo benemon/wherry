@@ -3,6 +3,7 @@ package trust
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,44 @@ import (
 
 	jose "github.com/go-jose/go-jose/v4"
 )
+
+// A malformed key file's error names the file and echoes nothing it holds. The canary is a private JWK whose x5u member
+// also holds its private d value, as ":<d>", which no URL parser accepts: a parser error passed on would echo the key.
+func TestLoadKeyFileErrorEchoesNoKeyMaterial(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "signing.key")
+	if _, err := GenerateSigningKeyFile(path); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var members map[string]any
+	if err := json.Unmarshal(encoded, &members); err != nil {
+		t.Fatal(err)
+	}
+	d, ok := members["d"].(string)
+	if !ok || d == "" {
+		t.Fatalf("key file %s has no d member", path)
+	}
+	members["x5u"] = ":" + d
+	if encoded, err = json.Marshal(members); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = LoadSigningKeyFile(path)
+	if err == nil {
+		t.Fatal("loaded a key file with an invalid x5u member")
+	}
+	if strings.Contains(err.Error(), d) {
+		t.Fatalf("error echoes the private value: %s", strings.ReplaceAll(err.Error(), d, "<d>"))
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("error %q does not name the file", err)
+	}
+}
 
 func TestKeyFileRoundTrip(t *testing.T) {
 	directory := t.TempDir()
