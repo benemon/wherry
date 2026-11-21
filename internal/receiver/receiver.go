@@ -436,6 +436,8 @@ func (r *Receiver) trace(ctx context.Context, pool string) error {
 	}
 	custodian, err := telemetry.New(ctx, telemetry.RoleCustodian, telemetry.Names{Pool: pool, Receiver: r.id})
 	if err != nil {
+		// The first provider is shut down, not left installed as the global one with nothing owning it.
+		r.shutdownProviders(tracing)
 		return err
 	}
 	r.tracing, r.custodian = tracing, custodian
@@ -444,9 +446,13 @@ func (r *Receiver) trace(ctx context.Context, pool string) error {
 
 // shutdownTracing flushes both providers within shutdownTimeout.
 func (r *Receiver) shutdownTracing() {
+	r.shutdownProviders(r.tracing, r.custodian)
+}
+
+func (r *Receiver) shutdownProviders(providers ...*telemetry.Tracing) {
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	for _, tracing := range []*telemetry.Tracing{r.tracing, r.custodian} {
+	for _, tracing := range providers {
 		if err := tracing.Shutdown(ctx); err != nil {
 			r.logger.Printf("tracing: %v", err)
 		}
