@@ -19,6 +19,7 @@ plugins:
           memory_mb: 2048
     profiles:
       - name: container
-        agent: claude
+        # The guide sets the README record's agent, claude, to the pool's catalog agent.
+        agent: claude-code
         labels:
           isolation: container

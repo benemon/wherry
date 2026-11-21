@@ -24,7 +24,7 @@ Follow one of them.
 | Kubernetes or OpenShift | [Receiver on Kubernetes and OpenShift](install-receiver-kubernetes.md) | `kubernetes-1` | `container` |
 | systemd | [Receiver on systemd](install-receiver-systemd.md) | `systemd-1` | `host` |
 
-The names used throughout are pool `build`, agent `claude`, tenant `acme` and host `laptop`.
+The names used throughout are pool `build`, agent `claude-code`, tenant `acme` and host `laptop`.
 
 ## The files you'll make
 

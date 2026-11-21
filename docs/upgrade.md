@@ -336,7 +336,7 @@ Each receiver page gives its platform's upgrade and uninstall steps.
 
 2. After it succeeds, delete `~/.config/wherry/` on the laptop.
    It holds `config.yaml`, `bundle.yaml` and `host.key`.
-3. Delete `~/claude-oauth-token` on the laptop when nothing else uses it.
+3. Delete `~/claude-oauth-token` on the laptop when Set up a host made it and nothing else uses it.
 4. On the operator machine, delete `bundles/hosts/<tenant>/<host>.bundle`.
    Host removal does not delete it.
 
