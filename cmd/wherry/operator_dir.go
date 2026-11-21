@@ -143,7 +143,7 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 	if superPassword == nil {
 		var err error
 		if answers["super-user-password-file"] == "-" {
-			superPassword, err = secretFromStandardInput("super-user-password-file", "password")
+			superPassword, err = secretFromStandardInput("password")
 		} else {
 			superPassword, err = loadPassword(answers["super-user-password-file"])
 		}

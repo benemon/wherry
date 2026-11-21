@@ -40,8 +40,7 @@ func display(s string) string {
 }
 
 var promptsEligible = func(out io.Writer) bool {
-	in, ok := stdin.(*os.File)
-	if !ok || !term.IsTerminal(int(in.Fd())) {
+	if !stdinIsTerminal() {
 		return false
 	}
 	f, ok := out.(*os.File)
@@ -230,12 +229,9 @@ func terminalStandardInput(flag, what string) error {
 	return fmt.Errorf("standard input is a terminal; leave out --%s to be asked for the %s, or pipe it in", flag, what)
 }
 
-// secretFromStandardInput reads the secret a flag given `-` names: all of standard input, as the bytes arrive. A
-// terminal is refused. Errors name standard input, never the flag's value.
-func secretFromStandardInput(flag, what string) ([]byte, error) {
-	if err := terminalStandardInput(flag, what); err != nil {
-		return nil, err
-	}
+// secretFromStandardInput reads the secret a flag given `-` names, all of standard input as the bytes arrive, after the
+// caller refused a terminal; its errors name standard input, never a value.
+func secretFromStandardInput(what string) ([]byte, error) {
 	b, err := io.ReadAll(stdin)
 	if err != nil {
 		return nil, fmt.Errorf("standard input: %w", err)
