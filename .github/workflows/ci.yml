@@ -152,7 +152,7 @@ jobs:
       - name: Run the real-broker tests
         run: |
           . "$RUNNER_TEMP/kafka/env"
-          go test -count=1 -timeout 30m ${{ matrix.package }}
+          go test -count=1 -timeout 45m ${{ matrix.package }}
       - name: Show the brokers' logs
         if: failure()
         run: for node in 1 2 3; do docker logs --tail 200 "wherry-kafka-$node"; done

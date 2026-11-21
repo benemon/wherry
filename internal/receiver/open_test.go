@@ -1001,7 +1001,7 @@ func (f fixture) revoke(t *testing.T, receiver string) {
 	t.Helper()
 	denied := func(context.Context, string, string) error { return operator.ErrAuthorizationDenied }
 	revocationBounds(t, f.service, "1")
-	if result := f.service.RevokeReceiver(f.ctx, receiver, time.Millisecond, denied); !result.Complete {
+	if result := f.service.RevokeReceiver(f.ctx, receiver, time.Millisecond, denied, nil); !result.Complete {
 		t.Fatalf("revoke receiver: %#v", result.Steps)
 	}
 	revocationBounds(t, f.service, "")

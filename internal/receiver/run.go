@@ -90,14 +90,23 @@ var newClaimClient = func(r *Receiver, _ Named, opts ...kgo.Opt) (*kgo.Client, e
 	return r.newClient(opts...)
 }
 
+// claimTurnTaken lets tests withdraw readiness after a waiter takes the turn.
+var claimTurnTaken = func() {}
+
+func newClaimTurn() chan struct{} {
+	turn := make(chan struct{}, 1)
+	turn <- struct{}{}
+	return turn
+}
+
 // claimLoop claims one task at a time, keeping its client after a successful accept or reject; it calls idle once its
 // client closes or claiming ends with a held task.
-func (r *Receiver) claimLoop(claiming, running context.Context, profile Named, idle func()) {
+func (r *Receiver) claimLoop(claiming, running context.Context, profile Named, turn chan struct{}, idle func()) {
 	defer idle()
 	var share *slotClient
 	for claiming.Err() == nil {
 		var err error
-		if share, err = r.claimNext(claiming, running, profile, idle, share); err != nil && claiming.Err() == nil {
+		if share, err = r.claimNext(claiming, running, profile, turn, idle, share); err != nil && claiming.Err() == nil {
 			r.deny(err, capClaim)
 			r.logger.Printf("claim: %v", err)
 			sleep(claiming, 2*time.Second)
@@ -173,8 +182,8 @@ func (r *Receiver) newSlotClient(profile Named) (*slotClient, error) {
 }
 
 // claimOne claims once on a client of its own, closed before it returns.
-func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle func()) error {
-	share, err := r.claimNext(claiming, ctx, profile, idle, nil)
+func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, turn chan struct{}, idle func()) error {
+	share, err := r.claimNext(claiming, ctx, profile, turn, idle, nil)
 	if share != nil {
 		share.Close()
 	}
@@ -182,7 +191,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, profile Named, idle f
 }
 
 // claimNext claims once on share, or on a new client when share is nil, and returns the client when the slot keeps it.
-func (r *Receiver) claimNext(claiming, ctx context.Context, profile Named, idle func(), share *slotClient) (*slotClient, error) {
+func (r *Receiver) claimNext(claiming, ctx context.Context, profile Named, turn chan struct{}, idle func(), share *slotClient) (*slotClient, error) {
 	if r.gated(profile) {
 		if share != nil {
 			share.Close()
@@ -201,10 +210,14 @@ func (r *Receiver) claimNext(claiming, ctx context.Context, profile Named, idle 
 	}
 	share.answers.Store(&claimAnswers{claim: claim})
 	kept := false
+	holdsTurn := false
 	defer func() {
 		share.answers.Store(nil)
 		if !kept {
 			share.Close()
+		}
+		if holdsTurn {
+			turn <- struct{}{}
 		}
 	}()
 	// Acks are flushed on shutdown too, so they must outlive ctx.
@@ -229,9 +242,28 @@ func (r *Receiver) claimNext(claiming, ctx context.Context, profile Named, idle 
 	stale := func() bool {
 		return r.gated(profile)
 	}
+	for !holdsTurn {
+		select {
+		case <-turn:
+			holdsTurn = true
+			claimTurnTaken()
+		case <-claiming.Done():
+			return nil, claiming.Err()
+		case <-time.After(100 * time.Millisecond):
+			if stale() {
+				return nil, nil
+			}
+		}
+	}
+	if claiming.Err() != nil {
+		return nil, claiming.Err()
+	}
+	if stale() || share.BufferedFetchRecords() > 0 {
+		return nil, nil
+	}
 	var record *kgo.Record
 	for record == nil {
-		pollCtx, cancel := context.WithTimeout(claiming, 30*time.Second)
+		pollCtx, cancel := context.WithCancel(claiming)
 		go func() {
 			for pollCtx.Err() == nil && !stale() {
 				sleep(pollCtx, 100*time.Millisecond)
@@ -253,6 +285,8 @@ func (r *Receiver) claimNext(claiming, ctx context.Context, profile Named, idle 
 		if records := fetches.Records(); len(records) > 0 {
 			record = records[0]
 			claim.anchor = time.Now()
+			holdsTurn = false
+			turn <- struct{}{}
 		}
 	}
 	// A slot holding a task releases it only after running ends, so it does not hold up the idle slots' close.

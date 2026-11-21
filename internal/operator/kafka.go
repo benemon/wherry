@@ -30,17 +30,60 @@ import (
 )
 
 type Service struct {
-	Operator        *kgo.Client // connected as wherry.operator
-	Broker          string      // the broker address host bundles carry
-	CA              []byte      // PEM the operator trusts the broker with; nil for the system roots
+	Operator *kgo.Client // connected as wherry.operator
+	Broker   string      // the broker address host bundles carry
+	CA       []byte      // PEM the operator trusts the broker with; nil for the system roots
+	// Storage is the storage keys the operator recorded for a tenant, zero for a tenant without any, which every host
+	// bundle of the tenant carries; nil when the operator records none.
+	Storage         func(tenant string) (StorageKeys, error)
 	DeliveryCeiling int32
 	LockCeilingMS   int64
 }
 
+// Bundle is a host's or receiver's Kafka identity, as the operator writes it. CA is the PEM certificates its holder
+// trusts the broker with, written when the operator trusts its own broker through a CA file; empty for the system roots.
+// It is a string: yaml marshals a []byte as !!binary, and a bundle is read by people too. Storage is the tenant's S3 key
+// pair, carried by a host bundle when the operator recorded one for the tenant; a receiver bundle never carries it.
 type Bundle struct {
-	Broker    string `yaml:"broker"`
-	Principal string `yaml:"principal"`
-	Password  string `yaml:"password"`
+	Broker    string      `yaml:"broker"`
+	Principal string      `yaml:"principal"`
+	Password  string      `yaml:"password"`
+	CA        string      `yaml:"ca,omitempty"`
+	Storage   StorageKeys `yaml:"storage,omitempty"`
+}
+
+// StorageKeys is a tenant's S3 access key and secret key, which the operator records once and every host bundle of
+// the tenant carries. Both are plain strings, so a bundle stays readable; a zero StorageKeys is no pair.
+type StorageKeys struct {
+	AccessKey string `yaml:"access_key"`
+	SecretKey string `yaml:"secret_key"`
+}
+
+// Bundle is the bundle service writes for principal with password at broker. When broker is the operator's own and the
+// operator trusts it through a CA file, the bundle carries that CA, so its holder needs no CA file; a receiver on another
+// address gets none, since the operator knows nothing of that address's CA.
+func (service *Service) Bundle(broker, principal, password string) Bundle {
+	bundle := Bundle{Broker: broker, Principal: principal, Password: password}
+	if broker == service.Broker && len(service.CA) > 0 {
+		bundle.CA = string(service.CA)
+	}
+	return bundle
+}
+
+// tenantStorage is the storage keys the operator recorded for tenant: zero without any, or without a record of them.
+func (service *Service) tenantStorage(tenant string) (StorageKeys, error) {
+	if service.Storage == nil {
+		return StorageKeys{}, nil
+	}
+	return service.Storage(tenant)
+}
+
+// hostBundle is the bundle a host of tenant holds now: the operator's broker and CA, the principal and password, and
+// the tenant's storage keys.
+func (service *Service) hostBundle(principal, password string, storage StorageKeys) Bundle {
+	bundle := service.Bundle(service.Broker, principal, password)
+	bundle.Storage = storage
+	return bundle
 }
 
 // DecodeYAML decodes encoded into value, refusing unknown fields. An error names only the lines it found, since the
@@ -58,7 +101,9 @@ func DecodeYAML(encoded []byte, value any) error {
 	return nil
 }
 
-// ReadBundle reads the bundle at path, refusing unknown fields and a bundle without its broker, principal or password.
+// ReadBundle reads the bundle at path, refusing unknown fields, a bundle without its broker, principal or password, a
+// ca that holds no PEM certificate, since a bundle whose CA cannot be trusted is refused rather than fall back to the
+// system roots, and a storage block missing either key.
 func ReadBundle(path string) (Bundle, error) {
 	encoded, err := os.ReadFile(path)
 	if err != nil {
@@ -71,7 +116,84 @@ func ReadBundle(path string) (Bundle, error) {
 	if bundle.Broker == "" || bundle.Principal == "" || bundle.Password == "" {
 		return Bundle{}, errors.New("bundle requires broker, principal and password")
 	}
+	if bundle.CA != "" && !x509.NewCertPool().AppendCertsFromPEM([]byte(bundle.CA)) {
+		return Bundle{}, errors.New("bundle ca holds no PEM certificate")
+	}
+	if err := bundle.Storage.check(); bundle.Storage != (StorageKeys{}) && err != nil {
+		return Bundle{}, fmt.Errorf("bundle %w", err)
+	}
 	return bundle, nil
+}
+
+// check is why keys is not a usable pair: either key missing. The message names no value.
+func (keys StorageKeys) check() error {
+	if keys.AccessKey == "" || keys.SecretKey == "" {
+		return errors.New("storage requires access_key and secret_key")
+	}
+	return nil
+}
+
+// ReadStorageKeys reads the storage keys file at path, refusing unknown fields and a pair missing either key.
+func ReadStorageKeys(path string) (StorageKeys, error) {
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		return StorageKeys{}, fmt.Errorf("read storage keys: %w", err)
+	}
+	var keys StorageKeys
+	if err := DecodeYAML(encoded, &keys); err != nil {
+		return StorageKeys{}, fmt.Errorf("decode storage keys: %w", err)
+	}
+	if err := keys.check(); err != nil {
+		return StorageKeys{}, fmt.Errorf("%s: %w", path, err)
+	}
+	return keys, nil
+}
+
+// ReplaceStorageKeys writes keys to the file at path, mode 0600, replacing any file there: a temporary file beside it
+// is filled, synced and renamed over it, so a failed write keeps the pair the file held.
+func ReplaceStorageKeys(path string, keys StorageKeys) (err error) {
+	if err := keys.check(); err != nil {
+		return err
+	}
+	file, err := createBundle(path, true)
+	if err != nil {
+		return err
+	}
+	defer closeBundle(file, &err)
+	encoded, err := yaml.Marshal(keys)
+	if err != nil {
+		return err
+	}
+	_, err = writeFile(file.File, encoded)
+	return err
+}
+
+// BundleKafkaOpts are KafkaOpts for bundle's principal at its broker. The broker is trusted through local, the holder's
+// own ca_file, when it names one; else through the bundle's ca; else through the system roots. A local file overrides the
+// bundle, so a stale one hides a refreshed CA.
+func BundleKafkaOpts(bundle Bundle, local []byte) ([]kgo.Opt, error) {
+	ca := local
+	if ca == nil && bundle.CA != "" {
+		ca = []byte(bundle.CA)
+	}
+	return KafkaOpts(bundle.Broker, ca, bundle.Principal, bundle.Password)
+}
+
+// UnknownAuthority reports whether err is a connection the broker's certificate failed because it chains to no CA the
+// connection trusts: Go's x509 error, which franz-go's dial error wraps.
+func UnknownAuthority(err error) bool {
+	var unknown x509.UnknownAuthorityError
+	return errors.As(err, &unknown)
+}
+
+// ExplainUnknownAuthority is err with, when UnknownAuthority, what to do: a bundle the operator wrote before it trusted
+// the broker through a CA file carries no ca, and refresh, the operator command that rewrites the bundle, gives it one.
+// Any other err is returned as it is.
+func ExplainUnknownAuthority(err error, refresh string) error {
+	if !UnknownAuthority(err) {
+		return err
+	}
+	return fmt.Errorf("%w; the broker's certificate chains to a CA this connection does not trust: a bundle written before the operator trusted the broker through a CA file carries none, so install the bundle %s writes, or name the CA as ca_file", err, refresh)
 }
 
 var yamlLine = regexp.MustCompile(`line \d+`)
@@ -426,7 +548,7 @@ func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, 
 	if err := service.converge(ctx); err != nil {
 		return err
 	}
-	return writeBundle(bundle, Bundle{broker, ReceiverPrincipal(config.Receiver), password})
+	return writeBundle(bundle, service.Bundle(broker, ReceiverPrincipal(config.Receiver), password))
 }
 
 // ReceiverReissue gives a live receiver a new password and writes its bundle, naming broker, to bundlePath, replacing
@@ -440,23 +562,24 @@ func (service *Service) ReceiverReissue(ctx context.Context, receiver, broker, b
 	if _, ok := state.Receivers[receiver]; !ok || state.Ended[ReceiverPrincipal(receiver)] {
 		return errors.New("no live receiver by that name")
 	}
-	return service.reissue(ctx, ReceiverPrincipal(receiver), broker, bundlePath)
+	principal := ReceiverPrincipal(receiver)
+	return service.reissue(ctx, principal, bundlePath, func(password string) Bundle { return service.Bundle(broker, principal, password) })
 }
 
-// reissue gives principal a new password and writes its bundle, naming broker, to bundlePath, replacing any file there.
-// Once the password changes, a failure leaves the old bundle, which no longer works.
-func (service *Service) reissue(ctx context.Context, principal, broker, bundlePath string) (err error) {
+// reissue gives principal a new password and writes its bundle, bundle's for that password, to bundlePath, replacing
+// any file there. Once the password changes, a failure leaves the old bundle, which no longer works.
+func (service *Service) reissue(ctx context.Context, principal, bundlePath string, bundle func(password string) Bundle) (err error) {
 	rotated := false
 	defer func() {
 		if err != nil && rotated {
 			err = fmt.Errorf("%w: %s has a new password, so its old bundle no longer works; run the command with --force again to write a new bundle", err, principal)
 		}
 	}()
-	bundle, err := createBundle(bundlePath, true)
+	file, err := createBundle(bundlePath, true)
 	if err != nil {
 		return err
 	}
-	defer closeBundle(bundle, &err)
+	defer closeBundle(file, &err)
 	password, err := service.upsertUser(ctx, principal)
 	if err != nil {
 		return err
@@ -471,7 +594,7 @@ func (service *Service) reissue(ctx context.Context, principal, broker, bundlePa
 		rotated = false
 		return fmt.Errorf("%s cannot return after its membership end", principal)
 	}
-	return writeBundle(bundle, Bundle{broker, principal, password})
+	return writeBundle(file, bundle(password))
 }
 
 // ReceiverUpdate records a new configuration for an existing receiver in its
@@ -527,8 +650,9 @@ func asRecorded(record Record) (ReceiverConfig, error) {
 	return *decoded.Config, nil
 }
 
-// HostAdd provisions host in tenant and writes its bundle to bundlePath. A host that exists is refused unless force,
-// which gives it a new password and replaces the bundle at bundlePath, leaving its record untouched.
+// HostAdd provisions host in tenant and writes its bundle to bundlePath, carrying the tenant's storage keys when the
+// operator recorded them. A host that exists is refused unless force, which gives it a new password and replaces the
+// bundle at bundlePath, leaving its record untouched.
 func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath string, force bool) (err error) {
 	// Without force the bundle's file is reserved before anything changes in Kafka.
 	var bundle *bundleFile
@@ -548,6 +672,12 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	if err := current.LiveTenant(tenant); err != nil {
 		return err
 	}
+	// The keys are read before anything changes in Kafka, so a keys file that cannot be read leaves no host without a
+	// bundle.
+	storage, err := service.tenantStorage(tenant)
+	if err != nil {
+		return err
+	}
 	principal := TenantPrincipal(tenant, host)
 	if _, exists := current.Hosts[principal]; exists {
 		if !force {
@@ -564,7 +694,7 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 		if err := service.applyQuota(ctx, current, tenant, principal); err != nil {
 			return err
 		}
-		return service.reissue(ctx, principal, service.Broker, bundlePath)
+		return service.reissue(ctx, principal, bundlePath, func(password string) Bundle { return service.hostBundle(principal, password, storage) })
 	}
 	if force {
 		if bundle, err = createBundle(bundlePath, true); err != nil {
@@ -594,7 +724,49 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	if err := service.applyQuota(ctx, state, tenant, principal); err != nil {
 		return err
 	}
-	return writeBundle(bundle, Bundle{service.Broker, principal, password})
+	return writeBundle(bundle, service.hostBundle(principal, password, storage))
+}
+
+// HostRefresh rewrites the kept bundle at bundlePath of host in tenant with the operator's broker, the CA it trusts
+// the broker through and the tenant's storage keys, keeping the principal and password, and reports whether the bundle
+// changed; a bundle already current is left as it is, so a refresh can be rerun. It refuses an absent, revoking or
+// ended host, as HostAdd does, a missing bundle, which --force reissues, and a bundle that is another principal's.
+func (service *Service) HostRefresh(ctx context.Context, tenant, host, bundlePath string) (bool, error) {
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return false, err
+	}
+	if err := state.LiveTenant(tenant); err != nil {
+		return false, err
+	}
+	principal := TenantPrincipal(tenant, host)
+	if _, exists := state.Hosts[principal]; !exists {
+		return false, errors.New("no host by that name")
+	}
+	if state.Ended[principal] {
+		return false, errors.New("host cannot return after its membership end")
+	}
+	if state.Revoking[principal] {
+		return false, errors.New("host is revoking")
+	}
+	kept, err := ReadBundle(bundlePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("%s does not exist; tenant host add %s %s --force gives the host a new password and bundle", bundlePath, tenant, host)
+	} else if err != nil {
+		return false, err
+	}
+	if kept.Principal != principal {
+		return false, fmt.Errorf("%s is the bundle of %s, not of %s", bundlePath, kept.Principal, principal)
+	}
+	storage, err := service.tenantStorage(tenant)
+	if err != nil {
+		return false, err
+	}
+	refreshed := service.hostBundle(principal, kept.Password, storage)
+	if refreshed == kept {
+		return false, nil
+	}
+	return true, ReplaceBundle(bundlePath, refreshed)
 }
 
 func (service *Service) TenantPoolAdd(ctx context.Context, tenant, pool string) error {
@@ -1538,8 +1710,8 @@ var (
 	removeFile = os.Remove
 )
 
-// closeBundle syncs and closes a bundle and, with replace, renames it to its path. On failure it removes the file it
-// created, so a retry can create it, and says so when it cannot: the file holds a password.
+// closeBundle syncs and closes a bundle, or a storage keys file, and, with replace, renames it to its path. On failure
+// it removes the file it created, so a retry can create it, and says so when it cannot: the file holds a secret.
 func closeBundle(bundle *bundleFile, err *error) {
 	if *err == nil {
 		*err = syncFile(bundle.File)
@@ -1554,7 +1726,7 @@ func closeBundle(bundle *bundleFile, err *error) {
 		return
 	}
 	if removeErr := removeFile(bundle.Name()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-		*err = fmt.Errorf("%w; %s could not be removed and may hold the new password: %w", *err, bundle.Name(), removeErr)
+		*err = fmt.Errorf("%w; %s could not be removed and may hold the new secret: %w", *err, bundle.Name(), removeErr)
 	}
 }
 

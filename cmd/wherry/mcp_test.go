@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
@@ -1098,6 +1099,36 @@ func TestMCPUnavailableLogsItsCause(t *testing.T) {
 	}
 	if !strings.Contains(logged.String(), "tool failed: dial broker.example:9093: connection refused") {
 		t.Fatalf("server log %q; want the cause", logged.String())
+	}
+}
+
+// A connection the broker's certificate fails for want of a trusted CA is explained in the server's log, as the CLI
+// explains it: the refresh that rewrites the bundle is named there. The model still sees UNAVAILABLE alone.
+func TestMCPUnavailableLogNamesTheRefreshOnAnUnknownAuthority(t *testing.T) {
+	ctx := context.Background()
+	var logged bytes.Buffer
+	connect := func() (*busclient.Host, error) {
+		return nil, fmt.Errorf("dial broker.example:9093: %w", x509.UnknownAuthorityError{})
+	}
+	open := inputOpener(t.TempDir(), busclient.Config{})
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry wait " + id }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { serverSession.Close() })
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "v0"}, nil).Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { session.Close() })
+	if failure := callToolError(t, ctx, session, "receivers", map[string]any{}); failure != (toolError{Code: "UNAVAILABLE", Message: "the wherry bus could not complete the request; the wherry CLI reports the cause"}) {
+		t.Fatalf("tool error %#v; want UNAVAILABLE alone", failure)
+	}
+	for _, want := range []string{"tool failed: dial broker.example:9093: x509: certificate signed by unknown authority; ", hostRefreshCommand, "ca_file"} {
+		if !strings.Contains(logged.String(), want) {
+			t.Fatalf("server log %q; want %q", logged.String(), want)
+		}
 	}
 }
 

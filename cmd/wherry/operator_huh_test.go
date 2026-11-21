@@ -18,7 +18,11 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"golang.org/x/term"
 )
+
+// typedPassword is the password the prompt tests type: spaces at either end are part of it.
+const typedPassword = "  unique-secret-marker  "
 
 func operatorAnswers(t *testing.T) map[string]string {
 	t.Helper()
@@ -85,11 +89,17 @@ func TestOperatorFormsAndFlags(t *testing.T) {
 				}
 				delete(opts, name)
 				value := full[name]
-				if name != "ca-file" {
+				if name == "super-user-password-file" {
+					// The prompt takes the password itself, as typed, and prints no answer line.
+					value = typedPassword
+				} else if name != "ca-file" {
 					value = "  " + value + "  "
 				}
 				steps = append(steps, keys(value+"\r"))
-				label := map[string]string{"broker": "Kafka broker address", "ca-file": "CA certificate", "super-user": "Kafka super user", "super-user-password-file": "Kafka super user's password file"}[name]
+				if name == "super-user-password-file" {
+					continue
+				}
+				label := map[string]string{"broker": "Kafka broker address", "ca-file": "CA certificate", "super-user": "Kafka super user"}[name]
 				answer := full[name]
 				if name == "ca-file" {
 					answer = "System roots"
@@ -97,8 +107,12 @@ func TestOperatorFormsAndFlags(t *testing.T) {
 				want = append(want, "? "+label+"  "+answer)
 			}
 			scriptForms(t, steps...)
+			password := "unique-secret-marker\n"
+			if _, fromFile := opts["super-user-password-file"]; !fromFile {
+				password = typedPassword
+			}
 			stop := stopOperatorConnection(t, func(b string, ca []byte, u, p string) {
-				if b != "host" || ca != nil || u != "root" || p != "unique-secret-marker\n" {
+				if b != "host" || ca != nil || u != "root" || p != password {
 					t.Fatal("connection answers", b, ca, u)
 				}
 			})
@@ -187,88 +201,350 @@ func TestOperatorInterruptPreservesFiles(t *testing.T) {
 }
 
 func TestOperatorSafePassword(t *testing.T) {
-	for _, flag := range []bool{false, true} {
-		t.Run(fmt.Sprint(flag), func(t *testing.T) {
-			for _, kind := range []string{"normal", "large", "symlink", "directory", "fifo", "missing", "unreadable", "replacement", "descriptor"} {
-				t.Run(kind, func(t *testing.T) {
-					opts := operatorAnswers(t)
-					path := opts["super-user-password-file"]
-					data := []byte("unique-secret-marker\n\n")
-					if kind == "large" {
-						data = bytes.Repeat([]byte("x"), (1<<20)+1)
-					}
-					os.WriteFile(path, data, 0600)
-					switch kind {
-					case "symlink":
-						os.Rename(path, path+".real")
-						os.Symlink(path+".real", path)
-					case "directory":
-						os.Remove(path)
-						os.Mkdir(path, 0700)
-					case "fifo":
-						os.Remove(path)
-						syscall.Mkfifo(path, 0600)
-					case "missing":
-						os.Remove(path)
-					}
-					old := openFile
-					t.Cleanup(func() { openFile = old })
-					answered := false
-					openFile = func(p string, flags int, mode os.FileMode) (*os.File, error) {
-						if flags&syscall.O_NONBLOCK == 0 {
-							t.Error("password open can block")
-						}
-						final := flag || answered
-						if final && kind == "unreadable" {
-							return nil, syscall.EACCES
-						}
-						if final && kind == "replacement" {
-							os.WriteFile(path+".replacement", []byte("replaced\n"), 0600)
-							os.Rename(path+".replacement", path)
-							data = []byte("replaced\n")
-						}
-						if final && kind == "descriptor" {
-							return old(filepath.Dir(path), flags, mode)
-						}
-						return old(p, flags, mode)
-					}
-					bad := kind == "directory" || kind == "fifo" || kind == "missing" || kind == "unreadable" || kind == "descriptor"
-					stop := stopOperatorConnection(t, func(_ string, _ []byte, _ string, p string) {
-						if bad {
-							t.Error("special password reached connection")
-						}
-						if p != string(data) {
-							t.Error("password bytes changed")
-						}
-					})
-					if !flag {
-						delete(opts, "super-user-password-file")
-						if bad && kind != "unreadable" && kind != "descriptor" {
-							scriptForms(t, []string{path, "\r", "\x03"})
-						} else {
-							scriptForms(t, keys(path+"\r"))
-						}
-					}
-					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-					defer cancel()
-					var out bytes.Buffer
-					err := operatorInit(ctx, "unused", opts, answerOutput{&out, "Kafka super user's password file", func() { answered = true }})
-					if kind == "descriptor" && (err == nil || !strings.Contains(err.Error(), "not a regular file")) {
-						t.Fatal("password descriptor was not checked by Fstat", err)
-					}
-					if bad {
-						if err == nil || errors.Is(err, stop) {
-							t.Fatal("unsafe password accepted", err)
-						}
-					} else if !errors.Is(err, stop) {
-						t.Fatal(err)
-					}
-					if strings.Contains(out.String(), "unique-secret-marker") || strings.Contains(fmt.Sprint(err), "unique-secret-marker") {
-						t.Fatal("secret leaked")
-					}
-				})
+	for _, kind := range []string{"normal", "large", "symlink", "directory", "fifo", "missing", "unreadable", "replacement", "descriptor"} {
+		t.Run(kind, func(t *testing.T) {
+			opts := operatorAnswers(t)
+			path := opts["super-user-password-file"]
+			data := []byte("unique-secret-marker\n\n")
+			if kind == "large" {
+				data = bytes.Repeat([]byte("x"), (1<<20)+1)
+			}
+			os.WriteFile(path, data, 0600)
+			switch kind {
+			case "symlink":
+				os.Rename(path, path+".real")
+				os.Symlink(path+".real", path)
+			case "directory":
+				os.Remove(path)
+				os.Mkdir(path, 0700)
+			case "fifo":
+				os.Remove(path)
+				syscall.Mkfifo(path, 0600)
+			case "missing":
+				os.Remove(path)
+			}
+			old := openFile
+			t.Cleanup(func() { openFile = old })
+			openFile = func(p string, flags int, mode os.FileMode) (*os.File, error) {
+				if flags&syscall.O_NONBLOCK == 0 {
+					t.Error("password open can block")
+				}
+				if kind == "unreadable" {
+					return nil, syscall.EACCES
+				}
+				if kind == "replacement" {
+					os.WriteFile(path+".replacement", []byte("replaced\n"), 0600)
+					os.Rename(path+".replacement", path)
+					data = []byte("replaced\n")
+				}
+				if kind == "descriptor" {
+					return old(filepath.Dir(path), flags, mode)
+				}
+				return old(p, flags, mode)
+			}
+			bad := kind == "directory" || kind == "fifo" || kind == "missing" || kind == "unreadable" || kind == "descriptor"
+			stop := stopOperatorConnection(t, func(_ string, _ []byte, _ string, p string) {
+				if bad {
+					t.Error("special password reached connection")
+				}
+				if p != string(data) {
+					t.Error("password bytes changed")
+				}
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			var out bytes.Buffer
+			err := operatorInit(ctx, "unused", opts, &out)
+			if kind == "descriptor" && (err == nil || !strings.Contains(err.Error(), "not a regular file")) {
+				t.Fatal("password descriptor was not checked by Fstat", err)
+			}
+			if bad {
+				if err == nil || errors.Is(err, stop) {
+					t.Fatal("unsafe password accepted", err)
+				}
+			} else if !errors.Is(err, stop) {
+				t.Fatal(err)
+			}
+			if strings.Contains(out.String(), "unique-secret-marker") || strings.Contains(fmt.Sprint(err), "unique-secret-marker") {
+				t.Fatal("secret leaked")
 			}
 		})
+	}
+}
+
+// `-` reads the super user's password from standard input, exactly as piped; a terminal there is refused before any
+// question, naming standard input and no path; and the operator directory gains no file either way.
+func TestOperatorPasswordFromStandardInput(t *testing.T) {
+	saved := stdin
+	t.Cleanup(func() { stdin = saved })
+	const piped = "  piped-secret-marker  \n"
+	noPath := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("error expected")
+		}
+		if !strings.Contains(err.Error(), "standard input") {
+			t.Fatal("error does not name standard input:", err)
+		}
+		if strings.Contains(strings.ReplaceAll(err.Error(), "--super-user-password-file", ""), "-") {
+			t.Fatal("error treats - as a value:", err)
+		}
+	}
+	noFile := func(t *testing.T, dir string) {
+		t.Helper()
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatal("a password from standard input wrote the operator directory")
+		}
+	}
+	t.Run("piped", func(t *testing.T) {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Close()
+		go func() { io.WriteString(w, piped); w.Close() }()
+		stdin = r
+		opts := operatorAnswers(t)
+		opts["super-user-password-file"] = "-"
+		reached := false
+		stop := stopOperatorConnection(t, func(_ string, _ []byte, _, p string) {
+			reached = true
+			if p != piped {
+				t.Error("piped password changed")
+			}
+		})
+		dir := filepath.Join(t.TempDir(), "new")
+		var out bytes.Buffer
+		if err := operatorInit(context.Background(), dir, opts, &out); !errors.Is(err, stop) {
+			t.Fatal(err)
+		}
+		if !reached {
+			t.Fatal("piped password did not reach the connection")
+		}
+		if strings.Contains(out.String(), "piped-secret-marker") {
+			t.Fatal("piped password echoed")
+		}
+		noFile(t, dir)
+	})
+	t.Run("empty", func(t *testing.T) {
+		stdin = strings.NewReader("\r\n")
+		opts := operatorAnswers(t)
+		opts["super-user-password-file"] = "-"
+		stopOperatorConnection(t, func(string, []byte, string, string) { t.Error("empty standard input reached connection") })
+		dir := filepath.Join(t.TempDir(), "new")
+		noPath(t, operatorInit(context.Background(), dir, opts, io.Discard))
+		noFile(t, dir)
+	})
+	for _, prompted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("terminal prompted=%v", prompted), func(t *testing.T) {
+			master, tty, err := pty.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tty.Close()
+			defer master.Close()
+			// The terminal echoes nothing of its own: it is raw, as a masked prompt leaves it, so what the master reads
+			// is what wherry wrote to the terminal, and the typed password must be none of it.
+			if _, err := term.MakeRaw(int(tty.Fd())); err != nil {
+				t.Fatal(err)
+			}
+			shown := make(chan string, 1)
+			go func() {
+				b, _ := io.ReadAll(master)
+				shown <- string(b)
+			}()
+			// A password typed at the terminal is there to be read; the master stays open, so the terminal stays one, and
+			// is closed later so that a read of it, which the refusal forbids, ends instead of hanging.
+			io.WriteString(master, "typed-secret-marker\n")
+			defer time.AfterFunc(3*time.Second, func() { master.Close() }).Stop()
+			stdin = tty
+			opts := operatorAnswers(t)
+			opts["super-user-password-file"] = "-"
+			if prompted {
+				// Prompts are available and the broker would be asked for: the refusal comes before any question.
+				delete(opts, "broker")
+				scriptForms(t)
+			}
+			stopOperatorConnection(t, func(string, []byte, string, string) { t.Error("terminal standard input reached connection") })
+			dir := filepath.Join(t.TempDir(), "new")
+			var out bytes.Buffer
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			err = operatorInit(ctx, dir, opts, &out)
+			noPath(t, err)
+			if !strings.Contains(err.Error(), "standard input is a terminal") {
+				t.Fatal("terminal accepted:", err)
+			}
+			tty.Close()
+			terminal := <-shown
+			if strings.Contains(err.Error(), "typed-secret-marker") || strings.Contains(out.String(), "typed-secret-marker") || strings.Contains(terminal, "typed-secret-marker") {
+				t.Fatal("typed password read or echoed")
+			}
+			if out.Len() != 0 || terminal != "" {
+				t.Fatalf("refusal came after a prompt: %q on the prompts, %q on the terminal", out.String(), terminal)
+			}
+			noFile(t, dir)
+		})
+	}
+}
+
+// The masked prompt never shows the password: not while it is typed, not on a validation failure, not on Ctrl-C, and
+// in no answer line; the spaces at either end reach the connection.
+func TestOperatorPasswordPromptNeverEchoes(t *testing.T) {
+	leaked := func(t *testing.T, out string, err error) {
+		t.Helper()
+		if strings.Contains(out, "unique-secret-marker") || strings.Contains(fmt.Sprint(err), "unique-secret-marker") {
+			t.Fatal("password echoed", out)
+		}
+		if lines := collapsedLines(out); len(lines) != 0 {
+			t.Fatal("password prompt printed an answer line", lines)
+		}
+	}
+	t.Run("success", func(t *testing.T) {
+		opts := operatorAnswers(t)
+		delete(opts, "super-user-password-file")
+		scriptForms(t, keys(typedPassword+"\r"))
+		reached := false
+		stop := stopOperatorConnection(t, func(_ string, _ []byte, _, p string) {
+			reached = true
+			if p != typedPassword {
+				t.Error("prompted password changed: its spaces must be kept")
+			}
+		})
+		dir := filepath.Join(t.TempDir(), "new")
+		var out bytes.Buffer
+		err := operatorInit(context.Background(), dir, opts, &out)
+		if !errors.Is(err, stop) || !reached {
+			t.Fatal(err)
+		}
+		leaked(t, out.String(), err)
+		if !strings.Contains(ansi.Strip(out.String()), "Kafka super user's password") {
+			t.Fatal("password prompt missing", out.String())
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatal("prompted password wrote the operator directory")
+		}
+	})
+	t.Run("validation failure", func(t *testing.T) {
+		opts := operatorAnswers(t)
+		delete(opts, "super-user-password-file")
+		scriptForms(t, []string{"\r", typedPassword + "\r"})
+		stop := stopOperatorConnection(t, func(_ string, _ []byte, _, p string) {
+			if p != typedPassword {
+				t.Error("corrected password changed")
+			}
+		})
+		var out bytes.Buffer
+		err := operatorInit(context.Background(), "unused", opts, &out)
+		if !errors.Is(err, stop) {
+			t.Fatal(err)
+		}
+		leaked(t, out.String(), err)
+		if !strings.Contains(ansi.Strip(out.String()), "Kafka super user's password is required") {
+			t.Fatal("empty password accepted", out.String())
+		}
+	})
+	t.Run("cancel", func(t *testing.T) {
+		opts := operatorAnswers(t)
+		delete(opts, "super-user-password-file")
+		scriptForms(t, []string{typedPassword, "\x03"})
+		stopOperatorConnection(t, func(string, []byte, string, string) { t.Error("cancelled prompt reached connection") })
+		var out bytes.Buffer
+		err := operatorInit(context.Background(), "unused", opts, &out)
+		if !errors.Is(err, errInterrupted) {
+			t.Fatal(err)
+		}
+		leaked(t, out.String(), err)
+	})
+	t.Run("rejected value", func(t *testing.T) {
+		// The input itself, with a validator that rejects the typed password: the failure shows the validator's message
+		// and nothing of the value.
+		scriptForms(t, []string{typedPassword, "\r", "\x03"})
+		var out bytes.Buffer
+		q := &questions{context.Background(), nil, &promptLatch{out: &out}}
+		_, err := q.secret("Secret", func(string) error { return errors.New("not this one") })
+		if !errors.Is(err, errInterrupted) {
+			t.Fatal(err)
+		}
+		leaked(t, out.String(), err)
+		if !strings.Contains(ansi.Strip(out.String()), "not this one") {
+			t.Fatal("validation message missing", out.String())
+		}
+	})
+}
+
+// On a real terminal the masked prompt shows nothing of what is typed: the terminal's output, which a person at it would
+// see, carries the prompt, its validation message and its masking, and the kernel echoes nothing, since the prompt
+// takes the terminal raw. The secret reaches the caller as typed, spaces included.
+func TestSecretPromptOnATerminalShowsNothingTyped(t *testing.T) {
+	master, tty, err := pty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer master.Close()
+	defer tty.Close()
+	if err := pty.Setsize(master, &pty.Winsize{Rows: 24, Cols: 80}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TERM", "xterm-256color")
+	shown := &syncBuffer{}
+	read := make(chan struct{})
+	go func() {
+		defer close(read)
+		io.Copy(shown, master)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	q := &questions{ctx, tty, &promptLatch{out: tty}}
+	type answer struct {
+		text string
+		err  error
+	}
+	answers := make(chan answer, 1)
+	go func() {
+		text, err := q.secret("Kafka super user's password", func(s string) error {
+			if s == "" {
+				return errors.New("a password is required")
+			}
+			return nil
+		})
+		answers <- answer{text, err}
+	}()
+	// Keys are typed once the prompt is on the terminal: an empty answer first, refused with the validator's message,
+	// then the password.
+	onTerminal := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for !strings.Contains(ansi.Strip(shown.String()), want) {
+			if time.Now().After(deadline) {
+				t.Fatalf("terminal shows %q; want %q", shown.String(), want)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	onTerminal("Kafka super user's password")
+	io.WriteString(master, "\r")
+	onTerminal("a password is required")
+	io.WriteString(master, typedPassword)
+	time.Sleep(100 * time.Millisecond)
+	io.WriteString(master, "\r")
+	var got answer
+	select {
+	case got = <-answers:
+	case <-ctx.Done():
+		t.Fatalf("prompt never returned; terminal shows %q", shown.String())
+	}
+	if got.err != nil || got.text != typedPassword {
+		t.Fatalf("secret = %q, %v; want the password as typed", got.text, got.err)
+	}
+	tty.Close()
+	<-read
+	terminal := ansi.Strip(shown.String())
+	if strings.Contains(terminal, "unique-secret-marker") {
+		t.Fatalf("the terminal showed the password:\n%s", terminal)
+	}
+	if !strings.Contains(terminal, "a password is required") {
+		t.Fatalf("the terminal did not show the validation message:\n%s", terminal)
 	}
 }
 
@@ -392,50 +668,21 @@ func TestOperatorWriterAndCancellation(t *testing.T) {
 	}
 }
 
-func TestOperatorRequiredCorrectionAndPasswordTab(t *testing.T) {
+// A blank answer to a required question is corrected in place; the password prompt, which keeps spaces, refuses only
+// the empty answer and completes nothing on Tab.
+func TestOperatorRequiredCorrection(t *testing.T) {
 	opts := operatorAnswers(t)
-	path := opts["super-user-password-file"]
 	delete(opts, "broker")
 	delete(opts, "super-user")
 	delete(opts, "super-user-password-file")
-	scriptForms(t, []string{"   ", "\r", "\x15", "[::1]:9093\r"}, []string{" ", "\r", "\x15", "root\r"}, []string{"   ", "\r", "\x15", strings.TrimSuffix(path, "word"), "\t", "\r"})
+	scriptForms(t, []string{"   ", "\r", "\x15", "[::1]:9093\r"}, []string{" ", "\r", "\x15", "root\r"}, []string{"\r", "unique-sec", "\t", "ret-marker\r"})
 	stop := stopOperatorConnection(t, func(b string, _ []byte, u, p string) {
-		if b != "[::1]:9093" || u != "root" || p != "unique-secret-marker\n" {
+		if b != "[::1]:9093" || u != "root" || p != "unique-secret-marker" {
 			t.Fatal("corrected answers lost")
 		}
 	})
 	if err := operatorInit(context.Background(), "unused", opts, io.Discard); !errors.Is(err, stop) {
 		t.Fatal(err)
-	}
-}
-
-func TestOperatorPasswordHomeCompletion(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Chdir(t.TempDir())
-	if err := os.WriteFile(filepath.Join(home, "password"), []byte("home-secret\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir("~", 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join("~", "password"), []byte("literal-secret\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	opts := operatorAnswers(t)
-	delete(opts, "super-user-password-file")
-	scriptForms(t, []string{"~/pass", "\t", "\r"})
-	stop := stopOperatorConnection(t, func(_ string, _ []byte, _, p string) {
-		if p != "home-secret\n" {
-			t.Error("password did not come from HOME", p)
-		}
-	})
-	var out bytes.Buffer
-	if err := operatorInit(context.Background(), "unused", opts, &out); !errors.Is(err, stop) {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out.String(), "? Kafka super user's password file  ~/password") {
-		t.Fatal("password collapse lost home-relative text", out.String())
 	}
 }
 

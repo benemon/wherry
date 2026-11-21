@@ -147,9 +147,20 @@ and runs in flight are then adopted on redelivery.
 ### Claim topology
 
 Each configured profile has its own single-topic claim loop for each
-effective replica (default one). Idle clients persist across empty polls. A
-loop holds one record at a time and admits fresh tasks through its own
-profile, including when another profile has the same signature. The
+effective replica (default one). One loop per profile polls at a time; the
+other loops keep joined clients so the next loop can poll without joining.
+The polling loop keeps its turn until a task arrives and then passes it; if
+polling ends without a task, it closes its client before passing the turn. Each fetch parked
+when a receiver crashes can use one of a task's bounded deliveries, so one
+polling loop per profile bounds what a crash costs. A poll that returns a
+task can briefly grant its client one further fetch before the next loop
+polls, so a profile can have two fetches in flight for a moment. A task that
+a stray fetch buffers returns to the pool when its lock lapses or its client
+closes, whichever comes first, using one delivery. Profiles that share a signature topic have
+separate turns, so a crash can leave one parked fetch from each such profile
+on that topic. Idle loops keep their clients. A loop holds one
+record at a time and admits fresh tasks through its own profile, including
+when another profile has the same signature. The
 selector guards against a host publishing to the wrong topic. It does not
 choose between profiles. Readiness
 withdrawal closes only that profile's idle clients. Held clients keep
@@ -166,8 +177,11 @@ gives the model, and
 
 **Snapshots.** The key custodian writes every snapshot through the
 transactional ID `p.<pool>.custodian`, one transaction per snapshot, and
-reads the committed snapshot back before it marks the key published. It
-initialises `p.<pool>.custodian` only when assigned. When assigned, a
+reads the committed snapshot back before it marks the key published. Kafka
+answers a commit before the commit marker reaches the topic's partition, so
+while the last stable offset has not passed the snapshot the custodian reads
+again every 50 ms for up to 5 seconds. A committed snapshot whose marker lands
+later is marked published on a later pass. It initialises `p.<pool>.custodian` only when assigned. When assigned, a
 receiver that the current snapshot names and that holds the snapshot's key
 continues with that key. Any other generates a P-256 key, stores it, and
 publishes it with reason `bootstrap` when the topic holds no snapshot and

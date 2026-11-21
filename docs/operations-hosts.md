@@ -4,10 +4,10 @@
 
 1. Ask your operator to create your tenant and entitle it to a pool.
 2. Ask for a host bundle from `wherry operator tenant host add TENANT HOST`.
-3. Install the broker CA if your Kafka cluster uses a private CA.
-4. Run `wherry host init HOST.bundle`.
-5. Configure the credential sources it requests.
-6. Run `wherry host receivers` to check your access.
+   It carries the broker's CA when the cluster uses a private one.
+3. Run `wherry host init HOST.bundle`.
+4. Configure the credential sources it requests.
+5. Run `wherry host receivers` to check your access.
 
 [Set up a host](install-host.md) gives a complete example.
 
@@ -117,13 +117,25 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
    aws s3api put-bucket-policy --endpoint-url https://s3.example.com --bucket wherry --policy file://alice.json
    ```
 
-   The host keeps the access key and secret key as two credentials, each with
-   its own source, and names them under the pool's entry in `storage` in its
-   [configuration](configuration-host.md#client-configuration). `wherry host init`
-   asks once for an access key source and a secret key source, and maps every
-   entitled pool with storage and no mapping yet to that pair. New names are
-   `s3-access-key` and `s3-secret-key`, numbered when taken. Edit the
-   configuration to give a pool its own keys:
+   Record the pair once with
+   [`wherry operator tenant storage alice`](commands.md#wherry-operator-tenant-storage-tenant),
+   from its masked prompts or piped in with `-`. It lives in the operator's
+   working directory, and every host bundle of the tenant carries it: the
+   host's user installs the bundle with `wherry host init`, which asks
+   nothing about storage, and the host uses the pair for every entitled
+   pool with storage. Hosts added before the pair was recorded get it from
+   `wherry operator tenant host refresh alice HOST` and the redistributed
+   bundle. To change the pair, follow
+   [Rotate a tenant's storage keys](runbooks.md#rotate-a-tenant-s-storage-keys).
+
+   A host whose pools are on different stores maps a pool to credentials
+   of its own under `storage` in its
+   [configuration](configuration-host.md#client-configuration), which win
+   over the bundle's pair for that pool; on a bundle without a pair,
+   `wherry host init` asks once for an access key source and a secret key
+   source and maps every entitled pool with storage and no mapping yet to
+   them, under the names `s3-access-key` and `s3-secret-key`, numbered when
+   taken:
 
    ```yaml
    credentials:

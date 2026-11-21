@@ -90,7 +90,8 @@ func TestQuickstartMissingSourceError(t *testing.T) {
 }
 
 // TestQuickstartOperatorOutput runs the quickstart's wherry operator commands, pool apply aside, on its files: receiver
-// apply --dry-run prints what receiver show prints once the receiver is recorded.
+// apply --dry-run prints what receiver show prints once the receiver is recorded, after the status, which a dry run has
+// none of.
 func TestQuickstartOperatorOutput(t *testing.T) {
 	receiverFile, err := filepath.Abs(quickstart("nomad-1.yaml"))
 	if err != nil {
@@ -127,7 +128,7 @@ func TestQuickstartOperatorOutput(t *testing.T) {
 	wherry("receiver", "apply", "nomad-1")
 	shown := wherry("receiver", "show", "nomad-1")
 	wherry("tenant", "host", "add", "acme", "laptop")
-	if shown != dryRun {
-		t.Fatalf("show printed\n%s\nwant what the dry run printed\n%s", shown, dryRun)
+	if shown != "status: silent\n"+dryRun {
+		t.Fatalf("show printed\n%s\nwant what the dry run printed, after the status\n%s", shown, dryRun)
 	}
 }

@@ -41,10 +41,38 @@ type initBroker struct {
 	login func(t *testing.T, dir string)
 }
 
-// init runs wherry operator init in dir with the broker's flags and logs in as its new password.
+// init runs wherry operator init in dir with the broker's flags, the super user's password from its file, and logs in
+// as its new password.
 func (b initBroker) init(t *testing.T, dir string) error {
 	t.Helper()
-	err := runOperator([]string{"init", "--dir", dir, "--broker", b.address, "--ca-file", b.caFile, "--super-user", b.superUser, "--super-user-password-file", b.superPasswordFile}, io.Discard, io.Discard)
+	return b.initVia(t, dir, "file")
+}
+
+// initVia runs wherry operator init in dir with the broker's flags and the super user's password from route: its file,
+// standard input, as - names it, or the masked prompt. A success logs in as the new password.
+func (b initBroker) initVia(t *testing.T, dir, route string) error {
+	t.Helper()
+	args := []string{"init", "--dir", dir, "--broker", b.address, "--ca-file", b.caFile, "--super-user", b.superUser}
+	switch route {
+	case "file":
+		args = append(args, "--super-user-password-file", b.superPasswordFile)
+	case "stdin":
+		password, err := os.ReadFile(b.superPasswordFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pipeStandardInput(t, string(password))
+		args = append(args, "--super-user-password-file", "-")
+	case "prompt":
+		password, err := os.ReadFile(b.superPasswordFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scriptForms(t, keys(strings.TrimRight(string(password), "\r\n")+"\r"))
+	default:
+		t.Fatalf("no route %q", route)
+	}
+	err := runOperator(args, io.Discard, io.Discard)
 	if err == nil {
 		b.login(t, dir)
 	}
@@ -254,15 +282,39 @@ func testOperatorInitDelegates(t *testing.T, b initBroker, removes bool) {
 	if info, err := os.Stat(filepath.Join(dir, "operator.password")); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("operator.password %v, %v; want mode 0600", info, err)
 	}
-	if ignored, err := os.ReadFile(filepath.Join(dir, ".gitignore")); err != nil || string(ignored) != "node_modules\n*.log\noperator.password\nbundles/\n" {
-		t.Fatalf(".gitignore %q, %v; want its lines kept and operator.password and bundles/ added", ignored, err)
+	if ignored, err := os.ReadFile(filepath.Join(dir, ".gitignore")); err != nil || string(ignored) != "node_modules\n*.log\noperator.password\nbundles/\nstorage/\n" {
+		t.Fatalf(".gitignore %q, %v; want its lines kept and operator.password, bundles/ and storage/ added", ignored, err)
 	}
 	superPassword, err := os.ReadFile(b.superPasswordFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	superValues := []string{b.superUser, strings.TrimSpace(string(superPassword)), b.superPasswordFile, filepath.Base(b.superPasswordFile)}
-	err = filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+	holdsNoSuperUser(t, dir, superValues)
+	if err := b.init(t, dir); err != nil {
+		t.Fatal(err)
+	}
+	if ignored, err := os.ReadFile(filepath.Join(dir, ".gitignore")); err != nil || string(ignored) != "node_modules\n*.log\noperator.password\nbundles/\nstorage/\n" {
+		t.Fatalf("after a second init, .gitignore %q, %v; want each line once", ignored, err)
+	}
+	// The password from standard input and from the masked prompt leaves the directory as clean as the file's: each
+	// route initialises a directory of its own, in which every file is scanned.
+	for _, route := range []string{"stdin", "prompt"} {
+		t.Run(route, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := b.initVia(t, dir, route); err != nil {
+				t.Fatal(err)
+			}
+			holdsNoSuperUser(t, dir, superValues)
+		})
+	}
+}
+
+// holdsNoSuperUser fails t when a file under dir holds any of values, the super user's name, password or password file.
+func holdsNoSuperUser(t *testing.T, dir string, values []string) {
+	t.Helper()
+	scanned := 0
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil || entry.IsDir() {
 			return err
 		}
@@ -270,7 +322,8 @@ func testOperatorInitDelegates(t *testing.T, b initBroker, removes bool) {
 		if err != nil {
 			return err
 		}
-		for _, value := range superValues {
+		scanned++
+		for _, value := range values {
 			if bytes.Contains(contents, []byte(value)) {
 				return fmt.Errorf("%s holds the super user's %q", path, value)
 			}
@@ -280,11 +333,8 @@ func testOperatorInitDelegates(t *testing.T, b initBroker, removes bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.init(t, dir); err != nil {
-		t.Fatal(err)
-	}
-	if ignored, err := os.ReadFile(filepath.Join(dir, ".gitignore")); err != nil || string(ignored) != "node_modules\n*.log\noperator.password\nbundles/\n" {
-		t.Fatalf("after a second init, .gitignore %q, %v; want each line once", ignored, err)
+	if scanned < 2 {
+		t.Fatalf("scanned %d files under %s; want operator.yaml and operator.password at least", scanned, dir)
 	}
 }
 

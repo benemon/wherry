@@ -347,11 +347,12 @@ type logsReply struct {
 // follower.
 func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error), waitCommand func(id string) string, logger *log.Logger) *mcp.Server {
 	// The model sees an UNAVAILABLE's class alone; the server's log, which only the host's user reads, keeps its cause
-	// with every credential value the host resolved redacted.
+	// with every credential value the host resolved redacted, and, for a broker certificate the connection does not
+	// trust, the refresh that rewrites the bundle, as the CLI's errors name it.
 	failure := func(err error) error {
 		mapped := toolFailure(err)
 		if failed, ok := mapped.(*toolError); ok && failed.Code == "UNAVAILABLE" {
-			logger.Print("tool failed: " + busclient.Redact(err.Error()))
+			logger.Print("tool failed: " + busclient.Redact(operator.ExplainUnknownAuthority(err, hostRefreshCommand).Error()))
 		}
 		return mapped
 	}

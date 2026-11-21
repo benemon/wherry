@@ -17,7 +17,8 @@ operator command takes `--dir DIR`, the current directory by default.
     hosts/<tenant>/          mode 0700
       <host>.bundle          mode 0600
     receivers/<receiver>.bundle  mode 0600
-  .gitignore                 operator init appends operator.password and bundles/
+  storage/<tenant>.yaml      the tenant's S3 key pair, written by tenant storage, mode 0600 in a directory mode 0700
+  .gitignore                 operator init appends operator.password, bundles/ and storage/
 ```
 
 In `operator.yaml`, unknown and duplicate fields are errors, a decode error
@@ -26,7 +27,7 @@ names only its line numbers, and no `~` is expanded:
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `broker` | string | required | Kafka bootstrap address, `host:port`; host bundles name it, and receiver bundles unless the receiver's file names another |
-| `ca_file` | string | none | path of the PEM CA certificates the operator trusts the broker with, which `operator init` writes absolute; a relative path is in the working directory; absent for the system's trusted roots |
+| `ca_file` | string | none | path of the PEM CA certificates the operator trusts the broker with, which `operator init` writes absolute and every bundle for its broker carries as `ca`; a relative path is in the working directory; absent for the system's trusted roots |
 | `password_file` | string | required | `wherry.operator`'s password file, `operator.password`; a relative path is in the working directory |
 
 It holds nothing about the Kafka super user, which only
@@ -34,7 +35,8 @@ It holds nothing about the Kafka super user, which only
 consumed: change one and apply it again. There is no local state: the
 `wherry.operator` topic is the state, and when a kept file and the topic
 differ, the topic is what runs until the file is applied. The directory holds
-every principal's password, in `operator.password` and each bundle
+every principal's password, in `operator.password` and each bundle, and
+every tenant's S3 key pair, in `storage/` and each host bundle
 ([Security](security.md#the-operator-working-directory)).
 
 ## Pool terms
@@ -139,9 +141,8 @@ attempts, not hops between members, and is sized by the attempts one task may
 burn, never by the number of members. A member that failed to start a task
 may be handed it again, even when a peer with the same signature could have
 started it. A profile that goes unready between a claim's subscription and
-its fetch has its task released. The unready profile's other replicas still polling may each acquire it once
-before they close their idle clients. For that readiness withdrawal, this
-allows up to the profile's effective replica count minus one more deliveries.
+its fetch has its task released. Only one replica per profile polls at a time,
+and it closes before another replica polls after the readiness withdrawal.
 A `replicas` value of 0 or an absent field means one replica. From attempt
 `delivery_limit` minus 1, a receiver ends a run `TASK_STATE_FAILED` with
 `delivery budget exhausted` where it would release it, except in the cases

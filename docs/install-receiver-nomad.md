@@ -28,8 +28,8 @@ Choose a Nomad plugin release that pairs with your wherry release.
 - The record uses pool `build` from Set up the operator.
   A pool is one trust and tenancy boundary; the platform is a label.
   `build` is that boundary here.
-- This guide's broker uses a private CA, `kafka-ca.pem` from Set up the operator.
-  Take the steps' lines for a private broker CA.
+- This guide's broker uses a private CA. The bundle carries it, so skip the steps' lines for a separate CA file;
+  a `ca_file` in the local configuration would override the bundle's CA.
 - The last step runs `wherry host receivers` from your laptop.
   You run it first on [Set up a host](install-host.md#_3-see-the-receiver).
 - The steps copy the example `config.yaml` to `receivers/nomad-1.config.yaml`.

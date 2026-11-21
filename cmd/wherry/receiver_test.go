@@ -248,12 +248,28 @@ func TestReadBundleIsStrict(t *testing.T) {
 	if _, err := operator.ReadBundle(path); err == nil {
 		t.Fatal("accepted a bundle carrying platform credentials")
 	}
-	// Broker trust is local to each machine, so a bundle carries no CA.
+	// A bundle's ca is the PEM certificates its holder trusts the broker with; one that holds no certificate fails closed
+	// rather than fall back to the system roots.
 	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nca: c\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := operator.ReadBundle(path); err == nil {
-		t.Fatal("accepted a bundle carrying a CA")
+	if _, err := operator.ReadBundle(path); err == nil || err.Error() != "bundle ca holds no PEM certificate" {
+		t.Fatalf("a bundle whose ca holds no certificate: %v; want it refused", err)
+	}
+	// A bundle's storage is the tenant's S3 key pair: both keys or none, and nothing else.
+	for _, storage := range []string{"storage: {access_key: a}\n", "storage: {secret_key: b}\n", "storage: {access_key: a, secret_key: b, token: c}\n", "storage: a\n"} {
+		if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\n"+storage), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := operator.ReadBundle(path); err == nil {
+			t.Fatalf("accepted a bundle with %q", storage)
+		}
+	}
+	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nstorage: {access_key: a, secret_key: b}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if bundle, err := operator.ReadBundle(path); err != nil || bundle.Storage != (operator.StorageKeys{AccessKey: "a", SecretKey: "b"}) {
+		t.Fatalf("bundle %#v err %v; want the storage pair", bundle, err)
 	}
 	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -277,6 +293,8 @@ func TestReadBundleErrorsEchoNoContent(t *testing.T) {
 		"broker: b\nprincipal: wherry.rcv.r\n" + pasted + ": 1\n",
 		"broker: [" + pasted + "\n",
 		"platform: " + pasted + "\n",
+		"broker: b\nprincipal: wherry.rcv.r\npassword: p\nstorage: {access_key: " + pasted + "}\n",
+		"broker: b\nprincipal: wherry.rcv.r\npassword: p\nstorage: {access_key: a, secret_key: b, " + pasted + ": 1}\n",
 	} {
 		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			t.Fatal(err)

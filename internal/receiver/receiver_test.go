@@ -2034,7 +2034,7 @@ func TestRevocationLeavesAHeldRunToAnAdopter(t *testing.T) {
 				}
 			}
 			revocationBounds(t, f.service, "1")
-			if result := f.service.RevokeReceiver(f.ctx, testReceiver, time.Millisecond, func(context.Context, string, string) error { return operator.ErrAuthorizationDenied }); !result.Complete {
+			if result := f.service.RevokeReceiver(f.ctx, testReceiver, time.Millisecond, func(context.Context, string, string) error { return operator.ErrAuthorizationDenied }, nil); !result.Complete {
 				t.Fatalf("revocation incomplete: %+v", result.Steps)
 			}
 			revocationBounds(t, f.service, "")

@@ -11,10 +11,10 @@ principals and group configurations; the cluster itself is prepared once.
   receiver. Every principal wherry issues uses SCRAM-SHA-512, so a listener
   that enables only SCRAM-SHA-256 cannot serve wherry; the super user
   `wherry operator init` uses may log in with SCRAM-SHA-256
-  (`--super-user-mechanism`). Its address goes into every bundle; its CA does not. Each host
-  and receiver trusts the broker through the system's roots, or a `ca_file`
-  in its own configuration when the CA is private, kept current by whoever
-  distributes the Kafka CA.
+  (`--super-user-mechanism`). Its address goes into every bundle, and so
+  does its CA when `operator.yaml` names a `ca_file`. Each host and receiver
+  trusts the broker through a `ca_file` in its own configuration, else the
+  `ca` its bundle carries, else the system's roots.
 - **An authoriser** denies anything no ACL allows, and `super.users` names
   the Kafka super user, which `wherry operator init` uses once. See
   [Authorization and ACLs](https://kafka.apache.org/documentation/#security_authz).
@@ -50,10 +50,11 @@ The pattern matches `wherry.operator`, every host principal
 `wherry.tnt.<tenant>.<host>` and every receiver principal
 `wherry.rcv.<receiver>`.
 
-Strimzi issues and renews the cluster CA. The operator, hosts and receivers
-name its certificate as their `ca_file`. When Strimzi replaces the CA
-certificate, put the new one in every `ca_file` that names it:
-`operator.yaml`'s, each host's and each receiver's.
+Strimzi issues and renews the cluster CA. `operator.yaml` names its
+certificate as `ca_file`, and every bundle carries it. When Strimzi replaces
+the CA certificate, put the new one in `operator.yaml`'s `ca_file`, then
+refresh and redistribute every bundle, as
+[Broker trust](security.md#broker-trust) describes.
 [Certificate renewal](https://strimzi.io/docs/operators/latest/deploying.html#con-certificate-renewal-str)
 gives Strimzi's timing.
 
@@ -144,10 +145,9 @@ as [Signatures](configuration-operator.md#pool-terms) describes.
   that failed may be handed the task again even when a peer with the same
   signature could start it. A profile that goes
   unready between a claim's subscription and its fetch has its task released.
-  The unready profile's other replicas still polling may each acquire it once
-  before they close their idle clients. For that readiness withdrawal, this
-  allows up to the profile's effective replica count minus one more
-  deliveries. A `replicas` value of 0 or an absent field means one replica.
+  Only one replica per profile polls at a time, and it closes before another
+  replica polls after the readiness withdrawal. A `replicas` value of 0 or an
+  absent field means one replica.
   From
   attempt `delivery_limit` minus 1, a receiver ends a run it would return to the
   pool `TASK_STATE_FAILED` with `delivery budget exhausted`, except in the
@@ -369,20 +369,27 @@ Prerequisites: the working directory
    wherry operator tenant pool add acme build
    ```
 
-2. Add each host the tenant submits from:
+2. When a pool has [S3 storage](operations-hosts.md#s3-storage), record the
+   S3 key pair the store's administrator issued for the tenant, from the
+   masked prompts or piped in:
+
+   ```sh
+   wherry operator tenant storage acme
+   ```
+
+3. Add each host the tenant submits from:
 
    ```sh
    wherry operator tenant host add acme laptop
    ```
 
-3. Hand the bundle, `bundles/hosts/acme/laptop.bundle`, to the host's user over
-   a channel you trust. It holds the host's Kafka password. When the
-   broker's certificate chains to a private CA, the host also needs that
-   CA's certificate, as `ca.pem` in its
-   [configuration directory](configuration-host.md#client-configuration), by
-   default `~/.config/wherry/ca.pem`, or at a path `wherry host init` asks
-   for. `host init` asks only on a terminal, so without one put the
-   certificate in place first; the bundle does not carry it.
+   It prints the bundle's path and the command that installs it.
+
+4. Hand the bundle, `bundles/hosts/acme/laptop.bundle`, to the host's user over
+   a channel you trust. It holds the host's Kafka password, the broker's CA
+   when `operator.yaml` names a `ca_file`, and the tenant's S3 key pair
+   when one is recorded, so the host needs nothing else to reach the broker
+   and its pools' storage.
 
 The host's user then runs `wherry host init <bundle>`, which places the
 bundle, registers the host key and writes the
@@ -518,9 +525,10 @@ host that meets [Run a receiver](operations-receivers.md#run-a-receiver).
 
 4. Deliver the bundle, `bundles/receivers/nomad-1.bundle`, to the receiver
    host over a channel you trust, such as the platform's secret mechanism.
-   It holds the receiver's Kafka password and no CA: when the broker's
-   certificate chains to a private CA, the receiver host also needs that
-   CA's certificate, named as `ca_file` in its local configuration.
+   It holds the receiver's Kafka password and, when the receiver uses the
+   operator's broker and `operator.yaml` names a `ca_file`, the broker's CA.
+   A receiver on another broker address gets no CA: it trusts that broker
+   through the system roots, or a `ca_file` in its local configuration.
 
 5. Install wherry and the receiver's plugins, as in
    [Install plugins](operations-receivers.md#install-plugins), and write the receiver's [local
@@ -531,7 +539,8 @@ host that meets [Run a receiver](operations-receivers.md#run-a-receiver).
 
    ```yaml
    bundle: /etc/wherry/receiver.bundle
-   # A private CA the broker's certificate chains to; without ca_file, the system roots.
+   # A private CA the broker's certificate chains to, overriding the ca the bundle carries; without ca_file, the bundle's
+   # ca, else the system roots.
    ca_file: /etc/wherry/kafka-ca.pem
    state_dir: /var/lib/wherry/state
    plugin_dir: /usr/local/libexec/wherry/plugins
@@ -552,8 +561,10 @@ host that meets [Run a receiver](operations-receivers.md#run-a-receiver).
    profile container: credential "nomad-token" has no source in the receiver's configuration
    ```
 
-7. On a host of an entitled tenant, check that `wherry host receivers` shows the
-   receiver `live` with each profile `ready=true`.
+7. Check that `wherry operator receiver show nomad-1` reports
+   `status: live`, which it does once the receiver's first advertisement is
+   verified against its key topic. On a host of an entitled tenant,
+   `wherry host receivers` shows the same status with each profile `ready=true`.
 
 To rotate a platform credential, replace the value at its source and
 restart the receiver; the bundle stays as it is.
@@ -621,11 +632,15 @@ restored.
    wherry operator receiver remove nomad-1
    ```
 
-   When it ends, the command prints one line per
-   [revocation step](concepts.md#revocation) it ran,
+   The command prints one line per
+   [revocation step](concepts.md#revocation) as the step ends,
    `step=<n> complete=<bool> name=<name>`. The wait in step 5 is usually the
-   longest; `--wait DURATION` lengthens it, must be positive, and is
-   refused below the broker-derived minimum.
+   longest, so before it the command prints
+   `step=5 started name=wait until=<time>`, the UTC time the wait ends;
+   `--wait DURATION` lengthens it, must be positive, and is
+   refused below the broker-derived minimum. Once the six steps are
+   complete, the command deletes the principal's bundle from `bundles/`:
+   its password can never log in again.
 
 2. If it fails with `revocation incomplete`, the line of the failed step
    ends in ` error=<cause>`. Check what that step depends on (the broker
@@ -635,7 +650,8 @@ restored.
    stale command can restore wherry-managed grants, which the next pass
    deletes again. A run that failed before step 2 may have left the
    principal's grants, and the run again deletes them. Step 3 already retries for up to 2 minutes while a
-   broker still authorises the principal.
+   broker still authorises the principal. The bundle stays until a run
+   completes; a run that finds the principal already ended deletes it.
 
 3. For a receiver, rotate at its source each credential of the runs it
    opened and, when it held its pool's key as key custodian, of every run
@@ -792,9 +808,10 @@ To onboard a tenant:
 
 1. Run `wherry operator tenant add acme`.
 2. Run `wherry operator tenant pool add acme build`.
-3. Run `wherry operator tenant host add acme laptop`.
-4. Deliver the bundle over a channel you trust.
-5. Run `wherry host init laptop.bundle` on the host.
+3. Run `wherry operator tenant storage acme` when a pool has storage.
+4. Run `wherry operator tenant host add acme laptop`.
+5. Deliver the bundle over a channel you trust.
+6. Run `wherry host init laptop.bundle` on the host.
 
 Collect results before removing an entitlement.
 `wherry operator tenant pool remove acme build` withdraws the hosts' pool access.

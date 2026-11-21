@@ -18,6 +18,7 @@ import (
 	"time"
 
 	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 )
 
@@ -27,9 +28,9 @@ const usage = `usage: wherry <command>
 operator:
   wherry operator init
   wherry operator pool apply|suspend|resume|rotate-key
-  wherry operator tenant add|list|remove
+  wherry operator tenant add|list|storage|remove
   wherry operator tenant pool add|remove
-  wherry operator tenant host add|remove
+  wherry operator tenant host add|refresh|remove
   wherry operator receiver apply|show|remove
   wherry operator check
 receiver:
@@ -43,6 +44,10 @@ developer:
   wherry dev init|up|down [--reset]
 wherry version
 `
+
+// hostRefreshCommand is the operator command that rewrites a host's bundle, named when a connection fails on a CA the
+// bundle does not carry.
+const hostRefreshCommand = "wherry operator tenant host refresh TENANT HOST"
 
 // dayToDay are the host's day-to-day commands, which wherry also runs without the host word.
 var dayToDay = map[string]func(context.Context, *busclient.Host, []string, io.Writer, io.Writer) error{
@@ -62,7 +67,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 	case "operator":
 		return runOperator(args[1:], stdout, stderr)
 	case "host":
-		return runHost(args[1:], stdout, stderr)
+		// A connection the broker's certificate fails for want of a trusted CA is explained: the bundle may predate the
+		// operator's CA file, and the operator's refresh rewrites it.
+		return operator.ExplainUnknownAuthority(runHost(args[1:], stdout, stderr), hostRefreshCommand)
 	case "dev":
 		return runDev(args[1:], stdout, stderr)
 	case "version":

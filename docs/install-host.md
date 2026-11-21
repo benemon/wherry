@@ -9,20 +9,13 @@ You work on your laptop throughout this page.
 On your laptop:
 
 - The `wherry` CLI, as [Install the wherry CLI](install-cli.md) shows.
-- The bundle and CA from the hand-off on [Set up the operator](install-operator.md#_4-add-your-laptop).
+- The bundle from the hand-off on [Set up the operator](install-operator.md#_4-add-your-laptop).
+  It carries the broker's CA, so you need no CA file.
 - A Claude Code OAuth token, which `claude setup-token` prints.
 
-## 1. Put the CA and your token in place
+## 1. Put your token in place
 
-The files from the hand-off are in your home directory.
-Move the CA to where wherry looks for it:
-
-```sh
-cd ~
-mkdir -p -m 0700 ~/.config/wherry
-mv kafka-ca.pem ~/.config/wherry/ca.pem
-```
-
+The bundle from the hand-off is in your home directory.
 Save your Claude Code token in a new file only you can read, without a trailing newline.
 The first command removes any old copy, so the new file gets the private mode:
 
@@ -34,11 +27,13 @@ rm -f ~/claude-oauth-token
 ## 2. Initialise the host
 
 ```sh
+cd ~
 wherry host init laptop.bundle
 rm laptop.bundle
 ```
 
 `host init` copies the bundle into `~/.config/wherry/`, so you can delete the hand-off copy.
+It trusts the broker through the CA the bundle carries.
 It creates your laptop's signing key. When standard input or standard error is
 not a terminal, with `TERM=dumb`, or when stdout is not the same terminal as
 standard error, init prints the key ID alone to stdout. Otherwise, Summary
