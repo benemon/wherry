@@ -102,7 +102,7 @@ func TestExpandDerivesOneCredentialPerVariable(t *testing.T) {
 	if !ok || !reflect.DeepEqual(several, want) {
 		t.Errorf("google expands to %+v, %t; want %+v", several, ok, want)
 	}
-	if name := DerivedName("AWS_SECRET_ACCESS_KEY"); name != "aws-secret-access-key" {
+	if name := derivedName("AWS_SECRET_ACCESS_KEY"); name != "aws-secret-access-key" {
 		t.Errorf("derived name %s", name)
 	}
 	if !catalog.Reads("GEMINI_API_KEY") || catalog.Reads("OPENAI_API_KEY") {
@@ -214,7 +214,7 @@ func renderVariables(c *Catalog) string {
 		"| Variable | Catalog entries |",
 		"| --- | --- |",
 	}
-	variables := c.Variables()
+	variables := catalogVariables(c)
 	for _, variable := range slices.Sorted(maps.Keys(variables)) {
 		ids := make([]string, 0, len(variables[variable]))
 		for _, id := range variables[variable] {
@@ -256,7 +256,7 @@ func TestDocsListTheCatalogVariables(t *testing.T) {
 			t.Errorf("the page lists %q, which no entry reads that way", absent)
 		}
 	}
-	for variable, ids := range c.Variables() {
+	for variable, ids := range catalogVariables(c) {
 		if !strings.Contains(want, "| `"+variable+"` | `"+ids[0]+"`") {
 			t.Errorf("the page lacks %s read by %s", variable, ids[0])
 		}
@@ -265,7 +265,22 @@ func TestDocsListTheCatalogVariables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if variables := fixture.Variables(); !reflect.DeepEqual(variables, map[string][]string{"ONE_KEY": {"one"}, "SHARED_KEY": {"one", "two"}}) {
+	if variables := catalogVariables(fixture); !reflect.DeepEqual(variables, map[string][]string{"ONE_KEY": {"one"}, "SHARED_KEY": {"one", "two"}}) {
 		t.Errorf("variables %v", variables)
 	}
+}
+
+// catalogVariables are the variables any entry of c reads, each with the sorted ids of the entries reading it: the set
+// a host reads implicitly, which the docs list.
+func catalogVariables(c *Catalog) map[string][]string {
+	variables := map[string][]string{}
+	for id, entry := range c.entries {
+		for _, variable := range entry.Env {
+			variables[variable] = append(variables[variable], id)
+		}
+	}
+	for _, ids := range variables {
+		slices.Sort(ids)
+	}
+	return variables
 }

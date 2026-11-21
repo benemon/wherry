@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/benemon/wherry/internal/catalog"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -174,17 +175,17 @@ func BundleKafkaOpts(bundle Bundle, local []byte) ([]kgo.Opt, error) {
 	return KafkaOpts(bundle.Broker, ca, bundle.Principal, bundle.Password)
 }
 
-// UnknownAuthority reports whether err is a connection the broker's certificate failed because it chains to no CA the
+// unknownAuthority reports whether err is a connection the broker's certificate failed because it chains to no CA the
 // connection trusts: Go's x509 error, which franz-go's dial error wraps.
-func UnknownAuthority(err error) bool {
+func unknownAuthority(err error) bool {
 	var unknown x509.UnknownAuthorityError
 	return errors.As(err, &unknown)
 }
 
-// ExplainUnknownAuthority adds to err, when UnknownAuthority, that a bundle written before the operator trusted the
+// ExplainUnknownAuthority adds to err, when unknownAuthority, that a bundle written before the operator trusted the
 // broker through a CA file carries no ca and that refresh rewrites it; any other err is returned as it is.
 func ExplainUnknownAuthority(err error, refresh string) error {
-	if !UnknownAuthority(err) {
+	if !unknownAuthority(err) {
 		return err
 	}
 	return fmt.Errorf("%w; the broker's certificate chains to a CA this connection does not trust: a bundle written before the operator trusted the broker through a CA file carries none, so install the bundle %s writes, or name the CA as ca_file", err, refresh)
@@ -249,7 +250,11 @@ func (service *Service) PoolApply(ctx context.Context, pool string, terms Terms,
 	if err := validateNames(pool); err != nil {
 		return err
 	}
-	terms, err := expand(terms)
+	c, err := catalog.Embedded()
+	if err != nil {
+		return err
+	}
+	terms, err = Expand(terms, c)
 	if err != nil {
 		return err
 	}

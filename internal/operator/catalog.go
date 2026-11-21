@@ -38,12 +38,3 @@ func Expand(terms Terms, c *catalog.Catalog) (Terms, error) {
 	}
 	return terms, nil
 }
-
-// expand is Expand with the embedded catalog.
-func expand(terms Terms) (Terms, error) {
-	c, err := catalog.Embedded()
-	if err != nil {
-		return terms, err
-	}
-	return Expand(terms, c)
-}

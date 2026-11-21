@@ -111,21 +111,6 @@ func (catalog *Catalog) Reads(variable string) bool {
 	return false
 }
 
-// Variables are the variables any entry reads, sorted, each with the sorted ids of the entries reading it: the set a
-// host reads implicitly, which the docs list.
-func (catalog *Catalog) Variables() map[string][]string {
-	variables := map[string][]string{}
-	for id, entry := range catalog.entries {
-		for _, variable := range entry.Env {
-			variables[variable] = append(variables[variable], id)
-		}
-	}
-	for _, ids := range variables {
-		slices.Sort(ids)
-	}
-	return variables
-}
-
 // Expand is the credentials the entry id derives, and whether id is usable: an agent named by a usable id gets them in
 // place of the credential entries an operator writes. An id that names no entry, or one that is not usable, expands
 // to nothing.
@@ -134,7 +119,7 @@ func (catalog *Catalog) Expand(id string) ([]Credential, bool) {
 	if !ok {
 		return nil, false
 	}
-	credentials := entry.Credentials()
+	credentials := entry.credentials()
 	if !wire.ValidName(id) || len(credentials) == 0 {
 		return nil, false
 	}
@@ -155,17 +140,17 @@ func (catalog *Catalog) Usable(id string) bool {
 	return ok
 }
 
-// Credentials are the credentials the entry derives, before the checks Expand makes.
-func (entry Entry) Credentials() []Credential {
+// credentials are the credentials the entry derives, before the checks Expand makes.
+func (entry Entry) credentials() []Credential {
 	credentials := make([]Credential, 0, len(entry.Env))
 	for _, variable := range entry.Env {
-		credentials = append(credentials, Credential{Name: DerivedName(variable), Env: variable, Description: entry.Name, Required: len(entry.Env) == 1})
+		credentials = append(credentials, Credential{Name: derivedName(variable), Env: variable, Description: entry.Name, Required: len(entry.Env) == 1})
 	}
 	return credentials
 }
 
-// DerivedName is the name of the credential derived from an environment variable: the variable in lower case with
+// derivedName is the name of the credential derived from an environment variable: the variable in lower case with
 // each _ replaced by -, so CLAUDE_CODE_OAUTH_TOKEN gives claude-code-oauth-token.
-func DerivedName(variable string) string {
+func derivedName(variable string) string {
 	return strings.ToLower(strings.ReplaceAll(variable, "_", "-"))
 }
