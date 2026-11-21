@@ -3,7 +3,6 @@ package trust
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -33,7 +32,7 @@ func LoadSigningKeyFile(path string) (ed25519.PrivateKey, error) {
 	}
 	private, ok := key.Key.(ed25519.PrivateKey)
 	if !ok {
-		return nil, errors.New("key file is not an Ed25519 private JWK")
+		return nil, fmt.Errorf("%s is not an Ed25519 private JWK", path)
 	}
 	return private, nil
 }
@@ -102,6 +101,8 @@ func ReadOwnerOnly(path string) ([]byte, error) {
 	return io.ReadAll(file)
 }
 
+// readKeyFile reads the private JWK at path. Its errors name the file and nothing in it: the parser's error can echo a
+// member it could not parse, and a key file's members are private.
 func readKeyFile(path string) (jose.JSONWebKey, error) {
 	var key jose.JSONWebKey
 	encoded, err := ReadOwnerOnly(path)
@@ -109,10 +110,10 @@ func readKeyFile(path string) (jose.JSONWebKey, error) {
 		return key, err
 	}
 	if err := key.UnmarshalJSON(encoded); err != nil {
-		return key, fmt.Errorf("invalid JWK private key: %w", err)
+		return key, fmt.Errorf("%s is not a valid private JWK", path)
 	}
 	if key.IsPublic() {
-		return key, errors.New("key file holds no private key")
+		return key, fmt.Errorf("%s holds no private key", path)
 	}
 	return key, nil
 }

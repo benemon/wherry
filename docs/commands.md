@@ -12,7 +12,7 @@ Every command but `version` and the shortcuts runs under its role's word:
 
 | Role | Commands |
 | --- | --- |
-| Operator | `wherry operator init`; `wherry operator pool apply`, `suspend`, `resume` and `rotate-key`; `wherry operator tenant add`, `list` and `remove`; `wherry operator tenant pool add` and `remove`; `wherry operator tenant host add` and `remove`; `wherry operator receiver apply`, `show` and `remove`; `wherry operator check` |
+| Operator | `wherry operator init`; `wherry operator pool apply`, `suspend`, `resume` and `rotate-key`; `wherry operator tenant add`, `list`, `storage` and `remove`; `wherry operator tenant pool add` and `remove`; `wherry operator tenant host add`, `refresh` and `remove`; `wherry operator receiver apply`, `show` and `remove`; `wherry operator check` |
 | Receiver | `wherry receiver run` |
 | Host user | `wherry host init`, `key rotate`, `receivers`, `mcp`, `submit`, `wait`, `status`, `events`, `logs` and `cancel` |
 | Development | [Development commands](commands-dev.md) |
@@ -170,10 +170,19 @@ Ctrl-C during those questions writes nothing.
 `tenant host add` and `receiver apply` write bundles under the working directory's
 `bundles/`: `bundles/hosts/<tenant>/<host>.bundle` and
 `bundles/receivers/<receiver>.bundle`, mode 0600, in directories mode 0700. A
-bundle holds the broker address, the principal and its password, and no CA.
+bundle holds the broker address, the principal and its password, and, when
+`operator.yaml` names a `ca_file` and the bundle's broker is the operator's,
+that file's certificates as `ca`, so a host or receiver needs no CA file of
+its own ([Broker trust](security.md#broker-trust)). A host bundle also
+holds the tenant's S3 key pair as `storage` once
+[`tenant storage`](#wherry-operator-tenant-storage-tenant) recorded it; a
+receiver bundle never does. The bundle is the invite: each command that
+writes or rewrites one prints its path and the next step:
+`wherry host init <file>` for a host, and the platform's bundle step for a receiver.
 `tenant host add` refuses a host that exists unless given `--force`. `receiver apply` of a receiver that exists
-updates its configuration, and replaces its bundle only to change the broker
-address, keeping the password. Without `--force`, `tenant host add` and
+updates its configuration, and replaces its bundle only when the broker
+address or the CA changed, keeping the password; `tenant host refresh` does
+the same for a host's bundle, the storage keys included. Without `--force`, `tenant host add` and
 `receiver apply` of a new receiver never replace a bundle: before they change
 anything in Kafka they create the bundle file, failing when a file is there,
 and write the bundle into it at the end. A
@@ -195,7 +204,7 @@ one.
 
 ```sh
 wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] \
-  [--super-user NAME --super-user-password-file FILE] \
+  [--super-user NAME --super-user-password-file FILE|-] \
   [--super-user-mechanism SCRAM-SHA-512|SCRAM-SHA-256]
 ```
 
@@ -209,13 +218,21 @@ An address without a port uses the Kafka client's default port, 9092
 Choose a CA certificate from the PEM files in the current directory,
 System roots or Other file...
 Enter the super user's name.
-Enter the password file path.
-Press Tab to complete either file path.
+Enter the super user's password. The prompt masks it, never prints it back,
+and takes it as typed: leading and trailing spaces are part of the password,
+and only a trailing CR or LF is trimmed, as from a file.
+Press Tab to complete the CA file path.
 Press Ctrl-C to stop before any files are written.
 If stderr is redirected, or prompts are otherwise unavailable, give every
 required flag. An omitted `--ca-file` uses the system roots.
 Missing flags are named in the error:
 `operator init has no terminal to prompt on; give --broker, --super-user, --super-user-password-file`.
+
+`--super-user-password-file` takes a file path, or `-` to read the password
+from standard input, for example piped from a password manager. `-` is
+refused when standard input is a terminal; there the prompt is the route.
+Errors about `-` say standard input and never treat it as a path. The
+password is written nowhere, whichever way it arrives.
 
 The super user logs in with SCRAM-SHA-512 unless `--super-user-mechanism SCRAM-SHA-256` says its credential is
 SCRAM-SHA-256; the mechanism is never prompted for, and any other value is refused before a prompt. Kafka answers a
@@ -476,6 +493,43 @@ Records a new tenant and creates its feed and transcript topics at 2 MiB per rec
 
 Lists live tenants with their pools and live hosts, in deterministic name order, as plain text. Revoking and ended hosts are omitted.
 
+### `wherry operator tenant storage TENANT`
+
+```sh
+wherry operator tenant storage TENANT
+printf '%s\n%s\n' "$ACCESS_KEY" "$SECRET_KEY" | wherry operator tenant storage TENANT -
+```
+
+Records the S3 access key and secret key the store's administrator issued
+for a live tenant, once, in `storage/<tenant>.yaml` under the working
+directory, mode 0600 in a directory mode 0700, and adds `storage/` to the
+directory's `.gitignore`. The pair goes into every host bundle of the tenant
+that `tenant host add`, `--force` or `tenant host refresh` writes from then
+on ([S3 storage](operations-hosts.md#s3-storage)), and into no Kafka record.
+It prints the file and, for each live host of the tenant, the `tenant host
+refresh` that puts the pair into its kept bundle.
+
+On a terminal it asks for the access key, then the secret key, each with a
+masked input that prints nothing back and no answer line, as `operator init`
+asks for the super user's password. With `-` it reads both from standard
+input, as a password manager pipes them: exactly two non-empty lines, the
+access key then the secret key, with or without a final line break; anything
+else is refused with `standard input must hold exactly two lines: the access
+key, then the secret key`, and standard input that is a terminal is refused
+before it is read. A key that is empty or holds whitespace or a control
+character is refused with a fixed message naming which key, since a key
+typed so would sign every request wrong. Without a terminal and without `-`
+it refuses, naming `-`. Both keys are checked before anything is written,
+and the file is replaced atomically, so a refusal or a failed write keeps
+the pair on file; Ctrl-C at either question writes nothing. No value reaches
+an error, the output or a record. An absent or ended tenant is refused.
+
+A changed pair reaches a host only through its bundle: run `tenant host
+refresh TENANT HOST` for each host and redistribute, as
+[Rotate a tenant's storage keys](runbooks.md#rotate-a-tenant-s-storage-keys)
+walks through. `tenant host remove` and `tenant remove` leave the pair where
+it is; the store's administrator disables it.
+
 ### `wherry operator tenant pool remove TENANT POOL`
 
 Ends the entitlement immediately and converges access grants. Recomputes each live host's minimum
@@ -500,7 +554,9 @@ Tenant command states:
 | `tenant add` | Create | Refuse: exists | Refuse: final |
 | `tenant pool add` | Refuse; use `tenant add` | Add or converge and apply quotas when already entitled | Refuse |
 | `tenant pool remove` | Refuse | End or converge and apply quotas when not entitled | Refuse |
+| `tenant storage` | Refuse | Record the pair in the working directory | Refuse |
 | `tenant host add` | Refuse | Add; reissue a live host with `--force`; refuse revoking or ended hosts | Refuse |
+| `tenant host refresh` | Refuse | Rewrite a live host's kept bundle; refuse revoking or ended hosts | Refuse |
 | `tenant host remove` | Refuse | Revoke; retry from its record; converge when already ended | Refuse |
 | `tenant remove` | Refuse | End entitlements, revoke hosts, end tenant, remove bundles | Converge and retry bundle removal |
 
@@ -512,14 +568,45 @@ wherry operator tenant host add TENANT HOST [--force]
 
 Records a host of an existing live tenant, creates its principal and key topic, grants its ACLs, applies its quotas, and writes
 its bundle to `bundles/hosts/<tenant>/<host>.bundle`, naming the broker in
-`operator.yaml`. It refuses a host that exists, and an existing bundle file,
+`operator.yaml`, carrying its `ca_file`'s certificates as `ca` when it
+names one, and the tenant's S3 key pair as `storage` when
+[`tenant storage`](#wherry-operator-tenant-storage-tenant) recorded one. It
+prints
+`wrote <bundle>; hand it to the host, where wherry host init <file> installs it`:
+the bundle carries everything the operator hands over. It
+refuses a host that exists, and an existing bundle file,
 unless given [`--force`](#operator-commands). For a host that exists,
 `--force` reissues its identity: it records nothing and creates no topic. It
 reapplies the host's quotas and [converges](#operator-commands) the ACLs as
 every operator command does, so it also repairs a host add that failed after
 its record was written. A revoking host or a host whose membership ended is refused, including with `--force`. Host names are unique
 within a tenant; hosts of the same name in other tenants have bundles of
-their own.
+their own. A storage keys file that cannot be read refuses the add before
+anything changes in Kafka.
+
+### `wherry operator tenant host refresh TENANT HOST`
+
+```sh
+wherry operator tenant host refresh TENANT HOST
+```
+
+Rewrites the kept bundle, `bundles/hosts/<tenant>/<host>.bundle`, of a live
+host with the broker in `operator.yaml`, its `ca_file`'s certificates as
+`ca` and the tenant's S3 key pair as `storage`, keeping the principal and
+password, so a renewed CA, a new broker address or a rotated pair reaches
+the host without a new password. It compares the broker, the CA and the pair
+on their own and prints `refreshed <bundle>` with the next step when any
+changed, or `<bundle> is current`; a rerun changes nothing, so a refresh
+interrupted between a tenant's hosts is run again for each of them and
+converges. The refreshed bundle is handed to the host
+as the first was, and its user runs `wherry host init BUNDLE`, which
+replaces the host's copy; a `ca_file` the host's configuration keeps
+overrides the bundle's `ca`, and `host init` warns when it does. It appends
+no record and changes nothing in Kafka. It refuses a tenant or host that
+does not exist, is revoking or has ended; a missing bundle, naming
+`tenant host add TENANT HOST --force`, which reissues the host with a new
+password; and a bundle that is another principal's.
+[Broker trust](security.md#broker-trust) gives the renewal procedure.
 
 ### `wherry operator receiver apply RECEIVER`
 
@@ -580,15 +667,19 @@ receiver's principal, key topic and progress topic,
 `wherry.receiver.<receiver>.progress`, and the signature topic of each of its
 profiles under the pool's recorded terms, with the task topics'
 [settings](#wherry-operator-pool-apply-pool), grants its ACLs, and writes its
-bundle to `bundles/receivers/<receiver>.bundle`. It creates every topic before
+bundle to `bundles/receivers/<receiver>.bundle`, printing `wrote <bundle>`
+and the next step: the bundle goes to the receiver's platform, whose
+install guide's bundle step installs it, and the receiver starts. It creates every topic before
 it appends the record, so a create that fails leaves no record. The file must name a
 `pool`. It creates the progress topic of every other live receiver in the
 pool that lacks one, and sets the
 [progress topic configuration](design.md#topics-1) on each existing one, never lowering its `retention.ms`.
-The bundle holds the receiver's Kafka identity alone; the receiver's [local
+The bundle holds the receiver's Kafka identity and, when the receiver uses
+the operator's broker and `operator.yaml` names a `ca_file`, that file's
+certificates as `ca`; a receiver on another address gets none. The receiver's [local
 configuration](configuration-receiver.md#receiver-local-configuration) gives the
-sources of its [platform credentials](configuration-receiver.md#platform-credentials)
-and the CA it trusts the broker with.
+sources of its [platform credentials](configuration-receiver.md#platform-credentials),
+and a `ca_file` there overrides the bundle's `ca`.
 With `--dry-run`, it makes the same checks and prints each plugin profile as
 the record would hold it, with the pins, in the format of `receiver show`, and creates and
 writes nothing.
@@ -599,11 +690,16 @@ new configuration in the receiver's pool. The file's `pool` may be empty and
 otherwise must name that pool. Tasks on a signature the new configuration no
 longer has wait unless another member shares it. The record holds only the pins the file gives, so give one for every
 plugin type. The principal and password stay as they are. When the file's
-broker address differs from the one in the receiver's bundle in
-`bundles/receivers/`, it rewrites the bundle with the new address and the
-same password. Without that bundle it records nothing and fails, naming the
+broker address, or the `ca` the bundle should carry, differs from the
+receiver's bundle in `bundles/receivers/`, each compared on its own, it
+rewrites the bundle with the new address and CA and the same password, so a
+renewed CA reaches the receiver without a new password, and prints
+`refreshed <bundle>` with the next step: install it on the platform and
+restart the receiver. Without that bundle it records nothing and fails, naming the
 missing bundle and that `--force` gives the receiver a new password and
-bundle. When the receiver reads a record that differs
+bundle; a kept bundle whose principal is another receiver's is refused the
+same way, before anything is recorded or rewritten, naming both principals.
+When the receiver reads a record that differs
 from the configuration it runs, it stops claiming, lets each run it holds
 end and commit with no time limit, then exits, and its platform restarts it.
 To apply a change at once, restart the receiver through its platform, as
@@ -629,7 +725,8 @@ receiver's configuration record, and takes no `-f` or `--dry-run`.
 wherry operator receiver show RECEIVER
 ```
 
-Prints the receiver's recorded configuration as YAML: `plugin_sha256`, the SHA-256 pinned for each plugin type, then
+Prints the receiver's liveness and recorded configuration as YAML: `status`,
+then `last_advertised` when it has advertised, then `plugin_sha256`, the SHA-256 pinned for each plugin type, then
 `profiles`, each plugin profile resolved, in recorded order, with its
 `name`, `plugin`, `agent`, `replicas` when above 1, `labels` and merged `config`, in that order
 ([Plugin profile merge](configuration-receiver.md#plugin-profile-merge)),
@@ -637,6 +734,8 @@ its `signature`, the agent and every label, double-quoted with each line
 feed shown as `\n`, and the signature's task `topic`:
 
 ```yaml
+status: live
+last_advertised: 2026-11-20T09:41:07.312Z
 plugin_sha256:
     nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 profiles:
@@ -659,6 +758,18 @@ profiles:
 A `credential` key shows the credential's name, which is all the record
 holds; neither `show` nor `--dry-run` prints a credential value.
 
+`status` is what [`wherry host receivers`](#wherry-host-receivers) reports
+for the receiver, read the same way: the operator reads the pool's receivers
+topic and verifies each advertisement against the receiver's key topic.
+The receiver is `live` when its latest authorised advertisement is dated
+within 120 seconds of now, either side; `stale` when it is dated beyond that,
+in the past or the future; `silent` when it has none; and `ended` once
+revoked. `last_advertised` is that advertisement's time, in UTC, and is
+absent for a silent or ended receiver. The latest advertisement is the one
+with the latest date, so one dated ahead counts until that time passes. A
+`--dry-run` of `receiver apply` prints no status: the record it would hold
+has no receiver to be live.
+
 ### `wherry operator tenant host remove TENANT HOST`
 
 ```sh
@@ -667,7 +778,8 @@ wherry operator tenant host remove TENANT HOST [--wait DURATION]
 
 Runs the [revocation](concepts.md#revocation) steps for the host, as
 [`receiver remove`](#wherry-operator-receiver-remove-receiver) does for a
-receiver.
+receiver, and once they are complete deletes the host's bundle,
+`bundles/hosts/TENANT/HOST.bundle`.
 
 ### `wherry operator receiver remove RECEIVER`
 
@@ -675,15 +787,27 @@ receiver.
 wherry operator receiver remove RECEIVER [--wait DURATION]
 ```
 
-Runs the [revocation](concepts.md#revocation) steps. When it ends, it
-prints one line per step it ran:
+Runs the [revocation](concepts.md#revocation) steps. It prints one line per
+step as the step ends:
 
 ```
 step=<n> complete=<bool> name=<step name>
 ```
 
 The line of a failed step ends in ` error=<cause>`. It stops at the first
-incomplete step and fails with `revocation incomplete`. The probe asks every
+incomplete step and fails with `revocation incomplete`. Before step 5 waits,
+it prints when the wait ends, in UTC:
+
+```
+step=5 started name=wait until=<RFC 3339 time>
+```
+
+Once the revocation is complete, it deletes the receiver's bundle,
+`bundles/receivers/RECEIVER.bundle`: its principal can never log in again.
+An incomplete revocation keeps the bundle, and a rerun deletes it once it
+finds the principal ended; a bundle already gone is no error. When the
+deletion itself fails, the command fails naming the file, with the
+revocation complete. The probe asks every
 broker for the metadata of the principal's own key topic, and step 3
 completes when every broker answers `TOPIC_AUTHORIZATION_FAILED`. While a
 broker still authorises the principal, step 3 probes again every second for
@@ -750,8 +874,12 @@ wherry receiver run [--config-file FILE] [--rotate-key]
 
 Runs a receiver as the principal of the bundle its [local
 configuration](configuration-receiver.md#receiver-local-configuration) names,
-trusting the broker through the configuration's `ca_file` or, without one,
-the system roots.
+trusting the broker through the configuration's `ca_file`, else the
+bundle's `ca`, else the system roots. A bundle whose `ca` holds no
+certificate is refused. When the broker's certificate chains to a CA the
+connection does not trust, the failure says that a bundle written before
+the operator trusted the broker through a CA file carries none, and names
+`wherry operator receiver apply RECEIVER`, which rewrites it.
 `--config-file` defaults to `/etc/wherry/config.yaml`. It creates the
 configuration's `state_dir` with mode 0700 and keeps `signing.key`, a
 private JWK with mode 0600, in it, and in `pool-keys/` one file with mode
@@ -994,24 +1122,40 @@ wherry host init [BUNDLE] [--config-file FILE]
 Sets the host up from its bundle, and configures it for every pool its tenant
 is entitled to:
 
-1. With `BUNDLE`, it reads the bundle and copies it to `bundle.yaml` in the
+1. With `BUNDLE`, it reads the bundle and copies it to the configuration's
+   bundle. For the default configuration that is always `bundle.yaml` in the
    [configuration directory](configuration-host.md#client-configuration),
-   `$XDG_CONFIG_HOME/wherry/` or by default `~/.config/wherry/`, mode 0600 in
-   a directory of mode 0700,
-   replacing any file there atomically, and names it as `bundle` in the
-   configuration, even when the configuration named another bundle. Without
-   `BUNDLE`, it uses the bundle the configuration names, and refuses when it
-   names none.
-2. On a terminal, when the configuration names no `ca_file` and the
-   configuration directory holds no `ca.pem`, Broker offers up to eight
-   eligible local CA files, System roots and Other file. Other file asks
-   for a path; blank returns to the options. A file holding at least one
-   PEM certificate is recorded as `ca_file`, after revalidation. Without a
-   terminal it asks nothing, so a host whose broker has a private CA needs
-   `ca.pem` in place, or `ca_file` in the configuration, before `host init`.
-   When the file is new or step 1 or 2 changed it, init writes the
+   `$XDG_CONFIG_HOME/wherry/` or by default `~/.config/wherry/`, named as
+   `bundle` in the configuration even when it named another bundle. A
+   configuration at any other `<path>` keeps the `bundle` it names and gets
+   the copy there; one naming none gets it at the
+   [default bundle path](configuration-host.md#a-configuration-away-from-the-default-path),
+   `<path>.bundle.yaml`, named as its `bundle`. The copy is mode 0600. The
+   configuration directory is made mode 0700; elsewhere, a directory init
+   creates is mode 0700 and an existing one keeps its mode. It replaces the
+   file there atomically. Before writing anything it refuses when the
+   bundle's destination, `<path>.host.key` or `<path>.state` exists and is
+   not the file the configuration already names, such as another
+   configuration or another host's bundle or key, naming the path and the
+   setting (`bundle`, `host_key`, `state_dir`) that avoids it; a rerun on an
+   initialised configuration succeeds, and explicit `host_key` and
+   `state_dir` paths and the configuration directory's files are not
+   checked. Without `BUNDLE`, it uses the bundle the configuration names,
+   and refuses when it names none.
+2. It trusts the broker through the configuration's `ca_file`, else the
+   bundle's `ca`, else the system roots, and asks nothing about the CA. A
+   bundle whose `ca` holds no certificate is refused. When the
+   configuration keeps a `ca_file` and `BUNDLE` carries a `ca`, it warns
+   that the file overrides the bundle, since a stale file hides a refreshed
+   CA. When the broker's certificate chains to a CA the connection does not
+   trust, the failure says that a bundle written before the operator
+   trusted the broker through a CA file carries none, and names
+   `wherry operator tenant host refresh TENANT HOST`, which rewrites it.
+   When the file is new or step 1 changed it, init writes the
    configuration now, before it connects.
-3. It creates the host key at `host_key`, a private JWK (RFC 7517) with mode
+3. It creates the host key at `host_key`, by default `host.key` in the
+   configuration directory for the default configuration and `<path>.host.key`
+   beside any other, a private JWK (RFC 7517) with mode
    0600, unless the file exists, creating its directory with mode 0700. It
    registers the key on the host's key topic when the topic holds none, and
    prints the key ID alone when standard input or standard error is not a
@@ -1034,12 +1178,15 @@ is entitled to:
    to avoid another pair's name. An unassociated existing source with the
    generated name is presumed to belong to that pair and reused. Existing
    sources are kept; Configured credential uses an existing credential instead.
-6. For all missing entitled S3 pool mappings together, Key sources asks for
+6. When the bundle carries the tenant's S3 key pair as `storage`, every
+   entitled pool with storage uses it and nothing is asked. Otherwise, for
+   all missing entitled S3 pool mappings together, Key sources asks for
    the access and secret key sources. Both sources and all missing mappings
    are committed together; cancelling either source discards the pending
    pair. New names are `s3-access-key` and `s3-secret-key`, with numeric
    suffixes on collisions. Configured credential reuses a named source.
-   Set per-pool keys by editing the config; existing mappings are kept.
+   Set per-pool keys by editing the config, which win over the bundle's
+   pair for that pool; existing mappings are kept.
 7. When answers changed the configuration, it writes it again. Summary
    shows registration, successful writes and anything still missing.
 
@@ -1059,11 +1206,18 @@ answers not yet written. If the terminal misbehaves after an abnormal exit,
 run `stty sane`.
 
 The configuration path is `--config-file` or `WHERRY_CONFIG`, else
-`config.yaml` in the configuration directory. Writes use mode 0600 even
+`config.yaml` in the configuration directory. A configuration at any other
+path, made absolute with no symlink resolved, keeps its bundle, host key
+and state directory beside it, as `<path>.bundle.yaml`, `<path>.host.key`
+and `<path>.state/`, so two configurations never share a host key; the
+default configuration named relatively, or through a link to it once it
+exists, is still the default. Explicit `bundle`, `host_key` and
+`state_dir` values are kept. Writes use mode 0600 even
 for existing files, with references to sources, never values. A re-run
 keeps existing entries and asks only for missing settings. When standard
 input or standard error is not a terminal, or with `TERM=dumb`, init asks nothing and lists missing
-credentials, Git hosts and entitled S3 storage. Stdout carries only the key
+credentials, Git hosts and entitled S3 storage, the last only when the
+bundle carries no pair. Stdout carries only the key
 ID. Summary appears even with no entitlement, with the instruction to run
 init again once the operator entitles the tenant to a pool.
 
@@ -1326,8 +1480,10 @@ credential, such as a git entry's, does not also deliver the agent's
 
 `--input FILE:s3` and `--output NAME:s3` use the pool's [S3 lane](a2a-extension-v1.md#s3-inputs-and-outputs).
 `submit` refuses them, before it uploads or publishes anything, when the
-client configuration has no [`storage`](configuration-host.md#client-configuration) or the
-pool's terms no [`storage`](configuration-operator.md#pool-terms):
+host has no storage keys for the pool, neither the pair its bundle carries
+nor a [`storage`](configuration-host.md#client-configuration) mapping in
+its configuration, or the pool's terms no
+[`storage`](configuration-operator.md#pool-terms):
 
 ```
 invalid input: pool build has no storage for S3 inputs and outputs

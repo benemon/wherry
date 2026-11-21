@@ -212,7 +212,10 @@ no attempt needs an answer from the submitting host. Custody in the pool:
   successor's snapshot;
 - keeps each run's non-secret task content, and its redaction key, on the
   host, so the host can resubmit; the host keeps no credential value in
-  the clear.
+  its run state. Its bundle holds the Kafka password and the tenant's
+  storage key pair, mode 0600, and its storage signing secret never leaves
+  it: the access-key identifier appears in presigned URLs, the secret key
+  in nothing the host publishes.
 
 ## Run credentialed tasks
 
@@ -429,15 +432,32 @@ credential grants. Loading the configuration refuses a `url` that does not
 start with `https://` or `ssh://` or repeats another, a `credential` with no
 source in `credentials`, and a `host_key` that is not a readable file.
 
-The storage keys resolve through their credentials' sources whenever the
-host uploads, presigns, downloads or deletes, with surrounding whitespace
-removed. Loading the configuration refuses a `storage` block missing either
-name, or naming a credential with no source in `credentials`. A source that
-fails names the credential and the cause:
-`read storage credential <name>: its environment variable is unset or empty`.
-The credential never leaves the host: receivers and agents get only the URLs it presigns.
-Scope it to `wherry/<tenant>/` in each pool's bucket
-([Operations](operations-hosts.md#s3-storage)).
+The storage keys are the tenant's pair the bundle carries as `storage`,
+recorded by [`tenant storage`](commands.md#wherry-operator-tenant-storage-tenant),
+for every pool with storage, unless the configuration's `storage` maps the
+pool to credentials of its own, which win. Mapped keys resolve through
+their credentials' sources whenever the host uploads, presigns, downloads or
+deletes, with surrounding whitespace removed. Loading the configuration
+refuses a `storage` block missing either name, or naming a credential with
+no source in `credentials`. A source that fails names the credential and
+the cause: `read storage credential <name>: its environment variable is
+unset or empty`. A store's answer can name the access key that signed the
+request, as `InvalidAccessKeyId` does. Every error that leaves the host's
+storage layer and every line it logs has both key values replaced by their
+markers, `[redacted:...]`, so the error `wherry submit` prints, the MCP
+server's private log and the host's log of a failed cleanup show a marker
+in the key's place; the error still carries the store's response code. This
+holds for the bundle's pair and for a mapped pair alike and whatever the
+keys' length: the two storage keys are replaced exactly, with no minimum
+length, where the receiver's redaction of delivered credentials leaves a
+value shorter than 8 bytes. Both values are also held for the host's general
+redaction before the first storage call, exactly and whatever its length,
+also when the same value was resolved earlier as a credential for a run,
+and the reader a download opens reports its errors through the same
+boundary. The keys never leave the host:
+receivers and agents get only the URLs it presigns, and neither key is a
+credential a pool's terms can request. Scope the pair to `wherry/<tenant>/`
+in each pool's bucket ([Operations](operations-hosts.md#s3-storage)).
 
 ## The Kafka super user
 
@@ -478,27 +498,56 @@ rotates with a re-run of `init`.
 ### The operator working directory
 
 The operator's [working directory](configuration-operator.md#operator-working-directory)
-holds `operator.password` and every bundle `tenant host add` and `receiver apply`
-write, so it holds the Kafka password of every principal wherry made. Keep it
-on the operator's machine, readable by the operator alone: `bundles/` is
-mode 0700 and each password and bundle file mode 0600. `init` adds
-`operator.password` and `bundles/` to the directory's `.gitignore`, so the
-pool and receiver files can be kept in git without them. Hand each bundle to
-its host or receiver over a channel you trust.
+holds `operator.password`, every bundle `tenant host add` and `receiver apply`
+write, and each tenant's S3 key pair that `tenant storage` recorded, in
+`storage/<tenant>.yaml`, so it holds the Kafka password of every principal
+wherry made and the storage keys of every tenant: a leaked operator
+directory exposes tenant storage as well as Kafka. Keep it on the
+operator's machine, readable by the operator alone: `bundles/` and
+`storage/` are mode 0700 and each password, bundle and keys file mode 0600.
+`init` adds `operator.password`, `bundles/` and `storage/` to the
+directory's `.gitignore`, so the pool and receiver files can be kept in git
+without them. Hand each bundle to its host or receiver over a channel you
+trust; a host bundle holds the host's Kafka password and its tenant's
+storage pair, two secrets on the one channel.
 
 ### Broker trust
 
-A bundle carries the broker address, the principal and its password, and no
-CA. Every host, receiver and the operator trusts the broker through the
-system's trusted roots, or through the CA file its own configuration names:
-`ca_file` in the host's or receiver's configuration (the host also looks for
-`ca.pem` in its [configuration directory](configuration-host.md#client-configuration),
-by default `~/.config/wherry/ca.pem`) and in `operator.yaml`. `wherry host init`
-asks for the CA only on a terminal, so a host without one has its CA file in
-place before `host init` connects. The Kafka platform issues
-and renews its CA; whoever distributes a private CA keeps each machine's
-file current, and a renewal needs no new bundle. A machine that trusts the
-system roots trusts every CA they hold for the broker's address.
+A bundle carries the broker address, the principal and its password, and,
+when `operator.yaml` names a `ca_file` and the bundle's broker is the
+operator's, that file's certificates as `ca`; a host bundle carries the
+tenant's storage pair as `storage` too. The operator trusts the broker
+through `operator.yaml`. A host or receiver trusts it through the `ca_file`
+its own configuration names, else the bundle's `ca`, else the system's
+trusted roots; a `ca` that holds no certificate is refused rather than
+fallen back from. A `ca_file` overrides the bundle, so a stale one hides a
+refreshed CA: `wherry host init BUNDLE` warns when the configuration keeps a
+`ca_file` and the bundle carries a `ca`, and the renewal below removes the
+line. A machine that trusts the system roots trusts every CA they hold for
+the broker's address.
+
+The Kafka platform issues and renews its CA. A renewal means refreshing and
+redistributing bundles, with no new password:
+
+1. Put the new CA in the file `operator.yaml` names as `ca_file`, keeping
+   the old certificate beside it while the brokers still present the old
+   chain.
+2. Run `wherry operator tenant host refresh TENANT HOST` for each host and
+   `wherry operator receiver apply RECEIVER` for each receiver on the
+   operator's broker. Each rewrites its kept bundle with the new `ca` and
+   the same password, and a rerun changes nothing.
+3. Hand each refreshed bundle over as the first was. Each host's user runs
+   `wherry host init BUNDLE`, which replaces the host's copy, and removes
+   any `ca_file` line from the host configuration; a long-lived MCP server
+   restarts to reread the bundle. Each receiver's platform replaces the
+   bundle and restarts the receiver; a `ca_file` in its local configuration
+   is removed, or its file replaced.
+4. Once every bundle is refreshed, the old certificate may leave the
+   operator's file; the next refresh of each bundle drops it there.
+
+A bundle written before the operator trusted the broker through a CA file
+carries no `ca`. A host or receiver running it with no `ca_file` fails
+against a private-CA broker, and the failure names the refresh.
 
 ## Removal and retained data
 

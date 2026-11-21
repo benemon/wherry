@@ -22,37 +22,88 @@ The host's paths are the same on every OS, macOS included:
 
 | Directory | Path | Holds |
 | --- | --- | --- |
-| configuration directory | `$XDG_CONFIG_HOME/wherry/`, by default `~/.config/wherry/` | `config.yaml`, `bundle.yaml`, `host.key` and, for a private CA, `ca.pem` |
+| configuration directory | `$XDG_CONFIG_HOME/wherry/`, by default `~/.config/wherry/` | `config.yaml`, `bundle.yaml` and `host.key` |
 | state directory | `$XDG_STATE_HOME/wherry/`, by default `~/.local/state/wherry/` | the host's state, `state_dir` |
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `bundle` | path | required | Read the host's bundle from this file. |
-| `ca_file` | path | `ca.pem` in the configuration directory if present | Trust these PEM CA certificates for the broker connection. |
-| `host_key` | path | `host.key` in the configuration directory | Read the host's private Ed25519 JWK. |
-| `state_dir` | path | the host state directory | Store local run records here. |
+| `bundle` | path | required; `host init BUNDLE` writes the [default bundle path](#a-configuration-away-from-the-default-path) when the configuration names none | Read the host's bundle from this file; `host init BUNDLE` copies the bundle here. |
+| `ca_file` | path | none | Trust these PEM CA certificates for the broker connection, in place of the `ca` the bundle carries. |
+| `host_key` | path | `host.key` in the configuration directory, or `<path>.host.key` beside a configuration [away from the default path](#a-configuration-away-from-the-default-path) | Read the host's private Ed25519 JWK. |
+| `state_dir` | path | the host state directory, or `<path>.state/` beside a configuration [away from the default path](#a-configuration-away-from-the-default-path) | Store local run records here. |
 | `credentials` | mapping | none | Map credential names to [sources](security.md#credential-sources). |
 | `git` | list | none | Map URL prefixes to credential names and SSH known-hosts files. |
-| `storage` | mapping | none | Map pool names to S3 `access_key` and `secret_key` credential names. |
+| `storage` | mapping | none | Map pool names to S3 `access_key` and `secret_key` credential names, which win over the `storage` pair the bundle carries for that pool. |
 | `input_roots` | list of paths | MCP server working directory | Allow the MCP server to send inputs from these directories. |
 
-Without a CA file, the host trusts system roots.
+Without a `ca_file`, the host trusts the broker through the bundle's `ca`, and without that through the system roots.
 Each credential source uses exactly one of `file`, `env` and `command`.
+
+### A configuration away from the default path
+
+A host identity is its host key, and a configuration names one. A
+configuration at any path other than the default keeps its files beside
+it, named from its whole path, nothing stripped:
+
+| File | Default configuration | Configuration at `<path>` |
+| --- | --- | --- |
+| the bundle, where `host init BUNDLE` copies it when the configuration names none | `bundle.yaml` in the configuration directory, always | `<path>.bundle.yaml` |
+| the host key file | `host.key` in the configuration directory | `<path>.host.key` |
+| the state directory | the state directory | `<path>.state/` |
+
+So `--config-file /work/a.yaml` and `--config-file /work/b.yaml` are two
+hosts with two keys, and never share one; `/work/a` and `/work/a.yaml` are
+distinct too. The path is made absolute and no symlink is resolved: it is
+the default when it is the default path, so the default configuration
+named relatively keeps the configuration directory's files, or when both
+exist and are one file, so a symlink or hard link to an existing default
+configuration does too. A link to a file not yet written is a
+configuration of its own, with its files beside the link, and stays one
+when that file is the default configuration: writing through the link
+makes it the default file, so `host init` names the `host_key` and
+`state_dir` it chose beside the link in the configuration it writes, and
+every later load, through the link or the default path, keeps them.
+Explicit `bundle`, `host_key` and `state_dir` values are kept wherever the
+configuration is: `host init BUNDLE` copies the bundle to the `bundle` a
+configuration away from the default path names, and to `<path>.bundle.yaml`
+only when it names none; the default configuration's copy is always
+`bundle.yaml` in the configuration directory. `host init` makes the
+configuration directory mode 0700; elsewhere it creates a missing directory
+for these files with mode 0700 and leaves an existing one's mode alone.
+
+Before it writes anything, `host init` refuses when the bundle's
+destination or one of the derived paths already exists and is not the file
+the configuration names: another configuration at `<path>.bundle.yaml`,
+another host's key at `<path>.host.key`, a file where `<path>.state/` would
+go, a directory where the named `bundle` would go, or a symlink to any of
+these or to nothing. A symlink is refused or accepted by what it points at:
+one to the file the configuration names is its own, one whose target does
+not exist is refused rather than written through. The error names the
+path and the setting, `bundle`, `host_key` or `state_dir`, that avoids it.
+A rerun on an initialised configuration, whose files it already names,
+succeeds. Explicit `host_key` and `state_dir` paths are not checked this
+way, and nor are the default configuration's files in the configuration
+directory.
+
 Git entries contain `url`, optional `credential` and `host_key`.
 An SSH remote requires `host_key`.
 An HTTPS remote refuses `host_key`.
 See [Git credentials](security.md#git-credentials).
-A pool without a storage entry has no S3 lane on this host.
+A pool without a storage entry uses the pair the bundle carries as
+`storage`; without that it has no S3 lane on this host.
 MCP input roots must be absolute paths to existing directories.
 CLI commands can read any input path you give them.
 
-`host init` writes `bundle`, a `ca_file` it asked for, and an entry in
-`credentials`, `git` and `storage` for each answer, each a reference to a
-source and never a value; a re-run keeps every entry and adds only what a
-newly entitled pool needs. Without a terminal it asks nothing and lists what
-still has no source. It asks for the CA only on a terminal, so without one a
-broker under a private CA needs `ca.pem` in the configuration directory, or
-`ca_file` in the file, before `host init` runs.
+`host init` writes `bundle`, `host_key` and
+`state_dir` when a configuration written through a link to the default
+path needs them, and an entry in `credentials`, `git` and `storage` for
+each answer, each a reference to a source and never a value; a re-run
+keeps every entry and adds only what a newly entitled pool needs. Without
+a terminal it asks nothing and lists what still has no source. It asks
+nothing about the broker's CA: the bundle carries it. A `ca_file` the
+configuration keeps overrides the bundle's `ca`, so a stale one hides a
+refreshed CA; `host init BUNDLE` warns when the configuration keeps one and
+the bundle carries a `ca`.
 
 `state_dir` holds:
 
@@ -76,8 +127,8 @@ The configuration of host `laptop`, setting every field:
 
 ```yaml
 bundle: ~/.config/wherry/laptop.bundle
-# A private CA the broker's certificate chains to; without ca_file, ~/.config/wherry/ca.pem if it exists, else the
-# system roots.
+# A private CA the broker's certificate chains to, overriding the ca the bundle carries; without ca_file, the bundle's
+# ca, else the system roots.
 ca_file: ~/.config/wherry/kafka-ca.pem
 host_key: ~/.config/wherry/laptop.key
 state_dir: ~/.local/state/wherry/laptop
@@ -114,29 +165,35 @@ storage:
 manager's command for `openai-api-key`, and the submitting process's
 `GITHUB_TOKEN` for `github-token`, which `git` also gives every task cloning
 under `https://github.com/acme/`. `storage` gives pool `build`'s bucket the S3
-access key from a file and the secret key from the password manager; another
-pool with storage takes its own entry. Each source resolves at
-each submit.
+access key from a file and the secret key from the password manager, in place
+of the pair the bundle carries; another pool with storage uses the bundle's
+pair, or takes an entry of its own. Each source resolves at each submit.
 
 ## Bundle
 
 A YAML file that `wherry operator` writes with mode 0600 under the working
-directory's `bundles/`. Unknown fields are errors, so a bundle carrying a
-`ca` is refused, and `broker`, `principal` and `password` are required; a
-decode error names only its line numbers. A trailing line break ends the
-password and is not part of it, and a password of nothing else is refused.
+directory's `bundles/`. Unknown fields are errors, and `broker`, `principal`
+and `password` are required; a decode error names only its line numbers. A
+trailing line break ends the password and is not part of it, and a password
+of nothing else is refused. A `storage` block holds both keys or is refused.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `broker` | string | required | Kafka bootstrap address, `host:port` |
 | `principal` | string | required | SCRAM-SHA-512 user name |
 | `password` | string | required | SCRAM password |
+| `ca` | string | none | PEM CA certificates the host trusts the broker with, written when `operator.yaml` names a `ca_file` |
+| `storage` | mapping | none | the tenant's S3 `access_key` and `secret_key`, plain strings, written when [`tenant storage`](commands.md#wherry-operator-tenant-storage-tenant) recorded them; used for every pool with storage that `storage` in the configuration does not map |
 
-A bundle carries nothing about the broker's TLS CA. The Kafka platform owns
-and renews its CA; each host and receiver trusts the broker through the
-system's roots or the `ca_file` of its own configuration, kept current by
-whoever distributes the Kafka CA. A `ca_file` with no certificate fails with
-`CA contains no certificates`.
+The Kafka platform owns and renews its CA. The operator trusts it through
+`operator.yaml`'s `ca_file`, and every bundle it writes for its broker
+carries that file's certificates as `ca`, so the host needs no CA file of
+its own; a bundle with no `ca` leaves the host on the system roots. A `ca`
+that holds no certificate is refused, and the host does not fall back to
+the system roots. A `ca_file` in the configuration overrides the bundle's
+`ca`; one with no certificate fails with `CA contains no certificates`. When
+the platform renews its CA, the operator refreshes and redistributes each
+bundle, as [Broker trust](security.md#broker-trust) describes.
 
 ## Environment variables
 
@@ -150,9 +207,12 @@ whoever distributes the Kafka CA. A `ca_file` with no certificate fails with
 
 Go's TLS stack reads `SSL_CERT_FILE` as its
 [crypto/x509](https://pkg.go.dev/crypto/x509#SystemCertPool) package
-documents. On Linux, a broker connection without `ca_file`, in any wherry
-command, trusts the roots it names. macOS ignores it for that connection:
-use `ca_file` there. The host's S3 client adds the certificates in
+documents. On Linux, a broker connection that falls back to the system
+roots, with neither a `ca_file` nor a bundle `ca` for a host or receiver and
+no `ca_file` for the operator, trusts the roots it names; a `ca_file` or a
+bundle `ca` replaces the system roots, so `SSL_CERT_FILE` then has no
+effect on that connection. macOS ignores it for the broker connection: use
+`ca_file` there. The host's S3 client adds the certificates in
 `SSL_CERT_FILE` to the system roots for a pool's storage endpoint on every
 OS.
 
@@ -161,4 +221,5 @@ A plugin reads its own variables from the receiver's environment; the
 lists its.
 
 Trailing CR and LF are trimmed from password files: `operator.password`, the
-super user's password file `operator init` reads, and a bundle's password.
+super user's password `operator init` reads from a file, standard input or its
+prompt, and a bundle's password.

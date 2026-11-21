@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
@@ -15,11 +16,15 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/benemon/wherry/internal/operator"
+	"github.com/benemon/wherry/internal/signed"
+	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"
@@ -198,13 +203,109 @@ func TestReceiverShowPrintsWholeNumbersAsIntegers(t *testing.T) {
 	var out bytes.Buffer
 	config := operator.ReceiverConfig{Profiles: []operator.ProfileSettings{{Name: "p", Plugin: "nomad", Agent: "claude",
 		Config: map[string]any{"memory_mb": float64(1 << 20), "ratio": 0.5, "sizes": []any{float64(2048000)}}}}}
-	if err := showReceiver(&out, config); err != nil {
+	if err := showReceiver(&out, config, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"memory_mb: 1048576", "ratio: 0.5", "- 2048000"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("show printed\n%s\nwant %q", out.String(), want)
 		}
+	}
+}
+
+// receiver show reports the receiver's liveness as a host does: live within 120 s of its latest authorised
+// advertisement, stale beyond it, past or future, silent without one and ended once revoked; only the receiver's own
+// key signs an advertisement that counts.
+func TestReceiverShowReportsLiveness(t *testing.T) {
+	service := operatorEnv(t)
+	ctx := context.Background()
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
+		t.Fatal(err)
+	}
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{{Name: "claude", Plugin: "nomad", Agent: "claude"}}, PluginSHA256: map[string]string{"nomad": fakeSHA256}}
+	path, err := bundlePath(".", "receivers", true, "receiver-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ReceiverAdd(ctx, config, service.Broker, path); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := operator.ReadBundle(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := connectTLS(t, bundle.Broker, string(service.CA), bundle.Principal, bundle.Password)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, stranger, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	produce := func(topic, recordKey string, value []byte) {
+		t.Helper()
+		if err := receiver.ProduceSync(ctx, &kgo.Record{Topic: topic, Key: []byte(recordKey), Value: value}).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	advertise := func(at time.Time, key ed25519.PrivateKey) {
+		t.Helper()
+		encoded, err := wire.SignRecord(&wire.Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []wire.Offer{{Profile: "claude", Agent: "claude"}}, Capacity: 1, AtMS: at.UnixMilli()}, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		produce(operator.PoolReceiversTopic("pool-a"), "receiver-a", encoded)
+	}
+	status := func() (string, string) {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := runOperator([]string{"receiver", "show", "receiver-a"}, &stdout, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.SplitN(stdout.String(), "\n", 3)
+		if !strings.HasPrefix(lines[0], "status: ") {
+			t.Fatalf("show printed\n%s\nwant the status first", stdout.String())
+		}
+		advertised := ""
+		if strings.HasPrefix(lines[1], "last_advertised: ") {
+			advertised = strings.TrimPrefix(lines[1], "last_advertised: ")
+		}
+		return strings.TrimPrefix(lines[0], "status: "), advertised
+	}
+	if got, at := status(); got != "silent" || at != "" {
+		t.Fatalf("status before any advertisement %q at %q; want silent", got, at)
+	}
+	registration, err := signed.RegisterKey("receiver-a", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	produce(operator.ReceiverTopic("receiver-a"), "receiver-a", registration)
+	advertise(time.Now(), stranger)
+	if got, _ := status(); got != "silent" {
+		t.Fatalf("status with an advertisement under another key %q; want silent", got)
+	}
+	old := time.Now().Add(-121 * time.Second)
+	advertise(old, key)
+	if got, at := status(); got != "stale" || !strings.HasPrefix(at, old.UTC().Format(time.RFC3339)[:19]) {
+		t.Fatalf("status with a 121 s old advertisement %q at %q; want stale at %s", got, at, old.UTC().Format(time.RFC3339))
+	}
+	advertise(time.Now(), key)
+	if got, at := status(); got != "live" || at == "" {
+		t.Fatalf("status with a current advertisement %q at %q; want live with its time", got, at)
+	}
+	// The latest advertisement by its own date counts, so one dated ahead masks the receiver until that time passes.
+	advertise(time.Now().Add(121*time.Second), key)
+	if got, _ := status(); got != "stale" {
+		t.Fatalf("status with an advertisement dated 121 s ahead %q; want stale", got)
+	}
+	revocationBounds(t, service, "1")
+	if result := service.RevokeReceiver(ctx, "receiver-a", 0, deniedProbe(service, ""), nil); !result.Complete {
+		t.Fatalf("revocation incomplete: %+v", result)
+	}
+	if got, at := status(); got != "ended" || at != "" {
+		t.Fatalf("status after revocation %q at %q; want ended", got, at)
 	}
 }
 
@@ -253,8 +354,9 @@ profiles:
       signature: "claude\n"
       topic: wherry.pool.pool-a.tasks.claude.98038b25280788a45a2f06c209513024c99adee81c6416b691b4b5872db7e027
 `
-	if got := wherry("receiver", "show", "receiver-a"); got != shown {
-		t.Fatalf("show printed\n%s\nwant\n%s", got, shown)
+	// Nothing has advertised as receiver-a, so show reports it silent before the record.
+	if got := wherry("receiver", "show", "receiver-a"); got != "status: silent\n"+shown {
+		t.Fatalf("show printed\n%s\nwant\n%s", got, "status: silent\n"+shown)
 	}
 	profile := item("name: claude\nagent: claude\nlabels: {tier: batch}\nconfig: {runtime: {config: {image: claude:1}}}\n", "      ")
 	receiverFile := func(head string) string {
@@ -307,7 +409,7 @@ profiles:
 	if err := runOperator([]string{"receiver", "show", "receiver-b"}, io.Discard, io.Discard); err == nil {
 		t.Fatal("apply --dry-run recorded receiver-b")
 	}
-	if got := wherry("receiver", "show", "receiver-a"); got != shown {
+	if got := wherry("receiver", "show", "receiver-a"); got != "status: silent\n"+shown {
 		t.Fatalf("after a dry run, show printed\n%s\nwant the recorded configuration", got)
 	}
 	outside := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": "plugin_sha256: {nomad: " + fakeSHA256 + "}\n" + basePlugin + item("name: codex\nagent: codex\n", "      ")}), "receiver.yaml")
@@ -320,8 +422,226 @@ profiles:
 	if got := wherry("receiver", "apply", "receiver-a", "-f", receiverFile("pool: pool-a\nplugin_sha256: {nomad: "+fakeSHA256+"}\n")); got != "" || records() != before+1 {
 		t.Fatalf("apply printed %q and left %d records; want nothing printed and one record more than %d", got, records(), before)
 	}
-	if got := wherry("receiver", "show", "receiver-a"); got != dryRun {
-		t.Fatalf("show printed\n%s\nwant what the dry run printed\n%s", got, dryRun)
+	if got := wherry("receiver", "show", "receiver-a"); got != "status: silent\n"+dryRun {
+		t.Fatalf("show printed\n%s\nwant what the dry run printed, after the status\n%s", got, dryRun)
+	}
+}
+
+// revocationBounds sets the broker timeouts that bound revocation's step 5 on the fake broker, which otherwise reports
+// none.
+func revocationBounds(t *testing.T, service *operator.Service, value string) {
+	t.Helper()
+	var alters []kadm.AlterConfig
+	for _, name := range []string{"connections.max.reauth.ms", "group.share.max.record.lock.duration.ms", "transaction.max.timeout.ms"} {
+		alters = append(alters, kadm.AlterConfig{Op: kadm.SetConfig, Name: name, Value: &value})
+	}
+	responses, err := kadm.NewClient(service.Operator).AlterBrokerConfigs(context.Background(), alters)
+	if err == nil {
+		err = responses[0].Err
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// deniedProbe stands for every broker denying the revoked principal, which the fake broker's authorisation answers do
+// not reproduce.
+func deniedProbe(*operator.Service, string) func(context.Context, string, string) error {
+	return func(context.Context, string, string) error { return operator.ErrAuthorizationDenied }
+}
+
+// stubProbe replaces the remove commands' probe for the test.
+func stubProbe(t *testing.T, probe func(*operator.Service, string) func(context.Context, string, string) error) {
+	t.Helper()
+	saved := revocationProbe
+	revocationProbe = probe
+	t.Cleanup(func() { revocationProbe = saved })
+}
+
+// lineWriter tells each complete line written to it, with the time the line arrived.
+type lineWriter struct {
+	mu   sync.Mutex
+	rest []byte
+	told func(line string, at time.Time)
+}
+
+func (w *lineWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.rest = append(w.rest, p...)
+	for {
+		i := bytes.IndexByte(w.rest, '\n')
+		if i < 0 {
+			return len(p), nil
+		}
+		w.told(string(w.rest[:i]), time.Now())
+		w.rest = w.rest[i+1:]
+	}
+}
+
+// remove prints each step as it ends and step 5 as it starts, while the command is still in its wait, with the time
+// that wait ends; it deletes the principal's bundle once the revocation is complete, keeps it after an incomplete one,
+// and deletes it on a rerun that finds the principal already ended.
+func TestRemoveDeletesTheBundleOnceRevocationCompletes(t *testing.T) {
+	service := operatorEnv(t)
+	ctx := context.Background()
+	if err := service.TenantAdd(ctx, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runOperator([]string{"tenant", "host", "add", "tenant-a", "host-a"}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	hostBundle := filepath.Join("bundles", "hosts", "tenant-a", "host-a.bundle")
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
+		t.Fatal(err)
+	}
+	receiverBundle, err := bundlePath(".", "receivers", true, "receiver-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{{Name: "claude", Plugin: "nomad", Agent: "claude"}}, PluginSHA256: map[string]string{"nomad": fakeSHA256}}
+	if err := service.ReceiverAdd(ctx, config, service.Broker, receiverBundle); err != nil {
+		t.Fatal(err)
+	}
+	// After the pool, whose lock duration the share-group ceiling bounds.
+	revocationBounds(t, service, "1")
+	exists := func(path string) bool {
+		t.Helper()
+		_, err := os.Stat(path)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		return err == nil
+	}
+	stubProbe(t, func(*operator.Service, string) func(context.Context, string, string) error {
+		return func(context.Context, string, string) error { return errors.New("injected probe failure") }
+	})
+	var stdout bytes.Buffer
+	if err := runOperator([]string{"tenant", "host", "remove", "tenant-a", "host-a"}, &stdout, io.Discard); err == nil || err.Error() != "revocation incomplete" {
+		t.Fatalf("remove with a failing probe = %v; want revocation incomplete", err)
+	}
+	if !exists(hostBundle) {
+		t.Fatalf("remove deleted %s after an incomplete revocation:\n%s", hostBundle, stdout.String())
+	}
+	stubProbe(t, deniedProbe)
+	// A wait well above the broker-derived minimum, watched as it runs: the started line must arrive while the command is
+	// still in step 5, naming the time that wait ends, and step 5 must end about that long after it.
+	const wait = 2 * time.Second
+	var mu sync.Mutex
+	var lines []string
+	var startedAt, completedAt time.Time
+	started, completed := make(chan struct{}), make(chan struct{})
+	printed := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return strings.Join(lines, "\n")
+	}
+	out := &lineWriter{told: func(line string, at time.Time) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, line)
+		switch {
+		case strings.HasPrefix(line, "step=5 started "):
+			startedAt = at
+			close(started)
+		case strings.HasPrefix(line, "step=5 complete="):
+			completedAt = at
+			close(completed)
+		}
+	}}
+	done := make(chan error, 1)
+	go func() {
+		done <- runOperator([]string{"tenant", "host", "remove", "tenant-a", "host-a", "--wait", wait.String()}, out, io.Discard)
+	}()
+	select {
+	case <-started:
+	case err := <-done:
+		t.Fatalf("remove = %v, printing\n%s\nwant step 5 announced as it starts", err, printed())
+	}
+	select {
+	case <-completed:
+		t.Fatalf("step 5 ended within %s of its announcement:\n%s\nwant the announcement while the wait runs", wait/2, printed())
+	case <-time.After(wait / 2):
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("remove = %v\n%s", err, printed())
+	}
+	index := slices.IndexFunc(lines, func(line string) bool { return strings.HasPrefix(line, "step=5 started name=wait until=") })
+	if index < 1 || index+1 >= len(lines) || !strings.HasPrefix(lines[index-1], "step=4 complete=true") || !strings.HasPrefix(lines[index+1], "step=5 complete=true") {
+		t.Fatalf("remove printed\n%s\nwant step 5 announced as it starts, between steps 4 and 5 ending", printed())
+	}
+	until, err := time.Parse(time.RFC3339, strings.TrimPrefix(lines[index], "step=5 started name=wait until="))
+	if err != nil {
+		t.Fatalf("progress line %q; want until as the RFC 3339 time the wait ends", lines[index])
+	}
+	// until is written to the second, so it is up to a second before the announcement plus the wait, never after.
+	if ahead := until.Sub(startedAt.Add(wait)); ahead <= -2*time.Second || ahead > 0 {
+		t.Fatalf("step 5 announced at %s until %s; want until the wait %s after the announcement", startedAt.Format(time.RFC3339Nano), until.Format(time.RFC3339), wait)
+	}
+	if actual := completedAt.Sub(startedAt); actual < wait-100*time.Millisecond {
+		t.Fatalf("step 5 ended %s after its announcement; want the announced wait %s", actual, wait)
+	}
+	if exists(hostBundle) {
+		t.Fatalf("remove kept %s after a complete revocation:\n%s", hostBundle, printed())
+	}
+	// A rerun finds the host already ended; it deletes a bundle an earlier run left, and a missing one is no error.
+	if err := runOperator([]string{"tenant", "host", "remove", "tenant-a", "host-a"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("rerun without a bundle = %v", err)
+	}
+	if err := os.WriteFile(hostBundle, []byte("left over"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	if err := runOperator([]string{"tenant", "host", "remove", "tenant-a", "host-a"}, &stdout, io.Discard); err != nil || !strings.HasPrefix(stdout.String(), "step=6 complete=true name=already ended") {
+		t.Fatalf("rerun = %v with output %q; want the already-ended step", err, stdout.String())
+	}
+	if exists(hostBundle) {
+		t.Fatalf("rerun kept %s after finding the host ended", hostBundle)
+	}
+	if err := runOperator([]string{"receiver", "remove", "receiver-a"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("receiver remove = %v", err)
+	}
+	if exists(receiverBundle) {
+		t.Fatalf("receiver remove kept %s after a complete revocation", receiverBundle)
+	}
+}
+
+// A receiver remove retried after the receiver's revocation completed but its bundle was left behind finds the receiver
+// already ended: it runs no new revocation, so it completes although the broker's timeouts would now refuse one, and
+// deletes the leftover bundle; a further rerun without a bundle is no error.
+func TestReceiverRemoveRetryDeletesTheBundleOfAnEndedReceiver(t *testing.T) {
+	service := operatorEnv(t)
+	ctx := context.Background()
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := bundlePath(".", "receivers", true, "receiver-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{{Name: "claude", Plugin: "nomad", Agent: "claude"}}, PluginSHA256: map[string]string{"nomad": fakeSHA256}}
+	if err := service.ReceiverAdd(ctx, config, service.Broker, bundle); err != nil {
+		t.Fatal(err)
+	}
+	revocationBounds(t, service, "1")
+	// The revocation completes without the command, which is what leaves its bundle: a cleanup interrupted after step 6.
+	if result := service.RevokeReceiver(ctx, "receiver-a", 0, deniedProbe(service, ""), nil); !result.Complete {
+		t.Fatalf("revocation incomplete: %+v", result)
+	}
+	// Unbounded timeouts refuse any new revocation at step 1, so only a retry that recognises the ended receiver completes.
+	revocationBounds(t, service, "0")
+	stubProbe(t, deniedProbe)
+	var stdout bytes.Buffer
+	if err := runOperator([]string{"receiver", "remove", "receiver-a"}, &stdout, io.Discard); err != nil || !strings.HasPrefix(stdout.String(), "step=6 complete=true name=already ended") {
+		t.Fatalf("retry = %v with output %q; want the already-ended step", err, stdout.String())
+	}
+	if _, err := os.Stat(bundle); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retry left %s (%v); want the ended receiver's bundle deleted", bundle, err)
+	}
+	if err := runOperator([]string{"receiver", "remove", "receiver-a"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("rerun without a bundle = %v", err)
 	}
 }
 

@@ -583,7 +583,7 @@ func TestProfileReplicasConfigurations(t *testing.T) {
 						t.Fatalf("legacy capacity refused: %v", err)
 					}
 					var shown bytes.Buffer
-					if err := showReceiver(&shown, config); err != nil {
+					if err := showReceiver(&shown, config, nil); err != nil {
 						t.Fatal(err)
 					}
 					if strings.Contains(shown.String(), "capacity:") {

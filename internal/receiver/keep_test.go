@@ -405,7 +405,7 @@ func TestBackToBackClaimsRenewOnTheKeptClient(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		f.receiver.claimLoop(ctx, ctx, f.receiver.profiles[0], func() {})
+		f.receiver.claimLoop(ctx, ctx, f.receiver.profiles[0], newClaimTurn(), func() {})
 	}()
 	t.Cleanup(func() { stop(); <-done })
 	f.submit(t, f.host, nil)

@@ -41,6 +41,9 @@ const (
 	// commitAttempts bounds the commits of one snapshot write; commitRetryInterval separates them.
 	commitAttempts      = 3
 	commitRetryInterval = 200 * time.Millisecond
+	// stableRetry separates the reads of a committed snapshot waiting for its commit marker; stableWait bounds them.
+	stableRetry = 50 * time.Millisecond
+	stableWait  = 5 * time.Second
 	// sessionTimeout is the custodian group's session timeout, also the window in which a second fence stands a
 	// contesting custodian down.
 	sessionTimeout = 45 * time.Second
@@ -558,11 +561,11 @@ func (r *Receiver) publish(ctx context.Context, keys map[string]*poolKey, reason
 	if err == nil {
 		err = producer.BeginTransaction()
 	}
-	produced := "none"
+	produced, producedOffset := "none", int64(-1)
 	if err == nil {
 		var record *kgo.Record
 		if record, err = producer.ProduceSync(ctx, &kgo.Record{Topic: operator.CustodianTopic(r.config.Pool), Key: []byte(wire.CustodianKey), Value: value}).First(); err == nil {
-			produced = strconv.FormatInt(record.Offset, 10)
+			produced, producedOffset = strconv.FormatInt(record.Offset, 10), record.Offset
 			err = commitSnapshot(ctx, producer)
 			if err != nil && !fenced(err) && !authorisationError(err) {
 				r.metrics.ambiguousCommits.Inc()
@@ -576,6 +579,12 @@ func (r *Receiver) publish(ctx context.Context, keys map[string]*poolKey, reason
 		r.deny(err, capWrite)
 	}
 	latest, readErr := r.readCurrent(ctx)
+	// Kafka answers a commit before its marker reaches the partition, and the last stable offset passes the snapshot
+	// only once the marker does.
+	for wait := time.Now().Add(stableWait); err == nil && readErr == nil && latest.end <= producedOffset && time.Now().Before(wait); {
+		sleep(ctx, stableRetry)
+		latest, readErr = r.readCurrent(ctx)
+	}
 	if readErr != nil || latest.record == nil || !bytes.Equal(latest.record.Value, value) {
 		superseded := readErr == nil && latest.record != nil && !latest.names(r) && (from.record == nil || latest.record.Offset > from.record.Offset)
 		if fenced(err) {

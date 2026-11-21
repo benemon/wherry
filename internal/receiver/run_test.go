@@ -788,7 +788,7 @@ func TestAdoptionFallsBackToStartedWithoutTheHoldersProgress(t *testing.T) {
 			switch cause {
 			case "ended":
 				revocationBounds(t, f.service, "1")
-				result := f.service.RevokeReceiver(f.ctx, "receiver-peer", time.Millisecond, func(context.Context, string, string) error { return operator.ErrAuthorizationDenied })
+				result := f.service.RevokeReceiver(f.ctx, "receiver-peer", time.Millisecond, func(context.Context, string, string) error { return operator.ErrAuthorizationDenied }, nil)
 				revocationBounds(t, f.service, "")
 				if !result.Complete {
 					t.Fatalf("incomplete revocation: %+v", result)
@@ -826,7 +826,7 @@ func TestLastOffsetSkipsOnlyAnEndedHoldersTopicDenial(t *testing.T) {
 	f.holding(t, task, hash, "receiver-peer", peerSigning, "claimed", nil)
 	f.produce(t, operator.ReceiverProgressTopic("receiver-peer"), testRun("run-peer"), progressRecord(t, hash, 42, nil))
 	revocationBounds(t, f.service, "1")
-	result := f.service.RevokeReceiver(f.ctx, "receiver-peer", time.Millisecond, func(context.Context, string, string) error { return operator.ErrAuthorizationDenied })
+	result := f.service.RevokeReceiver(f.ctx, "receiver-peer", time.Millisecond, func(context.Context, string, string) error { return operator.ErrAuthorizationDenied }, nil)
 	revocationBounds(t, f.service, "")
 	if !result.Complete {
 		t.Fatalf("incomplete revocation: %+v", result)
@@ -966,7 +966,7 @@ func TestFollowLinkLossResumesFromOffset(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.plugin.linkLost = 1
 	f.submit(t, f.host, nil)
-	if err := f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], func() {}); err != nil {
+	if err := f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], newClaimTurn(), func() {}); err != nil {
 		t.Fatal(err)
 	}
 	if task := f.lastTask(t); task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "done" {
@@ -1000,7 +1000,7 @@ func TestFollowErrorResumesFromOffsetByJobState(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.plugin.linkLost, f.plugin.lostErr, f.plugin.job = 1, errors.New("stream reset"), test.state
 			f.submit(t, f.host, nil)
-			if err := f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], func() {}); err != nil {
+			if err := f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], newClaimTurn(), func() {}); err != nil {
 				t.Fatal(err)
 			}
 			if task := f.lastTask(t); task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "done" {
@@ -1061,7 +1061,7 @@ func TestFollowFailureRetriesUntilTaskEndedBy(t *testing.T) {
 				task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = endBy, endBy
 			})
 			done := make(chan error, 1)
-			go func() { done <- f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], func() {}) }()
+			go func() { done <- f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], newClaimTurn(), func() {}) }()
 			select {
 			case err := <-done:
 				if err != nil {
@@ -1134,7 +1134,7 @@ func TestFollowRetryChecksTheRunDeadline(t *testing.T) {
 			f.submit(t, f.host, func(task *wire.Submission) {
 				task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = endBy, endBy
 			})
-			if err := f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], func() {}); err != nil {
+			if err := f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], newClaimTurn(), func() {}); err != nil {
 				t.Fatal(err)
 			}
 			if state, reason := terminalReason(t, f, testRun("run-a")); state != wire.TaskStateFailed || reason != wire.NotEndedBy(endBy) {
@@ -1671,7 +1671,7 @@ func TestShutdownDuringACommitCommitsTheDeliveredLine(t *testing.T) {
 			t.Cleanup(base.Close)
 			f.receiver.base = base
 			f.submit(t, f.host, nil)
-			if err := f.receiver.claimOne(ctx, ctx, f.receiver.profiles[0], func() {}); err != nil && !errors.Is(err, context.Canceled) {
+			if err := f.receiver.claimOne(ctx, ctx, f.receiver.profiles[0], newClaimTurn(), func() {}); err != nil && !errors.Is(err, context.Canceled) {
 				t.Fatalf("claimOne after shutdown: %v", err)
 			}
 			for _, chunk := range f.chunks(t) {

@@ -27,16 +27,15 @@ The paths you enter are on the receiver's host, so Wherry does not complete or c
 | Question | Choices or default | Field |
 | --- | --- | --- |
 | Bundle path | `/etc/wherry/receiver.bundle` | `bundle` |
-| Broker CA | **CA file**, then **CA file path** (default `/etc/wherry/kafka-ca.pem`), or **System roots**. CA file is selected when the receiver uses the operator's broker and `operator.yaml` names a CA; otherwise System roots is selected. | `ca_file` |
 | State directory (must survive restarts) | `/var/lib/wherry/state` | `state_dir` |
 | Plugin directory | `/usr/local/libexec/wherry/plugins` | `plugin_dir` |
 | Stop window (how long its platform waits before killing it) | `30s` | `drain_timeout`, calculated below |
 | Metrics | **Listen on an address**, then **Metrics address** (default `:9464`), or **No listener** | `metrics_addr` |
 | Credential NAME | **Environment variable**, then **Variable**, or **File**, then **File path** | `credentials` |
 
-Choose System roots to trust the broker through the system's trusted roots; Wherry leaves out `ca_file`.
+Wherry asks nothing about the broker's CA: the bundle carries it, and Wherry writes no `ca_file`.
 Choose No listener to serve no metrics; Wherry writes an empty `metrics_addr`.
-After you choose CA file or an address, `none` is an ordinary value.
+After you choose an address, `none` is an ordinary value.
 The Variable default is the credential name in upper case, with characters outside `[A-Z0-9_]` replaced by `_`, prefixed with `_` if it starts with a digit.
 File path has no default.
 Wherry shows why it refuses an answer on the same page, and you correct it and continue.
@@ -50,8 +49,6 @@ Wherry asks once per credential named by the merged profiles, in sorted order.
 A profile can remove an inherited credential with `credential: null`.
 Only the file can set `drain_timeout: 0s` or a `command` credential source.
 Every credential named by a profile must have a source.
-A missing `ca_file` produces a warning when the receiver uses the operator's broker and the operator names a CA.
-You may still trust that broker through the system roots.
 With `--dry-run`, standard error names the provided file or says apply will ask.
 Standard output keeps the receiver record format.
 
@@ -66,7 +63,6 @@ Replace `<version>` with the version you installed.
 | Answer | Nomad docker | Nomad exec | Kubernetes | systemd |
 | --- | --- | --- | --- | --- |
 | Bundle | `/secrets/receiver.bundle` | `/secrets/receiver.bundle` | `/etc/wherry/bundle/bundle.yaml` | `/run/credentials/wherry-receiver.service/bundle` |
-| Broker CA | System roots | System roots | System roots | System roots |
 | State | `/var/lib/wherry/state` | `/var/lib/wherry/state` | `/var/lib/wherry/state` | `/var/lib/wherry/state` |
 | Plugins | `/usr/local/libexec/wherry/plugins` | `/usr/local/libexec/wherry/<version>/plugins` | `/usr/local/libexec/wherry/plugins` | `/usr/local/libexec/wherry/plugins` |
 | Stop window | `30s` | `30s` | `30s` | `30s` |
@@ -74,8 +70,9 @@ Replace `<version>` with the version you installed.
 | Credentials | none; workload identity supplies `NOMAD_TOKEN` | none; workload identity supplies `NOMAD_TOKEN` | none; service account | none |
 
 Each example sets `drain_timeout: 20s`.
-For a private broker CA, choose CA file, then enter `/secrets/kafka-ca.pem` on Nomad,
-`/etc/wherry/kafka-ca/ca.crt` on Kubernetes or `/etc/wherry/kafka-ca.pem` on systemd.
+The bundle carries a private broker CA, so the examples need no CA file. A `ca_file` an example's `config.yaml` names,
+such as `/secrets/kafka-ca.pem` on Nomad, `/etc/wherry/kafka-ca/ca.crt` on Kubernetes or `/etc/wherry/kafka-ca.pem`
+on systemd, overrides the bundle's `ca`: keep that file current, or remove the line.
 
 ### Where wherry looks for the file
 
@@ -89,14 +86,14 @@ A leading `~/` expands in the flag and configuration paths.
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `bundle` | path | required | Read the receiver's bundle from this file. |
-| `ca_file` | path | none | Trust these PEM CA certificates for the broker connection. |
+| `ca_file` | path | none | Trust these PEM CA certificates for the broker connection, in place of the `ca` the bundle carries. |
 | `state_dir` | path | `state` beside the bundle | Store the signing key and retained pool keys here. |
 | `plugin_dir` | path | `/usr/local/libexec/wherry/plugins` | Find the `wherry-plugin-<type>` binaries here. |
 | `metrics_addr` | string | none | Serve `/metrics` at this `HOST:PORT`. |
 | `drain_timeout` | duration | `0s` | Let held runs continue for this long after a stop signal. |
 | `credentials` | mapping | none | Map platform credential names to [sources](security.md#credential-sources). |
 
-Without a CA file, the receiver trusts system roots.
+Without a `ca_file`, the receiver trusts the broker through the bundle's `ca`, and without that through the system roots.
 Pool keys live under `state_dir/pool-keys/`.
 Keep the state directory across restarts.
 Plugin binaries can be symbolic links.
@@ -155,7 +152,8 @@ example](#receiver-configuration-example) names:
 
 ```yaml
 bundle: /etc/wherry/receiver.bundle
-# A private CA the broker's certificate chains to; without ca_file, the system roots.
+# A private CA the broker's certificate chains to, overriding the ca the bundle carries; without ca_file, the bundle's
+# ca, else the system roots.
 ca_file: /etc/wherry/kafka-ca.pem
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
@@ -468,7 +466,7 @@ default, such as the Nomad plugin's `NOMAD_TOKEN`.
 
 Sources stay on the receiver's host. `wherry.operator`, which every principal
 reads, records the credential's name alone, and the receiver's bundle holds
-its Kafka identity alone. [Receiver on Nomad](install-receiver-nomad.md#run-the-receiver-in-nomad)
+its Kafka identity and the broker's CA alone. [Receiver on Nomad](install-receiver-nomad.md#run-the-receiver-in-nomad)
 uses the Nomad example's local configuration, which names no platform
 credential: its receiver takes the Nomad token from the job's workload identity.
 

@@ -35,9 +35,9 @@ The names used throughout are pool `build`, agent `claude`, tenant `acme` and ho
 | `pools/build.yaml` | you | `wherry-prod/` | the pool's terms: its agents and limits |
 | `receivers/<name>.yaml` | you, on your receiver page | `wherry-prod/` | the receiver's configuration: its pool, plugin pin and profiles |
 | `receivers/<name>.config.yaml` | you, on your receiver page | `wherry-prod/` | the receiver's local configuration: where it finds its files on its platform |
-| `bundles/receivers/<name>.bundle` | `receiver apply` | `wherry-prod/` | the receiver's Kafka identity: broker, principal and password |
-| `bundles/hosts/acme/laptop.bundle` | `tenant host add` | `wherry-prod/` | your laptop's Kafka identity |
-| `config.yaml`, `bundle.yaml`, `host.key`, `ca.pem` | `host init` and you | `~/.config/wherry/` on your laptop | your laptop's configuration |
+| `bundles/receivers/<name>.bundle` | `receiver apply` | `wherry-prod/` | the receiver's Kafka identity: broker, principal and password, and the broker's CA |
+| `bundles/hosts/acme/laptop.bundle` | `tenant host add` | `wherry-prod/` | your laptop's Kafka identity, the broker's CA and, once `tenant storage` records it, the tenant's S3 key pair |
+| `config.yaml`, `bundle.yaml`, `host.key` | `host init` | `~/.config/wherry/` on your laptop | your laptop's configuration |
 
 The bundles hold passwords.
 `operator init` keeps `bundles/` and `operator.password` out of git through `wherry-prod/.gitignore`.

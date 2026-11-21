@@ -47,9 +47,12 @@ Identity is a Kafka principal authenticated with
 [SCRAM-SHA-512](https://kafka.apache.org/documentation/#security_sasl_scram)
 over TLS. `wherry operator` creates each host and receiver principal, sets a
 generated password, and writes a **bundle**: a file, mode 0600, holding the
-broker address, the principal and its password, and no CA: each machine
-trusts the broker through the system roots or a CA file in its own
-configuration. The operator hands the bundle to the host or receiver. It never travels over Kafka.
+broker address, the principal and its password, and the broker's CA when
+the operator trusts it through a CA file: each machine trusts the broker
+through a CA file in its own configuration, else the bundle's CA, else the
+system roots. A host's bundle also carries its tenant's S3 key pair when the
+operator recorded one. The operator hands the bundle to the host or
+receiver. It never travels over Kafka.
 
 | Principal | Name |
 | --- | --- |

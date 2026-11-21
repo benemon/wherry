@@ -172,7 +172,7 @@ func TestAbsentTenantCommands(t *testing.T) {
 		"pool add":    func() error { return service.TenantPoolAdd(ctx, "absent", "p") },
 		"pool remove": func() error { return service.TenantPoolRemove(ctx, "absent", "p") },
 		"host add":    func() error { return service.HostAdd(ctx, "absent", "h", filepath.Join(t.TempDir(), "bundle"), false) },
-		"host remove": func() error { return revocationError(service.RevokeHost(ctx, "absent", "h", 0, denied)) },
+		"host remove": func() error { return revocationError(service.RevokeHost(ctx, "absent", "h", 0, denied, nil)) },
 		"remove":      func() error { return removeTenantFixture(service, ctx, "absent") },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -487,7 +487,7 @@ func TestChecksIgnoreEndedTopicsAndUnrelatedPoolRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	revocationBounds(t, service, "1", "1", "1")
-	if result := service.RevokeHost(ctx, "t", "h", 0, denied); !result.Complete {
+	if result := service.RevokeHost(ctx, "t", "h", 0, denied, nil); !result.Complete {
 		t.Fatal(result)
 	}
 	if err := removeTenantFixture(service, ctx, "t"); err != nil {

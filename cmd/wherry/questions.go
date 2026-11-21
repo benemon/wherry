@@ -199,6 +199,52 @@ func (q *questions) ask(label, description, initial, kind string, validate func(
 	}
 	return value, q.answer(label, value)
 }
+
+// secret asks for a value that is never shown: the input masks what is typed, offers no completion, prints no
+// answer line, and returns the text as typed, spaces included. validate sees that text; its error must not quote it.
+func (q *questions) secret(label string, validate func(string) error) (string, error) {
+	text := ""
+	field := huh.NewInput().Title(display(label)).EchoMode(huh.EchoModePassword).Value(&text).Validate(func(s string) error {
+		if err := validate(s); err != nil {
+			return errors.New(display(err.Error()))
+		}
+		return nil
+	})
+	if err := q.run(field); err != nil {
+		return "", err
+	}
+	return text, nil
+}
+
+func stdinIsTerminal() bool {
+	in, ok := stdin.(*os.File)
+	return ok && term.IsTerminal(int(in.Fd()))
+}
+
+// terminalStandardInput is the refusal for a flag given `-` while standard input is a terminal, where the masked
+// prompt is the route; nil otherwise. what names the secret, as in "password".
+func terminalStandardInput(flag, what string) error {
+	if !stdinIsTerminal() {
+		return nil
+	}
+	return fmt.Errorf("standard input is a terminal; leave out --%s to be asked for the %s, or pipe it in", flag, what)
+}
+
+// secretFromStandardInput reads the secret a flag given `-` names: all of standard input, as the bytes arrive. A
+// terminal is refused. Errors name standard input, never the flag's value.
+func secretFromStandardInput(flag, what string) ([]byte, error) {
+	if err := terminalStandardInput(flag, what); err != nil {
+		return nil, err
+	}
+	b, err := io.ReadAll(stdin)
+	if err != nil {
+		return nil, fmt.Errorf("standard input: %w", err)
+	}
+	if len(strings.TrimRight(string(b), "\r\n")) == 0 {
+		return nil, fmt.Errorf("standard input held no %s", what)
+	}
+	return b, nil
+}
 func safeCandidates(list []string) []string {
 	list = slices.DeleteFunc(list, func(s string) bool { return display(s) != s })
 	slices.Sort(list)

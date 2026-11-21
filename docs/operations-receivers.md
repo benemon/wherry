@@ -20,8 +20,9 @@ For Nomad, follow the plugin's [receiver policy](https://github.com/benemon/wher
    Without the flag, it reads `/etc/wherry/config.yaml`.
 6. Check the logs for `registered key: signing=<key id>` and `configured: pool=<pool> profiles=<n> replicas=<n>`.
    `waiting for configuration` means the configuration record is missing.
-7. Run `wherry host receivers` from an entitled tenant's host.
-   Check that the receiver is `live` after its first advertisement.
+7. Run `wherry operator receiver show RECEIVER` and check `status: live`
+   after the receiver's first advertisement. `wherry host receivers` from an
+   entitled tenant's host shows the same status.
 
 Losing the signing key prevents reuse of the receiver's identity.
 Losing pool keys can fail tasks that depend on them.
@@ -150,8 +151,11 @@ Each plugin's README runs the receiver on its platform, with its steps:
 ### What a receiver subscribes to
 
 Each profile has one share client per effective replica, subscribing only to that
-profile's signature topic through the pool's share group. An idle loop keeps its
-client across empty polls. A loop also keeps its client across claims: after a
+profile's signature topic through the pool's share group. One client per profile
+polls at a time; the others stay joined, so the next takes over without a join
+([Claim topology](design.md#claim-topology) explains why). A crashed receiver
+therefore leaves about one parked fetch per profile, and each can use one of a
+task's bounded deliveries. A loop also keeps its client across claims: after a
 claim ends with an accept or reject the broker answered without error, and no
 further task was fetched meanwhile, the next poll is on the same member and
 does not wait for a join. Any other end of a claim closes the client, which
@@ -187,10 +191,9 @@ other tasks that reach the readiness check:
    exhausted` terminal and rejects the task. If that commit fails, it releases
    the task.
 
-The unready profile's other replicas still polling may each acquire it once
-before they close their idle clients. For that readiness withdrawal, this
-allows up to the profile's effective replica count minus one more deliveries.
-A `replicas` value of 0 or an absent field means one replica.
+Only one replica per profile polls at a time, and it closes before another
+replica polls after the readiness withdrawal. A `replicas` value of 0 or an
+absent field means one replica.
 
 ### A receiver with no ready offer
 

@@ -37,25 +37,18 @@ func localReceiver() operator.ReceiverConfig {
 	return operator.ReceiverConfig{Receiver: "r", Broker: "broker", Profiles: []operator.ProfileSettings{{Name: "a", Plugin: "nomad", Config: map[string]any{"credential": "nomad-token"}}}}
 }
 
-// localForms accept every default: CA file first when needsCA, a metrics address, and each variable as derived.
-func localForms(needsCA bool, variables ...string) []receiverForm {
-	ca := "roots"
-	if needsCA {
-		ca = "file"
-	}
-	forms := []receiverForm{inputForm("/etc/wherry/receiver.bundle", "\r"), pickForm(ca, "\r")}
-	if needsCA {
-		forms = append(forms, inputForm("/etc/wherry/kafka-ca.pem", "\r"))
-	}
-	forms = append(forms, inputForm("/var/lib/wherry/state", "\r"), inputForm(defaultPluginDir, "\r"), inputForm("30s", "\r"), pickForm("listen", "\r"), inputForm(":9464", "\r"))
+// localForms accept every default: a metrics address, and each variable as derived. No question asks for the broker's
+// CA: the bundle carries it.
+func localForms(variables ...string) []receiverForm {
+	forms := []receiverForm{inputForm("/etc/wherry/receiver.bundle", "\r"), inputForm("/var/lib/wherry/state", "\r"), inputForm(defaultPluginDir, "\r"), inputForm("30s", "\r"), pickForm("listen", "\r"), inputForm(":9464", "\r")}
 	for _, variable := range variables {
 		forms = append(forms, pickForm("env", "\r"), inputForm(variable, "\r"))
 	}
 	return forms
 }
 
-func askLocal(config operator.ReceiverConfig, needsCA bool, out *bytes.Buffer) (receiverLocalConfig, error) {
-	return promptReceiverLocal(&questions{context.Background(), stdin, &promptLatch{out: out}}, config, needsCA)
+func askLocal(config operator.ReceiverConfig, out *bytes.Buffer) (receiverLocalConfig, error) {
+	return promptReceiverLocal(&questions{context.Background(), stdin, &promptLatch{out: out}}, config)
 }
 
 func retypeLocal(bad, good string) []string { return []string{"\x15" + bad, "\r", "\x15", good + "\r"} }
@@ -63,25 +56,23 @@ func retypeLocal(bad, good string) []string { return []string{"\x15" + bad, "\r"
 func TestReceiverLocalPrompts(t *testing.T) {
 	for _, test := range []struct {
 		name            string
-		ca              bool
 		kinds, profiles int
 		edit            func([]receiverForm) []receiverForm
 		window          string
 		drain           time.Duration
-		caFile, metrics string
+		metrics         string
 	}{
-		{"defaults", true, 1, 1, nil, "30s", 20 * time.Second, "/etc/wherry/kafka-ca.pem", ":9464"},
-		{"minimum", false, 1, 1, func(forms []receiverForm) []receiverForm {
-			forms[4] = inputForm("30s", "\x1515s\r")
+		{"defaults", 1, 1, nil, "30s", 20 * time.Second, ":9464"},
+		{"minimum", 1, 1, func(forms []receiverForm) []receiverForm {
+			forms[3] = inputForm("30s", "\x1515s\r")
 			return forms
-		}, "15s", 5 * time.Second, "", ":9464"},
-		{"three", false, 3, 3, nil, "30s", 18 * time.Second, "", ":9464"},
-		{"repeated", false, 1, 3, nil, "30s", 20 * time.Second, "", ":9464"},
-		{"roots and no listener", true, 1, 1, func(forms []receiverForm) []receiverForm {
-			forms[1] = pickForm("file", down+"\r")
-			forms[6] = pickForm("listen", down+"\r")
-			return append(forms[:2], append(forms[3:7], forms[8:]...)...)
-		}, "30s", 20 * time.Second, "", ""},
+		}, "15s", 5 * time.Second, ":9464"},
+		{"three", 3, 3, nil, "30s", 18 * time.Second, ":9464"},
+		{"repeated", 1, 3, nil, "30s", 20 * time.Second, ":9464"},
+		{"no listener", 1, 1, func(forms []receiverForm) []receiverForm {
+			forms[4] = pickForm("listen", down+"\r")
+			return append(forms[:5], forms[6:]...)
+		}, "30s", 20 * time.Second, ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			config := localReceiver()
@@ -92,20 +83,20 @@ func TestReceiverLocalPrompts(t *testing.T) {
 				}
 				config.Profiles = append(config.Profiles, operator.ProfileSettings{Plugin: plugin})
 			}
-			forms := localForms(test.ca, "NOMAD_TOKEN")
+			forms := localForms("NOMAD_TOKEN")
 			if test.edit != nil {
 				forms = test.edit(forms)
 			}
 			var out bytes.Buffer
 			scriptReceiver(t, &out, forms...)
-			local, err := askLocal(config, test.ca, &out)
+			local, err := askLocal(config, &out)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if local.DrainTimeout != test.drain || local.Bundle != "/etc/wherry/receiver.bundle" || local.StateDir != "/var/lib/wherry/state" || local.PluginDir != defaultPluginDir || local.Credentials["nomad-token"].Env != "NOMAD_TOKEN" {
 				t.Fatalf("config = %+v", local)
 			}
-			if local.CAFile != test.caFile || local.MetricsAddr != test.metrics {
+			if local.CAFile != "" || local.MetricsAddr != test.metrics {
 				t.Fatalf("config = %+v", local)
 			}
 			path := filepath.Join(t.TempDir(), "config.yaml")
@@ -119,11 +110,11 @@ func TestReceiverLocalPrompts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if test.caFile == "" && bytes.Contains(encoded, []byte("ca_file:")) {
+			if bytes.Contains(encoded, []byte("ca_file:")) {
 				t.Fatalf("CA field present: %s", encoded)
 			}
-			ca, metrics := cmp.Or(test.caFile, "System roots"), cmp.Or(test.metrics, "No listener")
-			want := []string{"? Bundle path  /etc/wherry/receiver.bundle", "? Broker CA  " + ca, "? State directory (must survive restarts)  /var/lib/wherry/state", "? Plugin directory  " + defaultPluginDir,
+			metrics := cmp.Or(test.metrics, "No listener")
+			want := []string{"? Bundle path  /etc/wherry/receiver.bundle", "? State directory (must survive restarts)  /var/lib/wherry/state", "? Plugin directory  " + defaultPluginDir,
 				"? Stop window (how long its platform waits before killing it)  " + test.window, "? Metrics  " + metrics, "? Credential nomad-token  Environment variable NOMAD_TOKEN"}
 			if got := collapsedLines(out.String()); !reflect.DeepEqual(got, want) {
 				t.Fatalf("prompt order: %q", got)
@@ -135,77 +126,66 @@ func TestReceiverLocalPrompts(t *testing.T) {
 	}
 }
 
-// The full flow writes the exact YAML for each Broker CA and Metrics choice, under both needsCA values, with one
-// credential from a variable and one from a file.
+// The full flow writes the exact YAML for each Metrics choice, with one credential from a variable and one from a file,
+// and never a ca_file: the bundle carries the broker's CA.
 func TestReceiverLocalFullFlow(t *testing.T) {
 	config := localReceiver()
 	config.Profiles = append(config.Profiles, operator.ProfileSettings{Name: "b", Plugin: "kubernetes", Config: map[string]any{"credential": "kube-token"}})
-	for _, needsCA := range []bool{false, true} {
-		for _, roots := range []bool{false, true} {
-			t.Run(fmt.Sprintf("needsCA=%t/roots=%t", needsCA, roots), func(t *testing.T) {
-				forms := localForms(needsCA, "KUBE_TOKEN")
-				forms = append(forms, pickForm("env", down+"\r"), inputForm("", "/run/secrets/nomad\r"))
-				switch {
-				case roots && needsCA:
-					forms[1] = pickForm("file", down+"\r")
-					forms = append(forms[:2], forms[3:]...)
-				case !roots && !needsCA:
-					forms[1] = pickForm("roots", "\x1b[A\r")
-					forms = append(forms[:2], append([]receiverForm{inputForm("/etc/wherry/kafka-ca.pem", "\r")}, forms[2:]...)...)
-				}
-				if roots {
-					forms[5] = pickForm("listen", down+"\r")
-					forms = append(forms[:6], forms[7:]...)
-				}
-				var out bytes.Buffer
-				scriptReceiver(t, &out, forms...)
-				dir := t.TempDir()
-				if err := receiverLocalFile(context.Background(), dir, "r", "outside.yaml", false, false, &out, config, "broker", needsCA); err != nil {
-					t.Fatal(err)
-				}
-				path := filepath.Join(dir, "receivers", "r.config.yaml")
-				data, err := os.ReadFile(path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				want := "bundle: /etc/wherry/receiver.bundle\nca_file: /etc/wherry/kafka-ca.pem\nstate_dir: /var/lib/wherry/state\nplugin_dir: " + defaultPluginDir + "\nmetrics_addr: :9464\ndrain_timeout: 20s\ncredentials:\n    kube-token:\n        env: KUBE_TOKEN\n    nomad-token:\n        file: /run/secrets/nomad\n"
-				expected := receiverLocalConfig{Bundle: "/etc/wherry/receiver.bundle", CAFile: "/etc/wherry/kafka-ca.pem", StateDir: "/var/lib/wherry/state", PluginDir: defaultPluginDir, MetricsAddr: ":9464", DrainTimeout: 20 * time.Second,
-					Credentials: map[string]credential.Source{"kube-token": {Env: "KUBE_TOKEN"}, "nomad-token": {File: "/run/secrets/nomad"}}}
-				if roots {
-					want = strings.Replace(strings.Replace(want, "ca_file: /etc/wherry/kafka-ca.pem\n", "", 1), "metrics_addr: :9464", `metrics_addr: ""`, 1)
-					expected.CAFile, expected.MetricsAddr = "", ""
-				}
-				if string(data) != want {
-					t.Fatalf("YAML: got\n%s\nwant\n%s", data, want)
-				}
-				if local, err := loadReceiverLocalConfig(path); err != nil || !reflect.DeepEqual(local, expected) {
-					t.Fatalf("read back: %+v, %v", local, err)
-				}
-				lines := collapsedLines(out.String())
-				credentials := []string{"? Credential kube-token  Environment variable KUBE_TOKEN", "? Credential nomad-token  File /run/secrets/nomad"}
-				if !reflect.DeepEqual(lines[len(lines)-2:], credentials) {
-					t.Fatalf("credential lines: %q", lines)
-				}
-				if strings.Contains(out.String(), "warning: local configuration has no ca_file") != (roots && needsCA) {
-					t.Fatalf("CA warning: %q", out.String())
-				}
-			})
-		}
+	for _, listener := range []bool{true, false} {
+		t.Run(fmt.Sprintf("listener=%t", listener), func(t *testing.T) {
+			forms := localForms("KUBE_TOKEN")
+			forms = append(forms, pickForm("env", down+"\r"), inputForm("", "/run/secrets/nomad\r"))
+			if !listener {
+				forms[4] = pickForm("listen", down+"\r")
+				forms = append(forms[:5], forms[6:]...)
+			}
+			var out bytes.Buffer
+			scriptReceiver(t, &out, forms...)
+			dir := t.TempDir()
+			if err := receiverLocalFile(context.Background(), dir, "r", "outside.yaml", false, false, &out, config); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "receivers", "r.config.yaml")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "bundle: /etc/wherry/receiver.bundle\nstate_dir: /var/lib/wherry/state\nplugin_dir: " + defaultPluginDir + "\nmetrics_addr: :9464\ndrain_timeout: 20s\ncredentials:\n    kube-token:\n        env: KUBE_TOKEN\n    nomad-token:\n        file: /run/secrets/nomad\n"
+			expected := receiverLocalConfig{Bundle: "/etc/wherry/receiver.bundle", StateDir: "/var/lib/wherry/state", PluginDir: defaultPluginDir, MetricsAddr: ":9464", DrainTimeout: 20 * time.Second,
+				Credentials: map[string]credential.Source{"kube-token": {Env: "KUBE_TOKEN"}, "nomad-token": {File: "/run/secrets/nomad"}}}
+			if !listener {
+				want = strings.Replace(want, "metrics_addr: :9464", `metrics_addr: ""`, 1)
+				expected.MetricsAddr = ""
+			}
+			if string(data) != want {
+				t.Fatalf("YAML: got\n%s\nwant\n%s", data, want)
+			}
+			if local, err := loadReceiverLocalConfig(path); err != nil || !reflect.DeepEqual(local, expected) {
+				t.Fatalf("read back: %+v, %v", local, err)
+			}
+			lines := collapsedLines(out.String())
+			credentials := []string{"? Credential kube-token  Environment variable KUBE_TOKEN", "? Credential nomad-token  File /run/secrets/nomad"}
+			if !reflect.DeepEqual(lines[len(lines)-2:], credentials) {
+				t.Fatalf("credential lines: %q", lines)
+			}
+			if strings.Contains(out.String(), "warning") || strings.Contains(out.String(), "CA") {
+				t.Fatalf("the local configuration questions mention the CA: %q", out.String())
+			}
+		})
 	}
 }
 
 func TestReceiverLocalFile(t *testing.T) {
 	dir := t.TempDir()
 	config := localReceiver()
-	op := operatorConfig{Broker: "broker", CAFile: "ca.pem"}
 	noTerminal(t)
 	path := filepath.Join(dir, "receivers", "r.config.yaml")
 	var out bytes.Buffer
-	err := receiverLocalFile(context.Background(), dir, "r", "outside.yaml", false, false, &out, config, op.Broker, op.CAFile != "")
+	err := receiverLocalFile(context.Background(), dir, "r", "outside.yaml", false, false, &out, config)
 	if err == nil || err.Error() != path+" does not exist and there is no terminal to prompt on; write it with "+receiverLocalFields {
 		t.Fatalf("missing: %v", err)
 	}
-	if err := receiverLocalFile(context.Background(), dir, "r", "outside.yaml", false, true, &out, config, op.Broker, op.CAFile != ""); err != nil {
+	if err := receiverLocalFile(context.Background(), dir, "r", "outside.yaml", false, true, &out, config); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), path+" is absent; apply will ask for local configuration\n") {
@@ -214,8 +194,8 @@ func TestReceiverLocalFile(t *testing.T) {
 	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
 		t.Fatalf("dry run created files: %v", err)
 	}
-	scriptReceiver(t, &out, localForms(true, "NOMAD_TOKEN")...)
-	if err := receiverLocalFile(context.Background(), dir, "r", "outside.yaml", false, false, &out, config, op.Broker, op.CAFile != ""); err != nil {
+	scriptReceiver(t, &out, localForms("NOMAD_TOKEN")...)
+	if err := receiverLocalFile(context.Background(), dir, "r", "outside.yaml", false, false, &out, config); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "wrote "+path+"\n") {
@@ -230,7 +210,7 @@ func TestReceiverLocalFile(t *testing.T) {
 	if before.Mode().Perm() != 0o600 {
 		t.Fatal(before.Mode())
 	}
-	if err := receiverLocalFile(context.Background(), dir, "r", "outside.yaml", false, false, io.Discard, config, op.Broker, op.CAFile != ""); err != nil {
+	if err := receiverLocalFile(context.Background(), dir, "r", "outside.yaml", false, false, io.Discard, config); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := os.Stat(path)
@@ -243,16 +223,16 @@ func TestReceiverLocalFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	out.Reset()
-	if err := receiverLocalFile(context.Background(), dir, "r", provided, true, true, &out, config, op.Broker, op.CAFile != ""); err != nil {
+	if err := receiverLocalFile(context.Background(), dir, "r", provided, true, true, &out, config); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "would use local configuration "+filepath.Join(provided, "config.yaml")) || !strings.Contains(out.String(), "warning:") {
+	if !strings.Contains(out.String(), "would use local configuration "+filepath.Join(provided, "config.yaml")) || strings.Contains(out.String(), "warning:") {
 		t.Fatal(out.String())
 	}
 	given := filepath.Join(provided, "config.yaml")
 	before, _ = os.Stat(given)
 	contents, _ = os.ReadFile(given)
-	if err := receiverLocalFile(context.Background(), dir, "r", provided, true, false, io.Discard, config, op.Broker, op.CAFile != ""); err != nil {
+	if err := receiverLocalFile(context.Background(), dir, "r", provided, true, false, io.Discard, config); err != nil {
 		t.Fatal(err)
 	}
 	after, _ = os.Stat(given)
@@ -272,8 +252,8 @@ func TestReceiverLocalRefusesSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	scriptReceiver(t, &out, localForms(false, "NOMAD_TOKEN")...)
-	if err := receiverLocalFile(context.Background(), dir, "r", "outside.yaml", false, false, &out, localReceiver(), "", false); err == nil {
+	scriptReceiver(t, &out, localForms("NOMAD_TOKEN")...)
+	if err := receiverLocalFile(context.Background(), dir, "r", "outside.yaml", false, false, &out, localReceiver()); err == nil {
 		t.Fatal("wrote through a dangling symlink")
 	}
 	if _, err := os.Stat(outside); !errors.Is(err, os.ErrNotExist) {
@@ -281,27 +261,26 @@ func TestReceiverLocalRefusesSymlink(t *testing.T) {
 	}
 }
 
-// A typed none after choosing CA file or an address is written literally.
+// A typed none after choosing an address is written literally.
 func TestReceiverLocalLiteralNone(t *testing.T) {
-	forms := localForms(true, "NOMAD_TOKEN")
-	forms[2] = inputForm("/etc/wherry/kafka-ca.pem", "\x15none\r")
-	forms[7] = inputForm(":9464", "\x15none\r")
+	forms := localForms("NOMAD_TOKEN")
+	forms[5] = inputForm(":9464", "\x15none\r")
 	var out bytes.Buffer
 	scriptReceiver(t, &out, forms...)
 	dir := t.TempDir()
-	if err := receiverLocalFile(context.Background(), dir, "r", "outside.yaml", false, false, &out, localReceiver(), "broker", true); err != nil {
+	if err := receiverLocalFile(context.Background(), dir, "r", "outside.yaml", false, false, &out, localReceiver()); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "receivers", "r.config.yaml")
 	data, err := os.ReadFile(path)
-	if err != nil || !strings.Contains(string(data), "ca_file: none\n") || !strings.Contains(string(data), "metrics_addr: none\n") {
+	if err != nil || !strings.Contains(string(data), "metrics_addr: none\n") {
 		t.Fatalf("YAML: %s, %v", data, err)
 	}
-	if local, err := loadReceiverLocalConfig(path); err != nil || local.CAFile != "none" || local.MetricsAddr != "none" {
+	if local, err := loadReceiverLocalConfig(path); err != nil || local.MetricsAddr != "none" {
 		t.Fatalf("read back: %+v, %v", local, err)
 	}
 	lines := strings.Join(collapsedLines(out.String()), "\n")
-	if !strings.Contains(lines, "? Broker CA  none") || !strings.Contains(lines, "? Metrics  none") {
+	if !strings.Contains(lines, "? Metrics  none") {
 		t.Fatalf("collapse: %q", lines)
 	}
 }
@@ -316,33 +295,33 @@ func TestReceiverLocalCorrections(t *testing.T) {
 		message string
 		stored  func(receiverLocalConfig) bool
 	}{
-		{"huge negative window", 4, func(forms []receiverForm) []receiverForm {
-			forms[4] = inputForm("30s", retypeLocal("-2562047h47m16.854775808s", "40s")...)
+		{"huge negative window", 3, func(forms []receiverForm) []receiverForm {
+			forms[3] = inputForm("30s", retypeLocal("-2562047h47m16.854775808s", "40s")...)
 			return forms
 		}, margin, func(l receiverLocalConfig) bool { return l.DrainTimeout == 30*time.Second }},
-		{"short window", 4, func(forms []receiverForm) []receiverForm {
-			forms[4] = inputForm("30s", retypeLocal("14s", "15s")...)
+		{"short window", 3, func(forms []receiverForm) []receiverForm {
+			forms[3] = inputForm("30s", retypeLocal("14s", "15s")...)
 			return forms
 		}, margin, func(l receiverLocalConfig) bool { return l.DrainTimeout == 5*time.Second }},
-		{"unparsed window", 4, func(forms []receiverForm) []receiverForm {
-			forms[4] = inputForm("30s", retypeLocal("abc", "40s")...)
+		{"unparsed window", 3, func(forms []receiverForm) []receiverForm {
+			forms[3] = inputForm("30s", retypeLocal("abc", "40s")...)
 			return forms
 		}, `stop window: time: invalid duration "abc"`, func(l receiverLocalConfig) bool { return l.DrainTimeout == 30*time.Second }},
-		{"leading digit variable", 8, func(forms []receiverForm) []receiverForm {
-			forms[8] = inputForm("NOMAD_TOKEN", retypeLocal("1X", "GOOD")...)
+		{"leading digit variable", 7, func(forms []receiverForm) []receiverForm {
+			forms[7] = inputForm("NOMAD_TOKEN", retypeLocal("1X", "GOOD")...)
 			return forms
 		}, "invalid environment variable name", func(l receiverLocalConfig) bool {
 			return reflect.DeepEqual(l.Credentials["nomad-token"], credential.Source{Env: "GOOD"})
 		}},
-		{"dashed variable", 8, func(forms []receiverForm) []receiverForm {
-			forms[8] = inputForm("NOMAD_TOKEN", retypeLocal("A-B", " A_B ")...)
+		{"dashed variable", 7, func(forms []receiverForm) []receiverForm {
+			forms[7] = inputForm("NOMAD_TOKEN", retypeLocal("A-B", " A_B ")...)
 			return forms
 		}, "invalid environment variable name", func(l receiverLocalConfig) bool {
 			return reflect.DeepEqual(l.Credentials["nomad-token"], credential.Source{Env: "A_B"})
 		}},
-		{"blank file path", 8, func(forms []receiverForm) []receiverForm {
-			forms[7] = pickForm("env", down+"\r")
-			forms[8] = inputForm("", retypeLocal("", "/run/token")...)
+		{"blank file path", 7, func(forms []receiverForm) []receiverForm {
+			forms[6] = pickForm("env", down+"\r")
+			forms[7] = inputForm("", retypeLocal("", "/run/token")...)
 			return forms
 		}, "credential file path must not be blank", func(l receiverLocalConfig) bool {
 			return reflect.DeepEqual(l.Credentials["nomad-token"], credential.Source{File: "/run/token"})
@@ -354,8 +333,8 @@ func TestReceiverLocalCorrections(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var out bytes.Buffer
-			frames := scriptReceiver(t, &out, test.edit(localForms(false, "NOMAD_TOKEN"))...)
-			local, err := askLocal(localReceiver(), false, &out)
+			frames := scriptReceiver(t, &out, test.edit(localForms("NOMAD_TOKEN"))...)
+			local, err := askLocal(localReceiver(), &out)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -377,17 +356,17 @@ func TestReceiverLocalMergedCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	forms := append(localForms(false, "_9_TOKEN"), pickForm("env", "\r"), inputForm("Z_TOKEN", "\r"))
+	forms := append(localForms("_9_TOKEN"), pickForm("env", "\r"), inputForm("Z_TOKEN", "\r"))
 	frames := scriptReceiver(t, &out, forms...)
-	local, err := askLocal(config, false, &out)
+	local, err := askLocal(config, &out)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(local.Credentials) != 2 || local.Credentials["9-token"].Env != "_9_TOKEN" || local.Credentials["z-token"].Env != "Z_TOKEN" {
 		t.Fatalf("credentials: %+v", local.Credentials)
 	}
-	if !strings.Contains((*frames)[7], "Credential 9-token") || !strings.Contains((*frames)[9], "Credential z-token") {
-		t.Fatalf("question order: %q", (*frames)[7:])
+	if !strings.Contains((*frames)[6], "Credential 9-token") || !strings.Contains((*frames)[8], "Credential z-token") {
+		t.Fatalf("question order: %q", (*frames)[6:])
 	}
 	lines := collapsedLines(out.String())
 	if want := []string{"? Credential 9-token  Environment variable _9_TOKEN", "? Credential z-token  Environment variable Z_TOKEN"}; !reflect.DeepEqual(lines[len(lines)-2:], want) || strings.Count(strings.Join(lines, "\n"), "Credential z-token") != 1 {
@@ -395,8 +374,8 @@ func TestReceiverLocalMergedCredentials(t *testing.T) {
 	}
 	config.Profiles = nil
 	out.Reset()
-	scriptReceiver(t, &out, localForms(false)...)
-	if _, err := askLocal(config, false, &out); err != nil || strings.Contains(out.String(), "Credential") {
+	scriptReceiver(t, &out, localForms()...)
+	if _, err := askLocal(config, &out); err != nil || strings.Contains(out.String(), "Credential") {
 		t.Fatalf("no credentials: %v %s", err, out.String())
 	}
 }
@@ -407,17 +386,17 @@ func TestReceiverLocalTwoCredentials(t *testing.T) {
 	config := localReceiver()
 	config.Profiles = append(config.Profiles, operator.ProfileSettings{Name: "b", Plugin: "nomad", Config: map[string]any{"credential": "9-token"}}, operator.ProfileSettings{Name: "c", Plugin: "nomad", Config: map[string]any{"credential": "nomad-token"}})
 	var out bytes.Buffer
-	forms := append(localForms(false, "_9_TOKEN"), pickForm("env", down+"\r"), inputForm("", "/run/nomad\r"))
+	forms := append(localForms("_9_TOKEN"), pickForm("env", down+"\r"), inputForm("", "/run/nomad\r"))
 	frames := scriptReceiver(t, &out, forms...)
-	local, err := askLocal(config, false, &out)
+	local, err := askLocal(config, &out)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(local.Credentials, map[string]credential.Source{"9-token": {Env: "_9_TOKEN"}, "nomad-token": {File: "/run/nomad"}}) {
 		t.Fatalf("credentials: %+v", local.Credentials)
 	}
-	if !strings.Contains((*frames)[7], "Credential 9-token") || !strings.Contains((*frames)[8], "Variable") || !strings.Contains((*frames)[9], "Credential nomad-token") || !strings.Contains((*frames)[10], "File path") {
-		t.Fatalf("question order: %q", (*frames)[7:])
+	if !strings.Contains((*frames)[6], "Credential 9-token") || !strings.Contains((*frames)[7], "Variable") || !strings.Contains((*frames)[8], "Credential nomad-token") || !strings.Contains((*frames)[9], "File path") {
+		t.Fatalf("question order: %q", (*frames)[6:])
 	}
 	lines := collapsedLines(out.String())
 	if want := []string{"? Credential 9-token  Environment variable _9_TOKEN", "? Credential nomad-token  File /run/nomad"}; !reflect.DeepEqual(lines[len(lines)-2:], want) {
@@ -428,12 +407,12 @@ func TestReceiverLocalTwoCredentials(t *testing.T) {
 // A credential file path is written raw, and its collapse line escapes it.
 func TestReceiverLocalEscape(t *testing.T) {
 	var out bytes.Buffer
-	forms := localForms(false, "NOMAD_TOKEN")
-	forms[7] = pickForm("env", down+"\r")
-	forms[8] = inputForm("", "/run/\u202etoken\r")
+	forms := localForms("NOMAD_TOKEN")
+	forms[6] = pickForm("env", down+"\r")
+	forms[7] = inputForm("", "/run/\u202etoken\r")
 	scriptReceiver(t, &out, forms...)
 	dir := t.TempDir()
-	if err := receiverLocalFile(context.Background(), dir, "r", "outside.yaml", false, false, &out, localReceiver(), "", false); err != nil {
+	if err := receiverLocalFile(context.Background(), dir, "r", "outside.yaml", false, false, &out, localReceiver()); err != nil {
 		t.Fatal(err)
 	}
 	local, err := loadReceiverLocalConfig(filepath.Join(dir, "receivers", "r.config.yaml"))
@@ -476,11 +455,11 @@ func TestReceiverLocalInterrupts(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			service, file := receiverApplyEnv(t)
 			var out bytes.Buffer
-			forms := localForms(true)
+			forms := localForms()
 			if mode == "ctrl-c at credential" {
 				forms = append(forms, pickForm("env", "\x03"))
 			} else {
-				forms = forms[:5]
+				forms = forms[:3]
 			}
 			scriptReceiver(t, &out, forms...)
 			if mode == "eof at stop window" {
@@ -488,7 +467,7 @@ func TestReceiverLocalInterrupts(t *testing.T) {
 				n := 0
 				runQuestion = func(q *questions, f huh.Field) error {
 					n++
-					if n == 6 {
+					if n == 4 {
 						next := *q
 						next.in = strings.NewReader("40s")
 						return next.runForm(f)
@@ -659,57 +638,11 @@ func TestReceiverLocalApplyDryRun(t *testing.T) {
 				if err := runOperator([]string{"receiver", "show", "r"}, &show, io.Discard); err != nil {
 					t.Fatal(err)
 				}
-				if stdout.String() != show.String() {
+				// show reports the recorded receiver's liveness first; a dry run has no receiver to report on.
+				if "status: silent\n"+stdout.String() != show.String() {
 					t.Fatalf("dry run differs from show: %s / %s", stdout.String(), show.String())
 				}
 			})
 		}
-	}
-}
-
-func TestReceiverLocalCA(t *testing.T) {
-	for _, test := range []struct {
-		name, broker, ca, answer string
-		warn                     bool
-	}{
-		{"same", "broker", "ca.pem", "", true},
-		{"different", "other", "ca.pem", "", false},
-		{"no-ca", "broker", "", "", false},
-		{"provided-ca", "broker", "ca.pem", "ca_file: /ca\n", false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			config := localReceiver()
-			config.Broker = test.broker
-			op := operatorConfig{Broker: "broker", CAFile: test.ca}
-			needsCA := test.broker == op.Broker && test.ca != ""
-			dir := t.TempDir()
-			var out bytes.Buffer
-			scriptReceiver(t, &out, localForms(needsCA, "NOMAD_TOKEN")...)
-			if err := receiverLocalFile(context.Background(), dir, "r", "external/receiver.yaml", false, false, &out, config, op.Broker, op.CAFile != ""); err != nil {
-				t.Fatal(err)
-			}
-			path := filepath.Join(dir, "receivers/r.config.yaml")
-			local, err := loadReceiverLocalConfig(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			expected := ""
-			if needsCA {
-				expected = "/etc/wherry/kafka-ca.pem"
-			}
-			if local.CAFile != expected {
-				t.Fatalf("CA = %q want %q", local.CAFile, expected)
-			}
-			if err := os.WriteFile(path, []byte("bundle: /bundle\n"+test.answer+"credentials: {nomad-token: {env: NOMAD_TOKEN}}\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			out.Reset()
-			if err := receiverLocalFile(context.Background(), dir, "r", "external/receiver.yaml", false, false, &out, config, op.Broker, op.CAFile != ""); err != nil {
-				t.Fatal(err)
-			}
-			if strings.Contains(out.String(), "warning:") != test.warn {
-				t.Fatal(out.String())
-			}
-		})
 	}
 }

@@ -588,7 +588,7 @@ func TestReceiverRejectsURLParts(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.submit(t, f.host, func(task *wire.Submission) { task.Message.Parts = append(task.Message.Parts, part) })
-			if err := f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], func() {}); err != nil {
+			if err := f.receiver.claimOne(f.ctx, f.ctx, f.receiver.profiles[0], newClaimTurn(), func() {}); err != nil {
 				t.Fatal(err)
 			}
 			if dispatches, _, _, _ := f.plugin.counts(); dispatches != 0 {
@@ -736,7 +736,7 @@ func startInFlight(t *testing.T, f fixture, ctx context.Context, name string) <-
 		named(task, name)
 	})
 	done := make(chan error, 1)
-	go func() { done <- f.receiver.claimOne(ctx, ctx, f.receiver.profiles[0], func() {}) }()
+	go func() { done <- f.receiver.claimOne(ctx, ctx, f.receiver.profiles[0], newClaimTurn(), func() {}) }()
 	for {
 		if _, _, follows, _ := f.plugin.counts(); follows == 1 {
 			return done
@@ -1228,7 +1228,7 @@ func TestRunIDOwnershipSurvivesTheOwnersHostEnding(t *testing.T) {
 	}
 	denied := func(context.Context, string, string) error { return operator.ErrAuthorizationDenied }
 	revocationBounds(t, f.service, "1")
-	if result := f.service.RevokeHost(f.ctx, testTenant, testHost, time.Millisecond, denied); !result.Complete {
+	if result := f.service.RevokeHost(f.ctx, testTenant, testHost, time.Millisecond, denied, nil); !result.Complete {
 		t.Fatalf("revoke host: %#v", result.Steps)
 	}
 	revocationBounds(t, f.service, "")

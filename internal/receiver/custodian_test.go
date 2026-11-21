@@ -1794,11 +1794,118 @@ func TestRotationNotReadBackNamesTheLatestSnapshot(t *testing.T) {
 	}
 	abortingCommits(t)
 	id, key := onlyKey(t, f.receiver)
+	began := time.Now()
 	err := f.receiver.tend(f.ctx, rotationAt(time.UnixMilli(key.PublishedMS), testPool, id))
+	// A read already past the produced offset is a lost write, not a late marker, and is not waited on.
+	if took := time.Since(began); took >= stableWait/2 {
+		t.Fatalf("lost rotation took %s, want no wait for a stable read", took)
+	}
 	// The bootstrap's commit marker takes offset 1, the rotation 2 and its abort marker 3.
 	want := regexp.MustCompile(`publish rotation snapshot: not read back: produced at offset 2, read to 4, latest 0 by ` + regexp.QuoteMeta(f.receiver.id) + `$`)
 	if err == nil || !want.MatchString(err.Error()) {
 		t.Fatalf("rotation: %v; want %s", err, want)
+	}
+}
+
+// lateMarker answers the custodian topic's read-committed latest-offset listings after the custodian's commit with
+// stuck, as Kafka does until the commit marker reaches the partition. It does so for the next answers listings, or for
+// every listing when answers is negative.
+func lateMarker(t *testing.T, f fixture, stuck int64, answers int32) *atomic.Int32 {
+	t.Helper()
+	var armed atomic.Bool
+	var served atomic.Int32
+	previous := commitTransaction
+	t.Cleanup(func() { commitTransaction = previous })
+	commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
+		err := previous(ctx, producer)
+		if id, _ := producer.OptValue(kgo.TransactionalID).(string); id == "p."+testPool+".custodian" {
+			armed.Store(true)
+		}
+		return err
+	}
+	topic := operator.CustodianTopic(testPool)
+	f.cluster.ControlKey(kmsg.ListOffsets.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		f.cluster.KeepControl()
+		req := request.(*kmsg.ListOffsetsRequest)
+		latest := req.IsolationLevel == 1 && len(req.Topics) == 1 && req.Topics[0].Topic == topic &&
+			slices.ContainsFunc(req.Topics[0].Partitions, func(partition kmsg.ListOffsetsRequestTopicPartition) bool { return partition.Timestamp == -1 })
+		if !armed.Load() || !latest || (answers >= 0 && served.Load() >= answers) {
+			return nil, nil, false
+		}
+		served.Add(1)
+		response := kmsg.NewPtrListOffsetsResponse()
+		response.SetVersion(req.Version)
+		out := kmsg.ListOffsetsResponseTopic{Topic: topic}
+		for _, partition := range req.Topics[0].Partitions {
+			out.Partitions = append(out.Partitions, kmsg.ListOffsetsResponseTopicPartition{Partition: partition.Partition, Offset: stuck, Timestamp: -1, LeaderEpoch: -1})
+		}
+		response.Topics = append(response.Topics, out)
+		return response, nil, true
+	})
+	return &served
+}
+
+// A rotation whose commit marker lands after the commit returns is read back once the last stable offset passes it.
+func TestRotationReadBackWaitsForALateMarker(t *testing.T) {
+	f := newBareFixture(t)
+	custodian(t, f.ctx, f.receiver, time.Now())
+	id, key := onlyKey(t, f.receiver)
+	// The bootstrap's commit marker takes offset 1, so the rotation is produced at 2.
+	served := lateMarker(t, f, 2, 3)
+	if err := f.receiver.tend(f.ctx, rotationAt(time.UnixMilli(key.PublishedMS), testPool, id)); err != nil {
+		t.Fatalf("rotation with a late marker: %v", err)
+	}
+	if got := served.Load(); got != 3 {
+		t.Fatalf("stale listings served %d, want 3", got)
+	}
+	published := 0
+	for held, key := range heldKeys(t, f.receiver) {
+		if held != id && key.PublishedMS != 0 {
+			published++
+		}
+	}
+	if published != 1 || !strings.Contains(f.logs.String(), "custodian: published pool "+testPool) {
+		t.Fatalf("rotated keys published %d, want 1; logs:\n%s", published, f.logs.String())
+	}
+}
+
+// A marker that never lands within the bound leaves the snapshot not read back, reported as before.
+func TestRotationReadBackGivesUpAtTheBound(t *testing.T) {
+	f := newBareFixture(t)
+	custodian(t, f.ctx, f.receiver, time.Now())
+	id, key := onlyKey(t, f.receiver)
+	lateMarker(t, f, 2, -1)
+	began := time.Now()
+	err := f.receiver.tend(f.ctx, rotationAt(time.UnixMilli(key.PublishedMS), testPool, id))
+	took := time.Since(began)
+	if err == nil || !strings.Contains(err.Error(), "publish rotation snapshot: not read back: produced at offset 2, read to 2") {
+		t.Fatalf("rotation: %v; want not read back at the produced offset", err)
+	}
+	if took < stableWait || took > stableWait+2*time.Second {
+		t.Fatalf("rotation took %s, want the %s bound", took, stableWait)
+	}
+}
+
+// A commit that fails is not waited on, even while the last stable offset stands at the produced snapshot.
+func TestFailedCommitDoesNotWaitForTheMarker(t *testing.T) {
+	f := newBareFixture(t)
+	custodian(t, f.ctx, f.receiver, time.Now())
+	id, key := onlyKey(t, f.receiver)
+	lateMarker(t, f, 2, -1)
+	committed := commitTransaction
+	commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
+		if err := committed(ctx, producer); err != nil {
+			return err
+		}
+		return errors.New("injected commit failure")
+	}
+	began := time.Now()
+	err := f.receiver.tend(f.ctx, rotationAt(time.UnixMilli(key.PublishedMS), testPool, id))
+	if err == nil || !strings.Contains(err.Error(), "injected commit failure") {
+		t.Fatalf("rotation: %v; want the commit failure", err)
+	}
+	if took := time.Since(began); took >= stableWait/2 {
+		t.Fatalf("failed commit took %s, want no wait for a stable read", took)
 	}
 }
 

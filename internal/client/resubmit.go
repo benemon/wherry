@@ -15,7 +15,6 @@ import (
 
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
-	"github.com/minio/minio-go/v7"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"golang.org/x/sync/errgroup"
 )
@@ -199,7 +198,7 @@ func (h *Host) resubmit(ctx context.Context, runID string, lost bool) (string, e
 	if submission.Wherry.Supplied, err = h.supplied(agent, local.Task.Wherry.Supplied); err != nil {
 		return "", err
 	}
-	var store *minio.Client
+	var store *store
 	if len(submission.Wherry.S3Inputs)+len(s3OutputNames(submission.Wherry.Outputs)) > 0 {
 		if store, err = h.bucket(ctx, local.Pool, terms.Storage); err != nil {
 			return "", err
