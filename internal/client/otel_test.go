@@ -134,7 +134,7 @@ func TestTracedSubmitSendsTheHeaderAndReadsTheResult(t *testing.T) {
 		kinds[teletest.Attr(resolve, telemetry.AttrCredential)] = teletest.Attr(resolve, telemetry.AttrCredentialSource)
 	}
 	if kinds["model"] != SourceFile || kinds["deploy-key"] != SourceCommand || len(kinds) != 2 {
-		t.Fatalf("resolve credential spans %v, want model from a file and deploy-key from a command", kinds)
+		t.Errorf("resolve credential spans %v, want model from a file and deploy-key from a command", kinds)
 	}
 	if len(teletest.Named(spans, "seal envelope")) != 1 {
 		t.Fatal("no seal envelope span")
