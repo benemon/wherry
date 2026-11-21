@@ -2114,9 +2114,10 @@ func (run *activeRun) budgetRecords(sendCtx context.Context, pending []pluginsdk
 		reason = fmt.Sprintf("%s after %d attempts; last: %s", budgetReason, run.attempt, run.startCause)
 	}
 	status := taskStatus(wire.TaskStateFailed, reason)
+	chunks := run.chunks(pending, true)
 	result := run.result(status, reason)
 	run.receiver.tracing.Inject(sendCtx, result)
-	return append(append(run.chunks(pending, true), result), run.terminal(status, pending)...)
+	return append(append(chunks, result), run.terminal(status, pending)...)
 }
 
 // budgetEnded counts a run whose committed terminal ended it at the delivery budget.
@@ -2571,9 +2572,11 @@ func replyMessage(message wire.Message, text string) *wire.Message {
 func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result string, pending []pluginsdk.Line, ack kgo.AckStatus) kgo.AckStatus {
 	sendCtx, send := run.publishing(ctx, status.State)
 	defer send.End()
+	// The chunks come first: the result's references read the transcript offset they advance.
+	chunks := run.chunks(pending, true)
 	published := run.result(status, result)
 	run.receiver.tracing.Inject(sendCtx, published)
-	records := append(append(append(run.chunks(pending, true), run.outputs...), published), run.terminal(status, pending)...)
+	records := append(append(append(chunks, run.outputs...), published), run.terminal(status, pending)...)
 	if err := run.commit(ctx, records...); err != nil {
 		return run.abandon(err)
 	}
