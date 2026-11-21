@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
+	"log"
 	"slices"
 	"strings"
 	"testing"
@@ -13,6 +15,7 @@ import (
 	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/benemon/wherry/internal/telemetry/teletest"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
@@ -107,6 +110,15 @@ func parentOf(t *testing.T, ids map[trace.SpanID]tracetest.SpanStub, s tracetest
 }
 
 func namespace(s tracetest.SpanStub) string { return teletest.Resource(s, semconv.ServiceNamespaceKey) }
+
+// headerSpan is the span ID of record's one traceparent header.
+func headerSpan(t *testing.T, record *kgo.Record) trace.SpanID {
+	t.Helper()
+	if len(record.Headers) != 1 || record.Headers[0].Key != "traceparent" {
+		t.Fatalf("record %d on %s carries headers %v, want a traceparent alone", record.Offset, record.Topic, record.Headers)
+	}
+	return telemetry.ParseTraceParent(string(record.Headers[0].Value)).SpanID()
+}
 
 // Brief test 1, receiver side: every attempt's CONSUMER span is a child of the host's send span, a redelivery gives two
 // sibling attempts under it, the run is the attempt's INTERNAL child through the production executeDelivery path, and
@@ -226,18 +238,37 @@ func TestTracedAttemptsAreSiblingsUnderTheHostSend(t *testing.T) {
 	if custodian != len(requests) || receiver != len(requests) {
 		t.Fatalf("custodian consumers %d, receiver wrap consumers %d; want %d each", custodian, receiver, len(requests))
 	}
+	// The terminal records: the result and the feed's terminal status each go out under a PRODUCER span of their own,
+	// both under the second attempt's run, and each record carries its own span's context and no other.
 	terminals := teletest.Named(spans, "send "+operator.TenantTopic(testTenant))
-	if len(terminals) != 1 || terminals[0].SpanKind != trace.SpanKindProducer || parentOf(t, ids, terminals[0]).SpanContext.SpanID() != runs[1].SpanContext.SpanID() {
-		t.Fatalf("terminal sends %d, want the second attempt's alone under its run", len(terminals))
+	if len(terminals) != 2 {
+		t.Fatalf("terminal sends %d, want one for the result and one for the terminal status", len(terminals))
+	}
+	for _, terminal := range terminals {
+		if terminal.SpanKind != trace.SpanKindProducer || parentOf(t, ids, terminal).SpanContext.SpanID() != runs[1].SpanContext.SpanID() {
+			t.Fatalf("terminal send %s has parent %s, want the second attempt's run", terminal.SpanContext.SpanID(), terminal.Parent.SpanID())
+		}
+	}
+	carried := map[string]trace.SpanID{}
+	for _, record := range f.records(t, operator.TenantTopic(testTenant)) {
+		var status wire.RunStatus
+		switch typ := recordType(record.Value); {
+		case typ == wire.ResultType:
+			carried["result"] = headerSpan(t, record)
+		case typ == wire.StatusType && wire.ParseRecord(record.Value, f.keys(), &status) == nil && status.Wherry.Kind == "terminal":
+			carried["terminal"] = headerSpan(t, record)
+		case len(record.Headers) != 0:
+			t.Fatalf("record %d of type %s carries headers %v", record.Offset, typ, record.Headers)
+		}
+	}
+	paired := carried["result"] == terminals[0].SpanContext.SpanID() && carried["terminal"] == terminals[1].SpanContext.SpanID() ||
+		carried["result"] == terminals[1].SpanContext.SpanID() && carried["terminal"] == terminals[0].SpanContext.SpanID()
+	if !paired {
+		t.Fatalf("result carries %s and terminal status %s; want one terminal send each", carried["result"], carried["terminal"])
 	}
 	for _, name := range []string{"plugin Dispatch", "plugin Lookup", "plugin Follow", "plugin Stop", "deliver credentials", "await start", "find job", "return task", "admit"} {
 		if len(teletest.Named(spans, name)) == 0 {
 			t.Errorf("no %s span", name)
-		}
-	}
-	for _, record := range f.records(t, operator.TenantTopic(testTenant)) {
-		if recordType(record.Value) == wire.ResultType && len(record.Headers) != 1 {
-			t.Fatalf("result record headers %v, want the terminal send's traceparent alone", record.Headers)
 		}
 	}
 	teletest.Check(t, spans, rejectionLabels...)
@@ -309,11 +340,12 @@ func TestTracedVariantBNamesThePool(t *testing.T) {
 }
 
 // Brief test 4, receiver side: with no endpoint set the global provider is the no-op one, nothing is exported, and no
-// record the receiver produces carries a header, whatever the incoming record carries.
+// record the receiver produces carries a header, whatever the incoming record carries. The traces-only endpoint
+// variable does not turn tracing on (rule 3).
 func TestTracingIsOffByDefault(t *testing.T) {
 	exporter := teletest.Hook(t)
 	t.Setenv(telemetry.EndpointEnv, "")
-	t.Setenv(telemetry.TracesEndpointEnv, "")
+	t.Setenv(telemetry.TracesEndpointEnv, "http://127.0.0.1:1")
 	f := newFixture(t, resultStream)
 	ctx, stop := context.WithCancel(f.ctx)
 	defer stop()
@@ -342,6 +374,89 @@ func TestTracingIsOffByDefault(t *testing.T) {
 			}
 		}
 	}
+}
+
+// A receiver whose second provider fails to build shuts the first down before configure returns: the global provider
+// is the no-op one again, within shutdownTimeout, and nothing stays installed with no owner.
+func TestTracingShutsTheFirstProviderDownWhenTheSecondFails(t *testing.T) {
+	exporter := teletest.Install(t)
+	calls := 0
+	telemetry.NewExporter = func(context.Context) (sdktrace.SpanExporter, error) {
+		if calls++; calls == 2 {
+			return nil, errors.New("exporter refused")
+		}
+		return exporter, nil
+	}
+	logs := &strings.Builder{}
+	r := &Receiver{id: testReceiver, logger: log.New(logs, "", 0)}
+	began := time.Now()
+	err := r.trace(context.Background(), testPool)
+	if err == nil || !strings.Contains(err.Error(), "exporter refused") {
+		t.Fatalf("trace = %v, want the second constructor's error", err)
+	}
+	if took := time.Since(began); took > shutdownTimeout {
+		t.Fatalf("configure took %s, over the %s bound", took, shutdownTimeout)
+	}
+	if r.tracing != nil || r.custodian != nil {
+		t.Fatalf("providers kept: %v, %v", r.tracing, r.custodian)
+	}
+	if _, sdk := otel.GetTracerProvider().(*sdktrace.TracerProvider); sdk {
+		t.Fatal("the global tracer provider is still the SDK's after the first provider's shutdown")
+	}
+	_, span := otel.Tracer("wherry").Start(context.Background(), "orphan")
+	span.End()
+	if spans := exporter.Spans(); len(spans) != 0 {
+		t.Fatalf("%d spans exported through the orphaned provider", len(spans))
+	}
+}
+
+// Brief test 3, plugin RPCs: a plugin failure whose Op, Class and Message carry sentinels, through the real Dispatch,
+// Follow and Stop failure paths, gives each CLIENT span the fixed plugin class and nothing of the failure. Dispatch
+// fails delivering the credential, naming its value, as a plugin that cannot write it would.
+func TestTracedPluginFailuresCarryAClass(t *testing.T) {
+	exporter := teletest.Install(t)
+	setDuration(t, &startRetryWait, 200*time.Millisecond)
+	f := newFixture(t, resultStream)
+	const op, class, message = "s3cr3t-op", "s3cr3t-class", "s3cr3t-message"
+	failure := func(detail string) error {
+		return &pluginsdk.Error{Op: op + " " + detail, Class: class + " " + detail, Err: errors.New(message + " " + detail + ": " + testToken)}
+	}
+	f.plugin.dispatchErr = failure("deliver credential")
+	f.plugin.purgeHook = func() { f.plugin.dispatchErr = nil }
+	f.plugin.followErr, f.plugin.followedJob = failure("follow"), new(pluginsdk.JobAbsent)
+	f.plugin.stopErr = failure("stop")
+	ctx, stop := context.WithCancel(f.ctx)
+	defer stop()
+	f.run(t, ctx)
+	f.submitTraced(t, nil, nil)
+	task := f.await(t, testRun("run-a"), anyTask)
+	if task.Status.State != wire.TaskStateFailed {
+		t.Fatalf("task %+v; logs:\n%s", task.Status, f.logs.String())
+	}
+	spans := f.spansWhen(t, exporter, ended("run", 1))
+	for _, name := range []string{"plugin Dispatch", "plugin Follow", "plugin Stop"} {
+		failed := 0
+		for _, s := range teletest.Named(spans, name) {
+			if s.SpanKind != trace.SpanKindClient {
+				t.Fatalf("%s span kind %s", name, s.SpanKind)
+			}
+			switch s.Status.Code {
+			case codes.Error:
+				if s.Status.Description != telemetry.ClassPlugin {
+					t.Fatalf("%s status %+v, want the fixed class %q", name, s.Status, telemetry.ClassPlugin)
+				}
+				failed++
+			case codes.Unset:
+			default:
+				t.Fatalf("%s status %+v", name, s.Status)
+			}
+		}
+		if failed == 0 {
+			t.Fatalf("no failed %s span among %d", name, len(teletest.Named(spans, name)))
+		}
+	}
+	teletest.Check(t, spans, rejectionLabels...)
+	teletest.Sentinels(t, spans, op, class, message, testToken, "s3cr3t")
 }
 
 // Brief test 5: a malformed or oversized traceparent is ignored, the attempt's span starts a trace of its own, and

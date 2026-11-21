@@ -263,7 +263,7 @@ func (r *runView) add(ctx context.Context, record *kgo.Record, typ, kid string) 
 				return operator.AuthorizeStatus(history, v.state, v.keys, value, r.pool, r.h.tenant)
 			}); err == nil && status.Wherry.Run == r.run {
 				r.entries = append(r.entries, entry{receiver: status.Wherry.Receiver, status: &status})
-				if status.Wherry.Kind == "rejected" {
+				if status.Wherry.Kind == "rejected" || status.Wherry.Kind == "terminal" {
 					r.h.traceTerminal(ctx, record, r.run, status.StatusUpdate.Status.State)
 				}
 				return
@@ -297,8 +297,8 @@ func (r *runView) add(ctx context.Context, record *kgo.Record, typ, kid string) 
 	}
 }
 
-// traceTerminal emits the CONSUMER span of a terminal record the host accepts, a child of the record's own trace
-// context, once per record in this process.
+// traceTerminal emits the CONSUMER span of a terminal record the host accepts, the result or a terminal or rejected
+// status, a child of the record's own trace context, once per record in this process.
 func (h *Host) traceTerminal(ctx context.Context, record *kgo.Record, run string, state wire.TaskState) {
 	if !h.tracing.Enabled() {
 		return

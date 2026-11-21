@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/operator"
+	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/benemon/wherry/internal/telemetry/teletest"
 	"github.com/benemon/wherry/internal/wire"
@@ -32,8 +34,9 @@ func receiverSend() (trace.SpanContext, kgo.RecordHeader) {
 	return sc, kgo.RecordHeader{Key: "traceparent", Value: []byte("00-" + traceID.String() + "-" + spanID.String() + "-01")}
 }
 
-// feedTraced is feed with header on the result record, as a receiver's terminal send puts it there.
-func (r *testReceiver) feedTraced(t *testing.T, ctx context.Context, runID string, traced kgo.RecordHeader, values ...[]byte) {
+// feedTraced is feed with resultHeader on the result record and terminalHeader on the terminal status, as a receiver's
+// terminal sends put them there.
+func (r *testReceiver) feedTraced(t *testing.T, ctx context.Context, runID string, resultHeader, terminalHeader kgo.RecordHeader, values ...[]byte) {
 	t.Helper()
 	producer, err := kgo.NewClient(append(r.kafka.Opts(), kgo.TransactionalID(operator.TransactionalPrefix(r.pool)+runID))...)
 	if err != nil {
@@ -45,8 +48,12 @@ func (r *testReceiver) feedTraced(t *testing.T, ctx context.Context, runID strin
 	}
 	for _, value := range values {
 		record := &kgo.Record{Topic: operator.TenantTopic("tenant-a"), Key: []byte(runID), Value: value}
-		if typ, _ := header(value); typ == wire.ResultType {
-			record.Headers = []kgo.RecordHeader{traced}
+		var status wire.RunStatus
+		switch typ, _ := header(value); {
+		case typ == wire.ResultType:
+			record.Headers = []kgo.RecordHeader{resultHeader}
+		case typ == wire.StatusType && wire.ParseRecord(value, signed.Keys{r.id: {Current: r.key.Public().(ed25519.PublicKey)}}, &status) == nil && status.Wherry.Kind == "terminal":
+			record.Headers = []kgo.RecordHeader{terminalHeader}
 		}
 		if err := producer.ProduceSync(ctx, record).FirstErr(); err != nil {
 			t.Fatal(err)
@@ -81,9 +88,9 @@ func taskRecord(t *testing.T, f *fixture, kafka *kgo.Client, pool, runID string)
 }
 
 // Brief test 1, host side: submit is the root, its send PRODUCER puts the trace context on the task record alone, the
-// result's CONSUMER is a child of the record's own header and emitted once per record, and a cancel is its own trace
-// linked to the submit. Brief test 3, host side: credential values, source paths and argv, the prompt, the envelope and
-// the redaction key reach no span.
+// result's and the terminal status's CONSUMER spans are each a child of their own record's header and emitted once
+// per record, and a cancel is in the run's trace under the submit context the local record saved. Brief test 3, host
+// side: credential values, source paths and argv, the prompt, the envelope and the redaction key reach no span.
 func TestTracedSubmitSendsTheHeaderAndReadsTheResult(t *testing.T) {
 	exporter := teletest.Install(t)
 	f := newFixture(t)
@@ -145,8 +152,9 @@ func TestTracedSubmitSendsTheHeaderAndReadsTheResult(t *testing.T) {
 	}
 
 	task := receiver.claim(t, f.ctx, runID)[0]
-	send, header := receiverSend()
-	receiver.feedTraced(t, f.ctx, runID, header, receiver.echo(t, task), receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil),
+	resultSend, resultHeader := receiverSend()
+	terminalSend, terminalHeader := receiverSend()
+	receiver.feedTraced(t, f.ctx, runID, resultHeader, terminalHeader, receiver.echo(t, task), receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil),
 		receiver.result(t, task, 1, wire.TaskStateCompleted, nil), receiver.terminal(t, task, 1, wire.TaskStateCompleted, 1))
 	if awaited, err := f.host.Await(f.ctx, runID, 5*time.Second); err != nil || awaited.Status.State != wire.TaskStateCompleted {
 		t.Fatalf("await %+v, %v", awaited, err)
@@ -158,9 +166,24 @@ func TestTracedSubmitSendsTheHeaderAndReadsTheResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	spans = f.host.spans(t, exporter)
-	results := teletest.Named(spans, "process "+operator.TenantTopic("tenant-a"))
-	if len(results) != 1 || results[0].SpanKind != trace.SpanKindConsumer || results[0].Parent.SpanID() != send.SpanID() || results[0].SpanContext.TraceID() != send.TraceID() || results[0].Status.Code != codes.Unset {
-		t.Fatalf("result spans %v, want one CONSUMER under the receiver's send %s, read once", results, send.SpanID())
+	consumers := teletest.Named(spans, "process "+operator.TenantTopic("tenant-a"))
+	if len(consumers) != 2 {
+		t.Fatalf("feed CONSUMER spans %d, want the result's and the terminal status's, each read once", len(consumers))
+	}
+	for name, send := range map[string]trace.SpanContext{"result": resultSend, "terminal status": terminalSend} {
+		under := 0
+		for _, consumer := range consumers {
+			if consumer.Parent.SpanID() != send.SpanID() {
+				continue
+			}
+			under++
+			if consumer.SpanKind != trace.SpanKindConsumer || consumer.SpanContext.TraceID() != send.TraceID() || consumer.Status.Code != codes.Unset {
+				t.Fatalf("%s span %v, want a CONSUMER in the trace of the receiver's send %s", name, consumer, send.SpanID())
+			}
+		}
+		if under != 1 {
+			t.Fatalf("%s CONSUMER spans under the receiver's send %s: %d, want one", name, send.SpanID(), under)
+		}
 	}
 
 	if _, err := f.host.Cancel(f.ctx, runID); err != nil {
@@ -168,11 +191,8 @@ func TestTracedSubmitSendsTheHeaderAndReadsTheResult(t *testing.T) {
 	}
 	spans = f.host.spans(t, exporter)
 	cancels := teletest.Named(spans, "send "+operator.PoolEventsTopic("pool-a"))
-	if len(cancels) != 1 || cancels[0].SpanKind != trace.SpanKindProducer || cancels[0].Parent.IsValid() || cancels[0].SpanContext.TraceID() == submit.SpanContext.TraceID() {
-		t.Fatalf("cancel spans %v, want one PRODUCER root of its own trace", cancels)
-	}
-	if links := cancels[0].Links; len(links) != 1 || links[0].SpanContext.SpanID() != submit.SpanContext.SpanID() {
-		t.Fatalf("cancel links %v, want the submit span", links)
+	if len(cancels) != 1 || cancels[0].SpanKind != trace.SpanKindProducer || cancels[0].Parent.SpanID() != submit.SpanContext.SpanID() || cancels[0].SpanContext.TraceID() != submit.SpanContext.TraceID() || len(cancels[0].Links) != 0 {
+		t.Fatalf("cancel spans %v, want one PRODUCER under the submit span %s in the run's trace", cancels, submit.SpanContext.SpanID())
 	}
 	events, err := readTopic(f.ctx, receiver.kafka, operator.PoolEventsTopic("pool-a"))
 	if err != nil {
@@ -236,11 +256,41 @@ func TestTracedUploadFailureKeepsTheStorageKeys(t *testing.T) {
 	teletest.Sentinels(t, spans, access, secret, server.URL, "s3cr3t")
 }
 
-// Brief test 4, host side: with no endpoint set the task record carries no header and nothing is exported.
+// A cancel of a run whose local record saved no trace context, submitted while tracing was off, is a root of its own
+// with no parent and nothing to link.
+func TestTracedCancelWithoutASavedContextIsARoot(t *testing.T) {
+	exporter := teletest.Hook(t)
+	t.Setenv(telemetry.EndpointEnv, "")
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	submitted := f.submit(t, defaultSelector())
+	if local, err := f.host.localRun(submitted.RunID); err != nil || local.TraceParent != "" {
+		t.Fatalf("local record trace parent %q, %v; want none", local.TraceParent, err)
+	}
+	t.Setenv(telemetry.EndpointEnv, "http://127.0.0.1:1")
+	restarted, err := NewHost(f.host.kafka, f.host.key, operator.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, nil, f.host.logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = restarted.tracing.Close() })
+	if _, err := restarted.Cancel(f.ctx, submitted.RunID); err != nil {
+		t.Fatal(err)
+	}
+	spans := restarted.spans(t, exporter)
+	cancels := teletest.Named(spans, "send "+operator.PoolEventsTopic("pool-a"))
+	if len(cancels) != 1 || cancels[0].SpanKind != trace.SpanKindProducer || cancels[0].Parent.IsValid() || len(cancels[0].Links) != 0 {
+		t.Fatalf("cancel spans %v, want one PRODUCER root without a link", cancels)
+	}
+	teletest.Check(t, spans)
+}
+
+// Brief test 4, host side: with no endpoint set the task record carries no header and nothing is exported. The
+// traces-only endpoint variable does not turn tracing on (rule 3).
 func TestTracingIsOffByDefaultAtTheHost(t *testing.T) {
 	exporter := teletest.Hook(t)
 	t.Setenv(telemetry.EndpointEnv, "")
-	t.Setenv(telemetry.TracesEndpointEnv, "")
+	t.Setenv(telemetry.TracesEndpointEnv, "http://127.0.0.1:1")
 	f := newFixture(t)
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, nil)

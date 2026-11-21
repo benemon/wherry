@@ -414,9 +414,10 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, profile Named)
 		}
 		held := &activeRun{receiver: r, task: &task, taskHash: hash, history: []wire.Message{task.Message}, attempt: attempt}
 		echo := &kgo.Record{Topic: operator.TenantTopic(task.Wherry.Tenant), Key: []byte(run), Value: r.sign(r.echo(&task, hash))}
-		sendCtx, send := held.publishing(ctx, wire.TaskStateFailed)
-		err := r.admissionCommit(ctx, append([]*kgo.Record{echo}, held.budgetRecords(sendCtx, nil)...)...)
-		send.End()
+		records, terminal := held.budgetRecords(nil)
+		ended := held.publishing(ctx, wire.TaskStateFailed, terminal...)
+		err := r.admissionCommit(ctx, append([]*kgo.Record{echo}, records...)...)
+		ended()
 		if err != nil {
 			r.logger.Printf("publish terminal for %s: %v", run, err)
 			return nil, kgo.AckRelease
@@ -583,14 +584,23 @@ func (r *Receiver) publishRejection(ctx context.Context, task *wire.Submission, 
 	return r.admissionCommit(ctx, append([]*kgo.Record{echo}, records...)...)
 }
 
-// publishing is the PRODUCER span of the run's terminal records to the tenant's feed, failed for any state but
-// completed; the result record carries its context to the host.
-func (run *activeRun) publishing(ctx context.Context, state wire.TaskState) (context.Context, trace.Span) {
-	sendCtx, send := run.receiver.tracing.Producer(ctx, operator.TenantTopic(run.task.Wherry.Tenant), telemetry.AttrRun.String(run.task.Wherry.Run), telemetry.AttrAttempt.Int64(run.attempt))
-	if state != wire.TaskStateCompleted {
-		telemetry.Fail(send, telemetry.StateClass(string(state)))
+// publishing starts one PRODUCER span per terminal record the host accepts, the result and the terminal status, failed
+// for any state but completed, and puts each span's own context on its record; the returned func ends them.
+func (run *activeRun) publishing(ctx context.Context, state wire.TaskState, records ...*kgo.Record) func() {
+	spans := make([]trace.Span, 0, len(records))
+	for _, record := range records {
+		sendCtx, send := run.receiver.tracing.Producer(ctx, record.Topic, telemetry.AttrRun.String(run.task.Wherry.Run), telemetry.AttrAttempt.Int64(run.attempt))
+		if state != wire.TaskStateCompleted {
+			telemetry.Fail(send, telemetry.StateClass(string(state)))
+		}
+		run.receiver.tracing.Inject(sendCtx, record)
+		spans = append(spans, send)
 	}
-	return sendCtx, send
+	return func() {
+		for _, send := range spans {
+			send.End()
+		}
+	}
 }
 
 func (r *Receiver) echo(task *wire.Submission, hash string) *wire.Echo {
@@ -2096,9 +2106,10 @@ func (run *activeRun) returnTask(ctx context.Context, pending []pluginsdk.Line) 
 	if !run.receiver.budgetSpent(run.attempt) {
 		return kgo.AckRelease
 	}
-	sendCtx, send := run.publishing(ctx, wire.TaskStateFailed)
-	err := run.commit(ctx, run.budgetRecords(sendCtx, pending)...)
-	send.End()
+	records, terminal := run.budgetRecords(pending)
+	ended := run.publishing(ctx, wire.TaskStateFailed, terminal...)
+	err := run.commit(ctx, records...)
+	ended()
 	if err != nil {
 		return run.abandon(err)
 	}
@@ -2107,8 +2118,9 @@ func (run *activeRun) returnTask(ctx context.Context, pending []pluginsdk.Line) 
 	return kgo.AckReject
 }
 
-// budgetRecords are the records that end the run at the delivery budget; the result carries sendCtx's trace context.
-func (run *activeRun) budgetRecords(sendCtx context.Context, pending []pluginsdk.Line) []*kgo.Record {
+// budgetRecords are the records that end the run at the delivery budget, and the terminal ones among them the host
+// accepts: the result and the feed's terminal status.
+func (run *activeRun) budgetRecords(pending []pluginsdk.Line) (records, terminal []*kgo.Record) {
 	reason := budgetReason
 	if run.startCause != "" {
 		reason = fmt.Sprintf("%s after %d attempts; last: %s", budgetReason, run.attempt, run.startCause)
@@ -2116,8 +2128,8 @@ func (run *activeRun) budgetRecords(sendCtx context.Context, pending []pluginsdk
 	status := taskStatus(wire.TaskStateFailed, reason)
 	chunks := run.chunks(pending, true)
 	result := run.result(status, reason)
-	run.receiver.tracing.Inject(sendCtx, result)
-	return append(append(chunks, result), run.terminal(status, pending)...)
+	ending := run.terminal(status, pending)
+	return append(append(chunks, result), ending...), []*kgo.Record{result, ending[1]}
 }
 
 // budgetEnded counts a run whose committed terminal ended it at the delivery budget.
@@ -2570,13 +2582,12 @@ func replyMessage(message wire.Message, text string) *wire.Message {
 // end commits the remaining transcript, the outputs and reply chunks, the result and the terminal status in one
 // transaction.
 func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result string, pending []pluginsdk.Line, ack kgo.AckStatus) kgo.AckStatus {
-	sendCtx, send := run.publishing(ctx, status.State)
-	defer send.End()
 	// The chunks come first: the result's references read the transcript offset they advance.
 	chunks := run.chunks(pending, true)
 	published := run.result(status, result)
-	run.receiver.tracing.Inject(sendCtx, published)
-	records := append(append(append(chunks, run.outputs...), published), run.terminal(status, pending)...)
+	ending := run.terminal(status, pending)
+	defer run.publishing(ctx, status.State, published, ending[1])()
+	records := append(append(append(chunks, run.outputs...), published), ending...)
 	if err := run.commit(ctx, records...); err != nil {
 		return run.abandon(err)
 	}
@@ -2648,8 +2659,8 @@ func (run *activeRun) claimRecords(topic string, offset int64) []*kgo.Record {
 	return run.receiver.statusRecords(run.task, value)
 }
 
-// terminal is the terminal status records, counting the attempt's committed chunks and pending's, or the empty last
-// chunk when nothing is pending, and the tombstone of the run's progress.
+// terminal is the terminal status records, the pool's then the feed's, counting the attempt's committed chunks and
+// pending's, or the empty last chunk when nothing is pending, and the tombstone of the run's progress.
 func (run *activeRun) terminal(status wire.TaskStatus, pending []pluginsdk.Line) []*kgo.Record {
 	value := run.status("terminal", status, nil, nil)
 	value.Wherry.TranscriptChunks = run.chunked + int64(max(len(pending), 1))

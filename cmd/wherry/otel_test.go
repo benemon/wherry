@@ -306,13 +306,30 @@ func TestTracedRoundTrip(t *testing.T) {
 	custodian := one("process "+events, trace.SpanKindConsumer, telemetry.RoleCustodian)
 	wrap := one("send "+events, trace.SpanKindProducer, telemetry.RoleCustodian)
 	opened := one("process "+events, trace.SpanKindConsumer, telemetry.RoleReceiver)
-	terminal := one("send "+feed, trace.SpanKindProducer, telemetry.RoleReceiver)
-	result := one("process "+feed, trace.SpanKindConsumer, telemetry.RoleHost)
 	for child, parent := range map[*tracetest.SpanStub]tracetest.SpanStub{
-		&send: submit, &process: send, &running: process, &request: running, &custodian: request, &wrap: custodian, &opened: wrap, &terminal: running, &result: terminal,
+		&send: submit, &process: send, &running: process, &request: running, &custodian: request, &wrap: custodian, &opened: wrap,
 	} {
 		if child.Parent.SpanID() != parent.SpanContext.SpanID() {
 			t.Errorf("%s (%s) has parent %s, want %s (%s)", child.Name, teletest.Resource(*child, semconv.ServiceNamespaceKey), ids[child.Parent.SpanID()].Name, parent.Name, teletest.Resource(parent, semconv.ServiceNamespaceKey))
+		}
+	}
+	// The result and the terminal status: a PRODUCER each under the run, and a host CONSUMER each under its own.
+	terminals, results := byName("send "+feed, trace.SpanKindProducer, telemetry.RoleReceiver), byName("process "+feed, trace.SpanKindConsumer, telemetry.RoleHost)
+	if len(terminals) != 2 || len(results) != 2 {
+		t.Fatalf("terminal sends %d and feed consumers %d, want two each", len(terminals), len(results))
+	}
+	for _, terminal := range terminals {
+		if terminal.Parent.SpanID() != running.SpanContext.SpanID() {
+			t.Errorf("terminal send %s has parent %s, want the run", terminal.SpanContext.SpanID(), ids[terminal.Parent.SpanID()].Name)
+		}
+		under := 0
+		for _, result := range results {
+			if result.Parent.SpanID() == terminal.SpanContext.SpanID() {
+				under++
+			}
+		}
+		if under != 1 {
+			t.Errorf("feed consumers under terminal send %s: %d, want one", terminal.SpanContext.SpanID(), under)
 		}
 	}
 	if process.Name != "process "+taskTopic+" fake" || teletest.Attr(process, telemetry.AttrProfile) != "fake" || teletest.Attr(process, telemetry.AttrAgent) != "claude" || teletest.Attr(process, telemetry.AttrAttempt) != "1" {

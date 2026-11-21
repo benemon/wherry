@@ -786,9 +786,9 @@ func (h *Host) cancel(ctx context.Context, runs []string) (CancelResult, error) 
 	if err != nil {
 		return CancelResult{}, err
 	}
-	// Its own trace, linked to the run's submit when this host has its record.
+	// In the run's trace, under the submit context its local record saved; a root when this host saved none.
 	topic := operator.PoolEventsTopic(r.pool)
-	sendCtx, send := h.tracing.ProducerLinked(ctx, topic, telemetry.ParseTraceParent(r.local.traceParent()), telemetry.AttrRun.String(runID), telemetry.AttrPool.String(r.pool))
+	sendCtx, send := h.tracing.ProducerUnder(ctx, topic, telemetry.ParseTraceParent(r.local.traceParent()), telemetry.AttrRun.String(runID), telemetry.AttrPool.String(r.pool))
 	record := &kgo.Record{Topic: topic, Key: []byte(runID), Value: encoded}
 	h.tracing.Inject(sendCtx, record)
 	err = h.produce(ctx, record)
@@ -994,8 +994,8 @@ type runRecord struct {
 	CancelRequestedMS int64 `json:"cancel_requested_at_ms,omitzero"`
 	// Bundle is the run's changes.bundle as wait last collected and verified it.
 	Bundle *collectedBundle `json:"bundle,omitzero"`
-	// TraceParent is the submit span's context as a traceparent header, which a cancel or resubmission links to; empty
-	// when tracing was off.
+	// TraceParent is the submit span's context as a traceparent header, which a cancel is parented to and a
+	// resubmission links to; empty when tracing was off.
 	TraceParent string `json:"trace_parent,omitzero"`
 }
 
