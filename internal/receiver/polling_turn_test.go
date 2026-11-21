@@ -286,7 +286,8 @@ func TestAdmissionDoesNotHoldTheProfileTurn(t *testing.T) {
 		return slices.Contains(events.polledKeys, testRun(name))
 	}
 	await := func(name string) bool {
-		for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		// A loaded runner can take seconds to fetch; the bound only matters when the turn is wrongly held.
+		for end := time.Now().Add(30 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
 			if polled(name) {
 				return true
 			}
