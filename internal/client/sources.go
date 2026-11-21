@@ -47,6 +47,8 @@ type agentSource struct {
 	// error; a variable read implicitly is left out when it is unset.
 	explicit   bool
 	configured bool
+	// catalogVariable says the credential's target is a variable in the host's catalog.
+	catalogVariable bool
 }
 
 // sources are agent's credentials with their sources on a host whose configuration names configured, under catalog c,
@@ -54,10 +56,10 @@ type agentSource struct {
 func sources(configured map[string]credential.Source, c *catalog.Catalog, agent operator.AgentTerms) []agentSource {
 	result := make([]agentSource, 0, len(agent.Credentials))
 	for _, entry := range agent.Credentials {
-		s := agentSource{AgentCredential: entry}
+		s := agentSource{AgentCredential: entry, catalogVariable: entry.Env != "" && c != nil && c.Reads(entry.Env)}
 		if source, ok := configured[entry.Name]; ok {
 			s.source, s.explicit, s.configured = source, true, true
-		} else if entry.Env != "" && c != nil && c.Reads(entry.Env) {
+		} else if s.catalogVariable {
 			s.source, s.configured = credential.Source{Env: entry.Env}, true
 		}
 		result = append(result, s)
@@ -181,14 +183,14 @@ func (h *Host) supplied(agent operator.AgentTerms, requested []string, r *resolv
 	return supplied, unsupplied, nil
 }
 
-// modelCredentials are the credentials of agent's terms whose targets are the variables of the catalog entry agent's
-// name names, when that entry reads several: the model credentials pool apply derived, found by target. Nil for an
-// agent whose name is no such entry, or whose terms share no variable with the host's entry.
-func (h *Host) modelCredentials(agent operator.AgentTerms) []operator.AgentCredential {
-	if h.catalog == nil {
+// modelCredentials are the credentials of agent's terms whose targets are the variables of the entry agent's name names
+// in c, when that entry reads several: the model credentials pool apply derived, found by target. Nil for an agent
+// whose name is no such entry, or whose terms share no variable with the entry.
+func modelCredentials(c *catalog.Catalog, agent operator.AgentTerms) []operator.AgentCredential {
+	if c == nil {
 		return nil
 	}
-	entry, ok := h.catalog.Entry(agent.Name)
+	entry, ok := c.Entry(agent.Name)
 	if !ok || len(entry.Env) < 2 {
 		return nil
 	}
@@ -204,7 +206,7 @@ func (h *Host) modelCredentials(agent operator.AgentTerms) []operator.AgentCrede
 // atLeastOne refuses a task of an agent whose model credentials are all optional when supplied holds none of them, since
 // the run would reach the vendor with no credential; other credentials neither satisfy nor disable the check.
 func (h *Host) atLeastOne(agent operator.AgentTerms, supplied []string) error {
-	model := h.modelCredentials(agent)
+	model := modelCredentials(h.catalog, agent)
 	if len(model) == 0 {
 		return nil
 	}
@@ -258,7 +260,7 @@ func readiness(configured map[string]credential.Source, c *catalog.Catalog, agen
 	byName := map[string]Readiness{}
 	for _, s := range sources(configured, c, agent) {
 		r := Readiness{Name: s.Name, Env: s.Env, File: s.File, Description: s.Description, Optional: s.Optional(), Source: s.kind(), Variable: s.variable(), Status: s.status(),
-			CatalogVariable: s.Env != "" && c != nil && c.Reads(s.Env)}
+			CatalogVariable: s.catalogVariable}
 		result.Credentials = append(result.Credentials, r)
 		byName[s.Name] = r
 		if !s.Optional() && (r.Status == StatusMissing || r.Status == StatusUnset) {
@@ -269,24 +271,21 @@ func readiness(configured map[string]credential.Source, c *catalog.Catalog, agen
 	if c != nil {
 		if entry, ok := c.Entry(agent.Name); ok {
 			result.Doc = entry.Doc
-			if len(entry.Env) > 1 {
-				var model []Readiness
-				satisfied := false
-				for _, s := range agent.Credentials {
-					if s.Env == "" || !slices.Contains(entry.Env, s.Env) {
-						continue
-					}
-					r := byName[s.Name]
-					model = append(model, r)
-					if !s.Optional() || r.Status == StatusReady || r.Status == StatusUnchecked {
-						satisfied = true
-					}
-				}
-				if len(model) > 0 && !satisfied {
-					result.Ready = false
-					result.Missing = append(result.Missing, model...)
-				}
+		}
+	}
+	if model := modelCredentials(c, agent); len(model) > 0 {
+		var missing []Readiness
+		satisfied := false
+		for _, s := range model {
+			r := byName[s.Name]
+			missing = append(missing, r)
+			if !s.Optional() || r.Status == StatusReady || r.Status == StatusUnchecked {
+				satisfied = true
 			}
+		}
+		if !satisfied {
+			result.Ready = false
+			result.Missing = append(result.Missing, missing...)
 		}
 	}
 	return result
