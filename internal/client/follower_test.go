@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"errors"
-	"regexp"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -27,8 +26,8 @@ type feedHook struct {
 func consumesFeed(client *kgo.Client) bool {
 	topic := operator.TenantTopic("tenant-a")
 	partitions, _ := client.OptValue(kgo.ConsumePartitions).(map[string]map[int32]kgo.Offset)
-	_, consumed := client.OptValue(kgo.ConsumeTopics).(map[string]*regexp.Regexp)[topic]
-	return partitions[topic] != nil || consumed
+	topics, _ := client.OptValue(kgo.ConsumeTopics).([]string)
+	return partitions[topic] != nil || slices.Contains(topics, topic)
 }
 
 func (h *feedHook) OnNewClient(client *kgo.Client) {
