@@ -26,10 +26,12 @@ import (
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
+	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -192,6 +194,11 @@ type Host struct {
 	// follower is the host's reader of the tenant feed, kept while its context lasts.
 	followMu sync.Mutex
 	follower *follower
+	// tracing is the host role's tracer provider; traced holds the feed records whose CONSUMER span this process has
+	// emitted, by topic and offset.
+	tracing  *telemetry.Tracing
+	tracedMu sync.Mutex
+	traced   map[string]bool
 }
 
 // NewHost constructs a host over a plain Kafka connection authenticated as principal.
@@ -206,13 +213,18 @@ func NewHost(kafka *kgo.Client, key ed25519.PrivateKey, principal, stateDir stri
 	if err != nil {
 		return nil, err
 	}
-	return &Host{kafka: kafka, reader: operator.NewReader(kafka), key: key, tenant: tenant, host: host, stateDir: stateDir, credentials: credentials, catalog: c, git: git, logger: logger}, nil
+	tracing, err := telemetry.New(context.Background(), telemetry.RoleHost, telemetry.Names{Tenant: tenant, Host: host})
+	if err != nil {
+		return nil, err
+	}
+	return &Host{kafka: kafka, reader: operator.NewReader(kafka), key: key, tenant: tenant, host: host, stateDir: stateDir, credentials: credentials, catalog: c, git: git, logger: logger, tracing: tracing, traced: map[string]bool{}}, nil
 }
 
-// Close closes the Kafka connections.
+// Close closes the Kafka connections and flushes the host's spans within telemetry.ShutdownBound.
 func (h *Host) Close() {
 	h.reader.Close()
 	h.kafka.Close()
+	h.tracing.Close()
 }
 
 // Register registers the host key on the host's key topic unless that key is already there, and returns its key ID.
@@ -270,8 +282,33 @@ func (h *Host) load(ctx context.Context) (view, error) {
 }
 
 // Submit places a task through the live receiver with the most spare capacity that can take it, and publishes it to
-// that receiver's pool.
+// that receiver's pool. It is the root span of the run's trace.
 func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, error) {
+	ctx, span := h.tracing.Root(ctx, "submit", trace.SpanKindInternal)
+	defer span.End()
+	result, err := h.submit(ctx, input)
+	if err != nil {
+		telemetry.Fail(span, submitClass(err))
+	}
+	return result, err
+}
+
+// submitClass is the fixed class of a failed submission.
+func submitClass(err error) string {
+	switch {
+	case errors.Is(err, ErrInvalidInput):
+		return telemetry.ClassInvalid
+	case errors.Is(err, ErrNoMatchingReceiver):
+		return telemetry.ClassUnplaced
+	case errors.Is(err, ErrStartByPastLimit):
+		return telemetry.ClassStartBy
+	case errors.Is(err, ErrNoSnapshot), errors.Is(err, ErrCustodianUnavailable):
+		return telemetry.ClassNoKey
+	}
+	return telemetry.ClassError
+}
+
+func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, error) {
 	h.resubmitLost(ctx)
 	// Checked before placement: an invalid key matches no offer and would read as no matching receiver.
 	for _, name := range input.Requested {
@@ -376,10 +413,14 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	var v view
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.Go(func() (err error) {
+		_, read := telemetry.ChildOf(groupCtx, "read host key", trace.SpanKindClient)
+		defer read.End()
 		keys, err = h.reader.ReadKeys(groupCtx, map[string]string{owner: operator.HostTopic(h.tenant, h.host)})
 		return err
 	})
 	group.Go(func() (err error) {
+		_, read := telemetry.ChildOf(groupCtx, "read state", trace.SpanKindClient)
+		defer read.End()
 		v, err = h.load(groupCtx)
 		return err
 	})
@@ -392,7 +433,9 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	now := time.Now()
 	// A receiver keeps its plugin's declared limit through a restart, so an advertisement of any age counts for the
 	// profile limit; placement takes live ones alone.
+	_, readAds := telemetry.ChildOf(ctx, "read advertisements", trace.SpanKindClient)
 	declared, err := h.reader.ReadAdvertisements(ctx, v.state, v.keys, slices.Sorted(maps.Keys(v.state.Entitlements[h.tenant])), now, math.MaxInt64)
+	readAds.End()
 	if err != nil {
 		return SubmitResult{}, err
 	}
@@ -405,6 +448,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err != nil {
 		return SubmitResult{}, err
 	}
+	trace.SpanFromContext(ctx).SetAttributes(telemetry.AttrPool.String(pool), telemetry.AttrAgent.String(placement.Agent), telemetry.AttrModel.String(placement.Model))
 	// Before any credential resolves or input uploads. The state is loaded before the snapshot is read and the snapshot
 	// before the produce, so a task carries the outgoing key only if it was read before a successor's snapshot.
 	poolKey, err := h.poolKey(ctx, v, pool)
@@ -473,6 +517,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	}
 	nonce := wire.RunNonce()
 	runID := wire.RunID(h.tenant, h.host, nonce)
+	trace.SpanFromContext(ctx).SetAttributes(telemetry.AttrRun.String(runID))
 	submission, err := h.submission(runID, nonce, pool, placement, append([]wire.Part{{Text: input.Prompt}}, input.Parts...), input.StartBy, input.EndBy)
 	if err != nil {
 		return SubmitResult{}, err
@@ -545,7 +590,9 @@ func (h *Host) poolKey(ctx context.Context, v view, pool string) (*ecdsa.PublicK
 	if v.state.Suspended[pool] {
 		return nil, fmt.Errorf("pool %s is suspended; submit again once it is resumed", pool)
 	}
+	_, read := telemetry.ChildOf(ctx, "read pool key", trace.SpanKindClient, telemetry.AttrPool.String(pool))
 	records, err := h.reader.ReadFrom(ctx, operator.CustodianTopic(pool), 0)
+	read.End()
 	if err != nil {
 		return nil, err
 	}
@@ -599,7 +646,12 @@ func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms
 		if !configured {
 			return nil, fmt.Errorf("%w: auth required: credential %s is not in this host's configuration", ErrInvalidInput, name)
 		}
+		_, resolve := telemetry.Child(ctx, "resolve credential", telemetry.AttrCredential.String(name), telemetry.AttrCredentialSource.String(sourceKind(source)))
 		value, err := resolver.resolve(name, source)
+		if err != nil {
+			telemetry.Fail(resolve, telemetry.ClassError)
+		}
+		resolve.End()
 		if err != nil {
 			return nil, fmt.Errorf("resolve credential %s: %w", name, err)
 		}
@@ -623,6 +675,8 @@ func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms
 			values.S3Outputs[output] = string(urls[signed.S3OutputValue(output)])
 		}
 	}
+	_, seal := telemetry.Child(ctx, "seal envelope")
+	defer seal.End()
 	if err := operator.CheckEnvelope(terms, submission, values); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
@@ -644,6 +698,17 @@ func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms
 		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
 	return encoded, nil
+}
+
+// sourceKind is the kind of a credential source, file, env or command: what a span may carry of it, never its key.
+func sourceKind(source credential.Source) string {
+	switch {
+	case source.Env != "":
+		return SourceEnv
+	case len(source.Command) > 0:
+		return SourceCommand
+	}
+	return SourceFile
 }
 
 // s3OutputNames names the outputs returned through the pool's bucket.
@@ -719,7 +784,17 @@ func (h *Host) cancel(ctx context.Context, runs []string) (CancelResult, error) 
 	if err != nil {
 		return CancelResult{}, err
 	}
-	if err := h.produce(ctx, &kgo.Record{Topic: operator.PoolEventsTopic(r.pool), Key: []byte(runID), Value: encoded}); err != nil {
+	// Its own trace, linked to the run's submit when this host has its record.
+	topic := operator.PoolEventsTopic(r.pool)
+	sendCtx, send := h.tracing.ProducerLinked(ctx, topic, telemetry.ParseTraceParent(r.local.traceParent()), telemetry.AttrRun.String(runID), telemetry.AttrPool.String(r.pool))
+	record := &kgo.Record{Topic: topic, Key: []byte(runID), Value: encoded}
+	h.tracing.Inject(sendCtx, record)
+	err = h.produce(ctx, record)
+	if err != nil {
+		telemetry.Fail(send, telemetry.ClassError)
+	}
+	send.End()
+	if err != nil {
 		return CancelResult{}, err
 	}
 	if local := r.local; local != nil && local.CancelRequestedMS == 0 {
@@ -768,7 +843,7 @@ func (h *Host) newRecord(ctx context.Context, submission *wire.Submission, topic
 	template.Wherry.Envelope, template.Wherry.Wrap = "", ""
 	record := runRecord{
 		Run: binding.Run, Pool: binding.Pool, Topic: topic, Placement: binding.Placement, TaskHash: wire.TaskHash(encoded), SubmittedMS: now.UnixMilli(), TaskStartedBy: binding.TaskStartedBy,
-		TaskEndedBy: binding.TaskEndedBy, RedactionKey: redactionKey, Task: &template,
+		TaskEndedBy: binding.TaskEndedBy, RedactionKey: redactionKey, Task: &template, TraceParent: h.tracing.TraceParent(ctx),
 	}
 	for _, credential := range binding.Credentials {
 		record.TaskCredentials = append(record.TaskCredentials, credential.Name)
@@ -789,12 +864,21 @@ func (h *Host) newRecord(ctx context.Context, submission *wire.Submission, topic
 	return record, nil
 }
 
-// produceTask writes encoded, a signed submission, to topic, a task topic of its pool.
+// produceTask writes encoded, a signed submission, to topic, a task topic of its pool, under the run's PRODUCER span,
+// whose context travels in the record's traceparent header.
 func (h *Host) produceTask(ctx context.Context, topic string, binding wire.SubmissionBinding, encoded []byte) error {
-	err := h.produce(ctx, &kgo.Record{Topic: topic, Key: []byte(binding.Run), Value: encoded})
+	sendCtx, send := h.tracing.Producer(ctx, topic, telemetry.AttrRun.String(binding.Run), telemetry.AttrPool.String(binding.Pool),
+		telemetry.AttrAgent.String(binding.Placement.Agent), telemetry.AttrModel.String(binding.Placement.Model), telemetry.AttrSize.Int(len(encoded)))
+	defer send.End()
+	record := &kgo.Record{Topic: topic, Key: []byte(binding.Run), Value: encoded}
+	h.tracing.Inject(sendCtx, record)
+	err := h.produce(ctx, record)
 	switch {
 	case errors.Is(err, kerr.MessageTooLarge):
+		telemetry.Fail(send, telemetry.ClassTooLarge)
 		return fmt.Errorf("%w: the submission is a %d-byte record, over the broker's record limit; shorten the prompt or the input files", ErrInvalidInput, len(encoded))
+	case err != nil:
+		telemetry.Fail(send, telemetry.ClassError)
 	}
 	return err
 }
@@ -908,6 +992,9 @@ type runRecord struct {
 	CancelRequestedMS int64 `json:"cancel_requested_at_ms,omitzero"`
 	// Bundle is the run's changes.bundle as wait last collected and verified it.
 	Bundle *collectedBundle `json:"bundle,omitzero"`
+	// TraceParent is the submit span's context as a traceparent header, which a cancel or resubmission links to; empty
+	// when tracing was off.
+	TraceParent string `json:"trace_parent,omitzero"`
 }
 
 // feedOffset is where the tenant feed's records about the run begin, zero without a local record of it.
@@ -916,6 +1003,13 @@ func (r *runRecord) feedOffset() int64 {
 		return 0
 	}
 	return r.FeedOffset
+}
+
+func (r *runRecord) traceParent() string {
+	if r == nil {
+		return ""
+	}
+	return r.TraceParent
 }
 
 func (h *Host) runPath(runID string) (string, bool) {

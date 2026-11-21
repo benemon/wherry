@@ -34,10 +34,14 @@ import (
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/redact"
 	"github.com/benemon/wherry/internal/signed"
+	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel/attribute"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -289,15 +293,32 @@ func (r *Receiver) claimNext(claiming, ctx context.Context, profile Named, turn 
 			turn <- struct{}{}
 		}
 	}
+	// The attempt's CONSUMER span, a child of the task record's trace context, from the record's receipt to its
+	// admission; the run is its INTERNAL child.
+	ctx, process := r.tracing.ConsumerNamed(ctx, record, "process "+record.Topic+" "+profile.Name,
+		telemetry.AttrAttempt.Int64(attemptOf(record)), telemetry.AttrProfile.String(profile.Name), telemetry.AttrAgent.String(profile.Agent),
+		semconv.MessagingKafkaOffset(int(record.Offset)), semconv.MessagingConsumerGroupName(operator.PoolGroup(r.config.Pool)))
 	// A slot holding a task releases it only after running ends, so it does not hold up the idle slots' close.
 	defer context.AfterFunc(claiming, idle)()
 	if r.suspended() {
+		telemetry.Fail(process, telemetry.ClassReleased)
+		process.End()
 		return settle(record, kgo.AckRelease)
 	}
 	admitted, ack := r.admit(ctx, record, profile)
 	if admitted == nil {
+		switch ack {
+		case kgo.AckRelease:
+			telemetry.FailUnset(process, telemetry.ClassReleased)
+		case kgo.AckReject:
+			telemetry.FailUnset(process, telemetry.ClassRejected)
+		}
+		process.End()
 		return settle(record, ack)
 	}
+	binding := admitted.task.Wherry
+	process.SetAttributes(telemetry.AttrRun.String(binding.Run), telemetry.AttrTenant.String(binding.Tenant), telemetry.AttrHost.String(binding.Host), telemetry.AttrModel.String(binding.Placement.Model))
+	process.End()
 	r.adjustInFlight(profile.Name, 1)
 	defer r.adjustInFlight(profile.Name, -1)
 	tenant, routed := admitted.task.Wherry.Tenant, admitted.profile.Name
@@ -347,6 +368,9 @@ type admission struct {
 
 // admit decides whether record's task runs here; a nil admission carries the acknowledgement.
 func (r *Receiver) admit(ctx context.Context, record *kgo.Record, profile Named) (*admission, kgo.AckStatus) {
+	process := trace.SpanFromContext(ctx)
+	ctx, span := telemetry.Child(ctx, "admit", telemetry.AttrAttempt.Int64(attemptOf(record)), telemetry.AttrProfile.String(profile.Name))
+	defer span.End()
 	hash := wire.TaskHash(record.Value)
 	// Released even at the delivery budget: without the events, a terminal could repeat a committed one.
 	events, err := r.readEvents(ctx)
@@ -362,13 +386,18 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, profile Named)
 		task, err = operator.AuthorizeSubmission(state, hosts, record.Value, r.config.Pool)
 		return err
 	}); err != nil || task.Wherry.Run != string(record.Key) {
+		telemetry.Fail(span, telemetry.ClassRejected)
 		return nil, kgo.AckReject
 	}
 	r.metrics.claims.WithLabelValues(task.Wherry.Tenant).Inc()
 	run, attempt := task.Wherry.Run, attemptOf(record)
-	// rejectAs counts the rejection under label, a fixed text for a reason that quotes the task.
+	span.SetAttributes(telemetry.AttrRun.String(run))
+	// rejectAs counts the rejection under label, a fixed text for a reason that quotes the task; the label, never the
+	// reason, is the spans' status.
 	rejectAs := func(label, reason string) (*admission, kgo.AckStatus) {
 		r.logger.Printf("rejected %s: %s", run, reason)
+		telemetry.Fail(span, label)
+		telemetry.Fail(process, label)
 		if err := r.publishRejection(ctx, &task, hash, attempt, reason); err != nil {
 			r.logger.Printf("publish rejection for %s: %v", run, err)
 			return nil, kgo.AckRelease
@@ -385,10 +414,15 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, profile Named)
 		}
 		held := &activeRun{receiver: r, task: &task, taskHash: hash, history: []wire.Message{task.Message}, attempt: attempt}
 		echo := &kgo.Record{Topic: operator.TenantTopic(task.Wherry.Tenant), Key: []byte(run), Value: r.sign(r.echo(&task, hash))}
-		if err := r.admissionCommit(ctx, append([]*kgo.Record{echo}, held.budgetRecords(nil)...)...); err != nil {
+		sendCtx, send := held.publishing(ctx, wire.TaskStateFailed)
+		err := r.admissionCommit(ctx, append([]*kgo.Record{echo}, held.budgetRecords(sendCtx, nil)...)...)
+		send.End()
+		if err != nil {
 			r.logger.Printf("publish terminal for %s: %v", run, err)
 			return nil, kgo.AckRelease
 		}
+		telemetry.Fail(span, telemetry.ClassFailed)
+		telemetry.Fail(process, telemetry.ClassFailed)
 		held.budgetEnded()
 		return nil, kgo.AckReject
 	}
@@ -541,7 +575,22 @@ func deliverables(history []wire.Message, git *wire.GitInput) ([]pluginsdk.File,
 func (r *Receiver) publishRejection(ctx context.Context, task *wire.Submission, hash string, attempt int64, reason string) error {
 	status := r.status(task, hash, attempt, "rejected", taskStatus(wire.TaskStateRejected, reason), nil)
 	echo := &kgo.Record{Topic: operator.TenantTopic(task.Wherry.Tenant), Key: []byte(task.Wherry.Run), Value: r.sign(r.echo(task, hash))}
-	return r.admissionCommit(ctx, append([]*kgo.Record{echo}, r.statusRecords(task, status)...)...)
+	sendCtx, send := r.tracing.Producer(ctx, operator.TenantTopic(task.Wherry.Tenant), telemetry.AttrRun.String(task.Wherry.Run), telemetry.AttrAttempt.Int64(attempt))
+	defer send.End()
+	telemetry.Fail(send, telemetry.ClassRejected)
+	records := r.statusRecords(task, status)
+	r.tracing.Inject(sendCtx, records[1])
+	return r.admissionCommit(ctx, append([]*kgo.Record{echo}, records...)...)
+}
+
+// publishing is the PRODUCER span of the run's terminal records to the tenant's feed, failed for any state but
+// completed; the result record carries its context to the host.
+func (run *activeRun) publishing(ctx context.Context, state wire.TaskState) (context.Context, trace.Span) {
+	sendCtx, send := run.receiver.tracing.Producer(ctx, operator.TenantTopic(run.task.Wherry.Tenant), telemetry.AttrRun.String(run.task.Wherry.Run), telemetry.AttrAttempt.Int64(run.attempt))
+	if state != wire.TaskStateCompleted {
+		telemetry.Fail(send, telemetry.StateClass(string(state)))
+	}
+	return sendCtx, send
 }
 
 func (r *Receiver) echo(task *wire.Submission, hash string) *wire.Echo {
@@ -858,7 +907,7 @@ func (r *Receiver) executeAttempt(ctx context.Context, claim *runClaim, record *
 		for _, credential := range credentials {
 			secrets = append(secrets, pluginsdk.Secret{Name: credential.Name, Env: credential.Env, File: credential.File, Value: values.Credentials[credential.Name]})
 		}
-		run.deliver(values.Credentials)
+		run.delivered(ctx, values.Credentials)
 		var fetches []pluginsdk.Fetch
 		fetches, run.puts = run.presigned(values, admitted.s3Inputs, outputNames)
 		promptInputs := make([]string, 0, len(admitted.inputs)+len(inputNames))
@@ -1002,7 +1051,7 @@ func (r *Receiver) executeAttempt(ctx context.Context, claim *runClaim, record *
 			return status
 		}
 		run.redactionKey = values.RedactionKey
-		run.deliver(values.Credentials)
+		run.delivered(ctx, values.Credentials)
 		_, run.puts = run.presigned(values, nil, outputNames)
 	}
 	if unplaced {
@@ -1229,6 +1278,7 @@ func (r *Receiver) executeAttempt(ctx context.Context, claim *runClaim, record *
 			if flush {
 				// The progress record commits with the chunks it covers.
 				records = append(run.chunks(pending[:len(pending)-held], false), run.progress(at))
+				telemetry.Event(ctx, "transcript commit", telemetry.AttrChunks.Int(len(pending)-held))
 			}
 			if line != "" {
 				records = append(records, run.statusRecords("working", taskStatus(wire.TaskStateWorking, line), nil, nil)...)
@@ -1313,11 +1363,13 @@ func accepted(state pluginsdk.JobState, completedAt, bound time.Time) bool {
 func (run *activeRun) awaitStart(ctx, startCtx context.Context, handle pluginsdk.Handle, dispatched time.Time, first *lookupResult) (pluginsdk.Job, kgo.AckStatus, bool) {
 	r, runID := run.receiver, run.task.Wherry.Run
 	bound := wire.PastBound(run.task.Wherry.TaskStartedBy)
+	_, awaiting := telemetry.Child(ctx, "await start")
+	defer awaiting.End()
 	results := make(chan lookupResult, 1)
 	cancelLookup := func() {}
 	defer func() { cancelLookup() }()
 	lookup := func() {
-		lookupCtx, cancel := context.WithCancel(startCtx)
+		lookupCtx, cancel := context.WithCancel(trace.ContextWithSpan(startCtx, awaiting))
 		cancelLookup = cancel
 		go func() {
 			job, err := run.profile.Plugin.Lookup(lookupCtx, runID)
@@ -1662,6 +1714,13 @@ type activeRun struct {
 	kept  bool
 }
 
+// delivered is deliver for the run's credentials, under a span naming them.
+func (run *activeRun) delivered(ctx context.Context, values map[string][]byte) {
+	_, span := telemetry.Child(ctx, "deliver credentials", telemetry.AttrCredential.StringSlice(slices.Sorted(maps.Keys(values))), telemetry.AttrCount.Int(len(values)))
+	defer span.End()
+	run.deliver(values)
+}
+
 // deliver keeps the forms of each credential value delivered to the run, each with the marker of the value's name under
 // the run's key, which names no credential.
 func (run *activeRun) deliver(values map[string][]byte) {
@@ -1967,6 +2026,9 @@ var errMisplaced = errors.New("a misplaced job was not removed")
 // started, with or without a started event, so nothing is purged.
 func (run *activeRun) findJob(ctx, lookupCtx context.Context) (pluginsdk.Job, bool, error) {
 	r, runID := run.receiver, run.task.Wherry.Run
+	_, span := telemetry.Child(ctx, "find job", telemetry.AttrAttempt.Int64(run.attempt))
+	defer span.End()
+	lookupCtx = trace.ContextWithSpan(lookupCtx, span)
 	for _, named := range r.profiles {
 		job, err := named.Plugin.Lookup(lookupCtx, runID)
 		if err != nil {
@@ -2029,23 +2091,32 @@ func (run *activeRun) reconcile(ctx context.Context) (pluginsdk.Job, bool) {
 // Lookup finds them. Once the delivery budget is spent it ends the run FAILED instead, and leaves the
 // material to the plugin's sweep.
 func (run *activeRun) returnTask(ctx context.Context, pending []pluginsdk.Line) kgo.AckStatus {
+	_, span := telemetry.Child(ctx, "return task", telemetry.AttrAttempt.Int64(run.attempt))
+	defer span.End()
 	if !run.receiver.budgetSpent(run.attempt) {
 		return kgo.AckRelease
 	}
-	if err := run.commit(ctx, run.budgetRecords(pending)...); err != nil {
+	sendCtx, send := run.publishing(ctx, wire.TaskStateFailed)
+	err := run.commit(ctx, run.budgetRecords(sendCtx, pending)...)
+	send.End()
+	if err != nil {
 		return run.abandon(err)
 	}
+	telemetry.FailCtx(ctx, telemetry.ClassFailed)
 	run.budgetEnded()
 	return kgo.AckReject
 }
 
-func (run *activeRun) budgetRecords(pending []pluginsdk.Line) []*kgo.Record {
+// budgetRecords are the records that end the run at the delivery budget; the result carries sendCtx's trace context.
+func (run *activeRun) budgetRecords(sendCtx context.Context, pending []pluginsdk.Line) []*kgo.Record {
 	reason := budgetReason
 	if run.startCause != "" {
 		reason = fmt.Sprintf("%s after %d attempts; last: %s", budgetReason, run.attempt, run.startCause)
 	}
 	status := taskStatus(wire.TaskStateFailed, reason)
-	return append(append(run.chunks(pending, true), run.result(status, reason)), run.terminal(status, pending)...)
+	result := run.result(status, reason)
+	run.receiver.tracing.Inject(sendCtx, result)
+	return append(append(run.chunks(pending, true), result), run.terminal(status, pending)...)
 }
 
 // budgetEnded counts a run whose committed terminal ended it at the delivery budget.
@@ -2317,14 +2388,29 @@ func uploadFailure(ctx context.Context, err error) string {
 // store uploads a streamed output to its presigned PUT URL with the Content-Length of its listing, as it reads it, and
 // hashes the bytes the request sends. Its reason never quotes the URL or a response body.
 func (run *activeRun) store(ctx context.Context, output pluginsdk.Output) storedOutput {
+	attrs := []attribute.KeyValue{telemetry.AttrSize.Int64(output.Size)}
+	if wire.ValidOutputName(output.Name) {
+		attrs = append(attrs, telemetry.AttrOutput.String(output.Name))
+	}
+	_, span := telemetry.ChildOf(ctx, "upload output", trace.SpanKindClient, attrs...)
+	defer span.End()
+	stored, class := run.upload(ctx, output)
+	if class != "" {
+		telemetry.Fail(span, class)
+	}
+	return stored
+}
+
+// upload is store's PUT; its class is the fixed class of a failure, empty for success.
+func (run *activeRun) upload(ctx context.Context, output pluginsdk.Output) (storedOutput, string) {
 	put, ok := run.puts[output.Name]
 	switch {
 	case !ok:
-		return storedOutput{reason: "not uploaded: no upload URL"}
+		return storedOutput{reason: "not uploaded: no upload URL"}, telemetry.ClassError
 	case output.Mode.Type() != 0:
-		return storedOutput{reason: "rejected: " + fileType(output.Mode)}
+		return storedOutput{reason: "rejected: " + fileType(output.Mode)}, telemetry.ClassError
 	case output.Size < 0 || output.Size > wire.MaxS3Object:
-		return storedOutput{reason: "exceeds the S3 object limit"}
+		return storedOutput{reason: "exceeds the S3 object limit"}, telemetry.ClassTooLarge
 	}
 	sum := sha256.New()
 	body := io.TeeReader(output.Body, sum)
@@ -2333,29 +2419,30 @@ func (run *activeRun) store(ctx context.Context, output pluginsdk.Output) stored
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPut, put, body)
 	if err != nil {
-		return storedOutput{reason: "not uploaded: invalid request"}
+		return storedOutput{reason: "not uploaded: invalid request"}, telemetry.ClassError
 	}
 	request.ContentLength = output.Size
 	response, err := storageClient.Do(request)
 	if err != nil {
-		reason := "not uploaded: request failed (" + uploadFailure(ctx, err) + ")"
+		class := uploadFailure(ctx, err)
+		reason := "not uploaded: request failed (" + class + ")"
 		if errors.Is(err, errRedirect) {
-			reason = "not uploaded: redirected"
+			reason, class = "not uploaded: redirected", telemetry.ClassRedirect
 		}
 		run.receiver.logger.Printf("run %s: S3 output %s %s", run.task.Wherry.Run, output.Name, reason)
-		return storedOutput{reason: reason}
+		return storedOutput{reason: reason}, class
 	}
 	io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
 	response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		reason := "not uploaded: status " + strconv.Itoa(response.StatusCode)
 		run.receiver.logger.Printf("run %s: S3 output %s %s", run.task.Wherry.Run, output.Name, reason)
-		return storedOutput{reason: reason}
+		return storedOutput{reason: reason}, telemetry.ClassStatus
 	}
 	return storedOutput{output: wire.ReturnedOutput{
 		Name: output.Name, SHA256: hex.EncodeToString(sum.Sum(nil)), Size: output.Size,
 		Key: wire.S3OutputKey(run.task.Wherry.Tenant, run.task.Wherry.Run, output.Name),
-	}}
+	}}, ""
 }
 
 // readOutcome reads and decodes an outcome file of at most the pool's output limit. Any outcome but a TaskStatus of a state an
@@ -2482,9 +2569,16 @@ func replyMessage(message wire.Message, text string) *wire.Message {
 // end commits the remaining transcript, the outputs and reply chunks, the result and the terminal status in one
 // transaction.
 func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result string, pending []pluginsdk.Line, ack kgo.AckStatus) kgo.AckStatus {
-	records := append(append(append(run.chunks(pending, true), run.outputs...), run.result(status, result)), run.terminal(status, pending)...)
+	sendCtx, send := run.publishing(ctx, status.State)
+	defer send.End()
+	published := run.result(status, result)
+	run.receiver.tracing.Inject(sendCtx, published)
+	records := append(append(append(run.chunks(pending, true), run.outputs...), published), run.terminal(status, pending)...)
 	if err := run.commit(ctx, records...); err != nil {
 		return run.abandon(err)
+	}
+	if status.State != wire.TaskStateCompleted {
+		telemetry.FailCtx(ctx, telemetry.StateClass(string(status.State)))
 	}
 	run.ended(status.State)
 	run.release(ctx)

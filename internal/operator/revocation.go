@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -44,6 +45,8 @@ type RevocationProgress func(RevocationStep)
 // RevokeReceiver runs the revocation steps for receiver, progress nil allowed, and reports a receiver whose membership
 // already ended converged and complete, as a host is, since its earlier revocation served its wait.
 func (service *Service) RevokeReceiver(ctx context.Context, receiver string, wait time.Duration, probe func(context.Context, string, string) error, progress RevocationProgress) RevocationResult {
+	ctx, span := service.marker(ctx, "receiver remove", telemetry.AttrReceiver.String(receiver))
+	defer span.End()
 	state, err := service.LoadState(ctx)
 	if err != nil {
 		return reported(progress, RevocationResult{Steps: []RevocationStep{{Number: 1, Err: err}}})
@@ -56,6 +59,8 @@ func (service *Service) RevokeReceiver(ctx context.Context, receiver string, wai
 
 // RevokeHost runs the revocation steps for tenant's host; progress may be nil.
 func (service *Service) RevokeHost(ctx context.Context, tenant, host string, wait time.Duration, probe func(context.Context, string, string) error, progress RevocationProgress) RevocationResult {
+	ctx, span := service.marker(ctx, "tenant host remove", telemetry.AttrTenant.String(tenant), telemetry.AttrHost.String(host))
+	defer span.End()
 	state, err := service.LoadState(ctx)
 	if err == nil {
 		err = state.LiveTenant(tenant)
@@ -323,6 +328,8 @@ func (service *Service) WaitOperatorCredential(ctx context.Context, password str
 }
 
 func (service *Service) TenantRemove(ctx context.Context, tenant string) error {
+	ctx, span := service.marker(ctx, "tenant remove", telemetry.AttrTenant.String(tenant))
+	defer span.End()
 	return service.removeTenant(ctx, tenant, service.Probe)
 }
 

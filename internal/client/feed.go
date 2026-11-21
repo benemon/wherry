@@ -15,16 +15,19 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
+	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/benemon/wherry/internal/wire"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -260,6 +263,9 @@ func (r *runView) add(ctx context.Context, record *kgo.Record, typ, kid string) 
 				return operator.AuthorizeStatus(history, v.state, v.keys, value, r.pool, r.h.tenant)
 			}); err == nil && status.Wherry.Run == r.run {
 				r.entries = append(r.entries, entry{receiver: status.Wherry.Receiver, status: &status})
+				if status.Wherry.Kind == "rejected" {
+					r.h.traceTerminal(ctx, record, r.run, status.StatusUpdate.Status.State)
+				}
 				return
 			}
 		case wire.ChunkType:
@@ -281,6 +287,7 @@ func (r *runView) add(ctx context.Context, record *kgo.Record, typ, kid string) 
 				return operator.AuthorizeResult(history, v.state, v.keys, value, r.pool, r.h.tenant)
 			}); err == nil && result.Wherry.Run == r.run {
 				r.entries = append(r.entries, entry{receiver: result.Wherry.Receiver, result: &result})
+				r.h.traceTerminal(ctx, record, r.run, result.Task.Status.State)
 				return
 			}
 		}
@@ -288,6 +295,27 @@ func (r *runView) add(ctx context.Context, record *kgo.Record, typ, kid string) 
 	if string(record.Key) == r.run {
 		r.unread++
 	}
+}
+
+// traceTerminal emits the CONSUMER span of a terminal record the host accepts, a child of the record's own trace
+// context, once per record in this process.
+func (h *Host) traceTerminal(ctx context.Context, record *kgo.Record, run string, state wire.TaskState) {
+	if !h.tracing.Enabled() {
+		return
+	}
+	key := record.Topic + "/" + strconv.FormatInt(record.Offset, 10)
+	h.tracedMu.Lock()
+	seen := h.traced[key]
+	h.traced[key] = true
+	h.tracedMu.Unlock()
+	if seen {
+		return
+	}
+	_, span := h.tracing.Consumer(ctx, record, telemetry.AttrRun.String(run), semconv.MessagingKafkaOffset(int(record.Offset)))
+	if state != wire.TaskStateCompleted {
+		telemetry.Fail(span, telemetry.StateClass(string(state)))
+	}
+	span.End()
 }
 
 // read takes a bounded read of the feed: echoes first, so a status committed before its run's echo still binds. Each

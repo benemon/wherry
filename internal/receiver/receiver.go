@@ -20,6 +20,7 @@ import (
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/redact"
 	"github.com/benemon/wherry/internal/signed"
+	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
@@ -27,6 +28,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // parseHistory, parseStrict and authorizeSubmission are wire.ParseHistory, wire.ParseStrict and
@@ -114,6 +116,9 @@ type Receiver struct {
 	platform []redact.Form
 	// events is the pool's events folded so far, which every read of them shares.
 	events eventsFold
+	// tracing and custodian are the receiver role's and the custodian role's tracer providers, set by configure.
+	tracing   *telemetry.Tracing
+	custodian *telemetry.Tracing
 }
 
 // New builds the receiver's Kafka client from bundle, trusting the broker through ca, the receiver's own ca_file, else
@@ -167,6 +172,7 @@ func (r *Receiver) newClient(extra ...kgo.Opt) (*kgo.Client, error) {
 func (r *Receiver) Run(ctx context.Context) error {
 	defer r.base.Close()
 	defer r.reader.Close()
+	defer r.shutdownTracing()
 	if err := r.register(ctx); err != nil {
 		return err
 	}
@@ -181,8 +187,11 @@ func (r *Receiver) Run(ctx context.Context) error {
 	if err := r.configure(ctx); err != nil {
 		return err
 	}
+	_, start := r.tracing.Root(ctx, "receiver start", trace.SpanKindInternal)
+	defer start.End()
 	// Claiming waits for one read of the pool's events, so a cancelled submission is not dispatched on start.
 	if err := r.readCancels(ctx); err != nil {
+		telemetry.Fail(start, telemetry.ClassNotLoaded)
 		return err
 	}
 	release := make(chan struct{})
@@ -228,6 +237,7 @@ func (r *Receiver) Run(ctx context.Context) error {
 	if err := r.advertise(ctx); err != nil {
 		r.logger.Printf("advertise: %v", err)
 	}
+	start.End()
 	var wg sync.WaitGroup
 	wg.Add(5)
 	go func() {
@@ -386,12 +396,16 @@ func (r *Receiver) configure(ctx context.Context) error {
 			if err := operator.ValidateReceiverRecord(record, r.id, state.Pools[config.Pool]); err != nil {
 				return fmt.Errorf("configuration: %w", err)
 			}
+			if err := r.trace(ctx, config.Pool); err != nil {
+				return err
+			}
 			profiles := make([]Named, 0, len(config.Profiles))
 			for _, settings := range config.Profiles {
 				named, err := r.factory(config.Pool, settings, config.PluginSHA256[settings.Plugin])
 				if err != nil {
 					return fmt.Errorf("profile %s: %s", settings.Name, logText(r.redactLive, err))
 				}
+				named.Plugin = tracePlugin(named.Plugin, r.tracing, named.Name)
 				profiles = append(profiles, named)
 			}
 			r.config, r.profiles = config, profiles
@@ -409,6 +423,32 @@ func (r *Receiver) configure(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(refreshInterval):
+		}
+	}
+}
+
+// trace builds the receiver's tracer providers, one for each role the process holds, once its pool is known.
+func (r *Receiver) trace(ctx context.Context, pool string) error {
+	r.shutdownTracing()
+	tracing, err := telemetry.New(ctx, telemetry.RoleReceiver, telemetry.Names{Pool: pool, Receiver: r.id})
+	if err != nil {
+		return err
+	}
+	custodian, err := telemetry.New(ctx, telemetry.RoleCustodian, telemetry.Names{Pool: pool, Receiver: r.id})
+	if err != nil {
+		return err
+	}
+	r.tracing, r.custodian = tracing, custodian
+	return nil
+}
+
+// shutdownTracing flushes both providers within shutdownTimeout.
+func (r *Receiver) shutdownTracing() {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	for _, tracing := range []*telemetry.Tracing{r.tracing, r.custodian} {
+		if err := tracing.Shutdown(ctx); err != nil {
+			r.logger.Printf("tracing: %v", err)
 		}
 	}
 }
