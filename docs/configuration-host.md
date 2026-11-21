@@ -51,25 +51,30 @@ it, named from its whole path, nothing stripped:
 | the host key file | `host.key` in the configuration directory | `<path>.host.key` |
 | the state directory | the state directory | `<path>.state/` |
 
-So `--config-file /work/a.yaml` and `--config-file /work/b.yaml` are two
-hosts with two keys, and never share one; `/work/a` and `/work/a.yaml` are
-distinct too. The path is made absolute and no symlink is resolved: it is
-the default when it is the default path, so the default configuration
-named relatively keeps the configuration directory's files, or when both
-exist and are one file, so a symlink or hard link to an existing default
-configuration does too. A link to a file not yet written is a
-configuration of its own, with its files beside the link, and stays one
-when that file is the default configuration: writing through the link
-makes it the default file, so `host init` names the `host_key` and
-`state_dir` it chose beside the link in the configuration it writes, and
-every later load, through the link or the default path, keeps them.
-Explicit `bundle`, `host_key` and `state_dir` values are kept wherever the
-configuration is: `host init BUNDLE` copies the bundle to the `bundle` a
+`--config-file /work/a.yaml` and `--config-file /work/b.yaml` are two hosts
+with two keys. `/work/a` and `/work/a.yaml` are distinct too. Explicit
+`bundle`, `host_key` and `state_dir` values are kept wherever the
+configuration is. `host init BUNDLE` copies the bundle to the `bundle` a
 configuration away from the default path names, and to `<path>.bundle.yaml`
-only when it names none; the default configuration's copy is always
+only when it names none. The default configuration's copy is always
 `bundle.yaml` in the configuration directory. `host init` makes the
-configuration directory mode 0700; elsewhere it creates a missing directory
+configuration directory mode 0700. Elsewhere it creates a missing directory
 for these files with mode 0700 and leaves an existing one's mode alone.
+
+The path is made absolute and no symlink is resolved. A configuration is
+the default in two cases:
+
+- Its path is the default path. The default configuration named relatively
+  keeps the configuration directory's files.
+- Both exist and are one file. A symlink or hard link to an existing default
+  configuration keeps them too.
+
+A link to a file not yet written is a configuration of its own, with its
+files beside the link. It stays one when that file is the default
+configuration: writing through the link makes it the default file, so
+`host init` names the `host_key` and `state_dir` it chose beside the link
+in the configuration it writes, and every later load, through the link or
+the default path, keeps them.
 
 Before it writes anything, `host init` refuses when the bundle's
 destination or one of the derived paths already exists and is not the file
@@ -78,7 +83,7 @@ another host's key at `<path>.host.key`, a file where `<path>.state/` would
 go, a directory where the named `bundle` would go, or a symlink to any of
 these or to nothing. A symlink is refused or accepted by what it points at:
 one to the file the configuration names is its own, one whose target does
-not exist is refused rather than written through. The error names the
+not exist is refused, and nothing is written through it. The error names the
 path and the setting, `bundle`, `host_key` or `state_dir`, that avoids it.
 A rerun on an initialised configuration, whose files it already names,
 succeeds. Explicit `host_key` and `state_dir` paths are not checked this
@@ -205,8 +210,8 @@ every run of that agent, with no request. Only the
 [catalog's variables](credential-variables.md) are read this way: the model
 providers' keys, the cloud credentials models.dev lists, such as
 `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AZURE_API_KEY` and
-`GOOGLE_APPLICATION_CREDENTIALS`, and `GITHUB_TOKEN`. `GITHUB_TOKEN` is the
-case to know: it is a catalog variable through models.dev's
+`GOOGLE_APPLICATION_CREDENTIALS`, and `GITHUB_TOKEN`. Note `GITHUB_TOKEN`.
+It is a catalog variable through models.dev's
 `github-copilot`, so a pool whose terms give an agent's credential that
 target, as the [example](#client-configuration-example)'s `github-token`
 has, gets the token from every submitting process that has it set; the
@@ -229,18 +234,18 @@ an error.
 
 ### Passing variables to an MCP server
 
-The process that submits is the MCP server, so a catalog variable has to
-be set in the server's environment, and a harness decides what that
-environment holds. A variable exported in the shell that starts the
-harness reaches `wherry host mcp` only where the harness passes its own
+The process that submits is the MCP server, `wherry host mcp`, so a catalog
+variable has to be set in the server's environment. Forward the variable by
+name in the server's entry in the harness's MCP configuration, as the table
+below shows for each harness. A variable exported in the shell that starts
+the harness reaches the server only where the harness passes its own
 environment through: Gemini CLI strips variables that look like secrets,
 model keys among them, from what its servers inherit, and Codex starts its
 servers with a baseline environment of its own, to which the server's
-entry adds the parent variables it allowlists. Each harness's server
-entry can forward or set variables itself, which is also the route when
-the harness is started from a launcher without them. Where neither fits,
-an explicit `credentials` entry with a `file` or `command` source is the
-fallback, and wins over the variable.
+entry adds the parent variables it allowlists. The server's entry is also
+the route when the harness is started from a launcher without the
+variable. Where neither fits, an explicit `credentials` entry with a `file`
+or `command` source is the fallback, and wins over the variable.
 
 | Harness | How a variable reaches its MCP server, per the linked documentation |
 | --- | --- |
@@ -250,11 +255,10 @@ fallback, and wins over the variable.
 | [Cursor](https://cursor.com/docs/mcp) | Set the `env` map of the server's `mcpServers` entry in `.cursor/mcp.json`. |
 | [Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers) | Set the `env` map of the server's entry in `~/.copilot/mcp-config.json`. |
 
-Forward a variable by name where the harness allows it, as Codex's
-`env_vars` and Gemini CLI's `$VAR` do. A literal value written into such an
-entry is a copy of the credential in a file the harness reads; prefer a
-forwarded variable, or a `command` source that reads a keychain or Vault,
-and keep these files out of version control. After changing an entry, call
+Prefer a variable forwarded by name, as Codex's `env_vars` and Gemini CLI's
+`$VAR` do, or a `command` source that reads a keychain or Vault. A literal
+value written into such an entry is a copy of the credential in a file the
+harness reads. Keep these files out of version control. After changing an entry, call
 the `receivers` tool from the harness: it reports each credential's
 `source` and `status` as the server sees them, where `wherry host
 receivers` in a shell reports that shell's environment.

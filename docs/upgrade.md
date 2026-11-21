@@ -59,8 +59,8 @@ the new binary and its refreshed bundle in one step:
 
 Until a host or receiver takes both, it keeps the old binary with the old
 bundle and its CA file, which still work.
-[Broker trust](security.md#broker-trust) gives the renewal procedure for
-later CA changes.
+[Renew the broker CA](security.md#renew-the-broker-ca) gives the renewal
+procedure for later CA changes.
 
 ## Optional credentials the host resolves
 

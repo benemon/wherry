@@ -38,9 +38,8 @@ op read "op://Infra/kafka-admin/password" | wherry operator init \
   --super-user kafka-admin --super-user-password-file -
 ```
 
-Either way the password touches no file.
 `operator init` creates the principal `wherry.operator` and grants it what wherry needs.
-It doesn't keep the super user's password.
+In both forms it writes the super user's password to no file and keeps no copy of it.
 Every later `wherry operator` command in this directory connects as `wherry.operator`.
 
 The broker address goes into every bundle, so use one your laptop and the receiver can reach.

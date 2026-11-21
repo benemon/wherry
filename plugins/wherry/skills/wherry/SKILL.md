@@ -148,7 +148,7 @@ task names it; `receivers` shows each one's `configured`, `source` and
 `status`, so read it to know what a run will get. A `credentials` entry of
 the name alone, `{name}`, names an optional credential the task cannot go
 without, for example `github-token` for the agent's own `gh` calls: `submit`
-then fails rather than send the run without it. `submit` returns
+then fails when the host cannot resolve it. `submit` returns
 `unsupplied`, the optional credentials this host could not resolve; the run
 goes without them. Leaving a credential out of `credentials` does not
 withhold it. The user withholds one, a billing credential such as an API

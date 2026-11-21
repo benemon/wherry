@@ -33,7 +33,7 @@ clones itself.
    agent's own target, required or optional (`wherry host receivers` marks
    them `optional`), whether or not the task names it; `--credential NAME`
    names an optional one the task cannot go without, so `submit` fails
-   rather than send the run without it, and the `submit` line's
+   when the host cannot resolve it, and the `submit` line's
    `unsupplied=` names the optional credentials the host could not resolve.
    Leaving a credential unnamed does not withhold it: the user withholds
    one, a billing credential such as an API key included, by removing its
@@ -59,7 +59,7 @@ clones itself.
    host could not resolve when it submitted. When `wherry host receivers`
    now shows the credential without `missing`, a source or variable arrived
    since: submit again with `--credential NAME`, so the new submit fails
-   rather than go without it again.
+   when the host cannot resolve it.
    Otherwise tell the user which credential it names, and to run
    `wherry host init`, which asks for a source for it (a file, an environment
    variable or a command), or to add one under `credentials` in their wherry

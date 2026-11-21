@@ -446,11 +446,12 @@ host loses its storage:
    host of the tenant. Each rewrites the host's kept bundle with the new pair
    and the same password; a rerun reports a refreshed bundle as current, so
    a run interrupted part way is run again for every host and converges.
-4. Hand each refreshed bundle to its host over a channel you trust. The
-   host's user runs `wherry host init BUNDLE`, which replaces the host's
-   copy, and restarts the harness sessions that run `wherry host mcp`, which
-   read the bundle at start. A host that maps the pool to credentials of its
-   own in its configuration keeps using them; update those sources too.
+4. Hand each refreshed bundle to its host over a channel you trust. Ask the
+   host's user to run `wherry host init BUNDLE`, which replaces the host's
+   copy, and to restart the harness sessions that run `wherry host mcp`,
+   which read the bundle at start. A host that maps the pool to credentials
+   of its own in its configuration keeps using them. Ask its user to update
+   those sources too.
 5. Once every host runs on the new pair, the administrator disables the old
    one.
 

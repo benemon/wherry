@@ -40,23 +40,19 @@ are listed in [Variables read implicitly](credential-variables.md).
 
 A required credential is delivered to every run of the agent. An optional
 credential is delivered to every run whose host resolves it, whether or not
-the task names it; `submit` names the optional credentials it could not
+the task names it. `submit` names the optional credentials it could not
 resolve as `unsupplied`, and the prompt names them as not supplied.
 `--credential NAME` or, through MCP, a `credentials` entry with a name
-alone, names an optional credential the task cannot go without: the submit
-then fails when the host cannot resolve it. A credential every run needs
-belongs in the pool's terms as required. `wherry submit` refuses a task at
-once, with `auth required: credential <name> is not in this host's
-configuration`, when the host has no source for a required credential of
-the placed agent, for a named one, or for a task credential, and with
-`auth required: credential <name> has no source: <VAR> is unset in the
-process that submits, and this host's configuration names no source for
-it` when its catalog variable is unset. A configured
-source that fails refuses the task naming the credential and the cause, and
-is never passed over for the credential's variable. When the placed agent's
-name is a catalog entry reading several variables, as `google` is, `submit`
-refuses before publishing unless one of the agent's credentials on those
-variables resolves, naming them and their variables.
+alone, names an optional credential the task cannot go without. A
+credential every run needs belongs in the pool's terms as required.
+`wherry submit` refuses a task before publishing in these cases:
+
+| Case | Refusal |
+| --- | --- |
+| The host has no source for a required credential of the placed agent, for a named optional one, or for a task credential | `auth required: credential <name> is not in this host's configuration` |
+| The catalog variable of such a credential is unset in the process that submits | `auth required: credential <name> has no source: <VAR> is unset in the process that submits, and this host's configuration names no source for it` |
+| A configured source fails | `resolve credential <name>: <cause>`; the host never falls back to the credential's variable |
+| The placed agent's name is a catalog entry reading several variables, as `google` is, and none of the agent's credentials on those variables resolves | `auth required: agent <agent> needs one of its model credentials <names>: set one of <VARS> in the process that submits, or name a source for one in this host's configuration` |
 
 ::: warning A set catalog variable reaches every run of its agent
 An optional credential whose variable is set where submits run reaches
@@ -65,11 +61,11 @@ the catalog's alone, listed in
 [Variables read implicitly](credential-variables.md): the model providers'
 keys, the cloud credentials models.dev lists, such as `AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY`, `AZURE_API_KEY` and
-`GOOGLE_APPLICATION_CREDENTIALS`, and `GITHUB_TOKEN`. `GITHUB_TOKEN` is the
-case to know: it is a catalog variable through models.dev's
-`github-copilot`, so a pool whose terms give an agent's credential that
-target gets the token from every submitting process that has it set, the
-MCP server a harness starts included; `GH_TOKEN` is not read implicitly.
+`GOOGLE_APPLICATION_CREDENTIALS`, and `GITHUB_TOKEN`. Note `GITHUB_TOKEN`.
+It is a catalog variable through models.dev's `github-copilot`, so a pool
+whose terms give an agent's credential that target gets the token from
+every submitting process that has it set, the MCP server a harness starts
+included. `GH_TOKEN` is not read implicitly.
 To hold a credential back from an agent's runs, unset its variable in the
 process that submits and remove any explicit source for that credential
 from the host configuration: an explicit source wins over the variable, so
@@ -342,8 +338,8 @@ per-workspace keys.
    for it. An optional credential reaches every run whose host resolves it,
    from the source its configuration names or, for a target the
    [catalog reads](credential-variables.md), from that variable where
-   submits run; a host keeps it from the pool's runs by removing its source
-   and unsetting its variable, not by leaving it out of a task.
+   submits run. A host keeps it from the pool's runs by removing its source
+   and unsetting its variable. Leaving it out of a task does not withhold it.
 
 5. On each host, run `wherry host receivers` and check that the agent lists
    `build-anthropic-api-key` without `missing`.
@@ -486,20 +482,12 @@ the cause: `read storage credential <name>: its environment variable is
 unset or empty`. A store's answer can name the access key that signed the
 request, as `InvalidAccessKeyId` does. Every error that leaves the host's
 storage layer and every line it logs has both key values replaced by their
-markers, `[redacted:...]`, so the error `wherry submit` prints, the MCP
-server's private log and the host's log of a failed cleanup show a marker
-in the key's place; the error still carries the store's response code. This
-holds for the bundle's pair and for a mapped pair alike and whatever the
-keys' length: the two storage keys are replaced exactly, with no minimum
-length, where the receiver's redaction of delivered credentials leaves a
-value shorter than 8 bytes. Both values are also held for the host's general
-redaction before the first storage call, exactly and whatever its length,
-also when the same value was resolved earlier as a credential for a run,
-and the reader a download opens reports its errors through the same
-boundary. The keys never leave the host:
-receivers and agents get only the URLs it presigns, and neither key is a
-credential a pool's terms can request. Scope the pair to `wherry/<tenant>/`
-in each pool's bucket ([Operations](operations-hosts.md#s3-storage)).
+markers, `[redacted:...]`, whatever the keys' length, and keeps the store's
+response code. Both values are also held for the host's general redaction
+before the first storage call. The keys never leave the host: receivers and
+agents get only the URLs it presigns, and neither key is a credential a
+pool's terms can request. Scope the pair to `wherry/<tenant>/` in each
+pool's bucket ([Operations](operations-hosts.md#s3-storage)).
 
 ## The Kafka super user
 
@@ -542,16 +530,15 @@ rotates with a re-run of `init`.
 The operator's [working directory](configuration-operator.md#operator-working-directory)
 holds `operator.password`, every bundle `tenant host add` and `receiver apply`
 write, and each tenant's S3 key pair that `tenant storage` recorded, in
-`storage/<tenant>.yaml`, so it holds the Kafka password of every principal
-wherry made and the storage keys of every tenant: a leaked operator
-directory exposes tenant storage as well as Kafka. Keep it on the
-operator's machine, readable by the operator alone: `bundles/` and
-`storage/` are mode 0700 and each password, bundle and keys file mode 0600.
-`init` adds `operator.password`, `bundles/` and `storage/` to the
-directory's `.gitignore`, so the pool and receiver files can be kept in git
-without them. Hand each bundle to its host or receiver over a channel you
-trust; a host bundle holds the host's Kafka password and its tenant's
-storage pair, two secrets on the one channel.
+`storage/<tenant>.yaml`. A leaked directory therefore exposes the Kafka
+password of every principal wherry made and the storage keys of every
+tenant. Keep it on the operator's machine, readable by the operator alone:
+`bundles/` and `storage/` are mode 0700 and each password, bundle and keys
+file mode 0600. `init` adds `operator.password`, `bundles/` and `storage/`
+to the directory's `.gitignore`, so the pool and receiver files can be kept
+in git without them. Hand each bundle to its host or receiver over a channel
+you trust. A host bundle holds the host's Kafka password and its tenant's
+storage pair.
 
 ### Broker trust
 
@@ -561,35 +548,42 @@ operator's, that file's certificates as `ca`; a host bundle carries the
 tenant's storage pair as `storage` too. The operator trusts the broker
 through `operator.yaml`. A host or receiver trusts it through the `ca_file`
 its own configuration names, else the bundle's `ca`, else the system's
-trusted roots; a `ca` that holds no certificate is refused rather than
-fallen back from. A `ca_file` overrides the bundle, so a stale one hides a
-refreshed CA: `wherry host init BUNDLE` warns when the configuration keeps a
-`ca_file` and the bundle carries a `ca`, and the renewal below removes the
-line. A machine that trusts the system roots trusts every CA they hold for
-the broker's address.
-
-The Kafka platform issues and renews its CA. A renewal means refreshing and
-redistributing bundles, with no new password:
-
-1. Put the new CA in the file `operator.yaml` names as `ca_file`, keeping
-   the old certificate beside it while the brokers still present the old
-   chain.
-2. Run `wherry operator tenant host refresh TENANT HOST` for each host and
-   `wherry operator receiver apply RECEIVER` for each receiver on the
-   operator's broker. Each rewrites its kept bundle with the new `ca` and
-   the same password, and a rerun changes nothing.
-3. Hand each refreshed bundle over as the first was. Each host's user runs
-   `wherry host init BUNDLE`, which replaces the host's copy, and removes
-   any `ca_file` line from the host configuration; a long-lived MCP server
-   restarts to reread the bundle. Each receiver's platform replaces the
-   bundle and restarts the receiver; a `ca_file` in its local configuration
-   is removed, or its file replaced.
-4. Once every bundle is refreshed, the old certificate may leave the
-   operator's file; the next refresh of each bundle drops it there.
+trusted roots. A `ca` that holds no certificate is refused. The host or
+receiver does not fall back to the system roots. A `ca_file` overrides the
+bundle, so a stale one hides a refreshed CA: `wherry host init BUNDLE` warns
+when the configuration keeps a `ca_file` and the bundle carries a `ca`, and
+the renewal below removes the line. A machine that trusts the system roots
+trusts every CA they hold for the broker's address.
 
 A bundle written before the operator trusted the broker through a CA file
 carries no `ca`. A host or receiver running it with no `ca_file` fails
 against a private-CA broker, and the failure names the refresh.
+
+### Renew the broker CA
+
+The Kafka platform issues and renews its CA. A renewal means refreshing and
+redistributing bundles. No password changes.
+
+Before you start, have:
+
+- the new CA certificate in PEM;
+- the operator's working directory, whose `operator.yaml` names a `ca_file`;
+- the channel you trust to each host's user and each receiver's platform.
+
+1. Put the new CA in the file `operator.yaml` names as `ca_file`. Keep the
+   old certificate beside it while the brokers still present the old chain.
+2. Run `wherry operator tenant host refresh TENANT HOST` for each host and
+   `wherry operator receiver apply RECEIVER` for each receiver on the
+   operator's broker. Each rewrites its kept bundle with the new `ca` and
+   the same password. A rerun changes nothing.
+3. Hand each refreshed bundle over as you handed the first. Ask each host's
+   user to run `wherry host init BUNDLE`, which replaces the host's copy, to
+   remove any `ca_file` line from the host configuration, and to restart a
+   long-lived MCP server so that it rereads the bundle. Ask each receiver's
+   platform owner to replace the bundle and restart the receiver, and to
+   remove a `ca_file` from its local configuration or replace its file.
+4. Once every bundle is refreshed, remove the old certificate from the
+   operator's file. The next refresh of each bundle drops it there.
 
 ## Removal and retained data
 
