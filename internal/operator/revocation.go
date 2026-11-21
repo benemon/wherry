@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -44,9 +45,9 @@ type RevocationProgress func(RevocationStep)
 
 // RevokeReceiver runs the revocation steps for receiver, progress nil allowed, and reports a receiver whose membership
 // already ended converged and complete, as a host is, since its earlier revocation served its wait.
-func (service *Service) RevokeReceiver(ctx context.Context, receiver string, wait time.Duration, probe func(context.Context, string, string) error, progress RevocationProgress) RevocationResult {
+func (service *Service) RevokeReceiver(ctx context.Context, receiver string, wait time.Duration, probe func(context.Context, string, string) error, progress RevocationProgress) (result RevocationResult) {
 	ctx, span := service.marker(ctx, "receiver remove", telemetry.AttrReceiver.String(receiver))
-	defer span.End()
+	defer revoked(span, &result)
 	state, err := service.LoadState(ctx)
 	if err != nil {
 		return reported(progress, RevocationResult{Steps: []RevocationStep{{Number: 1, Err: err}}})
@@ -58,9 +59,9 @@ func (service *Service) RevokeReceiver(ctx context.Context, receiver string, wai
 }
 
 // RevokeHost runs the revocation steps for tenant's host; progress may be nil.
-func (service *Service) RevokeHost(ctx context.Context, tenant, host string, wait time.Duration, probe func(context.Context, string, string) error, progress RevocationProgress) RevocationResult {
+func (service *Service) RevokeHost(ctx context.Context, tenant, host string, wait time.Duration, probe func(context.Context, string, string) error, progress RevocationProgress) (result RevocationResult) {
 	ctx, span := service.marker(ctx, "tenant host remove", telemetry.AttrTenant.String(tenant), telemetry.AttrHost.String(host))
-	defer span.End()
+	defer revoked(span, &result)
 	state, err := service.LoadState(ctx)
 	if err == nil {
 		err = state.LiveTenant(tenant)
@@ -117,12 +118,14 @@ func (r *revocation) steps(ctx context.Context, first, last int) RevocationResul
 		if number < first || number > last {
 			return true
 		}
+		_, span := telemetry.Child(ctx, "revocation step "+strconv.Itoa(number))
 		err := fn()
 		// Once revoking is recorded, a failed step converges: a stale concurrent command may have restored the
 		// principal's grants after step 2. Step 6 converges itself.
 		if err != nil && r.recorded && number < 6 {
 			err = errors.Join(err, service.converge(ctx))
 		}
+		ended(span, &err)
 		step := RevocationStep{Number: number, Name: name, Complete: err == nil, Err: err}
 		r.result.Steps = append(r.result.Steps, step)
 		if r.progress != nil {
@@ -327,9 +330,9 @@ func (service *Service) WaitOperatorCredential(ctx context.Context, password str
 	return ctx.Err()
 }
 
-func (service *Service) TenantRemove(ctx context.Context, tenant string) error {
+func (service *Service) TenantRemove(ctx context.Context, tenant string) (err error) {
 	ctx, span := service.marker(ctx, "tenant remove", telemetry.AttrTenant.String(tenant))
-	defer span.End()
+	defer ended(span, &err)
 	return service.removeTenant(ctx, tenant, service.Probe)
 }
 
