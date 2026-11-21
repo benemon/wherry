@@ -1,9 +1,8 @@
 // Package telemetry is wherry's OpenTelemetry tracing for the network-map spike (agb-pyn4, step 2): one tracer
 // provider per role, W3C trace context in Kafka record headers, and the attribute allowlist every span keeps to.
 //
-// Tracing is on only when OTEL_EXPORTER_OTLP_ENDPOINT or OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is set. Off, every
-// provider is the no-op one and no record carries a header. WHERRY_OTEL_NAMING selects the service naming variant,
-// a (default) or b.
+// Tracing is on only when OTEL_EXPORTER_OTLP_ENDPOINT is set. Off, every provider is the no-op one and no record
+// carries a header. WHERRY_OTEL_NAMING selects the service naming variant, a (default) or b.
 package telemetry
 
 import (
@@ -34,8 +33,9 @@ const (
 	RoleOperator  = "operator"
 )
 
-// NamingEnv selects the naming variant, a or b; EndpointEnv and TracesEndpointEnv are the SDK's exporter variables,
-// either of which turns tracing on.
+// NamingEnv selects the naming variant, a or b. EndpointEnv is the SDK's exporter variable that turns tracing on;
+// TracesEndpointEnv is the SDK's traces-only override, which the exporter reads once tracing is on but which alone
+// leaves it off (brief rule 3).
 const (
 	NamingEnv         = "WHERRY_OTEL_NAMING"
 	EndpointEnv       = "OTEL_EXPORTER_OTLP_ENDPOINT"
@@ -77,18 +77,25 @@ const (
 	AttrChunks           = attribute.Key("wherry.chunks")
 )
 
-// Allowlist is every attribute key a span or resource may carry.
+// ResourceAllowlist is every attribute key a resource may carry: the role's identity and the SDK's own.
+var ResourceAllowlist = []attribute.Key{
+	semconv.ServiceNameKey, semconv.ServiceNamespaceKey, semconv.ServiceInstanceIDKey,
+	semconv.TelemetrySDKNameKey, semconv.TelemetrySDKLanguageKey, semconv.TelemetrySDKVersionKey,
+}
+
+// Allowlist is every attribute key a span, an event or a link may carry.
 var Allowlist = []attribute.Key{
 	AttrSystemName, semconv.MessagingSystemKey, semconv.MessagingOperationTypeKey, semconv.MessagingOperationNameKey,
 	semconv.MessagingDestinationNameKey, semconv.MessagingKafkaOffsetKey, semconv.MessagingConsumerGroupNameKey,
 	AttrRun, AttrAttempt, AttrRetry, AttrTenant, AttrHost, AttrPool, AttrReceiver, AttrProfile, AttrAgent, AttrModel,
 	AttrCredential, AttrCredentialSource, AttrOutput, AttrCount, AttrSize, AttrChunks,
-	semconv.ServiceNameKey, semconv.ServiceNamespaceKey, semconv.ServiceInstanceIDKey,
-	semconv.TelemetrySDKNameKey, semconv.TelemetrySDKLanguageKey, semconv.TelemetrySDKVersionKey,
 }
 
 // Allowed reports whether key is in the allowlist.
 func Allowed(key attribute.Key) bool { return slices.Contains(Allowlist, key) }
+
+// ResourceAllowed reports whether key is in the resource allowlist.
+func ResourceAllowed(key attribute.Key) bool { return slices.Contains(ResourceAllowlist, key) }
 
 // Error classes: the fixed status descriptions this package sets. Roles add their own closed sets, the receiver's
 // rejection labels and upload failure classes among them.
@@ -127,9 +134,9 @@ var NewExporter = func(ctx context.Context) (sdktrace.SpanExporter, error) {
 
 var propagator = propagation.TraceContext{}
 
-// Enabled reports whether tracing is on: the SDK's endpoint variable is set.
+// Enabled reports whether tracing is on: OTEL_EXPORTER_OTLP_ENDPOINT is set. The traces-only variable does not count.
 func Enabled() bool {
-	return os.Getenv(EndpointEnv) != "" || os.Getenv(TracesEndpointEnv) != ""
+	return os.Getenv(EndpointEnv) != ""
 }
 
 // Names identify the process in its role; the ones a role does not have stay empty.
@@ -151,19 +158,20 @@ func New(ctx context.Context, role string, names Names) (*Tracing, error) {
 	if !Enabled() {
 		return &Tracing{Tracer: noop.NewTracerProvider().Tracer("wherry"), identity: identity}, nil
 	}
-	exporter, err := NewExporter(ctx)
+	// The resource is the role's identity and the SDK's own attributes alone: no environment, host or process detector.
+	attrs := append(serviceOf(role, names, os.Getenv(NamingEnv) == "b"), semconv.ServiceNamespace(role))
+	res, err := resource.New(ctx, resource.WithSchemaURL(semconv.SchemaURL), resource.WithTelemetrySDK(), resource.WithAttributes(attrs...))
 	if err != nil {
 		return nil, err
 	}
-	attrs := append(serviceOf(role, names, os.Getenv(NamingEnv) == "b"), semconv.ServiceNamespace(role))
-	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes(semconv.SchemaURL, attrs...))
+	exporter, err := NewExporter(ctx)
 	if err != nil {
 		return nil, err
 	}
 	provider := sdktrace.NewTracerProvider(
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
 		sdktrace.WithResource(res),
-		sdktrace.WithSpanProcessor(sdktrace.NewBatchSpanProcessor(exporter)),
+		sdktrace.WithSpanProcessor(sdktrace.NewBatchSpanProcessor(resourced{exporter, res})),
 	)
 	t := &Tracing{Tracer: provider.Tracer("wherry"), identity: identity, sdk: provider}
 	// The process's first provider stands as the global one; the custodian's, inside a receiver, does not.
@@ -175,6 +183,28 @@ func New(ctx context.Context, role string, names Names) (*Tracing, error) {
 	}
 	return t, nil
 }
+
+// resourced exports every span with res as its resource. The provider's WithResource folds OTEL_RESOURCE_ATTRIBUTES
+// under the resource it is given, so what leaves the process is fixed here instead.
+type resourced struct {
+	sdktrace.SpanExporter
+	res *resource.Resource
+}
+
+func (e resourced) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	fixed := make([]sdktrace.ReadOnlySpan, len(spans))
+	for i, span := range spans {
+		fixed[i] = withResource{span, e.res}
+	}
+	return e.SpanExporter.ExportSpans(ctx, fixed)
+}
+
+type withResource struct {
+	sdktrace.ReadOnlySpan
+	res *resource.Resource
+}
+
+func (s withResource) Resource() *resource.Resource { return s.res }
 
 func serviceOf(role string, names Names, variantB bool) []attribute.KeyValue {
 	switch role {
@@ -265,6 +295,14 @@ func (t *Tracing) Producer(ctx context.Context, topic string, attrs ...attribute
 // ProducerLinked is Producer as the root of a new trace, linked to link when it is valid.
 func (t *Tracing) ProducerLinked(ctx context.Context, topic string, link trace.SpanContext, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
 	return t.Linked(ctx, "send "+topic, trace.SpanKindProducer, link, append(messaging("send", semconv.MessagingOperationTypeSend, topic), attrs...)...)
+}
+
+// ProducerUnder is Producer as a child of parent when it is valid, in parent's trace; otherwise a root of its own.
+func (t *Tracing) ProducerUnder(ctx context.Context, topic string, parent trace.SpanContext, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	if parent.IsValid() {
+		return t.Producer(trace.ContextWithRemoteSpanContext(ctx, parent), topic, attrs...)
+	}
+	return t.ProducerLinked(ctx, topic, trace.SpanContext{}, attrs...)
 }
 
 // Linked starts a span as the root of a new trace, linked to link when it is valid.

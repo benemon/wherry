@@ -51,8 +51,8 @@ func Hook(t testing.TB) *Exporter {
 	return exporter
 }
 
-// Check fails the test for an attribute key outside the allowlist, an exception event, or a status description outside
-// telemetry's classes and classes.
+// Check fails the test for a span, event or link attribute key outside the allowlist, a resource key outside the
+// resource allowlist, an exception event, or a status description outside telemetry's classes and classes.
 func Check(t testing.TB, spans []tracetest.SpanStub, classes ...string) {
 	t.Helper()
 	allowed := append(slices.Clone(telemetry.Classes), classes...)
@@ -63,8 +63,15 @@ func Check(t testing.TB, spans []tracetest.SpanStub, classes ...string) {
 			}
 		}
 		for _, kv := range s.Resource.Attributes() {
-			if !telemetry.Allowed(kv.Key) {
-				t.Errorf("span %s's resource carries attribute %s, outside the allowlist", s.Name, kv.Key)
+			if !telemetry.ResourceAllowed(kv.Key) {
+				t.Errorf("span %s's resource carries attribute %s, outside the resource allowlist", s.Name, kv.Key)
+			}
+		}
+		for _, link := range s.Links {
+			for _, kv := range link.Attributes {
+				if !telemetry.Allowed(kv.Key) {
+					t.Errorf("span %s's link carries attribute %s, outside the allowlist", s.Name, kv.Key)
+				}
 			}
 		}
 		for _, event := range s.Events {
