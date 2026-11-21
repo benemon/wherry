@@ -107,7 +107,7 @@ func Text(s tracetest.SpanStub) string {
 	b.WriteString("\n")
 	write := func(kvs []attribute.KeyValue) {
 		for _, kv := range kvs {
-			b.WriteString(string(kv.Key) + "=" + kv.Value.Emit() + "\n")
+			b.WriteString(string(kv.Key) + "=" + kv.Value.String() + "\n")
 		}
 	}
 	write(s.Attributes)
@@ -130,7 +130,7 @@ func Text(s tracetest.SpanStub) string {
 func Attr(s tracetest.SpanStub, key attribute.Key) string {
 	for _, kv := range s.Attributes {
 		if kv.Key == key {
-			return kv.Value.Emit()
+			return kv.Value.String()
 		}
 	}
 	return ""
@@ -140,7 +140,7 @@ func Attr(s tracetest.SpanStub, key attribute.Key) string {
 func Resource(s tracetest.SpanStub, key attribute.Key) string {
 	for _, kv := range s.Resource.Attributes() {
 		if kv.Key == key {
-			return kv.Value.Emit()
+			return kv.Value.String()
 		}
 	}
 	return ""

@@ -224,7 +224,9 @@ func NewHost(kafka *kgo.Client, key ed25519.PrivateKey, principal, stateDir stri
 func (h *Host) Close() {
 	h.reader.Close()
 	h.kafka.Close()
-	h.tracing.Close()
+	if err := h.tracing.Close(); err != nil {
+		h.logger.Printf("tracing: %v", err)
+	}
 }
 
 // Register registers the host key on the host's key topic unless that key is already there, and returns its key ID.

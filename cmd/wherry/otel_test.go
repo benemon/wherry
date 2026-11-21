@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	json "encoding/json/v2"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -240,9 +241,11 @@ func TestTracedRoundTrip(t *testing.T) {
 	input.S3Inputs, input.Parts = nil, nil
 	traced := time10(host)
 	endpoint := os.Getenv(telemetry.EndpointEnv)
-	os.Unsetenv(telemetry.EndpointEnv)
+	if err := os.Unsetenv(telemetry.EndpointEnv); err != nil {
+		t.Fatal(err)
+	}
 	offHost, err := busclient.Connect(hostConfig, log.New(io.Discard, "", 0))
-	os.Setenv(telemetry.EndpointEnv, endpoint)
+	t.Setenv(telemetry.EndpointEnv, endpoint)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +256,10 @@ func TestTracedRoundTrip(t *testing.T) {
 	offHost.Close()
 	stop()
 	select {
-	case <-ran:
+	case err := <-ran:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("receiver run = %v", err)
+		}
 	case <-time.After(time.Minute):
 		t.Fatalf("receiver kept running; logs:\n%s", logs.String())
 	}

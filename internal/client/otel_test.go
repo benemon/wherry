@@ -87,7 +87,7 @@ func taskRecord(t *testing.T, f *fixture, kafka *kgo.Client, pool, runID string)
 func TestTracedSubmitSendsTheHeaderAndReadsTheResult(t *testing.T) {
 	exporter := teletest.Install(t)
 	f := newFixture(t)
-	t.Cleanup(func() { f.host.tracing.Close() })
+	t.Cleanup(func() { _ = f.host.tracing.Close() })
 	f.host.credentials["deploy-key"] = credential.Source{Command: []string{"cat", f.secret}}
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, nil)
@@ -198,7 +198,7 @@ func TestTracedUploadFailureKeepsTheStorageKeys(t *testing.T) {
 	exporter := teletest.Install(t)
 	server := refusingStore(t)
 	f := newFixture(t)
-	t.Cleanup(func() { f.host.tracing.Close() })
+	t.Cleanup(func() { _ = f.host.tracing.Close() })
 	const access, secret = "AKIAS3CR3TACCESSKEY", "s3cr3t-secret-key-value"
 	accessFile, secretFile := filepath.Join(t.TempDir(), "access"), filepath.Join(t.TempDir(), "secret")
 	for path, value := range map[string]string{accessFile: access, secretFile: secret} {
@@ -266,7 +266,7 @@ func TestTracingIsOffByDefaultAtTheHost(t *testing.T) {
 func TestTracedResubmissionLinksTheOriginalRun(t *testing.T) {
 	exporter := teletest.Install(t)
 	f := newFixture(t)
-	t.Cleanup(func() { f.host.tracing.Close() })
+	t.Cleanup(func() { _ = f.host.tracing.Close() })
 	receiver, task := f.admitted(t)
 	runID := task.submission.Wherry.Run
 	receiver.keyLost(t, f.ctx, task)

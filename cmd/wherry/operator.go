@@ -78,7 +78,11 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 	if service.Tracing, err = telemetry.New(ctx, telemetry.RoleOperator, telemetry.Names{}); err != nil {
 		return err
 	}
-	defer service.Tracing.Close()
+	defer func() {
+		if err := service.Tracing.Close(); err != nil {
+			fmt.Fprintln(stderr, "wherry: tracing:", err)
+		}
+	}()
 	command := operatorCommand(pos)
 	switch command {
 	case "pool apply":
