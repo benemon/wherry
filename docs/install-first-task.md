@@ -31,7 +31,9 @@ To follow the transcript while the run is going, use `wherry logs -f "$run"` in 
   page names it.
 - `wherry wait` prints `wherry is working` and exits 0.
 
-If `submit` refuses with `auth required`, your laptop has no source for the credential: run `wherry host init` again.
+If `submit` refuses with `auth required`, the shell that ran it has no `CLAUDE_CODE_OAUTH_TOKEN` and the configuration
+names no source for the credential.
+Set the variable as [Set up a host](install-host.md#_1-set-the-token-where-submits-run) shows, then submit again.
 
 ## Next steps
 

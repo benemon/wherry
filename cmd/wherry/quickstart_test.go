@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/benemon/wherry/internal/catalog"
 	"github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/pluginsdk"
@@ -21,13 +22,28 @@ func quickstart(name string) string {
 
 // TestQuickstartFiles reads each file the quickstart writes with the reader that reads it in use, checks the receiver
 // configuration against the pool terms, and checks that each credential the pool terms and the receiver configuration
-// name has a source in the host's and the receiver's configuration. docs/install-operator.md holds the pool terms whole,
-// and docs/install-host.md the host configuration; the Nomad record and local configuration come from the Nomad
-// plugin's install region in wherry-plugins, which this repository does not hold.
+// name has a source on the host and in the receiver's configuration. docs/install-operator.md holds the pool terms
+// whole, and docs/install-host.md the host configuration; the Nomad record and local configuration come from the Nomad
+// plugin's install region in wherry-plugins, which this repository does not hold. The pool's agent is a catalog id, so
+// the host configuration names no credential: the agent is ready from the catalog variable set where submits run, and
+// docs/install-host.md shows the ready line and the not-ready line as host init prints them.
 func TestQuickstartFiles(t *testing.T) {
-	terms, err := readPoolConfig(quickstart("build-terms.yaml"), false)
+	written, err := readPoolConfig(quickstart("build-terms.yaml"), false)
 	if err != nil {
 		t.Fatal(err)
+	}
+	c, err := catalog.Embedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// pool apply records the expanded terms, so the receiver and the host see the derived credential.
+	terms, err := operator.Expand(written, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(terms.Agents) != 1 || terms.Agents[0].Name != "claude-code" || len(written.Agents[0].Credentials) != 0 || len(terms.Agents[0].Credentials) != 1 ||
+		terms.Agents[0].Credentials[0].Name != "claude-code-oauth-token" || terms.Agents[0].Credentials[0].Env != "CLAUDE_CODE_OAUTH_TOKEN" || terms.Agents[0].Credentials[0].Optional() {
+		t.Fatalf("agents %+v expanded to %+v; want claude-code alone, with no credential written and claude-code-oauth-token at CLAUDE_CODE_OAUTH_TOKEN, required, derived", written.Agents, terms.Agents)
 	}
 	config, err := readReceiverConfig(quickstart("nomad-1.yaml"), false)
 	if err != nil {
@@ -49,18 +65,37 @@ func TestQuickstartFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, agent := range terms.Agents {
-		for _, credential := range agent.Credentials {
-			if _, ok := host.Credentials[credential.Name]; !ok {
-				t.Errorf("agent %s's credential %s has no source in the host configuration", agent.Name, credential.Name)
-			}
-		}
+	if len(host.Credentials) != 0 {
+		t.Errorf("host configuration names %+v; want no credential, the agent's being a catalog variable", host.Credentials)
 	}
 	if local.Bundle == "" || local.CAFile == "" || local.DrainTimeout <= 0 {
 		t.Fatalf("local configuration %+v; want the example's bundle, CA and drain timeout", local)
 	}
 	documented(t, "install-operator.md", "quickstart/build-terms.yaml")
 	documented(t, "install-host.md", "quickstart/host-config.yaml")
+
+	// The guide's ready lines are host init's, for the configuration at the guide's path, with the variable set and unset.
+	page := docRead(t, "../../docs/install-host.md")
+	pools := map[string]operator.Terms{"build": terms}
+	for _, step := range []struct {
+		value string
+		want  string
+	}{
+		{"token-value", "pool build agent claude-code: ready; claude-code-oauth-token from CLAUDE_CODE_OAUTH_TOKEN"},
+		{"", "pool build agent claude-code: not ready; set CLAUDE_CODE_OAUTH_TOKEN where submits run (https://code.claude.com/docs/en/authentication); or add to /home/me/.config/wherry/config.yaml: credentials: {claude-code-oauth-token: {command: [your-secret-tool, get, NAME]}}"},
+	} {
+		t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", step.value)
+		lines, err := agentLines("/home/me/.config/wherry/config.yaml", host, pools)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(lines) != 1 || lines[0] != step.want {
+			t.Errorf("host init lines %q; want %q", lines, step.want)
+		}
+		if !strings.Contains(page, "\n"+step.want+"\n```\n") {
+			t.Errorf("docs/install-host.md has no code block ending in %q", step.want)
+		}
+	}
 }
 
 // TestQuickstartMissingSourceError finds in the configuration reference and operations, as a code block of its own or of

@@ -67,8 +67,6 @@ func run(args []string, stdout, stderr io.Writer) error {
 	case "operator":
 		return runOperator(args[1:], stdout, stderr)
 	case "host":
-		// A connection the broker's certificate fails for want of a trusted CA is explained: the bundle may predate the
-		// operator's CA file, and the operator's refresh rewrites it.
 		return operator.ExplainUnknownAuthority(runHost(args[1:], stdout, stderr), hostRefreshCommand)
 	case "dev":
 		return runDev(args[1:], stdout, stderr)
@@ -268,8 +266,13 @@ func runReceivers(ctx context.Context, client *busclient.Host, args []string, st
 							name = credential.Name + ":file=" + credential.File
 						}
 						var notes []string
-						if !credential.Configured {
+						switch credential.Status {
+						case busclient.StatusMissing:
 							notes = append(notes, "missing")
+						case busclient.StatusUnset:
+							notes = append(notes, "unset")
+						case busclient.StatusUnchecked:
+							notes = append(notes, "unchecked")
 						}
 						if credential.Optional {
 							notes = append(notes, "optional")
@@ -346,7 +349,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	})
 	var credentials []wire.TaskCredential
 	var requested []string
-	flags.Func("credential", "NAME, NAME:file=FILE or NAME:env=VAR: request the agent's credential NAME at its target, or deliver configured credential NAME as file FILE in the agent's credentials directory or in its environment variable VAR (repeatable)", func(value string) error {
+	flags.Func("credential", "NAME, NAME:file=FILE or NAME:env=VAR: require the agent's optional credential NAME, failing without a value for it, or deliver configured credential NAME as file FILE in the agent's credentials directory or in its environment variable VAR (repeatable)", func(value string) error {
 		name, target, targeted := strings.Cut(value, ":")
 		kind, at, _ := strings.Cut(target, "=")
 		switch {
@@ -444,8 +447,8 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	fmt.Fprintf(stdout, "run_id=%s pool=%s", result.RunID, result.Pool)
-	if len(result.Unrequested) > 0 {
-		fmt.Fprintf(stdout, " unrequested=%s", strings.Join(result.Unrequested, ","))
+	if len(result.Unsupplied) > 0 {
+		fmt.Fprintf(stdout, " unsupplied=%s", strings.Join(result.Unsupplied, ","))
 	}
 	fmt.Fprintln(stdout)
 	return nil

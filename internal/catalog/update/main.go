@@ -1,0 +1,157 @@
+// Command update refreshes the credential catalog's models.dev snapshot: it fetches https://models.dev/api.json, drops
+// each provider's models and rewrites models.dev.json and SOURCE together, deterministically, once the whole response
+// is read. Run it from the repository root as go run ./internal/catalog/update and commit the result. It builds from
+// the standard library and the snapshot package alone.
+package main
+
+import (
+	"context"
+	"crypto/sha256"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"maps"
+	"net/http"
+	"os"
+	"path/filepath"
+	"slices"
+	"time"
+
+	"github.com/benemon/wherry/internal/catalog/snapshot"
+)
+
+const defaultURL = "https://models.dev/api.json"
+
+// responseLimit bounds the response read: api.json is about 7 MB.
+const responseLimit = 64 << 20
+
+func main() {
+	url := flag.String("url", defaultURL, "the models.dev api.json to fetch")
+	dir := flag.String("dir", filepath.Join("internal", "catalog"), "the catalog directory holding models.dev.json and SOURCE")
+	flag.Parse()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := update(ctx, http.DefaultClient, *url, *dir, time.Now()); err != nil {
+		fmt.Fprintln(os.Stderr, "update:", err)
+		os.Exit(1)
+	}
+	fmt.Println("updated", filepath.Join(*dir, "models.dev.json"), "and", filepath.Join(*dir, "SOURCE"))
+}
+
+// update fetches url with client, strips the providers' models and writes dir's models.dev.json and SOURCE, which
+// records url, now in UTC and the SHA-256 of the response bytes as fetched.
+func update(ctx context.Context, client *http.Client, url, dir string, now time.Time) error {
+	data, err := fetch(ctx, client, url)
+	if err != nil {
+		return err
+	}
+	entries, err := snapshot.Strip(data)
+	if err != nil {
+		return fmt.Errorf("%s: %w", url, err)
+	}
+	encoded, err := snapshot.Encode(entries)
+	if err != nil {
+		return err
+	}
+	source := fmt.Sprintf("url: %s\nfetched: %s\nsha256: %x\n", url, now.UTC().Format(time.RFC3339), sha256.Sum256(data))
+	return writeFiles(dir, map[string][]byte{"models.dev.json": encoded, "SOURCE": []byte(source)})
+}
+
+// fetch is the whole body of a 200 response to a GET of url.
+func fetch(ctx context.Context, client *http.Client, url string) ([]byte, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Accept", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s: %s", url, response.Status)
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, responseLimit+1))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", url, err)
+	}
+	if len(data) > responseLimit {
+		return nil, fmt.Errorf("%s: response exceeds %d bytes", url, responseLimit)
+	}
+	return data, nil
+}
+
+// rename is a variable so tests can fail a rename after the first one succeeded.
+var rename = os.Rename
+
+// writeFiles writes each file into dir through a temporary file, then renames them all into place or, when a rename
+// fails, puts every renamed file back from a hard-link backup, so the committed files change together or not at all; a
+// target that is not a regular file is refused before any rename.
+func writeFiles(dir string, files map[string][]byte) (err error) {
+	var temporary []string
+	defer func() {
+		for _, path := range temporary {
+			os.Remove(path)
+		}
+	}()
+	names := slices.Sorted(maps.Keys(files))
+	targets := map[string]string{}
+	for _, name := range names {
+		target := filepath.Join(dir, name)
+		if info, statErr := os.Lstat(target); statErr == nil && !info.Mode().IsRegular() {
+			return fmt.Errorf("%s exists and is not a regular file", target)
+		} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			return statErr
+		}
+		file, err := os.CreateTemp(dir, "."+name+".*")
+		if err != nil {
+			return err
+		}
+		temporary = append(temporary, file.Name())
+		if _, err := file.Write(files[name]); err != nil {
+			return errors.Join(err, file.Close())
+		}
+		// CreateTemp opens the file mode 0600; the committed files are readable by everyone.
+		if err := errors.Join(file.Chmod(0o644), file.Sync(), file.Close()); err != nil {
+			return err
+		}
+		targets[name] = file.Name()
+	}
+	// A hard link keeps each existing file whole under a backup name until every rename has succeeded.
+	backups := map[string]string{}
+	for _, name := range names {
+		target := filepath.Join(dir, name)
+		if _, statErr := os.Lstat(target); errors.Is(statErr, os.ErrNotExist) {
+			continue
+		}
+		// A backup an interrupted run left is stale.
+		backup := filepath.Join(dir, "."+name+".backup")
+		if err := os.Remove(backup); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err := os.Link(target, backup); err != nil {
+			return err
+		}
+		temporary = append(temporary, backup)
+		backups[name] = backup
+	}
+	var committed []string
+	for _, name := range names {
+		if err := rename(targets[name], filepath.Join(dir, name)); err != nil {
+			var restore []error
+			for _, done := range committed {
+				target := filepath.Join(dir, done)
+				if backup, existed := backups[done]; existed {
+					restore = append(restore, os.Rename(backup, target))
+				} else {
+					restore = append(restore, os.Remove(target))
+				}
+			}
+			return errors.Join(append([]error{err}, restore...)...)
+		}
+		committed = append(committed, name)
+	}
+	return nil
+}

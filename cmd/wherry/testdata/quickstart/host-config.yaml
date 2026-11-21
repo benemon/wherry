@@ -1,4 +1,1 @@
 bundle: /home/me/.config/wherry/bundle.yaml
-credentials:
-  claude-oauth-token:
-    file: /home/me/claude-oauth-token

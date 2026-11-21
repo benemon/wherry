@@ -433,11 +433,13 @@ func TestDevReadyLines(t *testing.T) {
 	manifest := writeCache(t, instance, []byte("snapshot"))
 	manifest.Agents = []string{"claude", "codex", "gemini"}
 	config := "/x/it's/config.yaml"
+	agents := devAgents(manifest, nil)
 	for _, c := range []struct {
 		files *devHostFiles
 		want  []string
 	}{
 		{&devHostFiles{}, []string{
+			"agents: claude-code, anthropic (default), codex, google, mock\n",
 			"claude: claude mcp add wherry-default -- wherry host mcp\n",
 			"codex:  codex mcp add wherry-default -- wherry host mcp\n",
 			"gemini: gemini mcp add wherry-default wherry host mcp\n",
@@ -451,7 +453,7 @@ func TestDevReadyLines(t *testing.T) {
 	} {
 		manifest.HostFiles = c.files
 		var ready bytes.Buffer
-		printReady(&ready, devEnv{instance: instance, manifest: manifest}, config)
+		printReady(&ready, devEnv{instance: instance, manifest: manifest, agents: agents, defaultAgent: "anthropic"}, config)
 		for _, want := range c.want {
 			if !strings.Contains(ready.String(), want) {
 				t.Errorf("ready output\n%s\nlacks %q", ready.String(), want)

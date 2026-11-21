@@ -1,7 +1,9 @@
 agents:
-  - name: claude
+  # claude-code is a credential catalog id: pool apply adds claude-code-oauth-token (CLAUDE_CODE_OAUTH_TOKEN), required.
+  - name: claude-code
     credentials:
-      - {name: claude-oauth-token, env: CLAUDE_CODE_OAUTH_TOKEN, description: Claude account token}
+      # A credential outside the catalog, beside the derived one; a run gets it when the host resolves it.
+      - {name: github-token, env: GH_TOKEN, required: false, description: GitHub token}
     models:
       - haiku
       - sonnet
@@ -10,12 +12,9 @@ agents:
     credentials:
       - {name: model-api-key, env: MODEL_API_KEY}
   # Without models, a task names no model and the profile's command picks one.
+  # codex is a catalog id: pool apply adds codex-api-key (CODEX_API_KEY), required.
   - name: codex
-    credentials:
-      - {name: openai-api-key, env: CODEX_API_KEY}
-      # A run gets it only when its task requests it.
-      - {name: github-token, env: GH_TOKEN, required: false}
-default_agent: claude
+default_agent: claude-code
 start_by_limit: 72h
 # The attempts one task may make, start failures included, plus a margin for the releases of a profile going unready.
 delivery_limit: 6

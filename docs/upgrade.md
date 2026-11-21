@@ -59,12 +59,131 @@ the new binary and its refreshed bundle in one step:
 
 Until a host or receiver takes both, it keeps the old binary with the old
 bundle and its CA file, which still work.
-[Broker trust](security.md#broker-trust) gives the renewal procedure for
-later CA changes.
+[Renew the broker CA](security.md#renew-the-broker-ca) gives the renewal
+procedure for later CA changes.
+
+## Optional credentials the host resolves
+
+A host now sends an optional agent credential, one the pool's terms mark
+`required: false`, to every run whose submit resolves it: from the source
+the host's configuration names, or, when the credential's target is one of
+the [variables the catalog reads](credential-variables.md), from that
+variable in the process that submits. The ask-first rule of v0.1.2, below,
+no longer applies: a task need not request an optional credential the host
+has, and `--credential NAME`, or an MCP `credentials` entry with a name
+alone, now means the task cannot go without it, failing the submit when the
+host cannot resolve it.
+
+- `submit` prints `unsupplied=<name,...>`, and the MCP `submit` tool returns
+  `unsupplied`, naming the optional credentials the host could not resolve,
+  in place of the earlier report of the ones a task left out.
+- Existing pools keep working as they are. An agent whose name is no
+  [credential catalog id](configuration-operator.md#catalog-agents), such
+  as `claude` or `gemini`, stays supported with the credential list the
+  operator wrote, and `pool apply` records it as before. Renaming is needed
+  only to adopt catalog expansion, under which `wherry operator pool apply`
+  derives an agent's model credentials from its name, for example
+  `claude-code` for Claude Code and `google` for Gemini, and the operator
+  writes none. Follow [Rename an agent to its catalog id](#rename-an-agent-to-its-catalog-id)
+  below; editing the name in place is refused.
+- A non-catalog agent, one that keeps a name that is no catalog id and its
+  explicit credential list, with an optional billing credential the host can
+  resolve now receives it on every run. An optional `anthropic-api-key`
+  beside a Claude subscription token switches Claude Code to API billing on
+  every run from a host that has `ANTHROPIC_API_KEY` set where submits run
+  or a source for it configured, where before only a task that named it was
+  billed that way. Decide in the terms, by removing the credential or making
+  it required, or on the host, by removing its source and unsetting its
+  variable.
+- A host whose configuration names no source for a credential whose target
+  is a catalog variable reads the variable where submits run, the MCP server
+  a harness starts included. A set variable reaches every run of that agent:
+  see the [warning](security.md#credential-envelopes) and, to hold one back,
+  unset it in the process that submits and remove any explicit source for
+  that credential from the host configuration.
+- A resubmission resolves the terms afresh: an optional credential whose
+  variable is unset at resubmit is left out, and an explicit source that
+  fails is an error, logged on each pass.
+- Receivers are unchanged: they deliver what `supplied_credentials` names.
+- `wherry host init` asks no question for a credential whose target is a
+  catalog variable and prints one line per entitled agent, ready or not
+  ready, in place of the list of credentials without a source.
+
+### Rename an agent to its catalog id
+
+A receiver's profiles name their agent, and `pool apply` checks every live
+receiver of the pool against the new terms before it records them, so
+terms that only rename an agent are refused, in a dry run and in an apply,
+and the recorded terms stay as they were:
+
+```
+wherry: pool terms would strand live receivers: receiver nomad-1 plugin nomad profile container: receiver agent is outside pool terms
+```
+
+Rename in three stages. The example takes `claude`, with
+`claude-oauth-token` at `CLAUDE_CODE_OAUTH_TOKEN` written by hand, to
+`claude-code`:
+
+1. Add the catalog-named agent beside the old one in `pools/<pool>.yaml`,
+   with the old agent's `models` and `default_model` and any credential
+   outside the catalog but no model credential, keep the old agent as it
+   is, and apply the pool:
+
+   ```sh
+   wherry operator pool apply build
+   ```
+
+   Copy `default_model` with `models`: an agent with several models and no
+   `default_model` makes every task name one, so a task that named none
+   for the old agent would be refused for the new. The recorded terms now
+   hold both agents, `claude-code` with the derived
+   `claude-code-oauth-token`, which a host's `wherry host receivers` shows
+   once a receiver offers the agent.
+
+2. Move each receiver to the new agent. In its configuration,
+   `receivers/<receiver>.yaml` or the receiver's directory, set
+   `agent: claude-code` on each profile that ran `claude`, change the
+   deployment settings that go with the agent, such as the image the
+   profile's `config` names, then check and apply it:
+
+   ```sh
+   wherry operator receiver apply nomad-1 -f nomad-1 --dry-run
+   wherry operator receiver apply nomad-1 -f nomad-1
+   ```
+
+   The receiver exits once its held runs end and its platform restarts it
+   on the new record, as [Change a receiver's configuration](operations-operator.md#change-a-receiver-s-configuration)
+   describes; move one receiver at a time. The moved profile's signature
+   topic is new, so tasks queued for `claude` stay on its topics, and the
+   restart drains only the runs the receiver holds. Empty each
+   queue before step 3, in one of two ways. To let the queued tasks finish
+   on `claude`, point new submissions at `claude-code` first, keep one
+   profile on `claude` for each signature with tasks still queued until
+   its queue drains, and move that last profile only then. Otherwise
+   cancel the queued tasks and submit them again for `claude-code`; a
+   receiver applies a cancel when it claims the task, so a cancel of a
+   task on a signature no profile serves stays pending.
+   Hosts that name the agent, with `--agent` or the MCP `agent` field, now
+   name `claude-code`; a host whose configuration gives the old credential
+   name a source moves that entry to the derived name, or drops it when
+   `CLAUDE_CODE_OAUTH_TOKEN` is set where submits run.
+
+3. Remove the old agent from the terms, set `default_agent` to the new
+   name when it named the old one, and apply the pool again:
+
+   ```sh
+   wherry operator pool apply build --dry-run
+   wherry operator pool apply build
+   ```
+
+   The dry run refuses, naming the receiver and profile, while any live
+   receiver still runs the old agent.
 
 ## Optional credentials from v0.1.2
 
-From v0.1.2 a host delivers an optional agent credential, one the pool's
+Superseded by [Optional credentials the host resolves](#optional-credentials-the-host-resolves),
+kept for the history of the wire field. From v0.1.2 a host delivered an
+optional agent credential, one the pool's
 terms mark `required: false`, only when the task requests it: with
 `wherry host submit --credential NAME`, or through MCP with a `credentials`
 entry of its name alone. Before v0.1.2 a host delivered every optional
@@ -217,7 +336,7 @@ Each receiver page gives its platform's upgrade and uninstall steps.
 
 2. After it succeeds, delete `~/.config/wherry/` on the laptop.
    It holds `config.yaml`, `bundle.yaml` and `host.key`.
-3. Delete `~/claude-oauth-token` on the laptop when nothing else uses it.
+3. Delete `~/claude-oauth-token` on the laptop when Set up a host made it and nothing else uses it.
 4. On the operator machine, delete `bundles/hosts/<tenant>/<host>.bundle`.
    Host removal does not delete it.
 

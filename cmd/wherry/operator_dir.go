@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/benemon/wherry/internal/catalog"
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/charmbracelet/huh"
@@ -142,7 +143,7 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 	if superPassword == nil {
 		var err error
 		if answers["super-user-password-file"] == "-" {
-			superPassword, err = secretFromStandardInput("super-user-password-file", "password")
+			superPassword, err = secretFromStandardInput("password")
 		} else {
 			superPassword, err = loadPassword(answers["super-user-password-file"])
 		}
@@ -272,10 +273,9 @@ func storageKeysFromStandardInput() (operator.StorageKeys, error) {
 	return operator.StorageKeys{AccessKey: lines[0], SecretKey: lines[1]}, nil
 }
 
-// tenantStorage records tenant's S3 access key and secret key in dir's storage/<tenant>.yaml, mode 0600 and kept out
-// of git, from two masked prompts on a terminal or, with fromStdin, from standard input, which is refused when it is a
-// terminal. Both values are validated before anything is written; the write replaces the kept pair atomically, so a
-// failed write keeps it. The pair reaches no record, no error and no output.
+// tenantStorage records tenant's S3 key pair in dir's storage/<tenant>.yaml, mode 0600 and kept out of git, from masked
+// prompts or, with fromStdin, standard input, validating both values before the kept pair is replaced atomically;
+// neither value reaches a record, an error or the output.
 func tenantStorage(ctx context.Context, service *operator.Service, dir, tenant string, fromStdin bool, stdout, prompts io.Writer) (result error) {
 	defer func() {
 		if result != nil {
@@ -466,9 +466,8 @@ func bundlePath(dir, kind string, create bool, names ...string) (string, error) 
 	return filepath.Join(path, names[len(names)-1]+".bundle"), nil
 }
 
-// refreshBundle rewrites the kept bundle at path, read as kept, as current, the bundle its principal should hold now,
-// keeping the password, when the broker or the CA differs; each is compared on its own, so a CA renewal with the same
-// broker rewrites the bundle too. It reports whether it wrote.
+// refreshBundle rewrites the kept bundle at path as current, keeping kept's principal and password, when the kept bundle
+// differs from the current one, and reports whether it wrote.
 func refreshBundle(path string, kept, current operator.Bundle) (bool, error) {
 	current.Principal, current.Password = kept.Principal, kept.Password
 	if current == kept {
@@ -533,6 +532,10 @@ type poolAgent struct {
 
 func promptPool(q *questions) (any, error) {
 	var file poolFile
+	c, err := catalog.Embedded()
+	if err != nil {
+		return nil, err
+	}
 	validName := func(s string) error {
 		if !wire.ValidName(s) {
 			return errors.New("invalid name")
@@ -548,6 +551,22 @@ func promptPool(q *questions) (any, error) {
 			return nil, err
 		}
 		agent := poolAgent{Name: name, Credentials: []map[string]any{}}
+		// A catalog agent's derived credentials are shown, and take part in the checks on the ones added here.
+		var targets []wire.TaskCredential
+		if derived, ok := c.Expand(name); ok {
+			var shown []string
+			for _, credential := range derived {
+				targets = append(targets, credential.TaskCredential())
+				required := "required"
+				if !credential.Required {
+					required = "optional"
+				}
+				shown = append(shown, credential.Name+" at "+credential.Env+", "+required)
+			}
+			if err := q.answer("Catalog credentials of "+name, strings.Join(shown, "; ")); err != nil {
+				return nil, err
+			}
+		}
 		for {
 			model, err := q.input("Model (blank ends the list)", "Leave blank for the profiles' choice", "", "", func(string) error { return nil })
 			if err != nil {
@@ -565,7 +584,6 @@ func promptPool(q *questions) (any, error) {
 		if err := q.answer("Models of "+name, models); err != nil {
 			return nil, err
 		}
-		var targets []wire.TaskCredential
 		for {
 			choice := "add"
 			if _, err := q.pick("Credentials of "+name, "", []huh.Option[string]{option("Add credential...", "add"), option("Done", "done")}, &choice); err != nil {
@@ -656,7 +674,7 @@ func promptPool(q *questions) (any, error) {
 	if err := q.answer("Default agent", file.DefaultAgent); err != nil {
 		return nil, err
 	}
-	_, err := q.ask("Producer byte rate per host, bytes a second", "", "1048576", "", func(s string) error {
+	_, err = q.ask("Producer byte rate per host, bytes a second", "", "1048576", "", func(s string) error {
 		value, err := strconv.ParseInt(s, 10, 64)
 		if err != nil || value <= 0 {
 			return errors.New("producer byte rate must be greater than 0")

@@ -851,7 +851,7 @@ func TestHostDescriptionPoolPrecedenceAndMissing(t *testing.T) {
 	h := newInitHost(t, map[string]operator.Terms{"a": agentTerms(first), "b": agentTerms(second)})
 	scriptForms(t, keys(down+down+down+"\r"))
 	_, out := h.init(t, h.bundle)
-	if !strings.Contains(out, "? First description  Skip") || !strings.Contains(out, "First description, credential key (pool a as FIRST, required; pool b as SECOND, required)") {
+	if !strings.Contains(out, "? First description  Skip") || !strings.Contains(out, "pool a agent claude: not ready; credential key (First description, FIRST) has no source") || !strings.Contains(out, "pool b agent claude: not ready; credential key (Second description, SECOND) has no source") {
 		t.Fatal(out)
 	}
 }
@@ -1043,7 +1043,7 @@ func TestHostOffTerminalDescription(t *testing.T) {
 	h := newInitHost(t, map[string]operator.Terms{"a": agentTerms(c)})
 	noTerminal(t)
 	stdout, out := h.init(t, h.bundle)
-	if strings.Contains(out, "\x1b") || !strings.Contains(out, "Account token, credential key (pool a as TARGET, required)") {
+	if strings.Contains(out, "\x1b") || !strings.Contains(out, "pool a agent claude: not ready; credential key (Account token, TARGET) has no source") {
 		t.Fatal(out)
 	}
 	h.registered(t, strings.TrimSpace(stdout))
@@ -1091,7 +1091,7 @@ func TestHostNarrowDescriptionKeepsScopeWarning(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := strings.Join(strings.Fields(strings.ReplaceAll(ansi.Strip(out.String()), "┃", "")), " ")
-	for _, part := range []string{"An environment source sends what the variable holds", "every pool that names token, now or later.", "Where it is optional, a run gets it only when its task requests it.", "It is read where submits run, including the MCP server your harness starts."} {
+	for _, part := range []string{"An environment source sends what the variable holds", "every pool that names token, now or later.", "Where it is optional, a run gets it whenever the variable is set, without being asked for.", "It is read where submits run, including the MCP server your harness starts."} {
 		if !strings.Contains(text, part) {
 			t.Fatalf("missing %q: %s", part, text)
 		}

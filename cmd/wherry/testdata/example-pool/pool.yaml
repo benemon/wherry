@@ -1,4 +1,4 @@
-default_agent: claude
+default_agent: claude-code
 start_by_limit: 72h
 # The attempts one task may make, start failures included, plus a margin for the releases of a profile going unready.
 delivery_limit: 6

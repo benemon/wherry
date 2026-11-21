@@ -176,8 +176,8 @@ that file's certificates as `ca`, so a host or receiver needs no CA file of
 its own ([Broker trust](security.md#broker-trust)). A host bundle also
 holds the tenant's S3 key pair as `storage` once
 [`tenant storage`](#wherry-operator-tenant-storage-tenant) recorded it; a
-receiver bundle never does. The bundle is the invite: each command that
-writes or rewrites one prints its path and the next step:
+receiver bundle never does. Each command that writes or rewrites a bundle
+prints its path and the next step:
 `wherry host init <file>` for a host, and the platform's bundle step for a receiver.
 `tenant host add` refuses a host that exists unless given `--force`. `receiver apply` of a receiver that exists
 updates its configuration, and replaces its bundle only when the broker
@@ -272,9 +272,13 @@ wherry operator pool apply POOL [-f PATH] [--dry-run]
 
 Creates the pool, or records new terms for it, from the
 [pool terms](configuration-operator.md#pool-terms) at `PATH` or in
-`pools/<pool>.yaml`. The [guided path](#operator-commands) asks for the
+`pools/<pool>.yaml`. An agent named by a
+[credential catalog id](configuration-operator.md#catalog-agents) gets the
+model credentials its entry derives, before any it lists; the terms recorded
+are the expanded ones. The [guided path](#operator-commands) asks for the
 agents one at a time, each one's models and credentials, then the default agent
-from the entered names. Each credential asks for its name, delivery as an
+from the entered names. After a catalog agent's name it prints the credentials
+the catalog derives and asks only for further ones. Each credential asks for its name, delivery as an
 environment variable or file, target, whether it is required, and an optional
 description. The remaining questions are `producer_byte_rate` (default
 1048576), `request_percentage` (default 10) and `start_by_limit` (default
@@ -301,7 +305,8 @@ It sets these on new and existing topics. [Topics](design.md#topics-1) gives
 the reasons.
 
 It refuses, before it reads the broker, terms whose agent credentials
-break the [pool terms](configuration-operator.md#pool-terms) rules, and a
+break the [pool terms](configuration-operator.md#pool-terms) rules, a
+catalog agent listing a credential the catalog derives for it, and a
 `start_by_limit` above 29 days and 18 hours. For a pool with `storage` it
 refuses a `start_by_limit` that with six hours added exceeds 7 days, the
 longest an S3 SigV4 presigned URL lasts, with `start_by_limit plus the 6h
@@ -513,16 +518,19 @@ On a terminal it asks for the access key, then the secret key, each with a
 masked input that prints nothing back and no answer line, as `operator init`
 asks for the super user's password. With `-` it reads both from standard
 input, as a password manager pipes them: exactly two non-empty lines, the
-access key then the secret key, with or without a final line break; anything
-else is refused with `standard input must hold exactly two lines: the access
-key, then the secret key`, and standard input that is a terminal is refused
-before it is read. A key that is empty or holds whitespace or a control
-character is refused with a fixed message naming which key, since a key
-typed so would sign every request wrong. Without a terminal and without `-`
-it refuses, naming `-`. Both keys are checked before anything is written,
-and the file is replaced atomically, so a refusal or a failed write keeps
-the pair on file; Ctrl-C at either question writes nothing. No value reaches
-an error, the output or a record. An absent or ended tenant is refused.
+access key then the secret key, with or without a final line break. Both
+keys are checked before anything is written, and the file is replaced
+atomically, so a refusal or a failed write keeps the pair on file. Ctrl-C at
+either question writes nothing. No value reaches an error, the output or a
+record. It refuses:
+
+| Refused | Message |
+| --- | --- |
+| standard input that is a terminal, with `-`, before it is read | `standard input is a terminal; leave out - to be asked for the storage keys, or pipe them in, the access key then the secret key, one per line` |
+| standard input holding other than two non-empty lines | `standard input must hold exactly two lines: the access key, then the secret key` |
+| no terminal and no `-` | `tenant storage has no terminal to prompt on; pipe the access key and the secret key in, one per line, with -` |
+| a key that is empty or holds whitespace or a control character, which would sign every request wrong | a fixed message naming which key |
+| a tenant that is absent or has ended | `tenant absent; use tenant add first` or `tenant has ended` |
 
 A changed pair reaches a host only through its bundle: run `tenant host
 refresh TENANT HOST` for each host and redistribute, as
@@ -572,9 +580,8 @@ its bundle to `bundles/hosts/<tenant>/<host>.bundle`, naming the broker in
 names one, and the tenant's S3 key pair as `storage` when
 [`tenant storage`](#wherry-operator-tenant-storage-tenant) recorded one. It
 prints
-`wrote <bundle>; hand it to the host, where wherry host init <file> installs it`:
-the bundle carries everything the operator hands over. It
-refuses a host that exists, and an existing bundle file,
+`wrote <bundle>; hand it to the host, where wherry host init <file> installs it`.
+It refuses a host that exists, and an existing bundle file,
 unless given [`--force`](#operator-commands). For a host that exists,
 `--force` reissues its identity: it records nothing and creates no topic. It
 reapplies the host's quotas and [converges](#operator-commands) the ACLs as
@@ -593,20 +600,18 @@ wherry operator tenant host refresh TENANT HOST
 Rewrites the kept bundle, `bundles/hosts/<tenant>/<host>.bundle`, of a live
 host with the broker in `operator.yaml`, its `ca_file`'s certificates as
 `ca` and the tenant's S3 key pair as `storage`, keeping the principal and
-password, so a renewed CA, a new broker address or a rotated pair reaches
-the host without a new password. It compares the broker, the CA and the pair
-on their own and prints `refreshed <bundle>` with the next step when any
-changed, or `<bundle> is current`; a rerun changes nothing, so a refresh
-interrupted between a tenant's hosts is run again for each of them and
-converges. The refreshed bundle is handed to the host
-as the first was, and its user runs `wherry host init BUNDLE`, which
-replaces the host's copy; a `ca_file` the host's configuration keeps
-overrides the bundle's `ca`, and `host init` warns when it does. It appends
-no record and changes nothing in Kafka. It refuses a tenant or host that
-does not exist, is revoking or has ended; a missing bundle, naming
-`tenant host add TENANT HOST --force`, which reissues the host with a new
-password; and a bundle that is another principal's.
-[Broker trust](security.md#broker-trust) gives the renewal procedure.
+password. A renewed CA, a new broker address or a rotated pair so reaches
+the host without a new password. It prints `refreshed <bundle>` with the
+next step when the bundle changed, or `<bundle> is current`. A rerun
+changes nothing, so a refresh interrupted between a tenant's hosts is run
+again for each of them. Hand the refreshed bundle to the host as the first
+was. Its user runs `wherry host init BUNDLE`, which replaces the host's
+copy and warns when a `ca_file` in the configuration overrides the bundle's
+`ca`. It appends no record and changes nothing in Kafka. It refuses a
+tenant or host that does not exist, is revoking or has ended; a missing
+bundle, naming `tenant host add TENANT HOST --force`, which reissues the
+host with a new password; and a bundle that is another principal's.
+[Renew the broker CA](security.md#renew-the-broker-ca) gives the renewal procedure.
 
 ### `wherry operator receiver apply RECEIVER`
 
@@ -1123,25 +1128,25 @@ Sets the host up from its bundle, and configures it for every pool its tenant
 is entitled to:
 
 1. With `BUNDLE`, it reads the bundle and copies it to the configuration's
-   bundle. For the default configuration that is always `bundle.yaml` in the
-   [configuration directory](configuration-host.md#client-configuration),
-   `$XDG_CONFIG_HOME/wherry/` or by default `~/.config/wherry/`, named as
-   `bundle` in the configuration even when it named another bundle. A
-   configuration at any other `<path>` keeps the `bundle` it names and gets
-   the copy there; one naming none gets it at the
-   [default bundle path](configuration-host.md#a-configuration-away-from-the-default-path),
-   `<path>.bundle.yaml`, named as its `bundle`. The copy is mode 0600. The
-   configuration directory is made mode 0700; elsewhere, a directory init
-   creates is mode 0700 and an existing one keeps its mode. It replaces the
-   file there atomically. Before writing anything it refuses when the
-   bundle's destination, `<path>.host.key` or `<path>.state` exists and is
-   not the file the configuration already names, such as another
-   configuration or another host's bundle or key, naming the path and the
-   setting (`bundle`, `host_key`, `state_dir`) that avoids it; a rerun on an
-   initialised configuration succeeds, and explicit `host_key` and
-   `state_dir` paths and the configuration directory's files are not
-   checked. Without `BUNDLE`, it uses the bundle the configuration names,
-   and refuses when it names none.
+   bundle, mode 0600, replacing the file there atomically:
+
+   | Configuration | Where the copy goes |
+   | --- | --- |
+   | the default configuration | `bundle.yaml` in the [configuration directory](configuration-host.md#client-configuration), `$XDG_CONFIG_HOME/wherry/` or by default `~/.config/wherry/`, named as `bundle` in the configuration even when it named another bundle |
+   | one at another `<path>` that names a `bundle` | that `bundle` |
+   | one at another `<path>` that names none | the [default bundle path](configuration-host.md#a-configuration-away-from-the-default-path), `<path>.bundle.yaml`, named as its `bundle` |
+
+   The configuration directory is made mode 0700. Elsewhere, a directory
+   init creates is mode 0700 and an existing one keeps its mode. Before
+   writing anything it refuses when the bundle's destination,
+   `<path>.host.key` or `<path>.state` exists and is not the file the
+   configuration already names, such as another configuration or another
+   host's bundle or key, naming the path and the setting (`bundle`,
+   `host_key`, `state_dir`) that avoids it. A rerun on an initialised
+   configuration succeeds. Explicit `host_key` and `state_dir` paths and
+   the configuration directory's files are not checked. Without `BUNDLE`,
+   it uses the bundle the configuration names, and refuses when it names
+   none.
 2. It trusts the broker through the configuration's `ca_file`, else the
    bundle's `ca`, else the system roots, and asks nothing about the CA. A
    bundle whose `ca` holds no certificate is refused. When the
@@ -1163,7 +1168,11 @@ is entitled to:
    standard error. Otherwise, Summary shows the registered key ID. It fails when
    the key topic holds another key.
 4. It reads every entitled pool's terms. On a terminal it asks by topic:
-   Credentials, Git, Storage, then Summary. A missing credential's question is
+   Credentials, Git, Storage, then Summary. A credential whose every target
+   is a [catalog variable](credential-variables.md) gets no question and no
+   line: the host reads the variable where submits run. A missing
+   credential's question, for any other environment target and for a file
+   target, is
    labelled with its first description in sorted pool order, then the terms'
    agent order, else its name, with `(optional)` when every use is optional.
    Choose Environment variable, File or Command. Environment variable lists detected non-empty targets, then New
@@ -1188,7 +1197,14 @@ is entitled to:
    Set per-pool keys by editing the config, which win over the bundle's
    pair for that pool; existing mappings are kept.
 7. When answers changed the configuration, it writes it again. Summary
-   shows registration, successful writes and anything still missing.
+   shows registration and successful writes, then one line per entitled
+   agent, pool by pool: `ready`, naming where each credential comes from
+   (`from VAR` for a catalog variable, `from env VAR`, `from file`, or
+   `from command, unchecked`, since init runs no command), or `not ready`,
+   naming the variables to set where submits run, the catalog entry's page,
+   each other credential without a source, and the one-line form of an
+   explicit source to add to the configuration. Git hosts and S3 storage
+   still missing follow.
 
 Choose Skip to leave a request for later, or Back in a nested list to return.
 In Git and Storage, Skip on a source returns to the host or S3 storage
@@ -1215,9 +1231,9 @@ exists, is still the default. Explicit `bundle`, `host_key` and
 `state_dir` values are kept. Writes use mode 0600 even
 for existing files, with references to sources, never values. A re-run
 keeps existing entries and asks only for missing settings. When standard
-input or standard error is not a terminal, or with `TERM=dumb`, init asks nothing and lists missing
-credentials, Git hosts and entitled S3 storage, the last only when the
-bundle carries no pair. Stdout carries only the key
+input or standard error is not a terminal, or with `TERM=dumb`, init asks nothing, prints the
+line per entitled agent and lists missing Git hosts and entitled S3
+storage, the last only when the bundle carries no pair. Stdout carries only the key
 ID. Summary appears even with no entitlement, with the instruction to run
 init again once the operator entitles the tenant to a pool.
 
@@ -1253,7 +1269,7 @@ and receiver ID:
 
 ```
 receiver=<id> pool=<pool> capacity=<n> in_flight=<n> advertisement_age=<age> status=<status> [gated=<reason>]
-  profile=<name> plugin=<type> agent=<agent> ready=<bool> labels=<k=v,...> [replicas=<n> in_flight=<n>] [inline_limit=<n>] [models=<m,...> default_model=<m>] [credentials=<name:env=VAR|name:file=FILE[(missing,optional)],...>]
+  profile=<name> plugin=<type> agent=<agent> ready=<bool> labels=<k=v,...> [replicas=<n> in_flight=<n>] [inline_limit=<n>] [models=<m,...> default_model=<m>] [credentials=<name:env=VAR|name:file=FILE[(missing|unset|unchecked[,optional]|optional)],...>]
     [credential=<name> description="<text>"]...
 ```
 
@@ -1284,10 +1300,14 @@ against the profile whose replica claimed it. `inline_limit`, when set, is
 the most inline input bytes the offered profile delivers. `credentials` names
 the agent's credentials in the pool's terms, each with its target, the
 agent's environment variable or the file in its credentials directory,
-marking `missing` each this host's configuration has no
-[source](configuration-host.md#client-configuration) for and `optional` each a run
-goes without unless the task requests it, as in
+marking `missing` each this host has no source for, neither a
+[source](configuration-host.md#client-configuration) its configuration
+names nor a set [catalog variable](credential-variables.md), `unset` each
+whose configured `env` source names a variable that is unset, `unchecked`
+each with a `command` source, which this command never runs, and
+`optional` each a run goes without when the host cannot resolve it, as in
 `credentials=openai-api-key:env=OPENAI_API_KEY,github-token:env=GH_TOKEN(missing,optional)`.
+A credential with no mark is ready: a file source, or a set variable.
 Each credential with a description in the pool's terms follows its profile on
 a line of its own, as in `credential=github-token description="GitHub token for gh"`.
 
@@ -1296,7 +1316,7 @@ a line of its own, as in `credential=github-token description="GitHub token for 
 | Member | Content |
 | --- | --- |
 | `receiver_id`, `pool` | strings |
-| `profiles` | `{name, plugin, agent, inline_limit, models, default_model, credentials, labels, ready, replicas, in_flight}`, `credentials` holding `{name, env, file, description, optional, configured}`, `env` or `file` the target; `replicas` and `in_flight` are 0 for a profile that is not ready; optional values are omitted when unset |
+| `profiles` | `{name, plugin, agent, inline_limit, models, default_model, credentials, labels, ready, replicas, in_flight}`, `credentials` holding `{name, env, file, description, optional, configured, source, variable, status}`, `env` or `file` the target, `source` `file`, `env` or `command` from the configuration or `variable` for the credential's own catalog variable, `variable` the variable an `env` or `variable` source reads, and `status` `ready`, `unchecked`, `unset` or `missing`; `replicas` and `in_flight` are 0 for a profile that is not ready; optional values are omitted when unset |
 | `capacity`, `in_flight` | integers from the latest advertisement, totals over the receiver's profiles |
 | `last_advertised` | RFC 3339 time of the latest advertisement; omitted when there is none |
 | `status` | `live`, `stale`, `silent` or `ended` |
@@ -1306,10 +1326,15 @@ a line of its own, as in `credential=github-token description="GitHub token for 
 
 Resolves a placement, a pool and a profile signature, signs the task and
 publishes it to the signature's task topic in the chosen pool. It prints
-`run_id=<id> pool=<pool>`, followed by `unrequested=<name,...>` when the
-placed agent has optional credentials the task did not request, or fails
+`run_id=<id> pool=<pool>`, followed by `unsupplied=<name,...>` when the
+placed agent has optional credentials this host could not resolve, or fails
 with `no matching live receiver` when no live signature satisfies the
-agent, model and selector.
+agent, model and selector. The agent's credentials come from the sources
+the [client configuration](configuration-host.md#client-configuration) names,
+else from their [catalog variables](credential-variables.md) in the
+submitting process; each distinct source resolves once per submit, and a
+configured source that fails refuses the task, as does a required
+credential, or a named optional one, with no value.
 
 Before it publishes, it folds the host's key topic and refuses when the host
 key is not the topic's current key, since receivers admit a task only under
@@ -1329,7 +1354,7 @@ and needs `wherry host init` on a re-provisioned host.
 | `--git-changes patch\|bundle` | | ask for the agent's commits back as the output `changes.patch` or `changes.bundle` |
 | `--continue RUN_ID` | | continue from the `changes.bundle` `wait` collected for a run of this host, in that run's repository, and return the next bundle through the pool's bucket |
 | `--input FILE[:s3]` | | file the agent gets in `WHERRY_INPUT_DIR` under its base name; `:s3` uploads it, at most 5 GiB, to the pool's bucket; repeatable |
-| `--credential NAME` | | request the placed agent's credential `NAME` at the target the pool's terms give it; an optional credential is delivered only when requested; repeatable |
+| `--credential NAME` | | name an optional credential of the placed agent the task cannot go without, at the target the pool's terms give it: the submit fails when this host cannot resolve it; one the host resolves is delivered without being named; repeatable |
 | `--credential NAME:file=FILE` or `--credential NAME:env=VAR` | | credential `NAME` from `credentials` in the client configuration, which the agent gets as the file `FILE` in `WHERRY_CREDENTIALS_DIR` or in the environment variable `VAR`; repeatable |
 | `--output NAME[:required][:s3]` | | file the agent is asked to leave in `WHERRY_OUTPUT_DIR`; `:required` fails the run without it, and `:s3` returns it through the pool's bucket, in either order; repeatable |
 | `--start-by` | `10m` | `task_started_by`: an RFC 3339 time, or a Go duration from now, by which the agent's job must start |
@@ -1448,35 +1473,42 @@ invalid input: task credential deploy-key takes the environment variable GH_TOKE
 ```
 
 A task credential named as one of the agent's credentials that the run
-gets, a required or a requested one, travels once in the envelope and is
-delivered at both targets.
+gets, a required one or an optional one the host resolves, travels once in
+the envelope and is delivered at both targets.
 
 `submit` refuses, before it publishes, a task credential, a required
-credential of the placed agent, or a requested one, that the client
-configuration has no [source](configuration-host.md#client-configuration) for:
+credential of the placed agent, or one `--credential NAME` names, that the
+host has no source for, neither in the client
+configuration's [sources](configuration-host.md#client-configuration) nor,
+for a target the [catalog reads](credential-variables.md), in the
+submitting process's variables:
 
 ```
 invalid input: auth required: credential openai-api-key is not in this host's configuration
+invalid input: auth required: credential claude-code-oauth-token has no source: CLAUDE_CODE_OAUTH_TOKEN is unset in the process that submits, and this host's configuration names no source for it
 ```
 
 A required credential of the placed agent is delivered to every run. An
-optional one is delivered only when `--credential NAME` requests it;
-requesting a required one changes nothing. The submission's
+optional one is delivered to every run whose submit resolves it; naming it
+with `--credential NAME` makes it one the task cannot go without, and
+naming a required one changes nothing. The submission's
 `supplied_credentials` names the agent's credentials delivered. An optional
-credential the task does not request, whether or not the host has a source
-for it, is named on the `unrequested=` of the output line; the run goes
-without it, and its [prompt](configuration-receiver.md#agent-contract) names
-it as not supplied.
-Request an optional credential only when the task needs it. `submit` refuses
-a request for a name that is not one of the placed agent's credentials:
+credential the host could not resolve is named on the `unsupplied=` of the
+output line; the run goes without it, and its
+[prompt](configuration-receiver.md#agent-contract) names it as not
+supplied. `submit` refuses a name that is not one of the placed agent's
+credentials:
 
 ```
 invalid input: requested credential vault-token is not one of agent claude's credentials
 ```
 
 A task credential with a target is not a request: a `github-token` task
-credential, such as a git entry's, does not also deliver the agent's
-`github-token` at its target unless `--credential github-token` asks for it.
+credential, such as a git entry's, is delivered at the target the task gives
+it, and the agent's `github-token` reaches its own target because the host
+resolves the same source for it, as for every agent credential;
+`--credential github-token` makes the agent's one the task cannot go
+without.
 
 `--input FILE:s3` and `--output NAME:s3` use the pool's [S3 lane](a2a-extension-v1.md#s3-inputs-and-outputs).
 `submit` refuses them, before it uploads or publishes anything, when the

@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,10 +15,12 @@ import (
 	"time"
 
 	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 // initHost is host-a of tenant-a on a TLS kfake cluster, added but not initialised, its bundle, which carries the
@@ -159,10 +164,14 @@ func TestHostInitWithoutATerminal(t *testing.T) {
 			t.Errorf("init without a terminal printed\n%s\nwant nothing asked", prompts)
 		}
 	}
-	for _, want := range []string{"credential model (pool pool-a as MODEL_API_KEY, required)", "git host git.example.test", "storage of pool pool-a"} {
+	// MODEL_API_KEY is set, but no catalog entry reads it, so the agent is not ready until the configuration names a source.
+	for _, want := range []string{"pool pool-a agent claude: not ready; credential model (MODEL_API_KEY) has no source; or add to " + h.config + ": credentials: {model: {command: [your-secret-tool, get, NAME]}}\n", "git host git.example.test", "storage of pool pool-a"} {
 		if !strings.Contains(prompts, want) {
 			t.Errorf("init without a terminal printed\n%s\nwant %q listed", prompts, want)
 		}
+	}
+	if strings.Contains(prompts, "model-key-value") {
+		t.Fatal("init printed the variable's value")
 	}
 	if config := h.written(t); config.Bundle != filepath.Join(h.dir, "bundle.yaml") || len(config.Credentials)+len(config.Git)+len(config.Storage) != 0 {
 		t.Fatalf("config %+v; want the bundle alone", config)
@@ -527,5 +536,186 @@ func TestHostInitRefusesAnotherConfigurationsFiles(t *testing.T) {
 		if again, _ := h.init(t, args...); again != keyID {
 			t.Fatalf("rerun %v registered %s; want the host's key %s kept", args, strings.TrimSpace(again), strings.TrimSpace(keyID))
 		}
+	}
+}
+
+// catalogVariables are the embedded catalog's variables these tests set or clear, so the process's environment plays no
+// part: google's three, and anthropic's one.
+var catalogVariables = []string{"GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY"}
+
+func clearCatalogVariables(t *testing.T) {
+	t.Helper()
+	for _, variable := range catalogVariables {
+		t.Setenv(variable, "")
+	}
+}
+
+// init asks no question and writes no line for a credential whose target is a catalog variable: the host reads it where
+// submits run. It still asks for an environment target no entry reads and for a file target, and reports the agent
+// ready naming each credential's source or variable.
+func TestHostInitAsksNothingForACatalogVariable(t *testing.T) {
+	clearCatalogVariables(t)
+	t.Setenv("ANTHROPIC_API_KEY", "anthropic-key-value")
+	t.Setenv("MODEL_API_KEY", "model-key-value")
+	anthropic := envCredential("anthropic-api-key", "ANTHROPIC_API_KEY")
+	anthropic.Description = "Anthropic"
+	h := newInitHost(t, map[string]operator.Terms{"pool-a": agentTerms(anthropic, envCredential("model", "MODEL_API_KEY"), fileCredential("deploy-key", "id_ed25519"))})
+	// Questions come by name: deploy-key, Skip; then model, Environment variable and the found MODEL_API_KEY.
+	scriptForms(t, keys(down+down+down+"\r"), keys("\r"), keys("\r"))
+	stdout, out := h.init(t, h.bundle)
+	h.registered(t, strings.TrimSpace(stdout))
+	if credentials := h.written(t).Credentials; len(credentials) != 1 || credentials["model"].Env != "MODEL_API_KEY" {
+		t.Fatalf("written credentials %+v; want model's source alone, none for the catalog variable", credentials)
+	}
+	for _, asked := range []string{"? Anthropic", "? anthropic-api-key"} {
+		if strings.Contains(out, asked) {
+			t.Errorf("init asked for the catalog variable's credential:\n%s", out)
+		}
+	}
+	for _, want := range []string{"? model  Environment variable MODEL_API_KEY", "? deploy-key (optional)  Skipped",
+		"pool pool-a agent claude: ready; anthropic-api-key from ANTHROPIC_API_KEY; model from env MODEL_API_KEY; deploy-key (optional), no source"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("init printed\n%s\nwant %q", out, want)
+		}
+	}
+	if strings.Contains(out, "anthropic-key-value") || strings.Contains(out, "model-key-value") {
+		t.Fatal("init printed a variable's value")
+	}
+}
+
+// A catalog agent reading several variables is not ready until one is set: the line names the variables, the entry's
+// page and the one-line form of an explicit source; with one set it is ready from that variable.
+func TestHostInitReportsACatalogAgentsVariables(t *testing.T) {
+	clearCatalogVariables(t)
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "google"}}, DefaultAgent: "google", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 10}
+	h := newInitHost(t, map[string]operator.Terms{"pool-a": terms})
+	noTerminal(t)
+	_, prompts := h.init(t, h.bundle)
+	want := "pool pool-a agent google: not ready; set one of GOOGLE_API_KEY, GOOGLE_GENERATIVE_AI_API_KEY, GEMINI_API_KEY where submits run (https://ai.google.dev/gemini-api/docs/models); or add to " +
+		h.config + ": credentials: {google-api-key: {command: [your-secret-tool, get, NAME]}}\n"
+	if !strings.Contains(prompts, want) {
+		t.Fatalf("init printed\n%s\nwant %q", prompts, want)
+	}
+	if strings.Contains(prompts, "op://") || strings.Contains(prompts, "op, read") {
+		t.Fatalf("init printed\n%s\nwant a vendor-neutral example command", prompts)
+	}
+	if strings.Contains(prompts, "has no source for") {
+		t.Fatalf("init printed\n%s\nwant no missing list for the catalog variables", prompts)
+	}
+	t.Setenv("GEMINI_API_KEY", "gemini-key-value")
+	_, prompts = h.init(t, h.bundle)
+	if want := "pool pool-a agent google: ready; google-api-key (optional), GOOGLE_API_KEY unset; google-generative-ai-api-key (optional), GOOGLE_GENERATIVE_AI_API_KEY unset; gemini-api-key (optional) from GEMINI_API_KEY\n"; !strings.Contains(prompts, want) {
+		t.Fatalf("init printed\n%s\nwant %q", prompts, want)
+	}
+	if credentials := h.written(t).Credentials; len(credentials) != 0 {
+		t.Fatalf("written credentials %+v; want none for a detected variable", credentials)
+	}
+	if strings.Contains(prompts, "gemini-key-value") {
+		t.Fatal("init printed the variable's value")
+	}
+}
+
+// A not-ready line for a credential with an explicit env source whose variable is unset names that variable, not the
+// catalog variable its target names: the explicit source wins, so setting the catalog variable cannot help. Without
+// the explicit source the same credential's line names the catalog variable.
+func TestHostInitNamesTheExplicitSourcesVariableOverTheCatalogs(t *testing.T) {
+	t.Setenv("CODEX_API_KEY", "")
+	t.Setenv("WHERRY_TEST_CODEX_SOURCE", "")
+	codex := operator.AgentCredential{TaskCredential: wire.TaskCredential{Name: "codex-api-key", Env: "CODEX_API_KEY"}, Description: "OpenAI Codex"}
+	pools := map[string]operator.Terms{"pool-a": {Agents: []operator.AgentTerms{{Name: "codex", Credentials: []operator.AgentCredential{codex}}}}}
+	lines, err := agentLines("config.yaml", busclient.Config{Credentials: map[string]credential.Source{"codex-api-key": {Env: "WHERRY_TEST_CODEX_SOURCE"}}}, pools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "pool pool-a agent codex: not ready; credential codex-api-key (OpenAI Codex, CODEX_API_KEY): its env source WHERRY_TEST_CODEX_SOURCE is unset; or add to config.yaml: credentials: {codex-api-key: {command: [your-secret-tool, get, NAME]}}"
+	if len(lines) != 1 || lines[0] != want {
+		t.Fatalf("init lines %q; want %q", lines, want)
+	}
+	lines, err = agentLines("config.yaml", busclient.Config{}, pools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "set CODEX_API_KEY where submits run"; len(lines) != 1 || !strings.Contains(lines[0], want) || strings.Contains(lines[0], "WHERRY_TEST_CODEX_SOURCE") {
+		t.Fatalf("init lines %q; want %q and no explicit variable", lines, want)
+	}
+}
+
+// receiver adds receiver-a to pool-a with a lab profile for agent, registers its key, publishes the pool's snapshot and a
+// live advertisement, so a submit places on it.
+func (h initHost) receiver(t *testing.T, ca, agent string) {
+	t.Helper()
+	bundle := filepath.Join(t.TempDir(), "receiver-a.bundle")
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{{Name: "lab", Plugin: "nomad", Agent: agent, Labels: map[string]string{"runtime": "exec"}}},
+		PluginSHA256: map[string]string{"nomad": fakeSHA256}}
+	if err := h.service.ReceiverAdd(h.ctx, config, h.service.Broker, bundle); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := operator.ReadBundle(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kafka := connectTLS(t, h.service.Broker, ca, contents.Principal, contents.Password)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration, err := signed.RegisterKey("receiver-a", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	advertisement, err := wire.SignRecord(&wire.Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []wire.Offer{{Profile: "lab", Agent: agent}}, Capacity: 1, AtMS: time.Now().UnixMilli()}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range []*kgo.Record{
+		{Topic: operator.ReceiverTopic("receiver-a"), Key: []byte("receiver-a"), Value: registration},
+		{Topic: operator.PoolReceiversTopic("pool-a"), Key: []byte("receiver-a"), Value: advertisement},
+	} {
+		if err := kafka.ProduceSync(h.ctx, record).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publishSnapshot(t, h.ctx, kafka, "pool-a", "receiver-a", key)
+}
+
+// A host initialised with the variable set, and so with no line for its credential, refuses a submit from a process
+// without the variable before any record is produced, naming the variable to set and the configuration as the
+// alternative.
+func TestHostInitWithAVariableThenSubmitWithoutIt(t *testing.T) {
+	clearCatalogVariables(t)
+	t.Setenv("ANTHROPIC_API_KEY", "anthropic-key-value")
+	h := newInitHost(t, map[string]operator.Terms{"pool-a": agentTerms(envCredential("anthropic-api-key", "ANTHROPIC_API_KEY"))})
+	noTerminal(t)
+	_, prompts := h.init(t, h.bundle)
+	if !strings.Contains(prompts, "pool pool-a agent claude: ready; anthropic-api-key from ANTHROPIC_API_KEY\n") || len(h.written(t).Credentials) != 0 {
+		t.Fatalf("init printed\n%s\nand wrote %+v; want the agent ready from the variable and no credential line", prompts, h.written(t).Credentials)
+	}
+	h.receiver(t, string(h.service.CA), "claude")
+	config, err := busclient.LoadConfig(h.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := &syncBuffer{}
+	host, err := busclient.Connect(config, log.New(logs, "host: ", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	_, err = host.Submit(h.ctx, busclient.SubmitInput{Prompt: "work", Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}},
+		StartBy: time.Now().Add(time.Minute), EndBy: time.Now().Add(time.Minute)})
+	want := "auth required: credential anthropic-api-key has no source: ANTHROPIC_API_KEY is unset in the process that submits, and this host's configuration names no source for it"
+	if !errors.Is(err, busclient.ErrInvalidInput) || !strings.Contains(err.Error(), want) {
+		t.Fatalf("submit = %v; want %q", err, want)
+	}
+	if entries, err := os.ReadDir(filepath.Join(config.StateDir, "runs")); err == nil && len(entries) != 0 {
+		t.Fatalf("%d local run records; want none", len(entries))
+	}
+	admin := connectTLS(t, h.service.Broker, string(h.service.CA), "admin", "password")
+	if records, err := readTasks(h.ctx, admin, "pool-a"); err != nil || len(records) != 0 {
+		t.Fatalf("%d task records, %v; want none published", len(records), err)
+	}
+	if strings.Contains(logs.String()+prompts, "anthropic-key-value") {
+		t.Fatal("a log or prompt carries the variable's value")
 	}
 }

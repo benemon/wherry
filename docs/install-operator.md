@@ -38,9 +38,8 @@ op read "op://Infra/kafka-admin/password" | wherry operator init \
   --super-user kafka-admin --super-user-password-file -
 ```
 
-Either way the password touches no file.
 `operator init` creates the principal `wherry.operator` and grants it what wherry needs.
-It doesn't keep the super user's password.
+In both forms it writes the super user's password to no file and keeps no copy of it.
 Every later `wherry operator` command in this directory connects as `wherry.operator`.
 
 The broker address goes into every bundle, so use one your laptop and the receiver can reach.
@@ -51,18 +50,18 @@ Write the pool's terms to `pools/build.yaml`:
 
 ```yaml
 agents:
-  - name: claude
-    credentials:
-      - {name: claude-oauth-token, env: CLAUDE_CODE_OAUTH_TOKEN}
-default_agent: claude
+  - name: claude-code
+default_agent: claude-code
 delivery_limit: 5
 lock_duration: 15s
 producer_byte_rate: 1048576
 request_percentage: 10
 ```
 
-The pool runs one agent, `claude`.
-Each run gets the credential `claude-oauth-token` in the variable Claude Code reads.
+The pool runs one agent, `claude-code`.
+The name is a [catalog id](configuration-operator.md#catalog-agents), so the agent lists no model credential.
+`pool apply` adds the credential `claude-code-oauth-token`, which targets `CLAUDE_CODE_OAUTH_TOKEN`, the variable
+Claude Code reads.
 Your laptop supplies its value on [Set up a host](install-host.md).
 
 Apply the terms:

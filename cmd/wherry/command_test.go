@@ -384,8 +384,9 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 	if rows[0]["receiver_id"] != "receiver-a" || rows[0]["status"] != "live" || rows[0]["pool"] != "pool-a" {
 		t.Fatalf("unexpected JSON row: %#v", rows[0])
 	}
-	if !strings.Contains(stdout.String(), `{"name":"github-token","env":"GH_TOKEN","description":"GitHub token for gh","optional":true,"configured":false}`) {
-		t.Fatalf("receivers JSON %s, want the credential's description", stdout.String())
+	if !strings.Contains(stdout.String(), `{"name":"model","env":"MODEL_API_KEY","configured":true,"source":"file","status":"ready"}`) ||
+		!strings.Contains(stdout.String(), `{"name":"github-token","env":"GH_TOKEN","description":"GitHub token for gh","optional":true,"configured":false,"status":"missing"}`) {
+		t.Fatalf("receivers JSON %s, want each credential's description, source and status", stdout.String())
 	}
 	stdout.Reset()
 	if err := runReceivers(b.ctx, b.client, nil, &stdout, &stderr); err != nil {

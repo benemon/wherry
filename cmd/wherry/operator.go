@@ -320,7 +320,6 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		if err := service.HostAdd(ctx, pos[3], pos[4], bundle, force); err != nil {
 			return err
 		}
-		// The bundle is the invite: it carries everything the operator hands over, so the next step is named with it.
 		return hostBundleNext(stdout, "wrote", bundle)
 	case "tenant host refresh":
 		if len(pos) != 5 {
@@ -402,16 +401,14 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 	}
 }
 
-// hostBundleNext says that a host bundle was written or refreshed, as did, and names the next step: the bundle is handed
-// to the host, where host init installs it.
+// hostBundleNext prints that a host bundle was written or refreshed, as did, and the host init that installs it.
 func hostBundleNext(out io.Writer, did, bundle string) error {
 	_, err := fmt.Fprintf(out, "%s %s; hand it to the host, where wherry host init %s installs it\n", did, bundle, filepath.Base(bundle))
 	return err
 }
 
-// receiverBundleNext says that a receiver bundle was written or refreshed, as did, and names the next step: the bundle
-// is handed to the receiver's platform, whose install guide's bundle step installs it, and the receiver is started, or
-// restarted, as then says.
+// receiverBundleNext prints that a receiver bundle was written or refreshed, as did, and the platform step that installs
+// it before the receiver is started or restarted, as then says.
 func receiverBundleNext(out io.Writer, did, bundle, then string) error {
 	_, err := fmt.Fprintf(out, "%s %s; hand it to the receiver's platform, whose install guide's bundle step installs it, then %s the receiver\n", did, bundle, then)
 	return err

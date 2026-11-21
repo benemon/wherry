@@ -174,8 +174,10 @@ as [Signatures](configuration-operator.md#pool-terms) describes.
 - An agent's `credentials` lists the credentials it takes, each
   `{name, env}` or `{name, file}`: the environment variable, or the file in
   the directory `WHERRY_CREDENTIALS_DIR` names, the agent finds it at.
-  `required: false` makes it optional: a run gets it only when its task
-  requests it, and goes without it otherwise. A credential every run needs
+  `required: false` makes it optional: a run gets it when its host resolves
+  it, from a configured source or, for a target the
+  [catalog reads](credential-variables.md), from the submitting process's
+  variable, and goes without it otherwise. A credential every run needs
   stays required, the default. `pool apply` refuses a duplicate name, two credentials on
   one target, both or neither of `env` and `file`, and an `env` a plugin
   sets itself, such as `HOME` or `WHERRY_CREDENTIALS_DIR`:
@@ -421,7 +423,7 @@ host that meets [Run a receiver](operations-receivers.md#run-a-receiver).
 
 1. Write the configuration directory. This configuration of receiver
    `nomad-1`, against the
-   [pool terms example](configuration-operator.md#pool-terms-example), runs `claude`
+   [pool terms example](configuration-operator.md#pool-terms-example), runs `claude-code`
    in a container and `codex` under the `exec` driver. Its `plugin_sha256`
    pins the Nomad plugin binary's SHA-256, its line in the release's
    verified `checksums.txt` ([Install plugins](operations-receivers.md#install-plugins)); a
@@ -466,7 +468,7 @@ host that meets [Run a receiver](operations-receivers.md#run-a-receiver).
 
    ```yaml
    name: container
-   agent: claude
+   agent: claude-code
    labels:
      isolation: container
    config:

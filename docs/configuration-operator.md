@@ -52,7 +52,7 @@ ignored. Any other entry and a directory with no agent files are errors.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `agents` | list | required | Declare each agent's name, credentials and optional model restrictions. Agent names must be unique. |
+| `agents` | list | required | Declare each agent's name, credentials and optional model restrictions. Agent names must be unique. An agent named by a [catalog id](#catalog-agents) gets its model credentials from the credential catalog. |
 | `default_agent` | string | the only agent, if there is one | Select the agent for a task that names none. |
 | `start_by_limit` | duration | `72h` | Bound how far after submission a run may start. |
 | `delivery_limit` | integer | `5` | Set the share group's delivery count limit. |
@@ -101,10 +101,14 @@ names, and no two share a target. `pool apply` refuses terms that break a
 rule, naming the agent and credential.
 
 `submit` refuses a task when its host has no source for a required
-credential of the placed agent. A run gets an optional credential only when
-its task requests it, and the host must then have a source for it; otherwise
-the run goes without it, and its [prompt](configuration-receiver.md#agent-contract) names it as not
-supplied. Make a credential every run needs required, the default. Every plugin profile of the agent delivers the agent's credentials, each at
+credential of the placed agent. A run gets an optional credential when its
+host resolves it: from a source the host's configuration names, or, when
+the credential's target is a [variable the catalog reads](credential-variables.md),
+from that variable in the process that submits; otherwise the run goes
+without it, and its [prompt](configuration-receiver.md#agent-contract) names it as not
+supplied. A task names an optional credential it cannot go without with
+`--credential NAME`, and the submit then fails without a value for it. Make
+a credential every run needs required, the default. Every plugin profile of the agent delivers the agent's credentials, each at
 its target.
 
 Each entry of `vcs` is a lowercase host name, with an optional `:port` from 1 to 65535. Each entry appears once.
@@ -167,16 +171,62 @@ exits, and nothing waits for or checks the tasks queued on the old signature.
 To keep service uninterrupted, quiesce the submissions that target the
 affected signature first.
 
+### Catalog agents
+
+An agent named by a usable credential catalog id takes its model
+credentials from the catalog. The catalog names the
+environment variable each model provider and agent harness reads: the
+providers of [models.dev](https://models.dev), whose `api.json` wherry embeds
+as a snapshot with each provider's models removed, and wherry's own entries
+for the harnesses, `claude-code` (`CLAUDE_CODE_OAUTH_TOKEN`), `codex`
+(`CODEX_API_KEY`), `copilot-cli` (`COPILOT_GITHUB_TOKEN`) and `cursor`
+(`CURSOR_API_KEY`), each with the vendor page that documents the variable.
+The files are `internal/catalog/models.dev.json` and
+`internal/catalog/harness.json` in wherry's source; `SOURCE` beside them
+records the snapshot's URL, fetch time and SHA-256, and
+`go run ./internal/catalog/update` refreshes it. An id in both files is an
+error. Nothing is fetched at build or run time, and the models.dev data is
+under the MIT licence, whose notice is kept with the files.
+
+An id can name an agent when it follows the [name](commands.md#names)
+grammar (`wafer.ai` does not) and every credential it derives is one these
+terms accept: a variable name no plugin sets, and a derived name of at most
+32 characters. `pool apply` expands each agent whose name is such an id,
+each agent on its own, before it checks the terms:
+
+- An entry reading one variable derives one required credential.
+- An entry reading several derives one optional credential per variable.
+  wherry never picks one of them. For an entry that needs several values
+  together, such as `azure` or `amazon-bedrock`, a run gets every value
+  whose variable its host supplies, and a partial set fails at the vendor.
+
+A derived credential is named after its variable in lower case with `_` as
+`-`, targets the variable, and takes the entry's name as its `description`:
+`claude-code` gives `claude-code-oauth-token` at `CLAUDE_CODE_OAUTH_TOKEN`,
+required; `google` gives `google-api-key`, `google-generative-ai-api-key`
+and `gemini-api-key`, each optional. In the recorded terms they are ordinary
+credentials, as an operator writes them, so the operator writes no model
+credential for a catalog agent. The agent may list further credentials,
+such as a token for a tool the agent uses; one that repeats a derived
+credential's name or target is refused naming it, and the uniqueness rules
+above hold across both. An agent whose name is not such an id keeps the
+list as written. The recorded terms change only when the operator applies
+them again, so a catalog change in a new wherry release reaches a pool at
+its next `pool apply`.
+
 ### Pool terms example
 
 Terms for pool `build` that set every field except a credential's `file`, as one file for
-`pool apply build -f build.yaml`:
+`pool apply build -f build.yaml`. `claude-code` and `codex` are catalog
+agents, so they list no model credential:
 
 ```yaml
 agents:
-  - name: claude
+  # claude-code is a credential catalog id: pool apply adds claude-code-oauth-token (CLAUDE_CODE_OAUTH_TOKEN), required.
+  - name: claude-code
     credentials:
-      - {name: claude-oauth-token, env: CLAUDE_CODE_OAUTH_TOKEN, description: Claude account token}
+      # A credential outside the catalog, beside the derived one; a run gets it when the host resolves it.
+      - {name: github-token, env: GH_TOKEN, required: false, description: GitHub token}
     models:
       - haiku
       - sonnet
@@ -185,12 +235,9 @@ agents:
     credentials:
       - {name: model-api-key, env: MODEL_API_KEY}
   # Without models, a task names no model and the profile's command picks one.
+  # codex is a catalog id: pool apply adds codex-api-key (CODEX_API_KEY), required.
   - name: codex
-    credentials:
-      - {name: openai-api-key, env: CODEX_API_KEY}
-      # A run gets it only when its task requests it.
-      - {name: github-token, env: GH_TOKEN, required: false}
-default_agent: claude
+default_agent: claude-code
 start_by_limit: 72h
 # The attempts one task may make, start failures included, plus a margin for the releases of a profile going unready.
 delivery_limit: 6
@@ -215,7 +262,7 @@ The same terms as a directory for `pool apply build -f build`:
 build/
   pool.yaml
   agents/
-    claude.yaml
+    claude-code.yaml
     coder.yaml
     codex.yaml
 ```
@@ -223,7 +270,7 @@ build/
 `pool.yaml`:
 
 ```yaml
-default_agent: claude
+default_agent: claude-code
 start_by_limit: 72h
 # The attempts one task may make, start failures included, plus a margin for the releases of a profile going unready.
 delivery_limit: 6
@@ -242,12 +289,14 @@ storage:
   bucket: wherry
 ```
 
-`agents/claude.yaml`:
+`agents/claude-code.yaml`:
 
 ```yaml
-name: claude
+# claude-code is a credential catalog id: pool apply adds claude-code-oauth-token (CLAUDE_CODE_OAUTH_TOKEN), required.
+name: claude-code
 credentials:
-  - {name: claude-oauth-token, env: CLAUDE_CODE_OAUTH_TOKEN, description: Claude account token}
+  # A credential outside the catalog, beside the derived one; a run gets it when the host resolves it.
+  - {name: github-token, env: GH_TOKEN, required: false, description: GitHub token}
 models:
   - haiku
   - sonnet
@@ -266,11 +315,8 @@ credentials:
 
 ```yaml
 # Without models, a task names no model and the profile's command picks one.
+# codex is a catalog id: pool apply adds codex-api-key (CODEX_API_KEY), required.
 name: codex
-credentials:
-  - {name: openai-api-key, env: CODEX_API_KEY}
-  # A run gets it only when its task requests it.
-  - {name: github-token, env: GH_TOKEN, required: false}
 ```
 
 The agent files are read in file-name order, so `coder` precedes `codex` in

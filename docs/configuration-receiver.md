@@ -33,7 +33,7 @@ The paths you enter are on the receiver's host, so Wherry does not complete or c
 | Metrics | **Listen on an address**, then **Metrics address** (default `:9464`), or **No listener** | `metrics_addr` |
 | Credential NAME | **Environment variable**, then **Variable**, or **File**, then **File path** | `credentials` |
 
-Wherry asks nothing about the broker's CA: the bundle carries it, and Wherry writes no `ca_file`.
+Wherry asks nothing about the broker's CA and writes no `ca_file`: a bundle for the operator's broker carries the CA when `operator.yaml` names a `ca_file`.
 Choose No listener to serve no metrics; Wherry writes an empty `metrics_addr`.
 After you choose an address, `none` is an ordinary value.
 The Variable default is the credential name in upper case, with characters outside `[A-Z0-9_]` replaced by `_`, prefixed with `_` if it starts with a digit.
@@ -70,7 +70,8 @@ Replace `<version>` with the version you installed.
 | Credentials | none; workload identity supplies `NOMAD_TOKEN` | none; workload identity supplies `NOMAD_TOKEN` | none; service account | none |
 
 Each example sets `drain_timeout: 20s`.
-The bundle carries a private broker CA, so the examples need no CA file. A `ca_file` an example's `config.yaml` names,
+Each example's bundle carries the broker's CA, since its operator names a `ca_file` and its receiver uses the
+operator's broker, so the examples need no CA file. A `ca_file` an example's `config.yaml` names,
 such as `/secrets/kafka-ca.pem` on Nomad, `/etc/wherry/kafka-ca/ca.crt` on Kubernetes or `/etc/wherry/kafka-ca.pem`
 on systemd, overrides the bundle's `ca`: keep that file current, or remove the line.
 
@@ -261,7 +262,7 @@ plugins:
         resources: {cpu: 1000, memory_mb: 2048}
     profiles:
       - name: claude
-        agent: claude
+        agent: claude-code
         config: {runtime: {config: {image: registry.example.com/claude-agent:1.0}}}
       - name: host
         agent: codex
@@ -336,7 +337,7 @@ plugins:
       credential: nomad-token
     profiles:
       - name: container
-        agent: claude
+        agent: claude-code
         labels:
           isolation: container
         config:
@@ -398,7 +399,7 @@ config:
 
 ```yaml
 name: container
-agent: claude
+agent: claude-code
 labels:
   isolation: container
 config:
@@ -466,7 +467,8 @@ default, such as the Nomad plugin's `NOMAD_TOKEN`.
 
 Sources stay on the receiver's host. `wherry.operator`, which every principal
 reads, records the credential's name alone, and the receiver's bundle holds
-its Kafka identity and the broker's CA alone. [Receiver on Nomad](install-receiver-nomad.md#run-the-receiver-in-nomad)
+its Kafka identity alone, with the broker's CA when the receiver uses the
+operator's broker and `operator.yaml` names a `ca_file`. [Receiver on Nomad](install-receiver-nomad.md#run-the-receiver-in-nomad)
 uses the Nomad example's local configuration, which names no platform
 credential: its receiver takes the Nomad token from the job's workload identity.
 
@@ -502,7 +504,7 @@ The prompt tells every agent to write, when it finishes, whatever happened,
 an A2A `TaskStatus` JSON object to `$WHERRY_OUTPUT_DIR/.wherry/outcome.json`.
 It names each credential file's path and each credential environment variable,
 and lists the run's credential names, marking each optional credential the
-host did not supply because the task did not request it, as in
+host did not supply because it could not resolve it, as in
 `This run's credentials are openai-api-key, github-token (not supplied).`
 It then says that the answer goes in the message text, that long or
 structured content belongs in files in the output directory, and that a reply

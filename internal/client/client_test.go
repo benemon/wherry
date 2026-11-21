@@ -85,7 +85,7 @@ func testTerms() operator.Terms {
 	return operator.Terms{
 		Agents: []operator.AgentTerms{
 			{Name: "claude", Credentials: []operator.AgentCredential{{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}}}},
-			{Name: "codex", Credentials: []operator.AgentCredential{
+			{Name: "coder", Credentials: []operator.AgentCredential{
 				{TaskCredential: wire.TaskCredential{Name: "openai", Env: "OPENAI_API_KEY"}},
 				{TaskCredential: wire.TaskCredential{Name: "github-token", Env: "GH_TOKEN"}, Description: "GitHub token for gh", Required: &optional},
 			}},
@@ -186,13 +186,13 @@ func (f *fixture) newHost(t *testing.T, host, stateDir string) *Host {
 	return h
 }
 
-// addReceiver provisions a receiver whose lab profile launches claude and cloud profile codex, and registers its signing
+// addReceiver provisions a receiver whose lab profile launches claude and cloud profile coder, and registers its signing
 // key.
 func (f *fixture) addReceiver(t *testing.T, id, pool string) *testReceiver {
 	t.Helper()
 	config := operator.ReceiverConfig{Receiver: id, Pool: pool, Profiles: []operator.ProfileSettings{
 		{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}},
-		{Name: "cloud", Plugin: "aws", Agent: "codex", Labels: map[string]string{"runtime": "exec"}},
+		{Name: "cloud", Plugin: "aws", Agent: "coder", Labels: map[string]string{"runtime": "exec"}},
 	}, PluginSHA256: map[string]string{"nomad": strings.Repeat("ab", 32), "aws": strings.Repeat("cd", 32)}}
 	return f.addReceiverConfig(t, config)
 }
@@ -259,7 +259,7 @@ func claudeOffer() wire.Offer {
 
 // bothOffers makes both of addReceiver's profiles ready.
 func bothOffers() []wire.Offer {
-	return []wire.Offer{claudeOffer(), {Profile: "cloud", Agent: "codex"}}
+	return []wire.Offer{claudeOffer(), {Profile: "cloud", Agent: "coder"}}
 }
 
 // advertise publishes a live advertisement; mutate may change it before it is signed.
@@ -515,7 +515,7 @@ func (f *fixture) tasksEnd(t *testing.T, pool string) int {
 
 func TestSubmitNoMatchingReceiverProducesNothing(t *testing.T) {
 	f := newFixture(t)
-	// cloud would launch codex with runtime=exec, but it is not ready: the advertisement offers only lab.
+	// cloud would launch coder with runtime=exec, but it is not ready: the advertisement offers only lab.
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
 	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if !errors.Is(err, ErrNoMatchingReceiver) {
@@ -546,8 +546,8 @@ func TestSubmitMatchesAcrossProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second profile did not match: %v", err)
 	}
-	if placement := receiver.claim(t, f.ctx, result.RunID)[0].submission.Wherry.Placement; placement.Agent != "codex" || !reflect.DeepEqual(placement.Selector, selector) {
-		t.Fatalf("placement %#v, want codex under the submitted selector", placement)
+	if placement := receiver.claim(t, f.ctx, result.RunID)[0].submission.Wherry.Placement; placement.Agent != "coder" || !reflect.DeepEqual(placement.Selector, selector) {
+		t.Fatalf("placement %#v, want coder under the submitted selector", placement)
 	}
 	for name, input := range map[string]SubmitInput{
 		"explicit agent the matching profile does not launch": {Agent: "claude", Selector: selector},
@@ -704,18 +704,18 @@ func TestSubmitWithoutAModelForAnAgentRequiringOne(t *testing.T) {
 
 func TestResolvePlacementModel(t *testing.T) {
 	terms := testTerms()
-	terms.DefaultAgent = "codex"
+	terms.DefaultAgent = "coder"
 	terms.Agents[0].Models, terms.Agents[0].DefaultModel = []string{"haiku", "sonnet"}, "haiku"
 	terms.Agents[1].Models, terms.Agents[1].DefaultModel = []string{"gpt-5-mini"}, "gpt-5-mini"
 	state := operator.NewState()
 	state.Pools["pool-a"] = terms
 	state.Receivers["receiver-a"] = operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{
-		{Name: "lab", Plugin: "nomad", Agent: "claude"}, {Name: "cloud", Plugin: "aws", Agent: "codex"},
+		{Name: "lab", Plugin: "nomad", Agent: "claude"}, {Name: "cloud", Plugin: "aws", Agent: "coder"},
 	}}
 	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true}
 	ads := map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Offers: []wire.Offer{{Profile: "lab"}, {Profile: "cloud"}}}}
 	for name, test := range map[string]struct{ agent, model, wantAgent, wantModel string }{
-		"default agent's default model":            {"", "", "codex", "gpt-5-mini"},
+		"default agent's default model":            {"", "", "coder", "gpt-5-mini"},
 		"fallback skips the default lacking model": {"", "sonnet", "claude", "sonnet"},
 		"explicit agent's default model":           {"claude", "", "claude", "haiku"},
 	} {
@@ -727,11 +727,11 @@ func TestResolvePlacementModel(t *testing.T) {
 	if _, _, _, err := resolvePlacement(state, "tenant-a", "", "opus", nil, ads); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("a model no agent holds placed: %v", err)
 	}
-	// claude, now the default agent, has models and no default model, so a task naming none falls to codex.
+	// claude, now the default agent, has models and no default model, so a task naming none falls to coder.
 	terms.DefaultAgent, terms.Agents[0].DefaultModel = "claude", ""
 	state.Pools["pool-a"] = terms
-	if _, placement, _, err := resolvePlacement(state, "tenant-a", "", "", nil, ads); err != nil || placement.Agent != "codex" || placement.Model != "gpt-5-mini" {
-		t.Fatalf("fallback placed %#v, %v; want codex past the agent requiring a model", placement, err)
+	if _, placement, _, err := resolvePlacement(state, "tenant-a", "", "", nil, ads); err != nil || placement.Agent != "coder" || placement.Model != "gpt-5-mini" {
+		t.Fatalf("fallback placed %#v, %v; want coder past the agent requiring a model", placement, err)
 	}
 	if _, _, _, err := resolvePlacement(state, "tenant-a", "claude", "", nil, ads); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "agent claude in pool pool-a requires a model") {
 		t.Fatalf("explicit agent requiring a model without one: %v", err)
@@ -796,14 +796,14 @@ func TestSubmitChoosesPoolOfMostSpareMember(t *testing.T) {
 func TestResolvePlacement(t *testing.T) {
 	terms := testTerms()
 	terms.Agents = append(terms.Agents, operator.AgentTerms{Name: "gemini"})
-	terms.DefaultAgent = "codex"
-	// The declared agent order is claude, codex, gemini; codex is the default. Equal spare capacity leaves the lowest
+	terms.DefaultAgent = "coder"
+	// The declared agent order is claude, coder, gemini; coder is the default. Equal spare capacity leaves the lowest
 	// topic, which sorts by agent first.
 	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{
 		{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu", "gpu": "a100"}},
 		{Name: "batch", Plugin: "nomad", Agent: "gemini", Labels: map[string]string{"runtime": "exec", "region": "us"}},
-		{Name: "cloud", Plugin: "aws", Agent: "codex", Labels: map[string]string{"runtime": "exec"}},
-		{Name: "spare", Plugin: "nomad", Agent: "codex", Labels: map[string]string{"runtime": "wasm"}},
+		{Name: "cloud", Plugin: "aws", Agent: "coder", Labels: map[string]string{"runtime": "exec"}},
+		{Name: "spare", Plugin: "nomad", Agent: "coder", Labels: map[string]string{"runtime": "wasm"}},
 		{Name: "rogue", Plugin: "nomad", Agent: "other"},
 	}}
 	state := operator.NewState()
@@ -813,7 +813,7 @@ func TestResolvePlacement(t *testing.T) {
 	offer := func(profile, agent string) wire.Offer {
 		return wire.Offer{Profile: profile, Agent: agent}
 	}
-	ready := []wire.Offer{offer("lab", "claude"), offer("batch", "gemini"), offer("cloud", "codex"), offer("rogue", "other")}
+	ready := []wire.Offer{offer("lab", "claude"), offer("batch", "gemini"), offer("cloud", "coder"), offer("rogue", "other")}
 	requirement := func(key, operator string, values ...string) wire.Requirement {
 		return wire.Requirement{Key: key, Operator: operator, Values: values}
 	}
@@ -823,21 +823,21 @@ func TestResolvePlacement(t *testing.T) {
 		offers   []wire.Offer
 		want     string
 	}{
-		"default agent first":                     {"", nil, ready, "codex"},
+		"default agent first":                     {"", nil, ready, "coder"},
 		"lowest topic after the default":          {"", []wire.Requirement{requirement("region", wire.OpExists)}, ready, "claude"},
 		"explicit agent":                          {"gemini", nil, ready, "gemini"},
 		"explicit agent outside the terms":        {"other", nil, ready, ""},
 		"explicit agent no ready profile matches": {"claude", []wire.Requirement{requirement("region", wire.OpIn, "us")}, ready, ""},
 		"In":                                {"", []wire.Requirement{requirement("region", wire.OpIn, "us", "ap")}, ready, "gemini"},
 		"NotIn":                             {"", []wire.Requirement{requirement("runtime", wire.OpNotIn, "exec")}, ready, "claude"},
-		"NotIn passes an absent key":        {"", []wire.Requirement{requirement("gpu", wire.OpNotIn, "a100")}, ready, "codex"},
+		"NotIn passes an absent key":        {"", []wire.Requirement{requirement("gpu", wire.OpNotIn, "a100")}, ready, "coder"},
 		"Exists":                            {"", []wire.Requirement{requirement("gpu", wire.OpExists)}, ready, "claude"},
-		"DoesNotExist":                      {"", []wire.Requirement{requirement("region", wire.OpDoesNotExist)}, ready, "codex"},
+		"DoesNotExist":                      {"", []wire.Requirement{requirement("region", wire.OpDoesNotExist)}, ready, "coder"},
 		"all requirements on one profile":   {"", []wire.Requirement{requirement("runtime", wire.OpIn, "exec"), requirement("gpu", wire.OpExists)}, ready, ""},
 		"not-ready profile never chosen":    {"", []wire.Requirement{requirement("runtime", wire.OpIn, "wasm")}, ready, ""},
 		"not-ready default falls to lowest": {"", nil, ready[:2], "claude"},
 		"advertised agent ignored":          {"claude", nil, []wire.Offer{offer("cloud", "claude")}, ""},
-		"profile outside the record":        {"", nil, []wire.Offer{offer("edge", "codex")}, ""},
+		"profile outside the record":        {"", nil, []wire.Offer{offer("edge", "coder")}, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			ads := map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Offers: test.offers, Capacity: 1}}
@@ -867,14 +867,14 @@ func TestResolvePlacementSumsSpareBySignatureThenLowestTopic(t *testing.T) {
 	ads := map[string]wire.Advertisement{}
 	member := func(id, pool string, replicas, inFlight int64, profile string) {
 		state.Receivers[id] = operator.ReceiverConfig{Receiver: id, Pool: pool, Profiles: []operator.ProfileSettings{
-			{Name: "lab", Plugin: "nomad", Agent: "claude"}, {Name: "cloud", Plugin: "aws", Agent: "codex"},
+			{Name: "lab", Plugin: "nomad", Agent: "claude"}, {Name: "cloud", Plugin: "aws", Agent: "coder"},
 		}}
 		ads[id] = wire.Advertisement{Receiver: id, Pool: pool, Offers: []wire.Offer{{Profile: profile, Agent: "x", Replicas: replicas, InFlight: inFlight}}}
 	}
 	member("receiver-d", "pool-b", 5, 1, "lab")   // spare 4
 	member("receiver-c", "pool-a", 5, 2, "lab")   // spare 3
 	member("receiver-e", "pool-a", 4, 2, "lab")   // spare 2, the same signature as receiver-c: 5 together
-	member("receiver-b", "pool-a", 9, 0, "cloud") // most spare, but its ready profile launches codex
+	member("receiver-b", "pool-a", 9, 0, "cloud") // most spare, but its ready profile launches coder
 	member("receiver-a", "pool-c", 9, 0, "lab")   // most spare, pool not entitled
 	poolA, poolB := operator.SignatureTopic("pool-a", "claude", nil), operator.SignatureTopic("pool-b", "claude", nil)
 	pool, placement, topic, err := resolvePlacement(state, "tenant-a", "claude", "", nil, ads)
@@ -1079,15 +1079,15 @@ func TestResolvePlacementPrefersTheDefaultAgentOverSpareCapacity(t *testing.T) {
 	for _, member := range []struct {
 		id, agent string
 		spare     int64
-	}{{"receiver-a", "codex", 9}, {"receiver-b", "claude", 1}} {
+	}{{"receiver-a", "coder", 9}, {"receiver-b", "claude", 1}} {
 		state.Receivers[member.id] = operator.ReceiverConfig{Receiver: member.id, Pool: "pool-a", Profiles: []operator.ProfileSettings{{Name: member.agent, Plugin: "nomad", Agent: member.agent}}}
 		ads[member.id] = wire.Advertisement{Receiver: member.id, Pool: "pool-a", Capacity: member.spare, Offers: []wire.Offer{{Profile: member.agent, Agent: member.agent}}}
 	}
 	if _, placement, _, err := resolvePlacement(state, "tenant-a", "", "", nil, ads); err != nil || placement.Agent != "claude" {
 		t.Fatalf("placed %#v %v, want the default agent claude through receiver-b despite receiver-a's spare capacity", placement, err)
 	}
-	if _, placement, _, err := resolvePlacement(state, "tenant-a", "codex", "", nil, ads); err != nil || placement.Agent != "codex" {
-		t.Fatalf("placed %#v %v, want the named agent codex", placement, err)
+	if _, placement, _, err := resolvePlacement(state, "tenant-a", "coder", "", nil, ads); err != nil || placement.Agent != "coder" {
+		t.Fatalf("placed %#v %v, want the named agent coder", placement, err)
 	}
 }
 
@@ -1398,8 +1398,8 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	}
 	if a := got["receiver-a"]; a.Status != "live" || a.Capacity != 3 || a.InFlight != 1 ||
 		!reflect.DeepEqual(a.Profiles, []Profile{
-			{Name: "lab", Plugin: "nomad", Agent: "claude", InlineLimit: 49152, Credentials: []Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true, Replicas: 2, InFlight: 1},
-			{Name: "cloud", Plugin: "aws", Agent: "codex", Credentials: []Credential{{Name: "openai", Env: "OPENAI_API_KEY", Configured: true}, {Name: "github-token", Env: "GH_TOKEN", Description: "GitHub token for gh", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
+			{Name: "lab", Plugin: "nomad", Agent: "claude", InlineLimit: 49152, Credentials: []Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true, Source: SourceFile, Status: StatusReady}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true, Replicas: 2, InFlight: 1},
+			{Name: "cloud", Plugin: "aws", Agent: "coder", Credentials: []Credential{{Name: "openai", Env: "OPENAI_API_KEY", Configured: true, Source: SourceFile, Status: StatusReady}, {Name: "github-token", Env: "GH_TOKEN", Description: "GitHub token for gh", Optional: true, Status: StatusMissing}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
 		}) {
 		t.Fatalf("live receiver %#v", a)
 	}
@@ -1989,8 +1989,8 @@ func TestReceiversListsALiveReceiverWithNoOffers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(receivers) != 1 || receivers[0].Status != "live" || !reflect.DeepEqual(receivers[0].Profiles, []Profile{
-		{Name: "lab", Plugin: "nomad", Agent: "claude", Credentials: []Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: false},
-		{Name: "cloud", Plugin: "aws", Agent: "codex", Credentials: []Credential{{Name: "openai", Env: "OPENAI_API_KEY", Configured: true}, {Name: "github-token", Env: "GH_TOKEN", Description: "GitHub token for gh", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
+		{Name: "lab", Plugin: "nomad", Agent: "claude", Credentials: []Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true, Source: SourceFile, Status: StatusReady}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: false},
+		{Name: "cloud", Plugin: "aws", Agent: "coder", Credentials: []Credential{{Name: "openai", Env: "OPENAI_API_KEY", Configured: true, Source: SourceFile, Status: StatusReady}, {Name: "github-token", Env: "GH_TOKEN", Description: "GitHub token for gh", Optional: true, Status: StatusMissing}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
 	}) {
 		t.Fatalf("receivers %#v; want the live receiver with its configured profiles, none ready", receivers)
 	}

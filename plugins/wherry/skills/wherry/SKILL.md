@@ -141,13 +141,21 @@ add `credentials`: `{name, file}` or `{name, env}` with `name` a credential in
 the user's wherry configuration and `file` the name it gets in
 `WHERRY_CREDENTIALS_DIR`, or `env` the environment variable it gets; you never
 see the value. Two credentials cannot share a target, nor can one take the
-target of an agent's own credential. An optional credential of the agent
-(`optional` in `receivers`, with its `description`) reaches the agent only
-when you request it with a `credentials` entry of its name alone, `{name}`,
-which delivers it at the agent's own target. Request one only when the task
-needs it, for example `github-token` for the agent's own `gh` calls, and leave
-billing credentials such as an API key unrequested unless the user asks for
-them. `submit` returns `unrequested`, the optional credentials you left out.
+target of an agent's own credential. Every credential of the agent this host
+can resolve, required or optional (`optional` in `receivers`, with its
+`description`), is delivered at the agent's own target, whether or not the
+task names it; `receivers` shows each one's `configured`, `source` and
+`status`, so read it to know what a run will get. A `credentials` entry of
+the name alone, `{name}`, names an optional credential the task cannot go
+without, for example `github-token` for the agent's own `gh` calls: `submit`
+then fails when the host cannot resolve it. `submit` returns
+`unsupplied`, the optional credentials this host could not resolve; the run
+goes without them. Leaving a credential out of `credentials` does not
+withhold it. The user withholds one, a billing credential such as an API
+key included, by removing its source from their wherry configuration and
+unsetting its variable where the wherry MCP server runs; when a task must
+not carry a credential whose `status` in `receivers` is `ready` or
+`unchecked`, tell the user so and do not submit.
 To get files back, add
 `outputs`: `{name, required}` for each file the agent should leave in
 `WHERRY_OUTPUT_DIR`. The prompt the agent receives names all of them.
@@ -227,11 +235,17 @@ with `truncated` set and its full size in `bytes`.
 
 `submit` returns `INVALID_ARGUMENT` with `auth required: credential NAME is not
 in this host's configuration` when the host has no source for a credential the
-agent requires or the task names or requests. An optional credential is not
-delivered unless requested, and the agent's prompt names it as not supplied.
-When a run ends naming an optional credential it went without and
-`receivers` shows it `configured`, request it in a new `submit` rather than
-asking the user to add a source.
+agent requires or the task names, and with `auth required: credential NAME
+has no source: VAR is unset in the process that submits, and this host's
+configuration names no source for it` when such a credential's catalog
+variable is unset. An optional credential the host cannot resolve is left
+out, listed in `unsupplied`, and the agent's prompt names it as not
+supplied; one the host resolves is sent to every run. When a run ends
+naming an optional credential it went without, the host could not resolve
+it at that submit. If `receivers` now shows its `status` as `ready` or
+`unchecked`, a source or variable arrived since: submit again, naming it
+with `{name}`, so the new submit fails when the host cannot resolve it.
+Otherwise ask the user for a source, as below.
 
 `submit` resolves the run's credentials and encrypts them in the task, so the run
 needs nothing more from this host. When a source fails to resolve, it returns

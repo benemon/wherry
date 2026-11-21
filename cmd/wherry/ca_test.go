@@ -104,7 +104,7 @@ func TestHostLocalCAFileOverridesTheBundle(t *testing.T) {
 	configure(wrong)
 	var out bytes.Buffer
 	err = run([]string{"host", "init", h.bundle}, &out, &out)
-	if err == nil || !operator.UnknownAuthority(err) {
+	if err == nil || !unknownAuthority(err) {
 		t.Fatalf("host init with a ca_file that does not trust the broker = %v; want the connection refused on the certificate, not the bundle's ca used", err)
 	}
 	editBundle(t, h.bundle, func(bundle *operator.Bundle) { bundle.CA = otherCA(t) })
@@ -130,7 +130,7 @@ func TestOldBundleWithoutCAFailsNamingRefresh(t *testing.T) {
 	}
 	var out bytes.Buffer
 	err := run([]string{"host", "init", h.bundle}, &out, &out)
-	if err == nil || !operator.UnknownAuthority(err) {
+	if err == nil || !unknownAuthority(err) {
 		t.Fatalf("host init with a bundle carrying no ca = %v; want the connection refused on the certificate", err)
 	}
 	if text := err.Error(); !strings.Contains(text, "wherry operator tenant host refresh TENANT HOST") || !strings.Contains(text, "ca_file") {
@@ -215,7 +215,7 @@ func TestReceiverTrustsTheBrokerThroughItsBundle(t *testing.T) {
 	}
 	editBundle(t, bundle, func(bundle *operator.Bundle) { bundle.CA = "" })
 	err = run([]string{"receiver", "run", "--config-file", localConfig}, &stdout, &stderr)
-	if err == nil || !operator.UnknownAuthority(err) || !strings.Contains(err.Error(), "wherry operator receiver apply receiver-a") {
+	if err == nil || !unknownAuthority(err) || !strings.Contains(err.Error(), "wherry operator receiver apply receiver-a") {
 		t.Fatalf("receiver run with a bundle carrying no ca = %v; want the certificate refused and receiver apply named", err)
 	}
 	// A ca_file that does not trust the broker overrides the bundle's ca.
@@ -223,7 +223,7 @@ func TestReceiverTrustsTheBrokerThroughItsBundle(t *testing.T) {
 	if err := os.WriteFile(localConfig, []byte("bundle: "+bundle+"\nca_file: "+writeFile(t, "wrong-ca.pem", otherCA(t))+"\nstate_dir: "+filepath.Join(dir, "state")+"\nplugin_dir: "+t.TempDir()+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := run([]string{"receiver", "run", "--config-file", localConfig}, &stdout, &stderr); err == nil || !operator.UnknownAuthority(err) {
+	if err := run([]string{"receiver", "run", "--config-file", localConfig}, &stdout, &stderr); err == nil || !unknownAuthority(err) {
 		t.Fatalf("receiver run with a ca_file that does not trust the broker = %v; want the certificate refused, not the bundle's ca used", err)
 	}
 }
@@ -402,4 +402,10 @@ func TestReceiverApplyRefusesAnotherPrincipalsBundle(t *testing.T) {
 	if want := "refreshed " + path + "; hand it to the receiver's platform, whose install guide's bundle step installs it, then restart the receiver\n"; stdout.String() != want {
 		t.Fatalf("apply printed %q; want %q", stdout.String(), want)
 	}
+}
+
+// unknownAuthority reports whether err is a connection the broker's certificate failed for chaining to no trusted CA.
+func unknownAuthority(err error) bool {
+	var unknown x509.UnknownAuthorityError
+	return errors.As(err, &unknown)
 }

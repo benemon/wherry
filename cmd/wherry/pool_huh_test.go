@@ -49,7 +49,7 @@ func TestPoolForms(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(terms, expected) {
 		t.Fatalf("read back: %+v, %v; want %+v", terms, err, expected)
 	}
-	wantLines := []string{"? Agent name  claude", "? Models of claude  haiku, sonnet", "? Credential token  Environment variable TOKEN, required, \"Claude subscription token\"", "? Credential deploy  File deploy-key, optional", "? Agent name  codex", "? Models of codex  none", "? Default agent  codex", "? Producer byte rate per host, bytes a second  2097152", "? Request percentage per host  20", "? Start-by limit  1h"}
+	wantLines := []string{"? Agent name  claude", "? Models of claude  haiku, sonnet", "? Credential token  Environment variable TOKEN, required, \"Claude subscription token\"", "? Credential deploy  File deploy-key, optional", "? Agent name  codex", "? Catalog credentials of codex  codex-api-key at CODEX_API_KEY, required", "? Models of codex  none", "? Default agent  codex", "? Producer byte rate per host, bytes a second  2097152", "? Request percentage per host  20", "? Start-by limit  1h"}
 	if !reflect.DeepEqual(collapsedLines(out.String()), wantLines) {
 		t.Fatalf("collapse lines: %q", collapsedLines(out.String()))
 	}

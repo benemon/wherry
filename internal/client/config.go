@@ -81,19 +81,17 @@ func DefaultConfigPath() (string, error) {
 	return filepath.Join(dir, "config.yaml"), nil
 }
 
-// Paths are the files a host configuration takes when it names none: Config is the configuration's path, with ~
-// expanded and made absolute, and Default says it is the default configuration.
+// Paths are the files a host configuration takes when it names none; Config is its absolute path and Default says it is
+// the default configuration.
 type Paths struct {
 	Config, Bundle, HostKey, StateDir string
 	Default                           bool
 }
 
-// DefaultPaths derives the bundle, host key and state directory of the configuration at path. The default configuration
-// keeps the configuration directory's bundle.yaml and host.key and the state directory: deriving them from its path
-// would give an existing host a second key. Any other configuration takes its own path plus .bundle.yaml, .host.key and
-// .state, nothing stripped, so two configurations never share a file or a host key, however alike their names. The path
-// is made absolute and no symlink is resolved, so a missing file needs no special case: it is the default when it equals
-// DefaultConfigPath's, or when both exist and are one file, however that file is reached.
+// DefaultPaths derives the bundle, host key and state directory of the configuration at path: the default configuration,
+// whose absolute path equals DefaultConfigPath's or is the same existing file (no symlink resolved), keeps the
+// configuration directory's files, since deriving them would give an existing host a second key, and any other takes its
+// own path plus .bundle.yaml, .host.key and .state, nothing stripped.
 func DefaultPaths(path string) (Paths, error) {
 	path, err := absolute(path)
 	if err != nil {

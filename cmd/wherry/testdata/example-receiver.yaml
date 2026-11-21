@@ -11,7 +11,7 @@ plugins:
       credential: nomad-token
     profiles:
       - name: container
-        agent: claude
+        agent: claude-code
         labels:
           isolation: container
         config:

@@ -1,0 +1,2 @@
+{"zeta":{"npm":"@ai-sdk/openai-compatible","name":"Zeta & Co","id":"zeta","env":["ZETA_API_KEY"],"doc":"https://zeta.example/docs?a=1&b=2","models":{"z-1":{"id":"z-1","cost":{"input":0.10,"output":1e-7},"limit":{"context":128000}}}},
+"alpha":{"models":{"a-1":{"id":"a-1"}},"id":"alpha","env":["ALPHA_API_KEY","ALPHA_TOKEN"],"name":"Alpha","doc":"https://alpha.example/docs","npm":"@ai-sdk/alpha","api":"https://api.alpha.example/v1"}}

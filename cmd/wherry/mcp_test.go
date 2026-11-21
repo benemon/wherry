@@ -310,7 +310,7 @@ func TestMCPSubmitWaitRoundTrip(t *testing.T) {
 	callTool(t, ctx, session, "receivers", map[string]any{}, &receivers)
 	if len(receivers.Receivers) != 1 || receivers.Receivers[0].ReceiverID != "receiver-a" || receivers.Receivers[0].Pool != "pool-a" || receivers.Receivers[0].Status != "live" ||
 		!reflect.DeepEqual(receivers.Receivers[0].Profiles, []busclient.Profile{{Name: "lab", Plugin: "nomad", Agent: "claude", InlineLimit: 49152,
-			Credentials: []busclient.Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true}, {Name: "github-token", Env: "GH_TOKEN", Description: "GitHub token for gh", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: true, Replicas: 1}}) {
+			Credentials: []busclient.Credential{{Name: "model", Env: "MODEL_API_KEY", Configured: true, Source: busclient.SourceFile, Status: busclient.StatusReady}, {Name: "github-token", Env: "GH_TOKEN", Description: "GitHub token for gh", Optional: true, Status: busclient.StatusMissing}}, Labels: map[string]string{"runtime": "exec"}, Ready: true, Replicas: 1}}) {
 		t.Fatalf("receivers %#v", receivers)
 	}
 	var submitted submitOutput
@@ -624,9 +624,10 @@ func TestMCPStatusAndEventsShowPlacing(t *testing.T) {
 	}
 }
 
-// A credential by name alone requests one of the placed agent's credentials; submit lists the optional ones left out, and
-// refuses an unmet request with the CLI's message.
-func TestMCPRequestsAgentCredentials(t *testing.T) {
+// A credential by name alone names one of the placed agent's optional credentials the task cannot go without; submit
+// supplies every optional credential the host resolves, named or not, lists the ones it could not as unsupplied, and
+// refuses an unmet name with the CLI's message. The tool descriptions no longer promise delivery on request alone.
+func TestMCPSuppliesAgentCredentials(t *testing.T) {
 	b := newBus(t)
 	session := mcpSession(t, b.connect(t), nil)
 	tools, err := session.ListTools(b.ctx, nil)
@@ -634,18 +635,24 @@ func TestMCPRequestsAgentCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tool := range tools.Tools {
-		if want := map[string]string{"receivers": "delivers only when its credentials name it", "submit": "an optional agent credential is delivered only when requested"}[tool.Name]; !strings.Contains(tool.Description, want) {
+		for _, stale := range askFirstLanguage {
+			if strings.Contains(strings.ToLower(tool.Description), stale) {
+				t.Errorf("%s description still says %q", tool.Name, stale)
+			}
+		}
+		if want := map[string]string{"receivers": "a run goes without when this host cannot resolve it", "submit": "every agent credential this host can resolve is delivered at its target, required or optional, named or not"}[tool.Name]; !strings.Contains(tool.Description, want) {
 			t.Errorf("%s description %q lacks %q", tool.Name, tool.Description, want)
 		}
 	}
-	var unrequested, requested submitOutput
-	callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "work"}, &unrequested)
+	var unsupplied, supplied, named submitOutput
+	callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "work"}, &unsupplied)
 	b.credentials["github-token"] = b.credentials["model"]
-	callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "work", "credentials": []any{map[string]any{"name": "github-token"}}}, &requested)
-	if !slices.Equal(unrequested.Unrequested, []string{"github-token"}) || requested.Unrequested != nil {
-		t.Fatalf("unrequested %v and %v; want github-token, then none", unrequested.Unrequested, requested.Unrequested)
+	callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "work"}, &supplied)
+	callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "work", "credentials": []any{map[string]any{"name": "github-token"}}}, &named)
+	if !slices.Equal(unsupplied.Unsupplied, []string{"github-token"}) || supplied.Unsupplied != nil || named.Unsupplied != nil {
+		t.Fatalf("unsupplied %v, %v and %v; want github-token while it had no source, then none", unsupplied.Unsupplied, supplied.Unsupplied, named.Unsupplied)
 	}
-	for runID, want := range map[string][]string{unrequested.ID: {"model"}, requested.ID: {"model", "github-token"}} {
+	for runID, want := range map[string][]string{unsupplied.ID: {"model"}, supplied.ID: {"model", "github-token"}, named.ID: {"model", "github-token"}} {
 		if binding := b.tasks(t, runID)[0].submission.Wherry; !slices.Equal(binding.Supplied, want) || len(binding.Credentials) != 0 {
 			t.Fatalf("run %s supplied %v and task credentials %+v; want %v and none", runID, binding.Supplied, binding.Credentials, want)
 		}

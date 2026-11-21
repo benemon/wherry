@@ -1,5 +1,5 @@
 name: container
-agent: claude
+agent: claude-code
 labels:
   isolation: container
 config:

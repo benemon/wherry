@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/benemon/wherry/internal/catalog"
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
@@ -60,7 +61,8 @@ type SubmitInput struct {
 	Parts []wire.Part
 	// Credentials name credentials this host configures, each delivered to the agent at its target.
 	Credentials []wire.TaskCredential
-	// Requested names the placed agent's credentials the task asks for; an optional one is delivered only when named.
+	// Requested names the placed agent's credentials the task asks for: an optional one named here fails the submission
+	// when this host cannot resolve it, where an unnamed one is left out.
 	Requested []string
 	// Outputs are the files the agent is asked to leave.
 	Outputs []wire.ExpectedOutput
@@ -104,8 +106,8 @@ func ParseBound(text string, now time.Time) (time.Time, error) {
 type SubmitResult struct {
 	RunID string
 	Pool  string
-	// Unrequested names the placed agent's optional credentials the task did not request, which the run goes without.
-	Unrequested []string
+	// Unsupplied names the placed agent's optional credentials this host could not resolve, which the run goes without.
+	Unsupplied []string
 }
 
 // CancelResult describes a produced cancel.
@@ -147,15 +149,23 @@ type Profile struct {
 }
 
 // Credential is one of an agent's credentials: its target, the agent's environment variable Env or credentials-directory
-// file File; its description from the pool's terms; whether a run goes without it unless the task requests it; and
-// whether this host has a source for it.
+// file File; its description from the pool's terms; whether a run goes without it when this host cannot resolve it;
+// and what discovery says of its source on this host, which runs no command.
 type Credential struct {
 	Name        string `json:"name"`
 	Env         string `json:"env,omitzero"`
 	File        string `json:"file,omitzero"`
 	Description string `json:"description,omitzero"`
 	Optional    bool   `json:"optional,omitzero"`
-	Configured  bool   `json:"configured"`
+	// Configured says this host has a source for the credential: one its configuration names, or the credential's own
+	// target variable, which the host reads when it is set because the variable is in its catalog.
+	Configured bool `json:"configured"`
+	// Source is SourceFile, SourceEnv or SourceCommand for a source the configuration names, SourceVariable for the
+	// catalog variable, or empty; Variable is the variable an env or variable source reads; Status is StatusReady,
+	// StatusUnchecked, StatusUnset or StatusMissing.
+	Source   string `json:"source,omitzero"`
+	Variable string `json:"variable,omitzero"`
+	Status   string `json:"status"`
 }
 
 // Host implements the operations of a tenant's host principal.
@@ -168,7 +178,10 @@ type Host struct {
 	host        string
 	stateDir    string
 	credentials map[string]credential.Source
-	git         []GitCredential
+	// catalog is the credential catalog this host reads variables through: a terms credential whose target is one of
+	// its variables resolves from that variable when the configuration names no source.
+	catalog *catalog.Catalog
+	git     []GitCredential
 	// storage holds the host's S3 credentials by pool; a pool without an entry uses bundleStorage, and without that has
 	// no storage on this host.
 	storage map[string]StorageConfig
@@ -189,7 +202,11 @@ func NewHost(kafka *kgo.Client, key ed25519.PrivateKey, principal, stateDir stri
 	if !prefixed || !split || !wire.ValidName(tenant) || !wire.ValidName(host) {
 		return nil, errors.New("principal is not a host principal wherry.tnt.<tenant>.<host>")
 	}
-	return &Host{kafka: kafka, reader: operator.NewReader(kafka), key: key, tenant: tenant, host: host, stateDir: stateDir, credentials: credentials, git: git, logger: logger}, nil
+	c, err := catalog.Embedded()
+	if err != nil {
+		return nil, err
+	}
+	return &Host{kafka: kafka, reader: operator.NewReader(kafka), key: key, tenant: tenant, host: host, stateDir: stateDir, credentials: credentials, catalog: c, git: git, logger: logger}, nil
 }
 
 // Close closes the Kafka connections.
@@ -401,15 +418,15 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, fmt.Errorf("%w: requested credential %s is not one of agent %s's credentials", ErrInvalidInput, name, agent.Name)
 		}
 	}
-	supplied, err := h.supplied(agent, input.Requested)
+	// One resolver: the bytes that decide what is supplied are the bytes the envelope carries and the storage keys sign
+	// with.
+	resolver := newResolver(ctx, wire.RFC3339(input.EndBy.Unix()))
+	supplied, unsupplied, err := h.supplied(agent, input.Requested, resolver)
 	if err != nil {
 		return SubmitResult{}, err
 	}
-	var unrequested []string
-	for _, credential := range agent.Credentials {
-		if credential.Optional() && !slices.Contains(input.Requested, credential.Name) {
-			unrequested = append(unrequested, credential.Name)
-		}
+	if err := h.atLeastOne(agent, supplied); err != nil {
+		return SubmitResult{}, err
 	}
 	for _, credential := range input.Credentials {
 		if slices.ContainsFunc(agent.Targets(), func(target wire.TaskCredential) bool { return target.Target() == credential.Target() }) {
@@ -484,7 +501,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	storage := v.state.Pools[pool].Storage
 	var store *store
 	if stored {
-		if store, err = h.bucket(ctx, pool, storage); err != nil {
+		if store, err = h.bucket(ctx, pool, storage, resolver); err != nil {
 			return SubmitResult{}, err
 		}
 		submission.Wherry.S3Inputs, err = uploadInputs(ctx, store, storage.Bucket, h.tenant, runID, input.S3Inputs)
@@ -502,7 +519,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		_, err = rand.Read(redactionKey)
 	}
 	if err == nil {
-		encoded, err = h.enveloped(ctx, submission, v.state.Pools[pool], poolKey, store, redactionKey)
+		encoded, err = h.enveloped(ctx, submission, v.state.Pools[pool], poolKey, store, redactionKey, resolver)
 	}
 	if limit := v.state.Pools[pool].RecordLimit; err == nil && int64(len(encoded)) > limit {
 		err = fmt.Errorf("%w: with its envelope the submission is a %d-byte record, over pool %s's %d-byte record limit", ErrInvalidInput, len(encoded), pool, limit)
@@ -518,23 +535,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		}
 		return SubmitResult{}, err
 	}
-	return SubmitResult{RunID: runID, Pool: pool, Unrequested: unrequested}, nil
-}
-
-// supplied names the credentials of agent's terms a task supplies: the required ones and those named in requested,
-// each of which needs a source in this host's configuration.
-func (h *Host) supplied(agent operator.AgentTerms, requested []string) ([]string, error) {
-	var supplied []string
-	for _, credential := range agent.Credentials {
-		if credential.Optional() && !slices.Contains(requested, credential.Name) {
-			continue
-		}
-		if _, configured := h.credentials[credential.Name]; !configured {
-			return nil, fmt.Errorf("%w: auth required: credential %s is not in this host's configuration", ErrInvalidInput, credential.Name)
-		}
-		supplied = append(supplied, credential.Name)
-	}
-	return supplied, nil
+	return SubmitResult{RunID: runID, Pool: pool, Unsupplied: unsupplied}, nil
 }
 
 // poolKey returns the current key of pool: that of the latest committed record under the snapshot key on the pool's
@@ -569,28 +570,39 @@ func (h *Host) poolKey(ctx context.Context, v view, pool string) (*ecdsa.PublicK
 }
 
 // enveloped signs submission with an envelope of its credentials, its S3 links and redactionKey, under a fresh content
-// key wrapped to poolKey. Credentials resolve here, a command source's child with the task's task_ended_by; GET links
-// last until task_started_by plus getLifetime and PUT links until task_ended_by.
-func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms operator.Terms, poolKey *ecdsa.PublicKey, store *store, redactionKey []byte) ([]byte, error) {
+// key wrapped to poolKey. The credentials' values come through resolver, which supplied filled for the agent's
+// credentials, so no source runs again here; a task credential's source is the configuration's. GET links last until
+// task_started_by plus getLifetime and PUT links until task_ended_by.
+func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms operator.Terms, poolKey *ecdsa.PublicKey, store *store, redactionKey []byte, resolver *resolver) ([]byte, error) {
 	binding := submission.Wherry
 	values := signed.EnvelopeValues{Binding: binding.EnvelopeBinding(), Credentials: map[string][]byte{}, S3Inputs: map[string]string{}, S3Outputs: map[string]string{}, RedactionKey: redactionKey}
+	sources := map[string]credential.Source{}
+	if i := slices.IndexFunc(terms.Agents, func(agent operator.AgentTerms) bool { return agent.Name == binding.Placement.Agent }); i >= 0 {
+		for _, s := range h.sources(terms.Agents[i]) {
+			if s.configured {
+				sources[s.Name] = s.source
+			}
+		}
+	}
 	names := slices.Clone(binding.Supplied)
 	for _, credential := range binding.Credentials {
 		names = append(names, credential.Name)
+		if source, configured := h.credentials[credential.Name]; configured {
+			sources[credential.Name] = source
+		}
 	}
 	for _, name := range names {
 		if _, resolved := values.Credentials[name]; resolved {
 			continue
 		}
-		source, configured := h.credentials[name]
+		source, configured := sources[name]
 		if !configured {
 			return nil, fmt.Errorf("%w: auth required: credential %s is not in this host's configuration", ErrInvalidInput, name)
 		}
-		value, err := source.ResolveForTask(ctx, wire.RFC3339(binding.TaskEndedBy))
+		value, err := resolver.resolve(name, source)
 		if err != nil {
 			return nil, fmt.Errorf("resolve credential %s: %w", name, err)
 		}
-		hold(name, value)
 		values.Credentials[name] = value
 	}
 	if store != nil {
@@ -836,9 +848,10 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 			agents := v.state.Pools[config.Pool].Agents
 			if index := slices.IndexFunc(agents, func(agent operator.AgentTerms) bool { return agent.Name == profile.Agent }); index >= 0 {
 				listed.Models, listed.DefaultModel = agents[index].Models, agents[index].DefaultModel
-				for _, credential := range agents[index].Credentials {
-					_, configured := h.credentials[credential.Name]
-					listed.Credentials = append(listed.Credentials, Credential{Name: credential.Name, Env: credential.Env, File: credential.File, Description: credential.Description, Optional: credential.Optional(), Configured: configured})
+				// From discovery alone: no command runs to list receivers.
+				for _, s := range h.sources(agents[index]) {
+					listed.Credentials = append(listed.Credentials, Credential{Name: s.Name, Env: s.Env, File: s.File, Description: s.Description, Optional: s.Optional(),
+						Configured: s.configured, Source: s.kind(), Variable: s.variable(), Status: s.status()})
 				}
 			}
 			receiver.Profiles = append(receiver.Profiles, listed)

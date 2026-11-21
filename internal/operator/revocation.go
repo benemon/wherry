@@ -41,9 +41,8 @@ type RevocationResult struct {
 // false, since its wait is usually the longest. The ones it is told as they end are the result's steps.
 type RevocationProgress func(RevocationStep)
 
-// RevokeReceiver runs the revocation steps for receiver; progress may be nil. A receiver whose membership already ended
-// is converged and reported complete, as a host is: its earlier revocation served its wait, so a retry of the cleanup
-// that follows needs no new one.
+// RevokeReceiver runs the revocation steps for receiver, progress nil allowed, and reports a receiver whose membership
+// already ended converged and complete, as a host is, since its earlier revocation served its wait.
 func (service *Service) RevokeReceiver(ctx context.Context, receiver string, wait time.Duration, probe func(context.Context, string, string) error, progress RevocationProgress) RevocationResult {
 	state, err := service.LoadState(ctx)
 	if err != nil {
