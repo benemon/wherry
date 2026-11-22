@@ -551,6 +551,8 @@ host that meets [Run a receiver](operations-receivers.md#run-a-receiver).
    credentials:
      nomad-token:
        file: /etc/wherry/nomad-token
+   # Write the receiver's spans to the trace topics; off without it.
+   tracing: true
    ```
 
 6. Start the receiver under a supervisor that restarts it when it exits and

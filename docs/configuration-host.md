@@ -35,6 +35,7 @@ The host's paths are the same on every OS, macOS included:
 | `git` | list | none | Map URL prefixes to credential names and SSH known-hosts files. |
 | `storage` | mapping | none | Map pool names to S3 `access_key` and `secret_key` credential names, which win over the `storage` pair the bundle carries for that pool. |
 | `input_roots` | list of paths | MCP server working directory | Allow the MCP server to send inputs from these directories. |
+| `tracing` | bool | `false` | Write the host's spans to its tenant's trace topic through the host's Kafka connection ([Tracing](tracing.md)). |
 
 Without a `ca_file`, the host trusts the broker through the bundle's `ca`, and without that through the system roots.
 Each credential source uses exactly one of `file`, `env` and `command`.
@@ -168,6 +169,8 @@ storage:
   build:
     access_key: s3-access-key
     secret_key: s3-secret-key
+# Write the host's spans to wherry.traces.<tenant>; off without it.
+tracing: true
 ```
 
 `credentials` holds a source for each credential the agents of the

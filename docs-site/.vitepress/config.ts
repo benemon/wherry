@@ -161,6 +161,10 @@ const sidebar = [
         "link": "/metrics"
       },
       {
+        "text": "Tracing",
+        "link": "/tracing"
+      },
+      {
         "text": "Plugin protocol",
         "link": "/plugin-protocol"
       },

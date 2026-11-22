@@ -93,6 +93,7 @@ A leading `~/` expands in the flag and configuration paths.
 | `metrics_addr` | string | none | Serve `/metrics` at this `HOST:PORT`. |
 | `drain_timeout` | duration | `0s` | Let held runs continue for this long after a stop signal. |
 | `credentials` | mapping | none | Map platform credential names to [sources](security.md#credential-sources). |
+| `tracing` | bool | `false` | Write the receiver's and its custodian's spans to the trace topics through the receiver's Kafka connection ([Tracing](tracing.md)). |
 
 Without a `ca_file`, the receiver trusts the broker through the bundle's `ca`, and without that through the system roots.
 Pool keys live under `state_dir/pool-keys/`.
@@ -163,6 +164,8 @@ drain_timeout: 20s
 credentials:
   nomad-token:
     file: /etc/wherry/nomad-token
+# Write the receiver's spans to the trace topics; off without it.
+tracing: true
 ```
 
 ## Receiver configuration
