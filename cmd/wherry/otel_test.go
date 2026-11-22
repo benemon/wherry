@@ -368,6 +368,28 @@ func TestTracedRoundTrip(t *testing.T) {
 			t.Errorf("%s spans %v, want a root", name, roots)
 		}
 	}
+	// Routing: every span of the run, the host's, the receiver's and the custodian's, carries the run's tenant, so the
+	// collector sends the whole trace to the tenant's topic. The spans outside a run, receiver start, custodian rotation
+	// and the operator markers of no tenant, carry none; the tenant markers keep theirs.
+	for _, s := range run {
+		if tenant := teletest.Attr(s, telemetry.AttrTenant); tenant != "tenant-a" {
+			t.Errorf("span %s of the %s (%s) in the run's trace carries wherry.tenant %q, want tenant-a", s.Name, teletest.Resource(s, semconv.ServiceNamespaceKey), s.SpanKind, tenant)
+		}
+	}
+	for _, name := range []string{"receiver start", "custodian rotation", "operator pool apply", "operator receiver apply"} {
+		for _, s := range teletest.Named(spans, name) {
+			if tenant := teletest.Attr(s, telemetry.AttrTenant); tenant != "" {
+				t.Errorf("%s, outside a run, carries wherry.tenant %q", name, tenant)
+			}
+		}
+	}
+	for _, name := range []string{"operator tenant add", "operator tenant pool add", "operator tenant host add"} {
+		for _, s := range teletest.Named(spans, name) {
+			if tenant := teletest.Attr(s, telemetry.AttrTenant); tenant != "tenant-a" {
+				t.Errorf("%s carries wherry.tenant %q, want tenant-a", name, tenant)
+			}
+		}
+	}
 	if markers := teletest.Named(spans, "operator "); len(markers) == 0 || teletest.Resource(markers[0], semconv.ServiceNameKey) != "wherry-operator" {
 		t.Errorf("operator markers %v", markers)
 	}

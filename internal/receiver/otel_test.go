@@ -111,6 +111,30 @@ func parentOf(t *testing.T, ids map[trace.SpanID]tracetest.SpanStub, s tracetest
 
 func namespace(s tracetest.SpanStub) string { return teletest.Resource(s, semconv.ServiceNamespaceKey) }
 
+// tenanted fails the test for a span in the run's trace, traceID, without wherry.tenant set to tenant, whichever role
+// started it, and for a span outside the run carrying one; receiver start and custodian rotation must be among the
+// latter.
+func tenanted(t *testing.T, spans []tracetest.SpanStub, traceID trace.TraceID, tenant string) {
+	t.Helper()
+	outside := map[string]bool{}
+	for _, s := range spans {
+		got := teletest.Attr(s, telemetry.AttrTenant)
+		switch {
+		case s.SpanContext.TraceID() == traceID && got != tenant:
+			t.Errorf("span %s (%s %s) in the run's trace carries wherry.tenant %q, want %q", s.Name, namespace(s), s.SpanKind, got, tenant)
+		case s.SpanContext.TraceID() != traceID && got != "":
+			t.Errorf("span %s (%s %s) outside the run carries wherry.tenant %q", s.Name, namespace(s), s.SpanKind, got)
+		case s.SpanContext.TraceID() != traceID:
+			outside[s.Name] = true
+		}
+	}
+	for _, name := range []string{"receiver start", "custodian rotation"} {
+		if !outside[name] {
+			t.Errorf("no %s span outside the run's trace", name)
+		}
+	}
+}
+
 // headerSpan is the span ID of record's one traceparent header.
 func headerSpan(t *testing.T, record *kgo.Record) trace.SpanID {
 	t.Helper()
@@ -266,11 +290,14 @@ func TestTracedAttemptsAreSiblingsUnderTheHostSend(t *testing.T) {
 	if !paired {
 		t.Fatalf("result carries %s and terminal status %s; want one terminal send each", carried["result"], carried["terminal"])
 	}
-	for _, name := range []string{"plugin Dispatch", "plugin Lookup", "plugin Follow", "plugin Stop", "deliver credentials", "await start", "find job", "return task", "admit"} {
+	for _, name := range []string{"plugin Dispatch", "plugin Lookup", "plugin Follow", "plugin Stop", "deliver credentials", "await start", "find job", "return task", "admit", "released"} {
 		if len(teletest.Named(spans, name)) == 0 {
 			t.Errorf("no %s span", name)
 		}
 	}
+	// Every span of the run, the receiver's and the custodian's, carries the run's tenant, for the collector to route
+	// the whole trace to the tenant's topic; the spans outside a run carry none.
+	tenanted(t, spans, send.TraceID(), testTenant)
 	teletest.Check(t, spans, rejectionLabels...)
 	parsed := f.parse(t, record)
 	teletest.Sentinels(t, spans, testToken, string(testRedactionKey), parsed.Wherry.Envelope, parsed.Wherry.Wrap, prompt, tracestate, "s3cr3t", s3Signature, "X-Amz-Signature", s3.endpoint())
@@ -306,6 +333,8 @@ func TestTracedRejectionCarriesTheLabel(t *testing.T) {
 	if len(teletest.Named(spans, "run")) != 0 {
 		t.Fatal("a rejected task has a run span")
 	}
+	// A rejection's spans, the attempt's, the admit and the rejection's PRODUCER, carry the tenant the task binds.
+	tenanted(t, spans, send.TraceID(), testTenant)
 	teletest.Check(t, spans, rejectionLabels...)
 	teletest.Sentinels(t, spans, status.StatusUpdate.Status.Message.Parts[0].Text, wire.RFC3339(time.Now().Add(-time.Minute).Unix())[:13])
 }
@@ -331,6 +360,9 @@ func TestTracedVariantBNamesThePool(t *testing.T) {
 			if teletest.Resource(s, semconv.ServiceNameKey) != "wherry-custodian."+testPool || namespace(s) != telemetry.RoleCustodian {
 				t.Fatalf("custodian resource %v", s.Resource.Attributes())
 			}
+		}
+		if tenant := teletest.Attr(s, telemetry.AttrTenant); tenant != "" {
+			t.Fatalf("%s, outside a run, carries wherry.tenant %q", s.Name, tenant)
 		}
 	}
 	if len(spans) != 2 {

@@ -317,7 +317,9 @@ func (r *Receiver) claimNext(claiming, ctx context.Context, profile Named, turn 
 		return settle(record, ack)
 	}
 	binding := admitted.task.Wherry
-	process.SetAttributes(telemetry.AttrRun.String(binding.Run), telemetry.AttrTenant.String(binding.Tenant), telemetry.AttrHost.String(binding.Host), telemetry.AttrModel.String(binding.Placement.Model))
+	// From here the run's context carries its tenant, so every span started under it carries wherry.tenant.
+	ctx = telemetry.WithTenant(ctx, binding.Tenant)
+	process.SetAttributes(telemetry.AttrHost.String(binding.Host), telemetry.AttrModel.String(binding.Placement.Model))
 	process.End()
 	r.adjustInFlight(profile.Name, 1)
 	defer r.adjustInFlight(profile.Name, -1)
@@ -391,7 +393,11 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, profile Named)
 	}
 	r.metrics.claims.WithLabelValues(task.Wherry.Tenant).Inc()
 	run, attempt := task.Wherry.Run, attemptOf(record)
-	span.SetAttributes(telemetry.AttrRun.String(run))
+	// The binding is known: the attempt's spans name the run and its tenant, and the spans started from here, a
+	// rejection's or a budget terminal's PRODUCER, carry the tenant through the context.
+	ctx = telemetry.WithTenant(ctx, task.Wherry.Tenant)
+	span.SetAttributes(telemetry.AttrRun.String(run), telemetry.AttrTenant.String(task.Wherry.Tenant))
+	process.SetAttributes(telemetry.AttrRun.String(run), telemetry.AttrTenant.String(task.Wherry.Tenant))
 	// rejectAs counts the rejection under label, a fixed text for a reason that quotes the task; the label, never the
 	// reason, is the spans' status.
 	rejectAs := func(label, reason string) (*admission, kgo.AckStatus) {

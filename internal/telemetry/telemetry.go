@@ -148,15 +148,21 @@ type Names struct {
 type Tracing struct {
 	Tracer   trace.Tracer
 	identity []attribute.KeyValue
-	sdk      *sdktrace.TracerProvider
-	global   bool
+	// tenant is the one tenant every span of the role belongs to, a host's; empty for the roles that serve many.
+	tenant string
+	sdk    *sdktrace.TracerProvider
+	global bool
 }
 
 // New is role's tracing for the process named by names, built from the environment: off unless an endpoint is set.
 func New(ctx context.Context, role string, names Names) (*Tracing, error) {
 	identity := identityOf(role, names)
+	tenant := ""
+	if role == RoleHost {
+		tenant = names.Tenant
+	}
 	if !Enabled() {
-		return &Tracing{Tracer: noop.NewTracerProvider().Tracer("wherry"), identity: identity}, nil
+		return &Tracing{Tracer: noop.NewTracerProvider().Tracer("wherry"), identity: identity, tenant: tenant}, nil
 	}
 	// The resource is the role's identity and the SDK's own attributes alone: no environment, host or process detector.
 	attrs := append(serviceOf(role, names, os.Getenv(NamingEnv) == "b"), semconv.ServiceNamespace(role))
@@ -173,7 +179,7 @@ func New(ctx context.Context, role string, names Names) (*Tracing, error) {
 		sdktrace.WithResource(res),
 		sdktrace.WithSpanProcessor(sdktrace.NewBatchSpanProcessor(resourced{exporter, res})),
 	)
-	t := &Tracing{Tracer: provider.Tracer("wherry"), identity: identity, sdk: provider}
+	t := &Tracing{Tracer: provider.Tracer("wherry"), identity: identity, tenant: tenant, sdk: provider}
 	// The process's first provider stands as the global one; the custodian's, inside a receiver, does not.
 	if role != RoleCustodian {
 		if _, set := otel.GetTracerProvider().(*sdktrace.TracerProvider); !set {
@@ -224,7 +230,8 @@ func serviceOf(role string, names Names, variantB bool) []attribute.KeyValue {
 func identityOf(role string, names Names) []attribute.KeyValue {
 	switch role {
 	case RoleHost:
-		return []attribute.KeyValue{AttrTenant.String(names.Tenant), AttrHost.String(names.Host)}
+		// The tenant comes through the context, as every role's does.
+		return []attribute.KeyValue{AttrHost.String(names.Host)}
 	case RoleReceiver:
 		return []attribute.KeyValue{AttrPool.String(names.Pool), AttrReceiver.String(names.Receiver)}
 	case RoleCustodian:
@@ -270,21 +277,33 @@ func (t *Tracing) tracer() trace.Tracer {
 	return t.Tracer
 }
 
-func (t *Tracing) attributes() []attribute.KeyValue {
+// attributes are the role's identity and the tenant ctx carries, for a span started under ctx.
+func (t *Tracing) attributes(ctx context.Context) []attribute.KeyValue {
 	if t == nil {
-		return nil
+		return tenantOf(ctx)
 	}
-	return t.identity
+	return append(slices.Clip(t.identity), tenantOf(ctx)...)
 }
 
-// Start starts a span of kind named name under ctx, carrying the role's identity and attrs.
+// scope is ctx carrying the role's one tenant when it has one and ctx names none: a host's spans are all its tenant's,
+// and the spans started under one of them inherit it through the context it returns.
+func (t *Tracing) scope(ctx context.Context) context.Context {
+	if t != nil && t.tenant != "" && TenantOf(ctx) == "" {
+		return WithTenant(ctx, t.tenant)
+	}
+	return ctx
+}
+
+// Start starts a span of kind named name under ctx, carrying the role's identity, the tenant ctx carries and attrs.
 func (t *Tracing) Start(ctx context.Context, name string, kind trace.SpanKind, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
-	return t.tracer().Start(ctx, name, trace.WithSpanKind(kind), trace.WithAttributes(t.attributes()...), trace.WithAttributes(attrs...))
+	ctx = t.scope(ctx)
+	return t.tracer().Start(ctx, name, trace.WithSpanKind(kind), trace.WithAttributes(t.attributes(ctx)...), trace.WithAttributes(attrs...))
 }
 
 // Root starts a span with no parent, whatever ctx carries.
 func (t *Tracing) Root(ctx context.Context, name string, kind trace.SpanKind, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
-	return t.tracer().Start(ctx, name, trace.WithNewRoot(), trace.WithSpanKind(kind), trace.WithAttributes(t.attributes()...), trace.WithAttributes(attrs...))
+	ctx = t.scope(ctx)
+	return t.tracer().Start(ctx, name, trace.WithNewRoot(), trace.WithSpanKind(kind), trace.WithAttributes(t.attributes(ctx)...), trace.WithAttributes(attrs...))
 }
 
 // Producer starts the PRODUCER span of a send to topic, as a child of ctx.
@@ -307,7 +326,8 @@ func (t *Tracing) ProducerUnder(ctx context.Context, topic string, parent trace.
 
 // Linked starts a span as the root of a new trace, linked to link when it is valid.
 func (t *Tracing) Linked(ctx context.Context, name string, kind trace.SpanKind, link trace.SpanContext, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
-	opts := []trace.SpanStartOption{trace.WithNewRoot(), trace.WithSpanKind(kind), trace.WithAttributes(t.attributes()...), trace.WithAttributes(attrs...)}
+	ctx = t.scope(ctx)
+	opts := []trace.SpanStartOption{trace.WithNewRoot(), trace.WithSpanKind(kind), trace.WithAttributes(t.attributes(ctx)...), trace.WithAttributes(attrs...)}
 	if link.IsValid() {
 		opts = append(opts, trace.WithLinks(trace.Link{SpanContext: link}))
 	}
@@ -425,14 +445,39 @@ func (c carrier) Keys() []string {
 	return keys
 }
 
+// tenantKey is the context key of the tenant a run's spans carry.
+type tenantKey struct{}
+
+// WithTenant returns ctx carrying tenant: every span this package starts under it carries wherry.tenant set to it. The
+// receiver sets it once a task's binding is known, so the run's spans need not name it one by one; an empty tenant
+// names none.
+func WithTenant(ctx context.Context, tenant string) context.Context {
+	return context.WithValue(ctx, tenantKey{}, tenant)
+}
+
+// TenantOf is the tenant ctx carries, or "" outside a run.
+func TenantOf(ctx context.Context) string {
+	tenant, _ := ctx.Value(tenantKey{}).(string)
+	return tenant
+}
+
+// tenantOf is wherry.tenant for a span started under ctx: the tenant it carries, or nothing.
+func tenantOf(ctx context.Context) []attribute.KeyValue {
+	if tenant := TenantOf(ctx); tenant != "" {
+		return []attribute.KeyValue{AttrTenant.String(tenant)}
+	}
+	return nil
+}
+
 // Child starts an INTERNAL span under ctx's span, through that span's provider, so a child needs no tracer of its own.
+// It carries the tenant ctx carries.
 func Child(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
 	return ChildOf(ctx, name, trace.SpanKindInternal, attrs...)
 }
 
 // ChildOf is Child with the span's kind given.
 func ChildOf(ctx context.Context, name string, kind trace.SpanKind, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
-	return trace.SpanFromContext(ctx).TracerProvider().Tracer("wherry").Start(ctx, name, trace.WithSpanKind(kind), trace.WithAttributes(attrs...))
+	return trace.SpanFromContext(ctx).TracerProvider().Tracer("wherry").Start(ctx, name, trace.WithSpanKind(kind), trace.WithAttributes(tenantOf(ctx)...), trace.WithAttributes(attrs...))
 }
 
 // Event adds an event to ctx's span.
