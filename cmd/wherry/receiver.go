@@ -43,7 +43,8 @@ const (
 // receiverLocalConfig is the receiver's local configuration file. CAFile holds the PEM certificates the receiver trusts
 // the broker with; without it, the bundle's ca, else the system roots. Credentials maps the name a profile's config gives
 // its platform credential to the source of its value. DrainTimeout bounds how long held runs may finish after a stop
-// signal; it stays below the platform's stop window, which the receiver cannot read.
+// signal; it stays below the platform's stop window, which the receiver cannot read. Tracing writes the receiver's
+// spans to the trace topics; off by default.
 type receiverLocalConfig struct {
 	Bundle       string                       `yaml:"bundle"`
 	CAFile       string                       `yaml:"ca_file,omitempty"`
@@ -52,6 +53,7 @@ type receiverLocalConfig struct {
 	MetricsAddr  string                       `yaml:"metrics_addr"`
 	DrainTimeout time.Duration                `yaml:"drain_timeout"`
 	Credentials  map[string]credential.Source `yaml:"credentials"`
+	Tracing      bool                         `yaml:"tracing,omitempty"`
 }
 
 // loadReceiverLocalConfig decodes the receiver's local configuration at path, defaulting state_dir and plugin_dir.
@@ -147,6 +149,9 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 		return operator.ExplainUnknownAuthority(err, refresh)
 	}
 	plugins.logs, plugins.hold = r.PluginLogs(stdout), r.HoldPlatformCredential
+	if config.Tracing {
+		r.Trace()
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := r.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {

@@ -2,6 +2,8 @@ package telemetry_test
 
 import (
 	"context"
+	"io"
+	"log"
 	"testing"
 
 	"github.com/benemon/wherry/internal/telemetry"
@@ -19,7 +21,7 @@ func TestResourceIgnoresTheEnvironment(t *testing.T) {
 	t.Setenv("OTEL_SERVICE_NAME", sentinel+"-service")
 	names := telemetry.Names{Tenant: "t", Host: "h", Pool: "p", Receiver: "r"}
 	for _, role := range []string{telemetry.RoleHost, telemetry.RoleReceiver, telemetry.RoleCustodian, telemetry.RoleOperator} {
-		tracing, err := telemetry.New(context.Background(), role, names)
+		tracing, err := telemetry.New(context.Background(), role, names, nil, log.New(io.Discard, "", 0))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -50,29 +52,4 @@ func TestResourceIgnoresTheEnvironment(t *testing.T) {
 	}
 	teletest.Check(t, spans)
 	teletest.Sentinels(t, spans, sentinel)
-}
-
-// Brief rule 3: the traces-only endpoint variable alone leaves tracing off.
-func TestTracesEndpointAloneLeavesTracingOff(t *testing.T) {
-	exporter := teletest.Hook(t)
-	t.Setenv(telemetry.EndpointEnv, "")
-	t.Setenv(telemetry.TracesEndpointEnv, "http://127.0.0.1:1")
-	if telemetry.Enabled() {
-		t.Fatal("tracing is on with the traces-only endpoint alone")
-	}
-	tracing, err := telemetry.New(context.Background(), telemetry.RoleHost, telemetry.Names{Tenant: "t", Host: "h"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tracing.Enabled() {
-		t.Fatal("the provider exports with the traces-only endpoint alone")
-	}
-	_, span := tracing.Root(context.Background(), "submit", trace.SpanKindInternal)
-	span.End()
-	if err := tracing.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if spans := exporter.Spans(); len(spans) != 0 {
-		t.Fatalf("%d spans exported with the traces-only endpoint alone", len(spans))
-	}
 }

@@ -2207,7 +2207,7 @@ func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pen
 func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stopped bool, terms operator.Terms) {
 	limit := terms.OutputLimit
 	stored := map[string]storedOutput{}
-	collected, err := run.collected(ctx, handle, stopped, limit, stored)
+	collected, err := run.collected(ctx, handle, stopped, limit, stored, terms.Storage)
 	if err != nil {
 		reason := collectionReasonFailed
 		switch {
@@ -2287,10 +2287,10 @@ type storedOutput struct {
 	reason string
 }
 
-// collected runs the plugin's Collect under limit and uploads each streamed S3 output into stored as it arrives.
-// Collect may run until the run passes task_ended_by, when its PUT URLs expire. The count and total are
-// checked again here, so a plugin that ignores the limits cannot grow the run's memory.
-func (run *activeRun) collected(ctx context.Context, handle pluginsdk.Handle, stopped bool, limit int64, stored map[string]storedOutput) ([]pluginsdk.Output, error) {
+// collected runs the plugin's Collect under limit and uploads each streamed S3 output into stored as it arrives, to
+// the terms' storage. Collect may run until the run passes task_ended_by, when its PUT URLs expire. The count and
+// total are checked again here, so a plugin that ignores the limits cannot grow the run's memory.
+func (run *activeRun) collected(ctx context.Context, handle pluginsdk.Handle, stopped bool, limit int64, stored map[string]storedOutput, storage *operator.Storage) ([]pluginsdk.Output, error) {
 	if !stopped {
 		return nil, errors.New("the job was not stopped")
 	}
@@ -2325,7 +2325,7 @@ func (run *activeRun) collected(ctx context.Context, handle pluginsdk.Handle, st
 		}
 		if output.Body != nil {
 			if _, done := stored[output.Name]; !done && over == nil {
-				stored[output.Name] = run.store(ctx, output)
+				stored[output.Name] = run.store(ctx, output, storage)
 			}
 			output.Body.Close()
 			output.Body = nil
@@ -2405,11 +2405,15 @@ func uploadFailure(ctx context.Context, err error) string {
 }
 
 // store uploads a streamed output to its presigned PUT URL with the Content-Length of its listing, as it reads it, and
-// hashes the bytes the request sends. Its reason never quotes the URL or a response body.
-func (run *activeRun) store(ctx context.Context, output pluginsdk.Output) storedOutput {
+// hashes the bytes the request sends. Its reason never quotes the URL or a response body; its span carries the terms'
+// endpoint and bucket, never the URL.
+func (run *activeRun) store(ctx context.Context, output pluginsdk.Output, storage *operator.Storage) storedOutput {
 	attrs := []attribute.KeyValue{telemetry.AttrSize.Int64(output.Size)}
 	if wire.ValidOutputName(output.Name) {
 		attrs = append(attrs, telemetry.AttrOutput.String(output.Name))
+	}
+	if storage != nil {
+		attrs = append(attrs, telemetry.AttrStorageEndpoint.String(storage.Endpoint), telemetry.AttrStorageBucket.String(storage.Bucket))
 	}
 	_, span := telemetry.ChildOf(ctx, "upload output", trace.SpanKindClient, attrs...)
 	defer span.End()

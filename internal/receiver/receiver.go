@@ -116,7 +116,9 @@ type Receiver struct {
 	platform []redact.Form
 	// events is the pool's events folded so far, which every read of them shares.
 	events eventsFold
-	// tracing and custodian are the receiver role's and the custodian role's tracer providers, set by configure.
+	// traced, set by Trace, has configure build tracing and custodian, the receiver role's and the custodian role's
+	// tracer providers; nil, they are off.
+	traced    bool
 	tracing   *telemetry.Tracing
 	custodian *telemetry.Tracing
 }
@@ -427,14 +429,21 @@ func (r *Receiver) configure(ctx context.Context) error {
 	}
 }
 
+// Trace turns the receiver's tracing on before Run, as its local configuration's tracing field does: its spans and its
+// custodian's go to the trace topics through its own Kafka client.
+func (r *Receiver) Trace() { r.traced = true }
+
 // trace builds the receiver's tracer providers, one for each role the process holds, once its pool is known.
 func (r *Receiver) trace(ctx context.Context, pool string) error {
 	r.shutdownTracing()
-	tracing, err := telemetry.New(ctx, telemetry.RoleReceiver, telemetry.Names{Pool: pool, Receiver: r.id})
+	if !r.traced {
+		return nil
+	}
+	tracing, err := telemetry.New(ctx, telemetry.RoleReceiver, telemetry.Names{Pool: pool, Receiver: r.id}, r.base, r.logger)
 	if err != nil {
 		return err
 	}
-	custodian, err := telemetry.New(ctx, telemetry.RoleCustodian, telemetry.Names{Pool: pool, Receiver: r.id})
+	custodian, err := telemetry.New(ctx, telemetry.RoleCustodian, telemetry.Names{Pool: pool, Receiver: r.id}, r.base, r.logger)
 	if err != nil {
 		// The first provider is shut down, not left installed as the global one with nothing owning it.
 		r.shutdownProviders(tracing)

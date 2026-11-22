@@ -492,7 +492,7 @@ func TestReceiverRejectsCapacity(t *testing.T) {
 				}
 				cluster, ca := tlsCluster(t)
 				dir := writeTree(t, map[string]string{"ca.pem": ca, "operator.password": "operator-password\n"})
-				if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{cluster.ListenAddrs()[0], "ca.pem", "operator.password"}); err != nil {
+				if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{Broker: cluster.ListenAddrs()[0], CAFile: "ca.pem", PasswordFile: "operator.password"}); err != nil {
 					t.Fatal(err)
 				}
 				t.Chdir(dir)

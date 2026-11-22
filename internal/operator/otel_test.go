@@ -3,6 +3,8 @@ package operator
 import (
 	"context"
 	"errors"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,7 +25,7 @@ func TestTracedCommandFailuresCarryAClass(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := t.Context()
-	tracing, err := telemetry.New(ctx, telemetry.RoleOperator, telemetry.Names{})
+	tracing, err := telemetry.New(ctx, telemetry.RoleOperator, telemetry.Names{}, service.Operator, log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatal(err)
 	}

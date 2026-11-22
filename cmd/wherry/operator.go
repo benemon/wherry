@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/operator"
-	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"gopkg.in/yaml.v3"
@@ -75,9 +74,6 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer service.Operator.Close()
-	if service.Tracing, err = telemetry.New(ctx, telemetry.RoleOperator, telemetry.Names{}); err != nil {
-		return err
-	}
 	defer func() {
 		if err := service.Tracing.Close(); err != nil {
 			fmt.Fprintln(stderr, "wherry: tracing:", err)

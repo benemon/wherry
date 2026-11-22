@@ -17,10 +17,10 @@ type tracedPlugin struct {
 	profile string
 }
 
-// tracePlugin wraps plugin for profile; a nil plugin stays nil.
+// tracePlugin wraps plugin for profile; a nil plugin stays nil, and tracing off leaves the plugin as it is.
 func tracePlugin(plugin pluginsdk.Plugin, tracing *telemetry.Tracing, profile string) pluginsdk.Plugin {
-	if plugin == nil {
-		return nil
+	if plugin == nil || !tracing.Enabled() {
+		return plugin
 	}
 	return &tracedPlugin{Plugin: plugin, tracing: tracing, profile: profile}
 }

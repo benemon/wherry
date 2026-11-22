@@ -30,6 +30,8 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kgo"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
@@ -106,6 +108,25 @@ func readBundle(t *testing.T, path string) operator.Bundle {
 	return bundle
 }
 
+// grantTraces grants principal WRITE and DESCRIBE on the trace topics of tenants, as slice 2's operator will, after the
+// last operator command: converge withdraws rows the operator does not manage.
+func grantTraces(t *testing.T, ctx context.Context, root *kgo.Client, principal string, tenants ...string) {
+	t.Helper()
+	for _, tenant := range tenants {
+		builder := kadm.NewACLs().Allow(principal).AllowHosts("*").Topics(telemetry.TraceTopic(tenant)).ResourcePatternType(kadm.ACLPatternLiteral).Operations(kadm.OpWrite, kadm.OpDescribe)
+		builder.PrefixUser()
+		results, err := kadm.NewClient(root).CreateACLs(ctx, builder)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, result := range results {
+			if result.Err != nil {
+				t.Fatal(result.Err)
+			}
+		}
+	}
+}
+
 // median is the middle of durations.
 func median(durations []time.Duration) time.Duration {
 	sorted := slices.Clone(durations)
@@ -120,17 +141,23 @@ func mapMinimum(s tracetest.SpanStub) bool {
 }
 
 // TestTracedRoundTrip runs a task from a host's Submit through a receiver, its custodian and the test plugin process
-// to the host's Await with tracing on, and checks the run is one trace: brief tests 1 to 3 across the roles, the
-// spans per run and the submit overhead with the endpoint set and unset.
+// to the host's Await with tracing on in every role's configuration, each role writing its spans to the trace topics
+// through its own Kafka client, and checks the run is one trace on the tenant's topic: brief tests 1, 3 and 4 across
+// the roles, the spans per run, the trace bytes per run and the submit wall time with tracing on and off.
 func TestTracedRoundTrip(t *testing.T) {
-	exporter := teletest.Install(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
+	for _, tenant := range []string{"", "tenant-a"} {
+		if err := cluster.CreateTopic(telemetry.TraceTopic(tenant), 1, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root := connectTLS(t, address, ca, "admin", "password")
 	service := &operator.Service{Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
 		Broker: address, CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}
-	operatorTracing, err := telemetry.New(ctx, telemetry.RoleOperator, telemetry.Names{})
+	operatorTracing, err := telemetry.New(ctx, telemetry.RoleOperator, telemetry.Names{}, service.Operator, log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,17 +191,21 @@ func TestTracedRoundTrip(t *testing.T) {
 	if err := operatorTracing.Close(); err != nil {
 		t.Fatal(err)
 	}
+	hostBundled, receiverBundled := readBundle(t, hostBundle), readBundle(t, receiverBundle)
+	grantTraces(t, ctx, root, hostBundled.Principal, "tenant-a")
+	grantTraces(t, ctx, root, receiverBundled.Principal, "tenant-a", "")
 
 	read := recordPlugin(t)
 	t.Setenv("WHERRY_TRACED_PLATFORM", platformText+"\n")
 	plugins := &plugins{dir: pluginDir, credentials: map[string]credential.Source{"fake-token": {Env: "WHERRY_TRACED_PLATFORM"}}, logger: log.New(io.Discard, "", 0), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	logs := &syncBuffer{}
-	r, err := receiver.New(readBundle(t, receiverBundle), []byte(ca), filepath.Join(dir, "receiver-state"), false, 0, plugins.profile, log.New(logs, "receiver: ", 0), prometheus.NewRegistry())
+	r, err := receiver.New(receiverBundled, []byte(ca), filepath.Join(dir, "receiver-state"), false, 0, plugins.profile, log.New(logs, "receiver: ", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
 	plugins.logs, plugins.hold = r.PluginLogs(logs), r.HoldPlatformCredential
+	r.Trace()
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
 	ran := make(chan error, 1)
@@ -194,11 +225,12 @@ func TestTracedRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	hostConfig := busclient.Config{Bundle: hostBundle, CAFile: caFile, HostKey: filepath.Join(dir, "host.key"), StateDir: filepath.Join(dir, "host-state"),
-		Credentials: map[string]credential.Source{"deploy-key": {Command: []string{"cat", deployPath}}}}
+		Credentials: map[string]credential.Source{"deploy-key": {Command: []string{"cat", deployPath}}}, Tracing: true}
 	if _, _, err := busclient.Init(ctx, hostConfig); err != nil {
 		t.Fatal(err)
 	}
-	host, err := busclient.Connect(hostConfig, log.New(io.Discard, "", 0))
+	hostLogs := &syncBuffer{}
+	host, err := busclient.Connect(hostConfig, log.New(hostLogs, "host: ", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,8 +258,11 @@ func TestTracedRoundTrip(t *testing.T) {
 		t.Fatalf("refused upload = %v; want the store's refusal with the key redacted", err)
 	}
 
-	// Submit wall time, median of 10, with the endpoint set and unset.
+	// Submit wall time, median of 10 after a warm-up, with tracing on and off in the host's configuration.
 	time10 := func(h *busclient.Host) time.Duration {
+		if _, err := h.Submit(ctx, input); err != nil {
+			t.Fatal(err)
+		}
 		var durations []time.Duration
 		for range 10 {
 			began := time.Now()
@@ -240,19 +275,17 @@ func TestTracedRoundTrip(t *testing.T) {
 	}
 	input.S3Inputs, input.Parts = nil, nil
 	traced := time10(host)
-	endpoint := os.Getenv(telemetry.EndpointEnv)
-	if err := os.Unsetenv(telemetry.EndpointEnv); err != nil {
-		t.Fatal(err)
-	}
+	hostConfig.Tracing = false
 	offHost, err := busclient.Connect(hostConfig, log.New(io.Discard, "", 0))
-	t.Setenv(telemetry.EndpointEnv, endpoint)
 	if err != nil {
 		t.Fatal(err)
 	}
 	untraced := time10(offHost)
-	t.Logf("submit wall time, median of 10: endpoint set %s, unset %s", traced, untraced)
+	t.Logf("submit wall time, median of 10: tracing on %s, off %s", traced, untraced)
 
+	began := time.Now()
 	host.Close()
+	closeTook := time.Since(began)
 	offHost.Close()
 	stop()
 	select {
@@ -263,7 +296,20 @@ func TestTracedRoundTrip(t *testing.T) {
 	case <-time.After(time.Minute):
 		t.Fatalf("receiver kept running; logs:\n%s", logs.String())
 	}
-	spans := exporter.Spans()
+	for _, text := range []string{logs.String(), hostLogs.String()} {
+		if strings.Contains(text, "tracing:") {
+			t.Fatalf("an export failed:\n%s", text)
+		}
+	}
+	tenantRecords, err := readTopic(ctx, service.Operator, telemetry.TraceTopic("tenant-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	untenantedRecords, err := readTopic(ctx, service.Operator, telemetry.TraceTopic(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spans := teletest.Spans(t, append(slices.Clone(tenantRecords), untenantedRecords...))
 	ids := teletest.ByID(spans)
 	var run []tracetest.SpanStub
 	var submit tracetest.SpanStub
@@ -313,6 +359,9 @@ func TestTracedRoundTrip(t *testing.T) {
 			t.Errorf("%s (%s) has parent %s, want %s (%s)", child.Name, teletest.Resource(*child, semconv.ServiceNamespaceKey), ids[child.Parent.SpanID()].Name, parent.Name, teletest.Resource(parent, semconv.ServiceNamespaceKey))
 		}
 	}
+	if teletest.Attr(custodian, telemetry.AttrRun) != submitted.RunID || teletest.Attr(wrap, telemetry.AttrRun) != submitted.RunID {
+		t.Errorf("custodian spans name run %q and %q, want the verified task's %s", teletest.Attr(custodian, telemetry.AttrRun), teletest.Attr(wrap, telemetry.AttrRun), submitted.RunID)
+	}
 	// The result and the terminal status: a PRODUCER each under the run, and a host CONSUMER each under its own.
 	terminals, results := byName("send "+feed, trace.SpanKindProducer, telemetry.RoleReceiver), byName("process "+feed, trace.SpanKindConsumer, telemetry.RoleHost)
 	if len(terminals) != 2 || len(results) != 2 {
@@ -348,8 +397,16 @@ func TestTracedRoundTrip(t *testing.T) {
 		t.Errorf("services in the run's trace %v", services)
 	}
 	for _, name := range []string{"plugin Dispatch", "plugin Lookup", "plugin Follow", "plugin Stop", "deliver credentials", "await start", "upload output", "resolve credential", "seal envelope", "upload inputs", "admit"} {
-		if len(byName(name, trace.SpanKindUnspecified, "")) == 0 && len(teletest.Named(run, name)) == 0 {
+		if len(teletest.Named(run, name)) == 0 {
 			t.Errorf("no %s span in the run's trace", name)
+		}
+	}
+	// Brief test 4: the uploads carry the terms' endpoint and bucket, and nothing of the presigned URLs.
+	for _, name := range []string{"upload inputs", "upload output"} {
+		for _, upload := range teletest.Named(run, name) {
+			if teletest.Attr(upload, telemetry.AttrStorageEndpoint) != bucket.endpoint || teletest.Attr(upload, telemetry.AttrStorageBucket) != s3Bucket {
+				t.Errorf("%s span storage %q %q, want the terms' %q %q", name, teletest.Attr(upload, telemetry.AttrStorageEndpoint), teletest.Attr(upload, telemetry.AttrStorageBucket), bucket.endpoint, s3Bucket)
+			}
 		}
 	}
 	minimum := 0
@@ -358,28 +415,54 @@ func TestTracedRoundTrip(t *testing.T) {
 			minimum++
 		}
 	}
-	t.Logf("spans per run: map minimum %d, total %d", minimum, len(run))
+	runBytes, runRecords := 0, 0
+	for _, record := range tenantRecords {
+		if string(record.Key) == submit.SpanContext.TraceID().String() {
+			runBytes += len(record.Key) + len(record.Value)
+			runRecords++
+		}
+	}
+	t.Logf("spans per run: map minimum %d, total %d; trace bytes per run %d in %d records; host close %s", minimum, len(run), runBytes, runRecords, closeTook)
 	for _, s := range run {
 		t.Logf("  %-9s %-9s %s", teletest.Resource(s, semconv.ServiceNamespaceKey), s.SpanKind, s.Name)
 	}
-	for _, name := range []string{"receiver start", "custodian rotation", "operator pool apply", "operator tenant add", "operator tenant pool add", "operator tenant host add", "operator receiver apply"} {
+	for _, name := range []string{"receiver start", "custodian rotation", "operator pool apply", "operator tenant add", "operator tenant pool add", "operator tenant host add", "operator receiver provision"} {
 		roots := teletest.Named(spans, name)
 		if len(roots) == 0 || roots[0].Parent.IsValid() {
 			t.Errorf("%s spans %v, want a root", name, roots)
 		}
 	}
-	// Routing: every span of the run, the host's, the receiver's and the custodian's, carries the run's tenant, so the
-	// collector sends the whole trace to the tenant's topic. The spans outside a run, receiver start, custodian rotation
-	// and the operator markers of no tenant, carry none; the tenant markers keep theirs.
+	// Routing: every span of the run, the host's, the receiver's and the custodian's, carries the run's tenant and is
+	// on the tenant's topic, keyed by the run's trace. The spans outside a run, receiver start, custodian rotation and
+	// the operator markers of no tenant, carry none and are on wherry.traces; the tenant markers are on the tenant's.
 	for _, s := range run {
 		if tenant := teletest.Attr(s, telemetry.AttrTenant); tenant != "tenant-a" {
 			t.Errorf("span %s of the %s (%s) in the run's trace carries wherry.tenant %q, want tenant-a", s.Name, teletest.Resource(s, semconv.ServiceNamespaceKey), s.SpanKind, tenant)
 		}
 	}
-	for _, name := range []string{"receiver start", "custodian rotation", "operator pool apply", "operator receiver apply"} {
+	onTopic := map[string]string{}
+	for topic, records := range map[string][]*kgo.Record{telemetry.TraceTopic("tenant-a"): tenantRecords, telemetry.TraceTopic(""): untenantedRecords} {
+		for _, record := range records {
+			for _, s := range teletest.Spans(t, []*kgo.Record{record}) {
+				if s.SpanContext.TraceID().String() != string(record.Key) {
+					t.Errorf("record %d on %s keyed %s holds span %s of trace %s", record.Offset, topic, record.Key, s.Name, s.SpanContext.TraceID())
+				}
+				onTopic[s.Name+" "+s.SpanContext.SpanID().String()] = topic
+			}
+		}
+	}
+	for _, s := range run {
+		if onTopic[s.Name+" "+s.SpanContext.SpanID().String()] != telemetry.TraceTopic("tenant-a") {
+			t.Errorf("span %s of the run is on %s", s.Name, onTopic[s.Name+" "+s.SpanContext.SpanID().String()])
+		}
+	}
+	for _, name := range []string{"receiver start", "custodian rotation", "operator pool apply", "operator receiver provision"} {
 		for _, s := range teletest.Named(spans, name) {
 			if tenant := teletest.Attr(s, telemetry.AttrTenant); tenant != "" {
 				t.Errorf("%s, outside a run, carries wherry.tenant %q", name, tenant)
+			}
+			if topic := onTopic[s.Name+" "+s.SpanContext.SpanID().String()]; topic != telemetry.TraceTopic("") {
+				t.Errorf("%s is on %s, want %s", name, topic, telemetry.TraceTopic(""))
 			}
 		}
 	}
@@ -388,6 +471,9 @@ func TestTracedRoundTrip(t *testing.T) {
 			if tenant := teletest.Attr(s, telemetry.AttrTenant); tenant != "tenant-a" {
 				t.Errorf("%s carries wherry.tenant %q, want tenant-a", name, tenant)
 			}
+			if topic := onTopic[s.Name+" "+s.SpanContext.SpanID().String()]; topic != telemetry.TraceTopic("tenant-a") {
+				t.Errorf("%s is on %s, want %s", name, topic, telemetry.TraceTopic("tenant-a"))
+			}
 		}
 	}
 	if markers := teletest.Named(spans, "operator "); len(markers) == 0 || teletest.Resource(markers[0], semconv.ServiceNameKey) != "wherry-operator" {
@@ -395,7 +481,6 @@ func TestTracedRoundTrip(t *testing.T) {
 	}
 
 	teletest.Check(t, spans, "dns", "tls", "connection refused", "connection closed", "other")
-	hostBundled, receiverBundled := readBundle(t, hostBundle), readBundle(t, receiverBundle)
 	tasks, err := readTasks(ctx, service.Operator, "pool-a")
 	if err != nil {
 		t.Fatal(err)
@@ -422,8 +507,10 @@ func TestTracedRoundTrip(t *testing.T) {
 		t.Fatalf("local record has no redaction key: %s", local)
 	}
 	sentinels = append(sentinels, credentialText, platformText, deployText, deployPath, tracedPathPart, tracedPrompt, tracedAccess, tracedSecret, tracedSetting,
-		hostBundled.Password, receiverBundled.Password, strings.TrimSpace(ca), bucket.endpoint, "X-Amz-Signature", redactionKey, "s3cr3t")
+		hostBundled.Password, receiverBundled.Password, strings.TrimSpace(ca), "X-Amz-Signature", "X-Amz", wire.S3OutputKey("tenant-a", submitted.RunID, "big.bin"),
+		wire.S3InputKey("tenant-a", submitted.RunID, "dataset.bin"), redactionKey, "s3cr3t")
 	teletest.Sentinels(t, spans, sentinels...)
+	teletest.Bytes(t, append(slices.Clone(tenantRecords), untenantedRecords...), sentinels...)
 	var runs int
 	for _, record := range read() {
 		if record.Call == "dispatch" {

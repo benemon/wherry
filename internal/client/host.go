@@ -194,11 +194,17 @@ type Host struct {
 	// follower is the host's reader of the tenant feed, kept while its context lasts.
 	followMu sync.Mutex
 	follower *follower
-	// tracing is the host role's tracer provider; traced holds the feed records whose CONSUMER span this process has
-	// emitted, by topic and offset.
-	tracing  *telemetry.Tracing
-	tracedMu sync.Mutex
-	traced   map[string]bool
+	// tracing is the host role's tracer provider, nil until Trace turns it on; awaited holds, for each run a wait of
+	// this process follows, the feed records whose CONSUMER span it has emitted.
+	tracing   *telemetry.Tracing
+	awaitedMu sync.Mutex
+	awaited   map[string]*awaited
+}
+
+// awaited is a run the process waits on: how many waits follow it and the records traced, by topic and offset.
+type awaited struct {
+	waiters int
+	traced  map[string]bool
 }
 
 // NewHost constructs a host over a plain Kafka connection authenticated as principal.
@@ -213,20 +219,27 @@ func NewHost(kafka *kgo.Client, key ed25519.PrivateKey, principal, stateDir stri
 	if err != nil {
 		return nil, err
 	}
-	tracing, err := telemetry.New(context.Background(), telemetry.RoleHost, telemetry.Names{Tenant: tenant, Host: host})
-	if err != nil {
-		return nil, err
-	}
-	return &Host{kafka: kafka, reader: operator.NewReader(kafka), key: key, tenant: tenant, host: host, stateDir: stateDir, credentials: credentials, catalog: c, git: git, logger: logger, tracing: tracing, traced: map[string]bool{}}, nil
+	return &Host{kafka: kafka, reader: operator.NewReader(kafka), key: key, tenant: tenant, host: host, stateDir: stateDir, credentials: credentials, catalog: c, git: git, logger: logger, awaited: map[string]*awaited{}}, nil
 }
 
-// Close closes the Kafka connections and flushes the host's spans within telemetry.ShutdownBound.
+// Trace turns the host's tracing on, as its configuration's tracing field does: its spans go to its tenant's trace
+// topic through its own Kafka client.
+func (h *Host) Trace() error {
+	tracing, err := telemetry.New(context.Background(), telemetry.RoleHost, telemetry.Names{Tenant: h.tenant, Host: h.host}, h.kafka, h.logger)
+	if err != nil {
+		return err
+	}
+	h.tracing = tracing
+	return nil
+}
+
+// Close flushes the host's spans within telemetry.ShutdownBound, then closes the Kafka connections they went through.
 func (h *Host) Close() {
-	h.reader.Close()
-	h.kafka.Close()
 	if err := h.tracing.Close(); err != nil {
 		h.logger.Printf("tracing: %v", err)
 	}
+	h.reader.Close()
+	h.kafka.Close()
 }
 
 // Register registers the host key on the host's key topic unless that key is already there, and returns its key ID.
@@ -551,7 +564,7 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		if store, err = h.bucket(ctx, pool, storage, resolver); err != nil {
 			return SubmitResult{}, err
 		}
-		submission.Wherry.S3Inputs, err = uploadInputs(ctx, store, storage.Bucket, h.tenant, runID, input.S3Inputs)
+		submission.Wherry.S3Inputs, err = uploadInputs(ctx, store, storage, h.tenant, runID, input.S3Inputs)
 	}
 	if err == nil && continued.last != nil {
 		uploaded := submission.Wherry.S3Inputs[slices.IndexFunc(submission.Wherry.S3Inputs, func(input wire.S3Input) bool { return input.Name == baseBundle })]

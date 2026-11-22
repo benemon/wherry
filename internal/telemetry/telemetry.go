@@ -1,13 +1,14 @@
-// Package telemetry is wherry's OpenTelemetry tracing for the network-map spike (agb-pyn4, step 2): one tracer
-// provider per role, W3C trace context in Kafka record headers, and the attribute allowlist every span keeps to.
+// Package telemetry is wherry's OpenTelemetry tracing: one tracer provider per role, W3C trace context in Kafka record
+// headers, the attribute allowlist every span keeps to, and the transport that writes spans to the trace topics
+// through the process's own Kafka client.
 //
-// Tracing is on only when OTEL_EXPORTER_OTLP_ENDPOINT is set. Off, every provider is the no-op one and no record
-// carries a header. WHERRY_OTEL_NAMING selects the service naming variant, a (default) or b.
+// Tracing is on when a role's configuration says so and the role calls New; a nil Tracing is off, every span under it
+// is the no-op one and no record carries a header.
 package telemetry
 
 import (
 	"context"
-	"os"
+	"log"
 	"slices"
 	"strings"
 	"time"
@@ -16,7 +17,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -33,18 +34,13 @@ const (
 	RoleOperator  = "operator"
 )
 
-// NamingEnv selects the naming variant, a or b. EndpointEnv is the SDK's exporter variable that turns tracing on;
-// TracesEndpointEnv is the SDK's traces-only override, which the exporter reads once tracing is on but which alone
-// leaves it off (brief rule 3).
+// ShutdownBound caps a short process's flush and shutdown of its provider, so an unreachable broker adds no more than
+// this to a command. ExportBound caps one export under it: an export whose records are not acknowledged by then is
+// dropped and reported.
 const (
-	NamingEnv         = "WHERRY_OTEL_NAMING"
-	EndpointEnv       = "OTEL_EXPORTER_OTLP_ENDPOINT"
-	TracesEndpointEnv = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+	ShutdownBound = 2 * time.Second
+	ExportBound   = time.Second
 )
-
-// ShutdownBound caps a short process's flush and shutdown of its provider, so an unreachable endpoint adds no more
-// than this to a command.
-const ShutdownBound = 2 * time.Second
 
 // Header names: the only record headers injected and extracted. The bounds are the W3C sizes: a version 00
 // traceparent is exactly 55 bytes, and tracestate is bounded to 512.
@@ -75,6 +71,8 @@ const (
 	AttrCount            = attribute.Key("wherry.count")
 	AttrSize             = attribute.Key("wherry.size")
 	AttrChunks           = attribute.Key("wherry.chunks")
+	AttrStorageEndpoint  = attribute.Key("wherry.storage.endpoint")
+	AttrStorageBucket    = attribute.Key("wherry.storage.bucket")
 )
 
 // ResourceAllowlist is every attribute key a resource may carry: the role's identity and the SDK's own.
@@ -83,12 +81,13 @@ var ResourceAllowlist = []attribute.Key{
 	semconv.TelemetrySDKNameKey, semconv.TelemetrySDKLanguageKey, semconv.TelemetrySDKVersionKey,
 }
 
-// Allowlist is every attribute key a span, an event or a link may carry.
+// Allowlist is every attribute key a span, an event or a link may carry. It is enforced by the tests of each role,
+// not at export: a span is built from fixed keys and values the role already holds.
 var Allowlist = []attribute.Key{
-	AttrSystemName, semconv.MessagingSystemKey, semconv.MessagingOperationTypeKey, semconv.MessagingOperationNameKey,
+	AttrSystemName, semconv.MessagingOperationTypeKey, semconv.MessagingOperationNameKey,
 	semconv.MessagingDestinationNameKey, semconv.MessagingKafkaOffsetKey, semconv.MessagingConsumerGroupNameKey,
 	AttrRun, AttrAttempt, AttrRetry, AttrTenant, AttrHost, AttrPool, AttrReceiver, AttrProfile, AttrAgent, AttrModel,
-	AttrCredential, AttrCredentialSource, AttrOutput, AttrCount, AttrSize, AttrChunks,
+	AttrCredential, AttrCredentialSource, AttrOutput, AttrCount, AttrSize, AttrChunks, AttrStorageEndpoint, AttrStorageBucket,
 }
 
 // Allowed reports whether key is in the allowlist.
@@ -127,17 +126,13 @@ var Classes = []string{
 	ClassUnsealed, ClassNotLoaded,
 }
 
-// NewExporter builds the exporter every provider sends to. A variable so tests can install an in-memory one.
-var NewExporter = func(ctx context.Context) (sdktrace.SpanExporter, error) {
-	return otlptracehttp.New(ctx)
+// NewExporter builds the exporter every provider sends to, over transport. A variable so tests can install an
+// in-memory one.
+var NewExporter = func(ctx context.Context, transport *Transport) (sdktrace.SpanExporter, error) {
+	return otlptrace.New(ctx, transport)
 }
 
 var propagator = propagation.TraceContext{}
-
-// Enabled reports whether tracing is on: OTEL_EXPORTER_OTLP_ENDPOINT is set. The traces-only variable does not count.
-func Enabled() bool {
-	return os.Getenv(EndpointEnv) != ""
-}
 
 // Names identify the process in its role; the ones a role does not have stay empty.
 type Names struct {
@@ -154,32 +149,29 @@ type Tracing struct {
 	global bool
 }
 
-// New is role's tracing for the process named by names, built from the environment: off unless an endpoint is set.
-func New(ctx context.Context, role string, names Names) (*Tracing, error) {
-	identity := identityOf(role, names)
+// New is role's tracing for the process named by names, exporting through kafka, the process's own non-transactional
+// client, which it never closes, and reporting export failures to logger.
+func New(ctx context.Context, role string, names Names, kafka *kgo.Client, logger *log.Logger) (*Tracing, error) {
 	tenant := ""
 	if role == RoleHost {
 		tenant = names.Tenant
 	}
-	if !Enabled() {
-		return &Tracing{Tracer: noop.NewTracerProvider().Tracer("wherry"), identity: identity, tenant: tenant}, nil
-	}
 	// The resource is the role's identity and the SDK's own attributes alone: no environment, host or process detector.
-	attrs := append(serviceOf(role, names, os.Getenv(NamingEnv) == "b"), semconv.ServiceNamespace(role))
+	attrs := append(serviceOf(role, names), semconv.ServiceNamespace(role))
 	res, err := resource.New(ctx, resource.WithSchemaURL(semconv.SchemaURL), resource.WithTelemetrySDK(), resource.WithAttributes(attrs...))
 	if err != nil {
 		return nil, err
 	}
-	exporter, err := NewExporter(ctx)
+	exporter, err := NewExporter(ctx, NewTransport(kafka))
 	if err != nil {
 		return nil, err
 	}
 	provider := sdktrace.NewTracerProvider(
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
 		sdktrace.WithResource(res),
-		sdktrace.WithSpanProcessor(sdktrace.NewBatchSpanProcessor(resourced{exporter, res})),
+		sdktrace.WithSpanProcessor(sdktrace.NewBatchSpanProcessor(resourced{exporter, res}, sdktrace.WithExportTimeout(ExportBound))),
 	)
-	t := &Tracing{Tracer: provider.Tracer("wherry"), identity: identity, tenant: tenant, sdk: provider}
+	t := &Tracing{Tracer: provider.Tracer("wherry"), identity: identityOf(role, names), tenant: tenant, sdk: provider}
 	// The process's first provider stands as the global one; the custodian's, inside a receiver, does not.
 	if role != RoleCustodian {
 		if _, set := otel.GetTracerProvider().(*sdktrace.TracerProvider); !set {
@@ -187,6 +179,7 @@ func New(ctx context.Context, role string, names Names) (*Tracing, error) {
 			t.global = true
 		}
 	}
+	reportTo(logger)
 	return t, nil
 }
 
@@ -212,14 +205,11 @@ type withResource struct {
 
 func (s withResource) Resource() *resource.Resource { return s.res }
 
-func serviceOf(role string, names Names, variantB bool) []attribute.KeyValue {
+func serviceOf(role string, names Names) []attribute.KeyValue {
 	switch role {
 	case RoleHost:
 		return []attribute.KeyValue{semconv.ServiceName("wherry-host." + names.Tenant + "." + names.Host)}
 	case RoleReceiver:
-		if variantB {
-			return []attribute.KeyValue{semconv.ServiceName("wherry-pool." + names.Pool), semconv.ServiceInstanceID(names.Receiver)}
-		}
 		return []attribute.KeyValue{semconv.ServiceName("wherry-receiver." + names.Pool + "." + names.Receiver)}
 	case RoleCustodian:
 		return []attribute.KeyValue{semconv.ServiceName("wherry-custodian." + names.Pool)}
@@ -263,7 +253,8 @@ func (t *Tracing) Flush(ctx context.Context) error {
 	return t.sdk.ForceFlush(ctx)
 }
 
-// Close is Shutdown within ShutdownBound, for a short process.
+// Close is Shutdown within ShutdownBound, for a short process. Each process closes its tracing before the Kafka client
+// the spans go through.
 func (t *Tracing) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), ShutdownBound)
 	defer cancel()
@@ -346,11 +337,10 @@ func (t *Tracing) ConsumerNamed(ctx context.Context, record *kgo.Record, name st
 	return t.Start(t.Extract(ctx, record), name, trace.SpanKindConsumer, attrs...)
 }
 
-// messaging are the semconv messaging attributes of a span. messaging.system.name is the semconv 1.45 key;
-// messaging.system is the older key SigNoz's messaging view still reads.
+// messaging are the semconv messaging attributes of a span.
 func messaging(operation string, operationType attribute.KeyValue, topic string) []attribute.KeyValue {
 	return []attribute.KeyValue{
-		AttrSystemName.String("kafka"), semconv.MessagingSystemKafka, operationType,
+		AttrSystemName.String("kafka"), operationType,
 		semconv.MessagingOperationName(operation), semconv.MessagingDestinationName(topic),
 	}
 }

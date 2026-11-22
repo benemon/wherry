@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"io"
 	"log"
 	"slices"
 	"strings"
@@ -146,8 +147,9 @@ func headerSpan(t *testing.T, record *kgo.Record) trace.SpanID {
 
 // Brief test 1, receiver side: every attempt's CONSUMER span is a child of the host's send span, a redelivery gives two
 // sibling attempts under it, the run is the attempt's INTERNAL child through the production executeDelivery path, and
-// the open exchange is traced in both directions. Brief test 3, receiver side: the delivered credential, the envelope,
-// the redaction key, the prompt, a presigned URL and the incoming tracestate reach no span.
+// the open exchange is traced in both directions, the custodian's spans naming the verified task's run. Brief test 3,
+// receiver side: the delivered credential, the envelope, the redaction key, the prompt, a presigned URL and the
+// incoming tracestate reach no span.
 func TestTracedAttemptsAreSiblingsUnderTheHostSend(t *testing.T) {
 	exporter := teletest.Install(t)
 	s3 := newStore(t)
@@ -252,6 +254,9 @@ func TestTracedAttemptsAreSiblingsUnderTheHostSend(t *testing.T) {
 			if s.SpanKind != trace.SpanKindConsumer || namespace(parent) != telemetry.RoleReceiver || parent.SpanKind != trace.SpanKindProducer || teletest.Resource(s, semconv.ServiceNameKey) != "wherry-custodian."+testPool {
 				t.Fatalf("custodian process span: kind %s, parent %s of %s", s.SpanKind, parent.Name, namespace(parent))
 			}
+			if teletest.Attr(s, telemetry.AttrRun) != testRun("run-a") || teletest.Attr(parent, telemetry.AttrRun) != testRun("run-a") {
+				t.Fatalf("custodian process span names run %q under a request naming %q, want the verified task's", teletest.Attr(s, telemetry.AttrRun), teletest.Attr(parent, telemetry.AttrRun))
+			}
 		case telemetry.RoleReceiver:
 			receiver++
 			if s.SpanKind != trace.SpanKindConsumer || namespace(parent) != telemetry.RoleCustodian || parent.SpanKind != trace.SpanKindProducer || parentOf(t, ids, parent).SpanKind != trace.SpanKindConsumer {
@@ -261,6 +266,11 @@ func TestTracedAttemptsAreSiblingsUnderTheHostSend(t *testing.T) {
 	}
 	if custodian != len(requests) || receiver != len(requests) {
 		t.Fatalf("custodian consumers %d, receiver wrap consumers %d; want %d each", custodian, receiver, len(requests))
+	}
+	for _, wrap := range wraps {
+		if teletest.Attr(wrap, telemetry.AttrRun) != testRun("run-a") {
+			t.Fatalf("wrap send names run %q, want the verified task's", teletest.Attr(wrap, telemetry.AttrRun))
+		}
 	}
 	// The terminal records: the result and the feed's terminal status each go out under a PRODUCER span of their own,
 	// both under the second attempt's run, and each record carries its own span's context and no other.
@@ -295,12 +305,45 @@ func TestTracedAttemptsAreSiblingsUnderTheHostSend(t *testing.T) {
 			t.Errorf("no %s span", name)
 		}
 	}
-	// Every span of the run, the receiver's and the custodian's, carries the run's tenant, for the collector to route
+	// Every span of the run, the receiver's and the custodian's, carries the run's tenant, for the transport to route
 	// the whole trace to the tenant's topic; the spans outside a run carry none.
 	tenanted(t, spans, send.TraceID(), testTenant)
 	teletest.Check(t, spans, rejectionLabels...)
 	parsed := f.parse(t, record)
-	teletest.Sentinels(t, spans, testToken, string(testRedactionKey), parsed.Wherry.Envelope, parsed.Wherry.Wrap, prompt, tracestate, "s3cr3t", s3Signature, "X-Amz-Signature", s3.endpoint())
+	teletest.Sentinels(t, spans, testToken, string(testRedactionKey), parsed.Wherry.Envelope, parsed.Wherry.Wrap, prompt, tracestate, "s3cr3t", s3Signature, "X-Amz-Signature")
+}
+
+// Brief test 4, receiver side: the output upload span carries the pool terms' endpoint and bucket; the presigned PUT
+// URL, with its distinctive query and the object's key, reaches no span.
+func TestTracedUploadOutputCarriesTheTerms(t *testing.T) {
+	exporter := teletest.Install(t)
+	s := newStore(t)
+	f := s3Fixture(t, s, resultStream, []pluginsdk.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
+	ctx, stop := context.WithCancel(f.ctx)
+	defer stop()
+	f.run(t, ctx)
+	f.submitTraced(t, nil, withS3)
+	if task := f.await(t, testRun("run-a"), anyTask); task.Status.State != wire.TaskStateCompleted {
+		t.Fatalf("task %+v; logs:\n%s", task.Status, f.logs.String())
+	}
+	spans := f.spansWhen(t, exporter, ended("run", 1))
+	uploads := teletest.Named(spans, "upload output")
+	if len(uploads) != 1 || uploads[0].SpanKind != trace.SpanKindClient || uploads[0].Status.Code != codes.Unset {
+		t.Fatalf("upload output spans %v, want one CLIENT span", uploads)
+	}
+	upload := uploads[0]
+	if teletest.Attr(upload, telemetry.AttrStorageEndpoint) != s.endpoint() || teletest.Attr(upload, telemetry.AttrStorageBucket) != s3Bucket {
+		t.Fatalf("upload span storage %q %q, want the terms' %q %q", teletest.Attr(upload, telemetry.AttrStorageEndpoint), teletest.Attr(upload, telemetry.AttrStorageBucket), s.endpoint(), s3Bucket)
+	}
+	if teletest.Attr(upload, telemetry.AttrOutput) != "report.pdf" || teletest.Attr(upload, telemetry.AttrSize) != "6" || teletest.Attr(upload, telemetry.AttrTenant) != testTenant {
+		t.Fatalf("upload span attributes %v", upload.Attributes)
+	}
+	key := wire.S3OutputKey(testTenant, testRun("run-a"), "report.pdf")
+	if data, ok := s.put("/" + s3Bucket + "/" + key); !ok || string(data) != "report" {
+		t.Fatalf("store holds %q, %v for the output", data, ok)
+	}
+	teletest.Check(t, spans, rejectionLabels...)
+	teletest.Sentinels(t, spans, s3Signature, "X-Amz-Signature", "X-Amz", key, "/"+s3Bucket+"/", testToken, "s3cr3t")
 }
 
 // Brief test 2, receiver side: a rejection's spans carry the rejectAs label, never its reason, which quotes the task's
@@ -339,45 +382,13 @@ func TestTracedRejectionCarriesTheLabel(t *testing.T) {
 	teletest.Sentinels(t, spans, status.StatusUpdate.Status.Message.Parts[0].Text, wire.RFC3339(time.Now().Add(-time.Minute).Unix())[:13])
 }
 
-// Variant B names the pool as the receiver's service, with the receiver as its instance; the custodian keeps its own.
-func TestTracedVariantBNamesThePool(t *testing.T) {
-	exporter := teletest.Install(t)
-	t.Setenv(telemetry.NamingEnv, "b")
-	f := newBareFixture(t)
-	t.Cleanup(f.receiver.shutdownTracing)
-	_, receiver := f.receiver.tracing.Root(f.ctx, "receiver start", trace.SpanKindInternal)
-	receiver.End()
-	_, custodian := f.receiver.custodian.Root(f.ctx, "custodian rotation", trace.SpanKindInternal)
-	custodian.End()
-	spans := f.spans(t, exporter)
-	for _, s := range spans {
-		switch s.Name {
-		case "receiver start":
-			if teletest.Resource(s, semconv.ServiceNameKey) != "wherry-pool."+testPool || teletest.Resource(s, semconv.ServiceInstanceIDKey) != testReceiver || namespace(s) != telemetry.RoleReceiver {
-				t.Fatalf("receiver resource %v", s.Resource.Attributes())
-			}
-		case "custodian rotation":
-			if teletest.Resource(s, semconv.ServiceNameKey) != "wherry-custodian."+testPool || namespace(s) != telemetry.RoleCustodian {
-				t.Fatalf("custodian resource %v", s.Resource.Attributes())
-			}
-		}
-		if tenant := teletest.Attr(s, telemetry.AttrTenant); tenant != "" {
-			t.Fatalf("%s, outside a run, carries wherry.tenant %q", s.Name, tenant)
-		}
-	}
-	if len(spans) != 2 {
-		t.Fatalf("spans %d, want two", len(spans))
-	}
-	teletest.Check(t, spans)
-}
-
-// Brief test 4, receiver side: with no endpoint set the global provider is the no-op one, nothing is exported, and no
-// record the receiver produces carries a header, whatever the incoming record carries. The traces-only endpoint
-// variable does not turn tracing on (rule 3).
+// Tracing is off by default: without the local configuration's tracing field the global provider is the no-op one,
+// nothing is exported, and no record the receiver produces carries a header, whatever the incoming record and the
+// OTLP exporter variables carry.
 func TestTracingIsOffByDefault(t *testing.T) {
 	exporter := teletest.Hook(t)
-	t.Setenv(telemetry.EndpointEnv, "")
-	t.Setenv(telemetry.TracesEndpointEnv, "http://127.0.0.1:1")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
+	t.Setenv("OTEL_TRACES_EXPORTER", "otlp")
 	f := newFixture(t, resultStream)
 	ctx, stop := context.WithCancel(f.ctx)
 	defer stop()
@@ -388,13 +399,13 @@ func TestTracingIsOffByDefault(t *testing.T) {
 		t.Fatalf("task %+v", task.Status)
 	}
 	if f.receiver.tracing.Enabled() || f.receiver.custodian.Enabled() {
-		t.Fatal("tracing is on without an endpoint")
+		t.Fatal("tracing is on without the configuration's tracing field")
 	}
 	if _, sdk := otel.GetTracerProvider().(*sdktrace.TracerProvider); sdk {
-		t.Fatal("the global tracer provider is the SDK's without an endpoint")
+		t.Fatal("the global tracer provider is the SDK's without the configuration's tracing field")
 	}
 	if spans := exporter.Spans(); len(spans) != 0 {
-		t.Fatalf("%d spans exported without an endpoint", len(spans))
+		t.Fatalf("%d spans exported without the configuration's tracing field", len(spans))
 	}
 	for _, topic := range []string{operator.PoolEventsTopic(testPool), operator.TenantTopic(testTenant), operator.TenantTranscriptTopic(testTenant), record.Topic} {
 		for _, produced := range f.records(t, topic) {
@@ -413,14 +424,14 @@ func TestTracingIsOffByDefault(t *testing.T) {
 func TestTracingShutsTheFirstProviderDownWhenTheSecondFails(t *testing.T) {
 	exporter := teletest.Install(t)
 	calls := 0
-	telemetry.NewExporter = func(context.Context) (sdktrace.SpanExporter, error) {
+	telemetry.NewExporter = func(context.Context, *telemetry.Transport) (sdktrace.SpanExporter, error) {
 		if calls++; calls == 2 {
 			return nil, errors.New("exporter refused")
 		}
 		return exporter, nil
 	}
 	logs := &strings.Builder{}
-	r := &Receiver{id: testReceiver, logger: log.New(logs, "", 0)}
+	r := &Receiver{id: testReceiver, logger: log.New(logs, "", 0), traced: true}
 	began := time.Now()
 	err := r.trace(context.Background(), testPool)
 	if err == nil || !strings.Contains(err.Error(), "exporter refused") {

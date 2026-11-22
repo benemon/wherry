@@ -404,9 +404,12 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 			continue
 		}
 		// The custodian's CONSUMER span of the request, parented through the request's header, and the PRODUCER span of
-		// its answer, whose context the answer's records carry back. Both carry the tenant of the task the decision
-		// looked up, none when the lookup found no task.
-		attrs := []attribute.KeyValue{telemetry.AttrRun.String(string(request.record.Key)), semconv.MessagingKafkaOffset(int(request.record.Offset))}
+		// its answer, whose context the answer's records carry back. Both carry the run and tenant of the verified task
+		// the decision looked up, neither when the lookup found no task.
+		attrs := []attribute.KeyValue{semconv.MessagingKafkaOffset(int(request.record.Offset))}
+		if check.run != "" {
+			attrs = append(attrs, telemetry.AttrRun.String(check.run))
+		}
 		if request.request != nil {
 			attrs = append(attrs, telemetry.AttrAttempt.Int64(request.request.Attempt), telemetry.AttrReceiver.String(request.request.Receiver))
 		}
@@ -534,9 +537,10 @@ type claimCheck struct {
 	ads       []*kgo.Record
 	adsRead   bool
 	changed   string
-	// refused is the reason of the refusal the last decision answered with, empty for a wrap; tenant is the tenant of
-	// the task the last decision looked up, empty when the lookup found none.
+	// refused is the reason of the refusal the last decision answered with, empty for a wrap; run and tenant are the
+	// verified task's the last decision looked up, empty when the lookup found none.
 	refused string
+	run     string
 	tenant  string
 }
 
@@ -544,7 +548,7 @@ type claimCheck struct {
 // transaction: a new claim decision with the attempt wrap or the refusal. None while the custodian waits for a key.
 func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Record {
 	r := c.r
-	c.changed, c.refused, c.tenant = "", "", ""
+	c.changed, c.refused, c.run, c.tenant = "", "", "", ""
 	var decision *wire.ClaimDecision
 	answer := func(value wire.Record) []*kgo.Record {
 		event := func(value wire.Record) *kgo.Record {
@@ -570,7 +574,7 @@ func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Reco
 		return refuse(reason)
 	}
 	binding, statuses := task.record.Wherry, c.events.statuses[request.Run]
-	c.tenant = binding.Tenant
+	c.run, c.tenant = binding.Run, binding.Tenant
 	adopting := slices.ContainsFunc(statuses, func(status wire.RunStatus) bool {
 		return status.Wherry.TaskHash == task.hash && status.Wherry.Kind == "adopting" && status.Wherry.Receiver == request.Receiver && status.Wherry.Attempt == request.Attempt
 	})

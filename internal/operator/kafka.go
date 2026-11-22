@@ -558,7 +558,7 @@ func (service *Service) ReceiverCheck(ctx context.Context, config ReceiverConfig
 
 // ReceiverAdd provisions config's receiver and writes its bundle, naming broker, to bundlePath.
 func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, broker, bundlePath string) (err error) {
-	ctx, span := service.marker(ctx, "receiver apply", telemetry.AttrReceiver.String(config.Receiver), telemetry.AttrPool.String(config.Pool))
+	ctx, span := service.marker(ctx, "receiver provision", telemetry.AttrReceiver.String(config.Receiver), telemetry.AttrPool.String(config.Pool))
 	defer ended(span, &err)
 	bundle, err := createBundle(bundlePath, false)
 	if err != nil {
@@ -654,7 +654,7 @@ func (service *Service) reissue(ctx context.Context, principal, bundlePath strin
 // it. With dryRun it writes nothing and returns the configuration as the record
 // would hold it.
 func (service *Service) ReceiverUpdate(ctx context.Context, config ReceiverConfig, dryRun bool) (recorded ReceiverConfig, err error) {
-	ctx, span := service.marker(ctx, "receiver apply", telemetry.AttrReceiver.String(config.Receiver), telemetry.AttrPool.String(config.Pool))
+	ctx, span := service.marker(ctx, "receiver reconfigure", telemetry.AttrReceiver.String(config.Receiver), telemetry.AttrPool.String(config.Pool))
 	defer ended(span, &err)
 	state, err := service.LoadState(ctx)
 	if err != nil {

@@ -183,6 +183,15 @@ func (h *Host) resubmit(ctx context.Context, runID string, lost bool) (string, e
 	ctx, span := h.tracing.Linked(ctx, "submit", trace.SpanKindInternal, telemetry.ParseTraceParent(local.TraceParent),
 		telemetry.AttrRun.String(local.Replacement), telemetry.AttrPool.String(local.Pool), telemetry.AttrAgent.String(local.Placement.Agent), telemetry.AttrModel.String(local.Placement.Model))
 	defer span.End()
+	replacement, err := h.replace(ctx, runID, local, now)
+	if err != nil {
+		telemetry.Fail(span, submitClass(err))
+	}
+	return replacement, err
+}
+
+// replace publishes local's replacement, the resubmission of runID, submitted at now.
+func (h *Host) replace(ctx context.Context, runID string, local *runRecord, now time.Time) (string, error) {
 	v, err := h.load(ctx)
 	if err != nil {
 		return "", err

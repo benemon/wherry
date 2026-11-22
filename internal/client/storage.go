@@ -183,11 +183,13 @@ func (r *redactedReader) Read(p []byte) (int, error) {
 func (r *redactedReader) Close() error { return r.store.wrap(r.object.Close()) }
 
 // uploadInputs puts each file under the run's prefix with one PUT and returns the S3 inputs with the size and SHA-256 of
-// the bytes it sent. Its span carries the count and the bytes, never a URL or the store's answer.
-func uploadInputs(ctx context.Context, store *store, bucket, tenant, run string, files []S3File) ([]wire.S3Input, error) {
-	_, span := telemetry.ChildOf(ctx, "upload inputs", trace.SpanKindClient, telemetry.AttrCount.Int(len(files)))
+// the bytes it sent. Its span carries the count, the bytes and the pool terms' endpoint and bucket, never a URL or
+// the store's answer.
+func uploadInputs(ctx context.Context, store *store, storage *operator.Storage, tenant, run string, files []S3File) ([]wire.S3Input, error) {
+	_, span := telemetry.ChildOf(ctx, "upload inputs", trace.SpanKindClient, telemetry.AttrCount.Int(len(files)),
+		telemetry.AttrStorageEndpoint.String(storage.Endpoint), telemetry.AttrStorageBucket.String(storage.Bucket))
 	defer span.End()
-	inputs, err := putInputs(ctx, store, bucket, tenant, run, files)
+	inputs, err := putInputs(ctx, store, storage.Bucket, tenant, run, files)
 	if err != nil {
 		telemetry.Fail(span, telemetry.ClassFailed)
 		return nil, err

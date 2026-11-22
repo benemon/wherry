@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"maps"
 	"net"
 	"os"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/benemon/wherry/internal/catalog"
 	"github.com/benemon/wherry/internal/operator"
+	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/charmbracelet/huh"
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -27,11 +29,13 @@ import (
 )
 
 // operatorConfig is a working directory's operator.yaml: how its commands connect as wherry.operator. CAFile is empty
-// for the system roots; a relative PasswordFile or CAFile is in the working directory.
+// for the system roots; a relative PasswordFile or CAFile is in the working directory. Tracing writes each command's
+// span to the trace topics; off by default.
 type operatorConfig struct {
 	Broker       string `yaml:"broker"`
 	CAFile       string `yaml:"ca_file,omitempty"`
 	PasswordFile string `yaml:"password_file"`
+	Tracing      bool   `yaml:"tracing,omitempty"`
 }
 
 // operatorInit, connected as the Kafka super user the flags or prompts name, delegates provisioning to wherry.operator
@@ -199,7 +203,7 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 		os.Remove(temp.Name())
 		return err
 	}
-	if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{answers["broker"], caFile, "operator.password"}); err != nil {
+	if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{Broker: answers["broker"], CAFile: caFile, PasswordFile: "operator.password"}); err != nil {
 		return err
 	}
 	if err := ignore(filepath.Join(dir, ".gitignore"), "operator.password", "bundles/", "storage/"); err != nil {
@@ -428,7 +432,14 @@ func operatorService(dir string) (*operator.Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &operator.Service{Operator: client, Broker: config.Broker, CA: ca, Storage: func(tenant string) (operator.StorageKeys, error) { return tenantStorageKeys(dir, tenant) }}, nil
+	service := &operator.Service{Operator: client, Broker: config.Broker, CA: ca, Storage: func(tenant string) (operator.StorageKeys, error) { return tenantStorageKeys(dir, tenant) }}
+	if config.Tracing {
+		if service.Tracing, err = telemetry.New(context.Background(), telemetry.RoleOperator, telemetry.Names{}, client, log.New(os.Stderr, "wherry: ", 0)); err != nil {
+			client.Close()
+			return nil, fmt.Errorf("tracing: %w", err)
+		}
+	}
+	return service, nil
 }
 
 func inDir(dir, path string) string {

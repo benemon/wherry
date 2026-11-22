@@ -5,6 +5,8 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,11 +19,14 @@ import (
 	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/benemon/wherry/internal/telemetry/teletest"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/sasl/scram"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
+	"gopkg.in/yaml.v3"
 )
 
 // receiverSend stands for a receiver's send span: a span context and its traceparent header.
@@ -34,8 +39,8 @@ func receiverSend() (trace.SpanContext, kgo.RecordHeader) {
 	return sc, kgo.RecordHeader{Key: "traceparent", Value: []byte("00-" + traceID.String() + "-" + spanID.String() + "-01")}
 }
 
-// feedTraced is feed with resultHeader on the result record and terminalHeader on the terminal status, as a receiver's
-// terminal sends put them there.
+// feedTraced is feed with resultHeader on the result record and terminalHeader on each terminal status, as a
+// receiver's terminal sends put them there.
 func (r *testReceiver) feedTraced(t *testing.T, ctx context.Context, runID string, resultHeader, terminalHeader kgo.RecordHeader, values ...[]byte) {
 	t.Helper()
 	producer, err := kgo.NewClient(append(r.kafka.Opts(), kgo.TransactionalID(operator.TransactionalPrefix(r.pool)+runID))...)
@@ -89,12 +94,12 @@ func taskRecord(t *testing.T, f *fixture, kafka *kgo.Client, pool, runID string)
 
 // Brief test 1, host side: submit is the root, its send PRODUCER puts the trace context on the task record alone, the
 // result's and the terminal status's CONSUMER spans are each a child of their own record's header and emitted once
-// per record, and a cancel is in the run's trace under the submit context the local record saved. Brief test 3, host
-// side: credential values, source paths and argv, the prompt, the envelope and the redaction key reach no span.
+// per record, for the records derive accepts into the outcome alone, and a cancel is in the run's trace under the
+// submit context the local record saved. Brief test 3, host side: credential values, source paths and argv, the
+// prompt, the envelope and the redaction key reach no span.
 func TestTracedSubmitSendsTheHeaderAndReadsTheResult(t *testing.T) {
 	exporter := teletest.Install(t)
 	f := newFixture(t)
-	t.Cleanup(func() { _ = f.host.tracing.Close() })
 	f.host.credentials["deploy-key"] = credential.Source{Command: []string{"cat", f.secret}}
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, nil)
@@ -151,11 +156,13 @@ func TestTracedSubmitSendsTheHeaderAndReadsTheResult(t *testing.T) {
 		t.Fatalf("local record trace parent %q, %v; want the submit's", local.TraceParent, err)
 	}
 
+	// The feed: the second attempt's result and terminal status end the run; a late terminal of the first attempt,
+	// authorised and kept but not admitted by derive, gets no span.
 	task := receiver.claim(t, f.ctx, runID)[0]
 	resultSend, resultHeader := receiverSend()
 	terminalSend, terminalHeader := receiverSend()
 	receiver.feedTraced(t, f.ctx, runID, resultHeader, terminalHeader, receiver.echo(t, task), receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil),
-		receiver.result(t, task, 1, wire.TaskStateCompleted, nil), receiver.terminal(t, task, 1, wire.TaskStateCompleted, 1))
+		receiver.result(t, task, 2, wire.TaskStateCompleted, nil), receiver.terminal(t, task, 2, wire.TaskStateCompleted, 1), receiver.terminal(t, task, 1, wire.TaskStateCanceled, 1))
 	if awaited, err := f.host.Await(f.ctx, runID, 5*time.Second); err != nil || awaited.Status.State != wire.TaskStateCompleted {
 		t.Fatalf("await %+v, %v", awaited, err)
 	}
@@ -185,6 +192,9 @@ func TestTracedSubmitSendsTheHeaderAndReadsTheResult(t *testing.T) {
 			t.Fatalf("%s CONSUMER spans under the receiver's send %s: %d, want one", name, send.SpanID(), under)
 		}
 	}
+	if len(f.host.awaited) != 0 {
+		t.Fatalf("awaited runs after the wait: %d, want the dedup state dropped", len(f.host.awaited))
+	}
 
 	if _, err := f.host.Cancel(f.ctx, runID); err != nil {
 		t.Fatal(err)
@@ -212,13 +222,59 @@ func TestTracedSubmitSendsTheHeaderAndReadsTheResult(t *testing.T) {
 		string(local.RedactionKey), base64.StdEncoding.EncodeToString(local.RedactionKey), "s3cr3t")
 }
 
+// Brief test 4, host side: the input upload span carries the pool terms' endpoint and bucket, and nothing of the
+// presigned URLs the envelope carries. Brief test 3: the keys that signed the uploads reach no span.
+func TestTracedUploadInputsCarryTheTerms(t *testing.T) {
+	exporter := teletest.Install(t)
+	o := newUploadOracle(t)
+	f := newFixture(t)
+	terms := testTerms()
+	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
+	if err := f.service.PoolApply(f.ctx, "pool-s3", terms, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.TenantPoolAdd(f.ctx, "tenant-a", "pool-s3"); err != nil {
+		t.Fatal(err)
+	}
+	f.host.storage = map[string]StorageConfig{"pool-s3": *o.config}
+	maps.Copy(f.host.credentials, o.sources)
+	receiver := f.addReceiver(t, "receiver-s3", "pool-s3")
+	receiver.advertise(t, f.ctx, nil)
+	file, _ := randomFile(t, "dataset.bin", 1024)
+	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "upload", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}},
+		Outputs: []wire.ExpectedOutput{{Name: "report.pdf", Required: true, Storage: wire.StorageS3}}, EndBy: time.Now().Add(30 * time.Minute), StartBy: time.Now().Add(10 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spans := f.host.spans(t, exporter)
+	uploads := teletest.Named(spans, "upload inputs")
+	if len(uploads) != 1 || uploads[0].SpanKind != trace.SpanKindClient || uploads[0].Status.Code != codes.Unset {
+		t.Fatalf("upload spans %v, want one CLIENT span", uploads)
+	}
+	if endpoint, bucket := teletest.Attr(uploads[0], telemetry.AttrStorageEndpoint), teletest.Attr(uploads[0], telemetry.AttrStorageBucket); endpoint != o.endpoint || bucket != testBucket {
+		t.Fatalf("upload span storage %q %q, want the terms' %q %q", endpoint, bucket, o.endpoint, testBucket)
+	}
+	if count, size := teletest.Attr(uploads[0], telemetry.AttrCount), teletest.Attr(uploads[0], telemetry.AttrSize); count != "1" || size != "1024" {
+		t.Fatalf("upload span count %s size %s", count, size)
+	}
+	task := taskRecord(t, f, receiver.kafka, "pool-s3", submitted.RunID)
+	payload := string(payloadOf(t, task.Value))
+	_, envelope, _ := strings.Cut(payload, `"envelope":"`)
+	envelope, _, _ = strings.Cut(envelope, `"`)
+	if len(envelope) < 40 {
+		t.Fatalf("task record carries no envelope: %s", payload)
+	}
+	teletest.Check(t, spans)
+	teletest.Sentinels(t, spans, envelope, "X-Amz-Signature", "X-Amz", wire.S3InputKey("tenant-a", submitted.RunID, "dataset.bin"), wire.S3OutputKey("tenant-a", submitted.RunID, "report.pdf"),
+		o.config.AccessKey, o.config.SecretKey, "s3cr3t")
+}
+
 // Brief test 3, host side: a storage refusal naming the access key, raised before store.wrap, leaves the keys out of
-// the upload span, which carries a fixed class alone.
+// the upload span, which carries a fixed class and the terms' endpoint and bucket alone.
 func TestTracedUploadFailureKeepsTheStorageKeys(t *testing.T) {
 	exporter := teletest.Install(t)
 	server := refusingStore(t)
 	f := newFixture(t)
-	t.Cleanup(func() { _ = f.host.tracing.Close() })
 	const access, secret = "AKIAS3CR3TACCESSKEY", "s3cr3t-secret-key-value"
 	accessFile, secretFile := filepath.Join(t.TempDir(), "access"), filepath.Join(t.TempDir(), "secret")
 	for path, value := range map[string]string{accessFile: access, secretFile: secret} {
@@ -249,18 +305,20 @@ func TestTracedUploadFailureKeepsTheStorageKeys(t *testing.T) {
 	if len(uploads) != 1 || uploads[0].SpanKind != trace.SpanKindClient || uploads[0].Status.Code != codes.Error || uploads[0].Status.Description != telemetry.ClassFailed || len(uploads[0].Events) != 0 {
 		t.Fatalf("upload spans %v, want one failed CLIENT span without events", uploads)
 	}
+	if teletest.Attr(uploads[0], telemetry.AttrStorageEndpoint) != server.URL || teletest.Attr(uploads[0], telemetry.AttrStorageBucket) != testBucket {
+		t.Fatalf("upload span attributes %v, want the terms' endpoint and bucket", uploads[0].Attributes)
+	}
 	if submits := teletest.Named(spans, "submit"); len(submits) != 1 || submits[0].Status.Description != telemetry.ClassError {
 		t.Fatalf("submit spans %v, want one failed with the generic class", submits)
 	}
 	teletest.Check(t, spans)
-	teletest.Sentinels(t, spans, access, secret, server.URL, "s3cr3t")
+	teletest.Sentinels(t, spans, access, secret, "s3cr3t")
 }
 
 // A cancel of a run whose local record saved no trace context, submitted while tracing was off, is a root of its own
 // with no parent and nothing to link.
 func TestTracedCancelWithoutASavedContextIsARoot(t *testing.T) {
 	exporter := teletest.Hook(t)
-	t.Setenv(telemetry.EndpointEnv, "")
 	f := newFixture(t)
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, nil)
@@ -268,9 +326,11 @@ func TestTracedCancelWithoutASavedContextIsARoot(t *testing.T) {
 	if local, err := f.host.localRun(submitted.RunID); err != nil || local.TraceParent != "" {
 		t.Fatalf("local record trace parent %q, %v; want none", local.TraceParent, err)
 	}
-	t.Setenv(telemetry.EndpointEnv, "http://127.0.0.1:1")
 	restarted, err := NewHost(f.host.kafka, f.host.key, operator.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, nil, f.host.logger)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.Trace(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = restarted.tracing.Close() })
@@ -285,18 +345,18 @@ func TestTracedCancelWithoutASavedContextIsARoot(t *testing.T) {
 	teletest.Check(t, spans)
 }
 
-// Brief test 4, host side: with no endpoint set the task record carries no header and nothing is exported. The
-// traces-only endpoint variable does not turn tracing on (rule 3).
+// Tracing is off by default: without the configuration's tracing field the task record carries no header and nothing
+// is exported, whatever the OTLP exporter variables say.
 func TestTracingIsOffByDefaultAtTheHost(t *testing.T) {
 	exporter := teletest.Hook(t)
-	t.Setenv(telemetry.EndpointEnv, "")
-	t.Setenv(telemetry.TracesEndpointEnv, "http://127.0.0.1:1")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
+	t.Setenv("OTEL_TRACES_EXPORTER", "otlp")
 	f := newFixture(t)
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, nil)
 	submitted := f.submit(t, defaultSelector())
 	if f.host.tracing.Enabled() {
-		t.Fatal("tracing is on without an endpoint")
+		t.Fatal("tracing is on without the configuration's tracing field")
 	}
 	if record := taskRecord(t, f, receiver.kafka, "pool-a", submitted.RunID); len(record.Headers) != 0 {
 		t.Fatalf("task record carries headers %v", record.Headers)
@@ -308,7 +368,11 @@ func TestTracingIsOffByDefaultAtTheHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	if spans := exporter.Spans(); len(spans) != 0 {
-		t.Fatalf("%d spans exported without an endpoint", len(spans))
+		t.Fatalf("%d spans exported without the configuration's tracing field", len(spans))
+	}
+	var config Config
+	if err := yaml.Unmarshal([]byte("bundle: b.yaml\ntracing: true\n"), &config); err != nil || !config.Tracing {
+		t.Fatalf("config %+v, %v; want tracing on", config, err)
 	}
 }
 
@@ -316,7 +380,6 @@ func TestTracingIsOffByDefaultAtTheHost(t *testing.T) {
 func TestTracedResubmissionLinksTheOriginalRun(t *testing.T) {
 	exporter := teletest.Install(t)
 	f := newFixture(t)
-	t.Cleanup(func() { _ = f.host.tracing.Close() })
 	receiver, task := f.admitted(t)
 	runID := task.submission.Wherry.Run
 	receiver.keyLost(t, f.ctx, task)
@@ -337,8 +400,8 @@ func TestTracedResubmissionLinksTheOriginalRun(t *testing.T) {
 	if !original.SpanContext.IsValid() || !replacement.SpanContext.IsValid() {
 		t.Fatalf("submit spans %v, want the original's and the replacement's", teletest.Named(spans, "submit"))
 	}
-	if replacement.Parent.IsValid() || replacement.SpanContext.TraceID() == original.SpanContext.TraceID() {
-		t.Fatalf("replacement submit has parent %s in trace %s; want a new trace", replacement.Parent.SpanID(), replacement.SpanContext.TraceID())
+	if replacement.Parent.IsValid() || replacement.SpanContext.TraceID() == original.SpanContext.TraceID() || replacement.Status.Code != codes.Unset {
+		t.Fatalf("replacement submit has parent %s in trace %s, status %+v; want a new trace", replacement.Parent.SpanID(), replacement.SpanContext.TraceID(), replacement.Status)
 	}
 	if links := replacement.Links; len(links) != 1 || links[0].SpanContext.SpanID() != original.SpanContext.SpanID() {
 		t.Fatalf("replacement links %v, want the original submit", links)
@@ -348,4 +411,125 @@ func TestTracedResubmissionLinksTheOriginalRun(t *testing.T) {
 		t.Fatalf("replacement record headers %v, want the replacement's trace", record.Headers)
 	}
 	teletest.Check(t, spans)
+}
+
+// A resubmission that fails, here against a suspended pool, fails its span with a fixed class and nothing of the error.
+func TestTracedResubmissionFailureFailsTheSpan(t *testing.T) {
+	exporter := teletest.Install(t)
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	receiver.keyLost(t, f.ctx, task)
+	if err := f.service.PoolSuspend(f.ctx, "pool-a", true); err != nil {
+		t.Fatal(err)
+	}
+	status, err := f.host.Status(f.ctx, runID)
+	if err != nil || status.Replacement != "" {
+		t.Fatalf("status %+v, %v; want no replacement produced", status, err)
+	}
+	spans := f.host.spans(t, exporter)
+	var failed []tracetest.SpanStub
+	for _, s := range teletest.Named(spans, "submit") {
+		if teletest.Attr(s, telemetry.AttrRun) != runID {
+			failed = append(failed, s)
+		}
+	}
+	if len(failed) != 1 || failed[0].Status.Code != codes.Error || failed[0].Status.Description != telemetry.ClassError || len(failed[0].Links) != 1 {
+		t.Fatalf("resubmission spans %v, want one failed with the generic class, linked to the original", failed)
+	}
+	teletest.Check(t, spans)
+	teletest.Sentinels(t, spans, "suspended")
+}
+
+// Brief test 3, the host clause: Close flushes the host's spans through its own Kafka client before closing it, so the
+// submit's trace is on the tenant's trace topic, keyed by its trace ID, and its records carry no sentinel.
+func TestTracedHostFlushesBeforeClosingItsClient(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	// The host's own client, which Close closes, and its tenant's trace topic with the grant slice 2's operator makes.
+	bundlePath := filepath.Join(t.TempDir(), "bundle.yaml")
+	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-t", bundlePath, false); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := os.ReadFile(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundle operator.Bundle
+	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	topic := telemetry.TraceTopic("tenant-a")
+	if err := f.cluster.CreateTopic(topic, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	root, err := kgo.NewClient(kgo.SeedBrokers(f.cluster.ListenAddrs()...), kgo.SASL(scram.Auth{User: "admin", Pass: "password"}.AsSha512Mechanism()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	builder := kadm.NewACLs().Allow(bundle.Principal).AllowHosts("*").Topics(topic).ResourcePatternType(kadm.ACLPatternLiteral).Operations(kadm.OpWrite, kadm.OpDescribe)
+	builder.PrefixUser()
+	if _, err := kadm.NewClient(root).CreateACLs(f.ctx, builder); err != nil {
+		t.Fatal(err)
+	}
+	kafka, err := kgo.NewClient(kgo.SeedBrokers(f.service.Broker), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()),
+		kgo.FetchMaxWait(10*time.Millisecond), kgo.FetchIsolationLevel(kgo.ReadCommitted()), kgo.DisableClientMetrics())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := &syncBuffer{}
+	host, err := NewHost(kafka, key, bundle.Principal, t.TempDir(), map[string]credential.Source{"model": {File: f.secret}}, nil, log.New(logs, "host-t: ", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.Register(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Trace(); err != nil {
+		t.Fatal(err)
+	}
+	const prompt = "s3cr3t-prompt-text"
+	submitted, err := host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: prompt, EndBy: time.Now().Add(30 * time.Minute), StartBy: time.Now().Add(10 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	local, err := host.localRun(submitted.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.Close()
+	records, err := readTopic(f.ctx, f.service.Operator, topic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) == 0 {
+		t.Fatalf("nothing on %s after close; logs:\n%s", topic, logs.String())
+	}
+	traceID := telemetry.ParseTraceParent(local.TraceParent).TraceID().String()
+	spans := teletest.Spans(t, records)
+	for _, record := range records {
+		if string(record.Key) != traceID {
+			t.Fatalf("record %d keyed %s, want the submit's trace %s", record.Offset, record.Key, traceID)
+		}
+	}
+	if submits := teletest.Named(spans, "submit"); len(submits) != 1 || teletest.Attr(submits[0], telemetry.AttrRun) != submitted.RunID || teletest.Attr(submits[0], telemetry.AttrTenant) != "tenant-a" {
+		t.Fatalf("submit spans on %s: %v", topic, submits)
+	}
+	for _, name := range []string{"read state", "seal envelope", "resolve credential", "send "} {
+		if len(teletest.Named(spans, name)) == 0 {
+			t.Errorf("no %s span on %s", name, topic)
+		}
+	}
+	teletest.Check(t, spans)
+	teletest.Sentinels(t, spans, prompt, "model-token", f.secret, bundle.Password, string(local.RedactionKey), "s3cr3t")
+	teletest.Bytes(t, records, prompt, "model-token", bundle.Password, base64.StdEncoding.EncodeToString(local.RedactionKey), "s3cr3t")
+	if strings.Contains(logs.String(), "tracing:") {
+		t.Fatalf("logs:\n%s", logs.String())
+	}
 }

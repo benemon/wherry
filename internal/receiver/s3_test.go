@@ -527,7 +527,7 @@ func TestAnAdoptedRunReturnsAnS3Output(t *testing.T) {
 
 func TestAnAttemptWithoutAnUploadURLStoresNothing(t *testing.T) {
 	run := &activeRun{receiver: &Receiver{}, task: testSubmission("run-a")}
-	if stored := run.store(t.Context(), pluginsdk.Output{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}); stored.reason != "not uploaded: no upload URL" {
+	if stored := run.store(t.Context(), pluginsdk.Output{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}, nil); stored.reason != "not uploaded: no upload URL" {
 		t.Fatalf("stored %+v", stored)
 	}
 }
