@@ -53,3 +53,38 @@ func TestRetiredKeyRetractsFoldedFacts(t *testing.T) {
 		t.Errorf("status under the new key: %+v", r)
 	}
 }
+
+// A run admitted before its tenant's entitlement ended takes only records joined to that echo: the same run, tenant,
+// pool and task hash under the run's Kafka key. A different hash is refused, never adopted.
+func TestReviewWrongHashAfterEnd(t *testing.T) {
+	f := newFixture(t)
+	at := f.now.Add(-time.Hour)
+	run := f.echo(at, receiverA, tenantA, hostA, poolA, "wrong-after-end")
+	f.operator(at.Add(time.Minute), operator.Record{Kind: "end", Tenant: tenantA, Pool: poolA})
+	f.status(at.Add(2*time.Minute), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: run, kind: "terminal", state: wire.TaskStateCompleted, hash: hashOf("different")})
+	f.resultWith(at.Add(2*time.Minute), receiverA, tenantA, poolA, run, 1, wire.TaskStateCompleted, wire.ResultMetadata{}, "reply", hashOf("different"))
+	f.startFailureWith(at.Add(2*time.Minute), receiverA, tenantA, poolA, run, 2, "dispatch", "profile-a", agentA, hashOf("different"))
+	// The right hash under another run's Kafka key.
+	other := runID(tenantA, hostA, "other")
+	f.produce(operator.PoolEventsTopic(poolA), other, f.statusRecord(at.Add(3*time.Minute), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: run, kind: "working", state: wire.TaskStateWorking}), at.Add(3*time.Minute))
+	v := f.view(2*time.Hour, testCaps())
+	f.tick(v)
+	s := v.Snapshot(0)
+	r := summaryOf(t, s, run)
+	d, _ := v.RunDetail(run)
+	if r.Terminal || r.Stage != "echoed" || d.Hash != hashOf(run) || d.Result != nil || len(d.Attempts) != 0 {
+		t.Fatalf("post-entitlement records with a different task hash accepted: %+v hash %s result %+v attempts %+v", r, d.Hash, d.Result, d.Attempts)
+	}
+	if hasRun(s, other) {
+		t.Error("a status under another run's key made a run")
+	}
+	if s.Counts["refused"] != 4 || s.Counts["pending"] != 0 {
+		t.Errorf("counts %v; want the four refused and nothing pending", s.Counts)
+	}
+	// The joined record is taken.
+	f.status(at.Add(4*time.Minute), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: run, kind: "terminal", state: wire.TaskStateCompleted})
+	f.tick(v)
+	if r := summaryOf(t, v.Snapshot(0), run); !r.Terminal {
+		t.Errorf("the joined terminal was not taken: %+v", r)
+	}
+}

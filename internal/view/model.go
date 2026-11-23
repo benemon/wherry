@@ -684,11 +684,17 @@ func (m *model) evict(kept *run) {
 	m.count(capRuns, int64(dropped))
 }
 
-// joined reports whether run has an echo: a record of a tenant whose entitlement had ended when it was appended
-// counts only joined to the echo that admitted the run before the end.
-func (m *model) joined(id string) bool {
-	r := m.runs[id]
-	return r != nil && len(r.Echoes) > 0
+// joined reports whether the record of binding, carrying hash and read under key, joins the echo that admitted its
+// run before the tenant's entitlement ended: the run the key names is the signed one, and it holds an echo of the
+// same tenant, pool and task hash appended while the tenant was entitled. A record of a tenant whose entitlement had
+// ended when it was appended counts only so joined.
+func (m *model) joined(binding wire.ReceiverBinding, hash, key string) bool {
+	r := m.runs[binding.Run]
+	if r == nil || binding.Run != key || r.Tenant != binding.Tenant {
+		return false
+	}
+	e, ok := r.Echoes[hash]
+	return ok && e.Pool == binding.Pool && m.history.EntitledAt(binding.Tenant, binding.Pool, e.At)
 }
 
 // applyEvent folds a parsed pool events record, read from pool's events.
@@ -699,16 +705,19 @@ func (m *model) applyEvent(pool string, p *parsed, record *kgo.Record) error {
 	at, id, src := record.Timestamp, string(record.Key), p.src(record)
 	switch value := p.value.(type) {
 	case *wire.RunStatus:
-		if err := m.history.CheckStatus(*value, pool, "", at, m.joined(id)); err != nil {
+		if value.Wherry.Run != id {
+			return errors.New("status names another run than its key")
+		}
+		if err := m.history.CheckStatus(*value, pool, "", at, m.joined(value.Wherry.ReceiverBinding, value.Wherry.TaskHash, id)); err != nil {
 			return m.unjoined(err, id)
 		}
 		return m.addStatus(*value, p.digest, src)
 	case *wire.StartFailure:
-		if err := m.history.CheckStartFailure(*value, pool, at, m.joined(id)); err != nil {
-			return m.unjoined(err, id)
-		}
 		if value.Wherry.Run != id {
 			return errors.New("start failure names another run than its key")
+		}
+		if err := m.history.CheckStartFailure(*value, pool, at, m.joined(value.Wherry, value.TaskHash, id)); err != nil {
+			return m.unjoined(err, id)
 		}
 		r := m.runFor(value.Wherry.Run, value.Wherry.Tenant, value.Wherry.Pool, at)
 		a := r.attempt(value.Wherry.Attempt)
@@ -766,10 +775,10 @@ func (m *model) applyEvent(pool string, p *parsed, record *kgo.Record) error {
 	return errors.New("record is not a pool event")
 }
 
-// unjoined turns an entitlement refusal of a record of a run without an echo into a pending join; any other error
-// stands.
+// unjoined turns an entitlement refusal of a record of a run without an echo into a pending join; one of a run whose
+// echoes carry another task hash is refused, never adopted, and any other error stands.
 func (m *model) unjoined(err error, id string) error {
-	if !m.joined(id) && strings.Contains(err.Error(), "not entitled") {
+	if r := m.runs[id]; (r == nil || len(r.Echoes) == 0) && strings.Contains(err.Error(), "not entitled") {
 		return errUnjoined
 	}
 	return err
@@ -831,17 +840,20 @@ func (m *model) applyFeed(tenant string, p *parsed, record *kgo.Record) error {
 		m.storage(r)
 		return nil
 	case *wire.RunStatus:
-		if err := m.history.CheckStatus(*value, "", tenant, at, m.joined(id)); err != nil {
+		if value.Wherry.Run != id {
+			return errors.New("status names another run than its key")
+		}
+		if err := m.history.CheckStatus(*value, "", tenant, at, m.joined(value.Wherry.ReceiverBinding, value.Wherry.TaskHash, id)); err != nil {
 			return m.unjoined(err, id)
 		}
 		return m.addStatus(*value, p.digest, src)
 	case *wire.Result:
 		result := *value
-		if err := m.history.CheckResult(result, tenant, at, m.joined(id)); err != nil {
-			return m.unjoined(err, id)
-		}
 		if result.Wherry.Run != id {
 			return errors.New("result names another run than its key")
+		}
+		if err := m.history.CheckResult(result, tenant, at, m.joined(result.Wherry.ReceiverBinding, result.Wherry.TaskHash, id)); err != nil {
+			return m.unjoined(err, id)
 		}
 		r := m.runFor(result.Wherry.Run, result.Wherry.Tenant, result.Wherry.Pool, at)
 		if r.Tenant != result.Wherry.Tenant {

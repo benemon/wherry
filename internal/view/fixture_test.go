@@ -256,19 +256,29 @@ func (f *fixture) echoWith(at time.Time, receiver, tenant, host, pool, name, has
 // result writes a result with metadata and reply to the tenant's feed.
 func (f *fixture) result(at time.Time, receiver, tenant, pool, run string, attempt int64, state wire.TaskState, metadata wire.ResultMetadata, reply string) {
 	f.t.Helper()
+	f.resultWith(at, receiver, tenant, pool, run, attempt, state, metadata, reply, hashOf(run))
+}
+
+func (f *fixture) resultWith(at time.Time, receiver, tenant, pool, run string, attempt int64, state wire.TaskState, metadata wire.ResultMetadata, reply, hash string) {
+	f.t.Helper()
 	metadata.ReceiverID, metadata.Pool = receiver, pool
 	encoded := must(f.t)(json.Marshal(metadata))
 	result := &wire.Result{
 		Task: wire.Task{ID: run, ContextID: run, Status: wire.TaskStatus{State: state, Timestamp: at.UTC().Format(time.RFC3339Nano), Message: &wire.Message{MessageID: "reply-" + run, Role: wire.RoleAgent, Parts: []wire.Part{{Text: reply}}, Extensions: []string{wire.ExtensionURI}}},
 			Artifacts: []wire.Artifact{{ArtifactID: wire.ResultArtifact, Parts: []wire.Part{{Text: reply}}, Extensions: []string{wire.ExtensionURI}}}, History: []wire.Message{}, Metadata: encoded},
-		Wherry: wire.ResultBinding{ReceiverBinding: wire.ReceiverBinding{Receiver: receiver, Tenant: tenant, Pool: pool, Run: run, Attempt: attempt}, TaskHash: hashOf(run)},
+		Wherry: wire.ResultBinding{ReceiverBinding: wire.ReceiverBinding{Receiver: receiver, Tenant: tenant, Pool: pool, Run: run, Attempt: attempt}, TaskHash: hash},
 	}
 	f.produce(operator.TenantTopic(tenant), run, f.sign(result, f.keys[receiver]), at)
 }
 
 func (f *fixture) startFailure(at time.Time, receiver, tenant, pool, run string, attempt int64, class string) {
 	f.t.Helper()
-	failure := &wire.StartFailure{Wherry: wire.ReceiverBinding{Receiver: receiver, Tenant: tenant, Pool: pool, Run: run, Attempt: attempt}, Profile: "profile-a", Agent: agentA, Class: class, TaskHash: hashOf(run)}
+	f.startFailureWith(at, receiver, tenant, pool, run, attempt, class, "profile-a", agentA, hashOf(run))
+}
+
+func (f *fixture) startFailureWith(at time.Time, receiver, tenant, pool, run string, attempt int64, class, profile, agent, hash string) {
+	f.t.Helper()
+	failure := &wire.StartFailure{Wherry: wire.ReceiverBinding{Receiver: receiver, Tenant: tenant, Pool: pool, Run: run, Attempt: attempt}, Profile: profile, Agent: agent, Class: class, TaskHash: hash}
 	f.produce(operator.PoolEventsTopic(pool), run, f.sign(failure, f.keys[receiver]), at)
 }
 

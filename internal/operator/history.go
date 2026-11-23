@@ -176,7 +176,8 @@ var errEndedMember = errors.New("record was appended after its receiver's member
 // historicReceiver checks a receiver record appended at appended: its receiver was a live member of its pool then,
 // which is topicPool when the record was read from a pool's events, and its tenant feedTenant's when read from a
 // tenant feed. Its tenant was entitled to the pool then, or, with joined, the run it belongs to was admitted to the
-// pool before the entitlement ended: the caller joins it to that echo.
+// pool before the entitlement ended: the caller joins it to the echo of the same run, tenant, pool and task hash,
+// appended before the end, under the Kafka key of the signed run.
 func (h History) historicReceiver(binding wire.ReceiverBinding, topicPool, feedTenant string, appended time.Time, joined bool) error {
 	if topicPool != "" && binding.Pool != topicPool {
 		return errors.New("record names another pool than its topic")
@@ -208,7 +209,8 @@ func AuthorizeHistoricStatus(h History, keys signed.Keys, encoded []byte, topicP
 
 // CheckStatus is AuthorizeHistoricStatus's check on a status already verified: a reader that verifies in parallel
 // applies it in order. topicPool is the events topic's pool, or empty on a tenant feed; feedTenant the feed's tenant,
-// or empty on pool events; joined whether the run has its echo.
+// or empty on pool events; joined whether the caller joined the status to the echo that admitted its run before the
+// entitlement ended, by run, tenant, pool and task hash.
 func (h History) CheckStatus(status wire.RunStatus, topicPool, feedTenant string, appended time.Time, joined bool) error {
 	return h.historicReceiver(status.Wherry.ReceiverBinding, topicPool, feedTenant, appended, joined)
 }
