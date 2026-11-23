@@ -39,7 +39,7 @@ Every command but `version` and the shortcuts runs under its role's word:
   A leading `~/` is expanded.
 - A command's flags may come before or after its `RUN_ID`.
 - A failed command prints `wherry: <error>` on standard error and exits
-  with status 1. `result` has its own [exit codes](#exit-codes).
+  with status 1. `result`, and `submit --wait`, have their own [exit codes](#exit-codes).
 - Durations use Go syntax, such as `90s`, `45m` or `720h`, and must be
   positive. [`receiver remove`](#wherry-operator-receiver-remove-receiver)
   gives the rules for `--wait`.
@@ -1579,7 +1579,8 @@ With `--wait`, `submit` prints the `run_id=` line, then collects the run as
 `--wait`. The waiting budget is the published `task_ended_by` plus ten minutes,
 less the time already spent, with a minimum of one second. Downloads after
 the run finishes are outside that budget. On timeout it prints a command to
-collect later. Leaving the command does not cancel the run.
+collect later. It exits with `result`'s [exit codes](#exit-codes).
+Leaving the command does not cancel the run.
 
 ### `wherry host cancel RUN_ID`
 
@@ -1715,7 +1716,7 @@ exits with status 1 and
 | 2 | the run ended `TASK_STATE_FAILED` |
 | 3 | the run ended `TASK_STATE_CANCELED` |
 | 4 | the run ended `TASK_STATE_REJECTED` |
-| 6 | `--timeout` passed with the run still going |
+| 6 | `--timeout`, or `submit --wait`'s budget, passed with the run still going |
 
 For codes 2 to 4 the error is `run ended in <state>`. A run that ends in
 any other state but `TASK_STATE_COMPLETED` exits 1 with the same error.

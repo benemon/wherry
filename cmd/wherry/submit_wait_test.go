@@ -55,6 +55,9 @@ func TestResultRename(t *testing.T) {
 	if err := run([]string{"wait"}, &out, &errout); err == nil || err.Error() != `unknown command "wait"` {
 		t.Fatalf("old command: %v", err)
 	}
+	if err := run([]string{"host", "wait"}, &out, &errout); err == nil || !strings.Contains(err.Error(), "wait") {
+		t.Fatalf("old host command: %v", err)
+	}
 	if !strings.Contains(usage, "submit|result|") {
 		t.Fatal("result missing from help")
 	}
@@ -109,7 +112,8 @@ func TestSubmitWaitStates(t *testing.T) {
 		b := newBus(t)
 		var out, stderr bytes.Buffer
 		err := runSubmit(b.ctx, b.client, []string{"--prompt", "work", "--wait", "--start-by", "100ms"}, &out, &stderr)
-		if err == nil || !strings.Contains(err.Error(), "no receiver claimed") {
+		var exit *exitError
+		if err == nil || !strings.Contains(err.Error(), "no receiver claimed") || errors.As(err, &exit) {
 			t.Fatalf("unclaimed: %v %s", err, stderr.String())
 		}
 	})

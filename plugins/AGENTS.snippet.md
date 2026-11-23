@@ -98,7 +98,7 @@ waits up to 45 seconds; call it again while the reply carries `retry_after`. Its
 returns a page of lines; call it again with `next_offset` while it is set.
 
 For a short run, use `wherry submit --wait` to submit and collect in one
-command, with `--outputs-dir DIR` when needed. In MCP, set submit's `wait` to
+command, which exits with `wherry result`'s exit codes, with `--outputs-dir DIR` when needed. In MCP, set submit's `wait` to
 `true` only when the run is expected to finish within 45 seconds. Read its
 nested `result`, or its sanitised `error` after publish; `command` collects
 later. For longer runs submit first and call `result` separately.

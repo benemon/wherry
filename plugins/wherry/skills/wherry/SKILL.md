@@ -292,7 +292,7 @@ up; the message starts with the step that failed,
 and the MCP server's log holds the cause.
 
 For a short run, use `wherry submit --wait` to submit and collect in one
-command, with `--outputs-dir DIR` when needed. In MCP, set submit's `wait` to
+command, which exits with `wherry result`'s exit codes, with `--outputs-dir DIR` when needed. In MCP, set submit's `wait` to
 `true` only when the run is expected to finish within 45 seconds. Read its
 nested `result`, or its sanitised `error` after publish; `command` collects
 later. For longer runs submit first and call `result` separately.

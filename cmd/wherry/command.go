@@ -509,7 +509,8 @@ func outputFlag(outputs *[]wire.ExpectedOutput) func(string) error {
 // stdin is a variable so tests can give submit a prompt on standard input.
 var stdin io.Reader = os.Stdin
 
-const defaultSubmitWaitMargin = 10 * time.Minute
+// defaultSubmitWaitMargin is the margin result's default timeout has over the default task_ended_by.
+const defaultSubmitWaitMargin = busclient.DefaultStartBy
 
 var submitWaitMargin = defaultSubmitWaitMargin
 
