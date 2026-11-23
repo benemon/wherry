@@ -276,7 +276,7 @@ func testOperatorInitDelegates(t *testing.T, b initBroker, removes bool) {
 		t.Fatal(err)
 	}
 	var config operatorConfig
-	if err := readYAML(filepath.Join(dir, "operator.yaml"), &config); err != nil || config != (operatorConfig{b.address, b.caFile, "operator.password"}) {
+	if err := readYAML(filepath.Join(dir, "operator.yaml"), &config); err != nil || config != (operatorConfig{Broker: b.address, CAFile: b.caFile, PasswordFile: "operator.password"}) {
 		t.Fatalf("operator.yaml %+v, %v; want the broker, its CA file and operator.password", config, err)
 	}
 	if info, err := os.Stat(filepath.Join(dir, "operator.password")); err != nil || info.Mode().Perm() != 0o600 {

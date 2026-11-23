@@ -25,6 +25,7 @@ import (
 // host key a task cloning under each URL prefix takes. InputRoots are the
 // directories the MCP server sends inputs from. CAFile holds the PEM certificates the host trusts the broker with; without
 // it, the bundle's ca, and without that the system roots. Storage maps a pool to the credentials of its bucket.
+// Tracing writes the host's spans to its tenant's trace topic; off by default.
 type Config struct {
 	Bundle      string                       `yaml:"bundle"`
 	CAFile      string                       `yaml:"ca_file,omitempty"`
@@ -34,6 +35,7 @@ type Config struct {
 	Git         []GitCredential              `yaml:"git,omitempty"`
 	Storage     map[string]StorageConfig     `yaml:"storage,omitempty"`
 	InputRoots  []string                     `yaml:"input_roots,omitempty"`
+	Tracing     bool                         `yaml:"tracing,omitempty"`
 }
 
 // GitCredential gives a task whose git remote starts with URL the credential Credential and, for ssh, the known_hosts
@@ -283,6 +285,12 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 		return nil, fmt.Errorf("load host key: %w", err)
 	}
 	host.storage, host.bundleStorage = config.Storage, bundle.Storage
+	if config.Tracing {
+		if err := host.Trace(); err != nil {
+			kafka.Close()
+			return nil, fmt.Errorf("tracing: %w", err)
+		}
+	}
 	return host, nil
 }
 

@@ -4,8 +4,10 @@ import (
 	"context"
 	"time"
 
+	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // retryInPlace is the acknowledgement of an execution whose start failure its holder retries within the delivery.
@@ -27,12 +29,19 @@ func (d *delivery) retry(failed time.Time) bool {
 }
 
 // executeDelivery executes the claimed task, again after a wait for each start failure retried in place, under one
-// renewer for the whole delivery.
+// renewer for the whole delivery. It is the run's INTERNAL span, a child of the attempt's CONSUMER span, carrying the
+// tenant from ctx as every span under the run does; an in-place retry keeps the attempt and counts in wherry.retry.
 func (r *Receiver) executeDelivery(claiming, ctx context.Context, claim *runClaim, record *kgo.Record, admitted *admission, attempt int64) kgo.AckStatus {
+	task := admitted.task.Wherry
+	ctx, span := r.tracing.Start(ctx, "run", trace.SpanKindInternal, telemetry.AttrRun.String(task.Run), telemetry.AttrAttempt.Int64(attempt),
+		telemetry.AttrHost.String(task.Host), telemetry.AttrProfile.String(admitted.profile.Name),
+		telemetry.AttrAgent.String(task.Placement.Agent), telemetry.AttrModel.String(task.Placement.Model))
+	defer span.End()
 	defer claim.reportLoss(r, admitted.task.Wherry.Run)
 	defer renewer(ctx, claim)()
 	retries := &delivery{}
-	for wait := startRetryWait; ; wait = min(2*wait, startRetryMaxWait) {
+	for wait, retry := startRetryWait, 0; ; wait, retry = min(2*wait, startRetryMaxWait), retry+1 {
+		span.SetAttributes(telemetry.AttrRetry.Int(retry))
 		ack := r.executeAttempt(ctx, claim, record, admitted, attempt, retries)
 		run := retries.run
 		retries.run = nil

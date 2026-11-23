@@ -810,7 +810,7 @@ func TestPaddedStorageKeyIsRedacted(t *testing.T) {
 		t.Fatal(err)
 	}
 	file, _ := randomFile(t, "dataset.bin", 16)
-	_, err = uploadInputs(ctx, store, testBucket, "tenant-a", "run-1", []S3File{{Name: "dataset.bin", Body: file}})
+	_, err = uploadInputs(ctx, store, &operator.Storage{Bucket: testBucket}, "tenant-a", "run-1", []S3File{{Name: "dataset.bin", Body: file}})
 	if want := "upload S3 input dataset.bin: no access key " + signed.RedactionMarker(nil, "padded-access"); err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("upload = %v; want %q", err, want)
 	}
@@ -851,7 +851,7 @@ func TestLoopbackHTTPStorage(t *testing.T) {
 		t.Fatal(err)
 	}
 	file, _ := randomFile(t, "dataset.bin", 16)
-	if _, err := uploadInputs(ctx, store, testBucket, "tenant-a", "run-1", []S3File{{Name: "dataset.bin", Body: file}}); err != nil || puts.Load() != 1 {
+	if _, err := uploadInputs(ctx, store, &operator.Storage{Bucket: testBucket}, "tenant-a", "run-1", []S3File{{Name: "dataset.bin", Body: file}}); err != nil || puts.Load() != 1 {
 		t.Fatalf("upload = %v after %d PUTs; want one PUT over http", err, puts.Load())
 	}
 	values, err := presign(ctx, store, testBucket, "tenant-a", "run-1", "run-1", []string{"dataset.bin"}, nil, time.Now().Add(getLifetime), time.Now().Add(time.Hour))

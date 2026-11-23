@@ -74,7 +74,7 @@ func operatorEnv(t *testing.T) *operator.Service {
 		}
 	}
 	address := cluster.ListenAddrs()[0]
-	if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{address, "ca.pem", "operator.password"}); err != nil {
+	if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{Broker: address, CAFile: "ca.pem", PasswordFile: "operator.password"}); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)

@@ -15,16 +15,19 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
+	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/benemon/wherry/internal/wire"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -143,8 +146,10 @@ type binding struct {
 type entry struct {
 	receiver string
 	echo     *wire.Echo
-	// at is the echo's Kafka timestamp.
+	// at is the echo's Kafka timestamp; record is the status's or result's record, for the CONSUMER span of one derive
+	// accepts.
 	at     time.Time
+	record *kgo.Record
 	status *wire.RunStatus
 	chunk  *wire.Chunk
 	output *wire.Output
@@ -174,8 +179,10 @@ type runView struct {
 	outputs  []*wire.Output
 	skipped  int
 	outcome  *AwaitResult
-	// result is the result that set the outcome, nil when a status did.
-	result *wire.Result
+	// result is the result that set the outcome, nil when a status did; accepted are the entries of the outcome's
+	// attempt that ended the run, the result and its terminal or rejected status.
+	result   *wire.Result
+	accepted []entry
 }
 
 func newRunView(h *Host, v view, runID string, local *runRecord) *runView {
@@ -259,7 +266,7 @@ func (r *runView) add(ctx context.Context, record *kgo.Record, typ, kid string) 
 			if status, err := authorize(ctx, r, kid, func(v view) (wire.RunStatus, error) {
 				return operator.AuthorizeStatus(history, v.state, v.keys, value, r.pool, r.h.tenant)
 			}); err == nil && status.Wherry.Run == r.run {
-				r.entries = append(r.entries, entry{receiver: status.Wherry.Receiver, status: &status})
+				r.entries = append(r.entries, entry{receiver: status.Wherry.Receiver, status: &status, record: record})
 				return
 			}
 		case wire.ChunkType:
@@ -280,13 +287,70 @@ func (r *runView) add(ctx context.Context, record *kgo.Record, typ, kid string) 
 			if result, err := authorize(ctx, r, kid, func(v view) (wire.Result, error) {
 				return operator.AuthorizeResult(history, v.state, v.keys, value, r.pool, r.h.tenant)
 			}); err == nil && result.Wherry.Run == r.run {
-				r.entries = append(r.entries, entry{receiver: result.Wherry.Receiver, result: &result})
+				r.entries = append(r.entries, entry{receiver: result.Wherry.Receiver, result: &result, record: record})
 				return
 			}
 		}
 	}
 	if string(record.Key) == r.run {
 		r.unread++
+	}
+}
+
+// awaiting counts a wait on run and returns the func that ends it, which drops the run's traced records with its last
+// waiter: the dedup state lasts as long as the process waits on the run. Off, it keeps nothing.
+func (h *Host) awaiting(run string) func() {
+	if !h.tracing.Enabled() {
+		return func() {}
+	}
+	h.awaitedMu.Lock()
+	defer h.awaitedMu.Unlock()
+	a := h.awaited[run]
+	if a == nil {
+		a = &awaited{traced: map[string]bool{}}
+		h.awaited[run] = a
+	}
+	a.waiters++
+	return func() {
+		h.awaitedMu.Lock()
+		defer h.awaitedMu.Unlock()
+		if a.waiters--; a.waiters == 0 {
+			delete(h.awaited, run)
+		}
+	}
+}
+
+// traceTerminals emits the CONSUMER span of each terminal record derive accepted into the run's outcome, the result
+// and the terminal or rejected status of its attempt, each a child of its record's own trace context, once per record
+// while this process waits on the run.
+func (h *Host) traceTerminals(ctx context.Context, r *runView) {
+	if !h.tracing.Enabled() {
+		return
+	}
+	h.awaitedMu.Lock()
+	a := h.awaited[r.run]
+	h.awaitedMu.Unlock()
+	if a == nil {
+		return
+	}
+	for _, e := range r.accepted {
+		key := e.record.Topic + "/" + strconv.FormatInt(e.record.Offset, 10)
+		h.awaitedMu.Lock()
+		seen := a.traced[key]
+		a.traced[key] = true
+		h.awaitedMu.Unlock()
+		if seen {
+			continue
+		}
+		state := r.outcome.Status.State
+		if e.status != nil {
+			state = e.status.StatusUpdate.Status.State
+		}
+		_, span := h.tracing.Consumer(ctx, e.record, telemetry.AttrRun.String(r.run), semconv.MessagingKafkaOffset(int(e.record.Offset)))
+		if state != wire.TaskStateCompleted {
+			telemetry.Fail(span, telemetry.StateClass(string(state)))
+		}
+		span.End()
 	}
 }
 
@@ -324,7 +388,19 @@ func (r *runView) derive() {
 		config, ok := r.v.state.Receivers[receiver]
 		return ok && config.Pool == r.pool && !r.v.state.Ended[operator.ReceiverPrincipal(receiver)] && r.v.state.Entitlements[r.h.tenant][r.pool]
 	}
-	r.binding, r.statuses, r.chunks, r.outputs, r.skipped, r.outcome, r.result = binding{}, nil, nil, nil, r.unread, nil, nil
+	r.binding, r.statuses, r.chunks, r.outputs, r.skipped, r.outcome, r.result, r.accepted = binding{}, nil, nil, nil, r.unread, nil, nil, nil
+	// accept keeps e among the records that ended the run; a higher attempt's terminal replaces a lower's. Off, nothing
+	// is kept.
+	attempt, traced := int64(-1), r.h.tracing.Enabled()
+	accept := func(e entry, at int64) {
+		if !traced {
+			return
+		}
+		if at != attempt {
+			r.accepted, attempt = nil, at
+		}
+		r.accepted = append(r.accepted, e)
+	}
 	if r.local != nil {
 		r.binding.hash = r.local.TaskHash
 	}
@@ -357,8 +433,12 @@ func (r *runView) derive() {
 				continue
 			}
 			r.statuses = append(r.statuses, status)
-			if ends(status) && admit(&filter, status) {
+			switch {
+			case ends(status) && admit(&filter, status):
 				r.outcome, r.result = &AwaitResult{Status: status.StatusUpdate.Status}, nil
+				accept(e, status.Wherry.Attempt)
+			case status.Wherry.Kind == "terminal" && r.result != nil && status.Wherry.Attempt == r.result.Wherry.Attempt:
+				accept(e, status.Wherry.Attempt)
 			}
 		case e.chunk != nil:
 			if r.binding.hash != e.chunk.Wherry.TaskHash {
@@ -382,6 +462,7 @@ func (r *runView) derive() {
 			state := result.Task.Status.State
 			if wire.Terminal(state) && filter.Admit(r.run, result.Wherry.Attempt) {
 				r.outcome, r.result = &AwaitResult{Task: &result.Task, Status: result.Task.Status}, result
+				accept(e, result.Wherry.Attempt)
 			}
 		}
 	}
@@ -1252,6 +1333,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 // Each arrival re-reads wherry.operator and the receivers' keys and derives the run again, so nothing from a member ended
 // by then shapes the outcome.
 func (h *Host) awaitRun(waitCtx context.Context, runID string) (AwaitResult, error) {
+	defer h.awaiting(runID)()
 	f, err := h.follow(waitCtx)
 	if err != nil {
 		return AwaitResult{}, err
@@ -1288,6 +1370,7 @@ func (h *Host) awaitRun(waitCtx context.Context, runID string) (AwaitResult, err
 	}
 	for {
 		if r.outcome != nil {
+			h.traceTerminals(waitCtx, r)
 			outcome := *r.outcome
 			outcome.Skipped, outcome.Model, outcome.keyLost = r.skipped, r.model(), r.keyLost()
 			if r.result != nil {

@@ -19,9 +19,11 @@ import (
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/redact"
 	"github.com/benemon/wherry/internal/signed"
+	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // S3File is bytes a run delivers through its pool's bucket, as the input Name.
@@ -181,8 +183,26 @@ func (r *redactedReader) Read(p []byte) (int, error) {
 func (r *redactedReader) Close() error { return r.store.wrap(r.object.Close()) }
 
 // uploadInputs puts each file under the run's prefix with one PUT and returns the S3 inputs with the size and SHA-256 of
-// the bytes it sent.
-func uploadInputs(ctx context.Context, store *store, bucket, tenant, run string, files []S3File) ([]wire.S3Input, error) {
+// the bytes it sent. Its span carries the count, the bytes and the pool terms' endpoint and bucket, never a URL or
+// the store's answer.
+func uploadInputs(ctx context.Context, store *store, storage *operator.Storage, tenant, run string, files []S3File) ([]wire.S3Input, error) {
+	_, span := telemetry.ChildOf(ctx, "upload inputs", trace.SpanKindClient, telemetry.AttrCount.Int(len(files)),
+		telemetry.AttrStorageEndpoint.String(storage.Endpoint), telemetry.AttrStorageBucket.String(storage.Bucket))
+	defer span.End()
+	inputs, err := putInputs(ctx, store, storage.Bucket, tenant, run, files)
+	if err != nil {
+		telemetry.Fail(span, telemetry.ClassFailed)
+		return nil, err
+	}
+	var total int64
+	for _, input := range inputs {
+		total += input.Size
+	}
+	span.SetAttributes(telemetry.AttrSize.Int64(total))
+	return inputs, nil
+}
+
+func putInputs(ctx context.Context, store *store, bucket, tenant, run string, files []S3File) ([]wire.S3Input, error) {
 	var inputs []wire.S3Input
 	for _, file := range files {
 		if local, ok := file.Body.(*os.File); ok {

@@ -74,6 +74,9 @@ const (
 	rejectionReasonRunCap             string = "task_ended_by is past task_started_by plus the 6h run cap"
 )
 
+// rejectionLabels are every rejection label: the closed set a span's status may name a rejection by.
+var rejectionLabels = []string{rejectionReasonRunID, rejectionReasonDuplicate, rejectionReasonAgent, rejectionReasonModel, rejectionReasonStartBound, rejectionReasonEndBound, rejectionReasonTopicAgent, rejectionReasonSelector, rejectionReasonStartLimit, rejectionReasonRequiredCredential, rejectionReasonCredentialTarget, rejectionReasonVCS, rejectionReasonStorage, rejectionReasonPart, rejectionReasonEnvelope, rejectionReasonAppendTime, rejectionReasonBoundOrder, rejectionReasonRunCap}
+
 // durationBuckets bound the core's histograms, in seconds, from one second to six hours.
 var durationBuckets = []float64{1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200, 14400, 21600}
 
@@ -219,7 +222,7 @@ func (m *metrics) initialize(state operator.State, pool string, profiles []Named
 		for _, value := range []string{openOutcomeOpened, openOutcomeRefused, openOutcomeExpired, openOutcomeUnanswered} {
 			m.openWaits.WithLabelValues(tenant, value)
 		}
-		for _, value := range []string{rejectionReasonRunID, rejectionReasonDuplicate, rejectionReasonAgent, rejectionReasonModel, rejectionReasonStartBound, rejectionReasonEndBound, rejectionReasonTopicAgent, rejectionReasonSelector, rejectionReasonStartLimit, rejectionReasonRequiredCredential, rejectionReasonCredentialTarget, rejectionReasonVCS, rejectionReasonStorage, rejectionReasonPart, rejectionReasonEnvelope, rejectionReasonAppendTime, rejectionReasonBoundOrder, rejectionReasonRunCap} {
+		for _, value := range rejectionLabels {
 			m.rejections.WithLabelValues(tenant, value)
 		}
 		admissions, budget := map[string]bool{"": true}, map[string]bool{"none": true}

@@ -74,6 +74,11 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer service.Operator.Close()
+	defer func() {
+		if err := service.Tracing.Close(); err != nil {
+			fmt.Fprintln(stderr, "wherry: tracing:", err)
+		}
+	}()
 	command := operatorCommand(pos)
 	switch command {
 	case "pool apply":

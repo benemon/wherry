@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/catalog"
+	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -27,6 +28,9 @@ import (
 	"github.com/twmb/franz-go/pkg/kversion"
 	"github.com/twmb/franz-go/pkg/sasl"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"gopkg.in/yaml.v3"
 )
 
@@ -34,6 +38,8 @@ type Service struct {
 	Operator *kgo.Client // connected as wherry.operator
 	Broker   string      // the broker address host bundles carry
 	CA       []byte      // PEM the operator trusts the broker with; nil for the system roots
+	// Tracing is the operator role's tracer provider, nil for none: each command is a root marker span under it.
+	Tracing *telemetry.Tracing
 	// Storage is the storage keys the operator recorded for a tenant, zero for a tenant without any, which every host
 	// bundle of the tenant carries; nil when the operator records none.
 	Storage         func(tenant string) (StorageKeys, error)
@@ -56,6 +62,55 @@ type Bundle struct {
 type StorageKeys struct {
 	AccessKey string `yaml:"access_key"`
 	SecretKey string `yaml:"secret_key"`
+}
+
+// marker is the root span of an operator command. names are the command's arguments as identity attributes; each is
+// attached only once it passes validateNames, the check every command applies, so an invalid argument the command
+// refuses reaches no span, on the failure path or any other.
+func (service *Service) marker(ctx context.Context, command string, names ...attribute.KeyValue) (context.Context, trace.Span) {
+	if !service.Tracing.Enabled() {
+		return ctx, noopSpan
+	}
+	valid := make([]attribute.KeyValue, 0, len(names))
+	for _, name := range names {
+		if validateNames(name.Value.AsString()) == nil {
+			valid = append(valid, name)
+		}
+	}
+	return service.Tracing.Root(ctx, "operator "+command, trace.SpanKindInternal, valid...)
+}
+
+var noopSpan trace.Span = noop.Span{}
+
+// ended ends a command's span, failed with the class of *err when the command returned one.
+func ended(span trace.Span, err *error) {
+	if *err != nil {
+		telemetry.Fail(span, commandClass(*err))
+	}
+	span.End()
+}
+
+// revoked ends a revocation's span, failed with the class of the first step that failed; the error travels in the
+// result, not a return.
+func revoked(span trace.Span, result *RevocationResult) {
+	for _, step := range result.Steps {
+		if step.Err != nil {
+			telemetry.Fail(span, commandClass(step.Err))
+			break
+		}
+	}
+	span.End()
+}
+
+// commandClass is the fixed class of a failed operator command, from a closed set, never its text.
+func commandClass(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return telemetry.ClassCanceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return telemetry.ClassTimeout
+	}
+	return telemetry.ClassError
 }
 
 // Bundle is the bundle service writes for principal with password at broker, carrying the operator's CA only when broker
@@ -246,7 +301,9 @@ func kafkaOpts(broker string, ca []byte, user, password string, mechanism func(s
 // with other terms is updated, and one with the same terms has its missing topics completed. With dryRun it makes the
 // checks and writes nothing. Each agent named by a usable credential catalog id first gets the credentials its entry
 // derives (Expand); the terms recorded are the expanded ones.
-func (service *Service) PoolApply(ctx context.Context, pool string, terms Terms, dryRun bool) error {
+func (service *Service) PoolApply(ctx context.Context, pool string, terms Terms, dryRun bool) (err error) {
+	ctx, span := service.marker(ctx, "pool apply", telemetry.AttrPool.String(pool))
+	defer ended(span, &err)
 	if err := validateNames(pool); err != nil {
 		return err
 	}
@@ -515,6 +572,8 @@ func (service *Service) ReceiverCheck(ctx context.Context, config ReceiverConfig
 
 // ReceiverAdd provisions config's receiver and writes its bundle, naming broker, to bundlePath.
 func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, broker, bundlePath string) (err error) {
+	ctx, span := service.marker(ctx, "receiver provision", telemetry.AttrReceiver.String(config.Receiver), telemetry.AttrPool.String(config.Pool))
+	defer ended(span, &err)
 	bundle, err := createBundle(bundlePath, false)
 	if err != nil {
 		return err
@@ -559,6 +618,8 @@ func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, 
 // any file there. Its configuration record is untouched; Kafka keeps one SCRAM credential per user, so the old password
 // stops working.
 func (service *Service) ReceiverReissue(ctx context.Context, receiver, broker, bundlePath string) (err error) {
+	ctx, span := service.marker(ctx, "receiver reissue", telemetry.AttrReceiver.String(receiver))
+	defer ended(span, &err)
 	state, err := service.LoadState(ctx)
 	if err != nil {
 		return err
@@ -606,7 +667,9 @@ func (service *Service) reissue(ctx context.Context, principal, bundlePath strin
 // are untouched; the receiver exits on the new record and its platform restarts
 // it. With dryRun it writes nothing and returns the configuration as the record
 // would hold it.
-func (service *Service) ReceiverUpdate(ctx context.Context, config ReceiverConfig, dryRun bool) (ReceiverConfig, error) {
+func (service *Service) ReceiverUpdate(ctx context.Context, config ReceiverConfig, dryRun bool) (recorded ReceiverConfig, err error) {
+	ctx, span := service.marker(ctx, "receiver reconfigure", telemetry.AttrReceiver.String(config.Receiver), telemetry.AttrPool.String(config.Pool))
+	defer ended(span, &err)
 	state, err := service.LoadState(ctx)
 	if err != nil {
 		return ReceiverConfig{}, err
@@ -658,6 +721,8 @@ func asRecorded(record Record) (ReceiverConfig, error) {
 // operator recorded them. A host that exists is refused unless force, which gives it a new password and replaces the
 // bundle at bundlePath, leaving its record untouched.
 func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath string, force bool) (err error) {
+	ctx, span := service.marker(ctx, "tenant host add", telemetry.AttrTenant.String(tenant), telemetry.AttrHost.String(host))
+	defer ended(span, &err)
 	// Without force the bundle's file is reserved before anything changes in Kafka.
 	var bundle *bundleFile
 	if !force {
@@ -735,7 +800,9 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 // storage keys, keeping the principal and password, and reports whether it changed, a current bundle being left so a
 // refresh reruns; it refuses an absent, revoking or ended host, a missing bundle, which --force reissues, and another
 // principal's bundle.
-func (service *Service) HostRefresh(ctx context.Context, tenant, host, bundlePath string) (bool, error) {
+func (service *Service) HostRefresh(ctx context.Context, tenant, host, bundlePath string) (changed bool, err error) {
+	ctx, span := service.marker(ctx, "tenant host refresh", telemetry.AttrTenant.String(tenant), telemetry.AttrHost.String(host))
+	defer ended(span, &err)
 	state, err := service.LoadState(ctx)
 	if err != nil {
 		return false, err
@@ -773,7 +840,9 @@ func (service *Service) HostRefresh(ctx context.Context, tenant, host, bundlePat
 	return true, ReplaceBundle(bundlePath, refreshed)
 }
 
-func (service *Service) TenantPoolAdd(ctx context.Context, tenant, pool string) error {
+func (service *Service) TenantPoolAdd(ctx context.Context, tenant, pool string) (err error) {
+	ctx, span := service.marker(ctx, "tenant pool add", telemetry.AttrTenant.String(tenant), telemetry.AttrPool.String(pool))
+	defer ended(span, &err)
 	current, err := service.LoadState(ctx)
 	if err != nil {
 		return err
@@ -810,7 +879,9 @@ func (service *Service) TenantPoolAdd(ctx context.Context, tenant, pool string) 
 	return service.convergeTenantQuotas(ctx, state, tenant)
 }
 
-func (service *Service) TenantAdd(ctx context.Context, tenant string) error {
+func (service *Service) TenantAdd(ctx context.Context, tenant string) (err error) {
+	ctx, span := service.marker(ctx, "tenant add", telemetry.AttrTenant.String(tenant))
+	defer ended(span, &err)
 	record := Record{Kind: "tenant", Tenant: tenant}
 	if _, _, err := service.planRecord(ctx, record); err != nil {
 		return err
@@ -824,7 +895,9 @@ func (service *Service) TenantAdd(ctx context.Context, tenant string) error {
 	return service.converge(ctx)
 }
 
-func (service *Service) TenantPoolRemove(ctx context.Context, tenant, pool string) error {
+func (service *Service) TenantPoolRemove(ctx context.Context, tenant, pool string) (err error) {
+	ctx, span := service.marker(ctx, "tenant pool remove", telemetry.AttrTenant.String(tenant), telemetry.AttrPool.String(pool))
+	defer ended(span, &err)
 	state, err := service.LoadState(ctx)
 	if err != nil {
 		return err
@@ -859,7 +932,9 @@ func (service *Service) tenantQuotas(ctx context.Context, state State, tenant st
 	return nil
 }
 
-func (service *Service) Check(ctx context.Context) error {
+func (service *Service) Check(ctx context.Context) (err error) {
+	ctx, span := service.marker(ctx, "check")
+	defer ended(span, &err)
 	state, err := service.LoadState(ctx)
 	if err != nil {
 		return err

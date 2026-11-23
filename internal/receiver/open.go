@@ -14,10 +14,13 @@ import (
 
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
+	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel/attribute"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 )
 
 // keyLostReason ends a run whose envelope no holder of a pool key can open.
@@ -107,7 +110,13 @@ func (run *activeRun) openOnce(ctx, bound context.Context, job *pluginsdk.Handle
 		return nil, "", run.returnTask(ctx, nil), true
 	}
 	defer reader.Close()
-	if err := run.commit(ctx, &kgo.Record{Topic: topic, Key: []byte(runID), Value: request}); err != nil {
+	// The request's PRODUCER span, whose context travels in the record's header to the custodian.
+	sendCtx, send := r.tracing.Producer(ctx, topic, telemetry.AttrRun.String(runID), telemetry.AttrAttempt.Int64(run.attempt))
+	requested := &kgo.Record{Topic: topic, Key: []byte(runID), Value: request}
+	r.tracing.Inject(sendCtx, requested)
+	err = run.commit(ctx, requested)
+	send.End()
+	if err != nil {
 		return nil, "", run.abandon(err), true
 	}
 	// The answer is awaited from the request's append time once it is read back.
@@ -134,6 +143,7 @@ func (run *activeRun) openOnce(ctx, bound context.Context, job *pluginsdk.Handle
 				var refusal wire.OpenRefusal
 				if r.fromLiveMember(record, &refusal) && refusal.Request == digest && r.isCustodian(ctx, refusal.Custodian) {
 					refused = refusal.Reason
+					run.answered(ctx, record, refused)
 				}
 			case wire.AttemptWrapType:
 				var wrap wire.AttemptWrap
@@ -148,8 +158,10 @@ func (run *activeRun) openOnce(ctx, bound context.Context, job *pluginsdk.Handle
 					r.logger.Printf("run %s: ignored an attempt wrap whose key does not open the envelope", runID)
 				case err != nil:
 					failure = err.Error()
+					run.answered(ctx, record, wire.RefusedEnvelopeInvalid)
 				default:
 					values = &opened
+					run.answered(ctx, record, "")
 				}
 			}
 		})
@@ -187,6 +199,17 @@ func (run *activeRun) openOnce(ctx, bound context.Context, job *pluginsdk.Handle
 			return nil, "", kgo.AckRelease, true
 		}
 	}
+}
+
+// answered is the CONSUMER span of the custodian's answer to this attempt's open request, a child of the answer's
+// own trace context; refused is the refusal's reason, a fixed class, or empty for a wrap.
+func (run *activeRun) answered(ctx context.Context, record *kgo.Record, refused string) {
+	_, span := run.receiver.tracing.Consumer(ctx, record, telemetry.AttrRun.String(run.task.Wherry.Run), telemetry.AttrAttempt.Int64(run.attempt),
+		semconv.MessagingKafkaOffset(int(record.Offset)))
+	if refused != "" {
+		telemetry.Fail(span, refused)
+	}
+	span.End()
 }
 
 // fromLiveMember decodes record into value as a live pool member's.
@@ -283,6 +306,9 @@ func (run *activeRun) poolStatus(kind string, state wire.TaskState) *kgo.Record 
 // released commits the run's released status, giving up its claim, before its task goes back to the pool. A fenced
 // holder leaves the task to its adopter; a released status not committed leaves the task to its acquisition lock.
 func (run *activeRun) released(ctx context.Context) kgo.AckStatus {
+	_, span := telemetry.Child(ctx, "released")
+	defer span.End()
+	telemetry.FailCtx(ctx, telemetry.ClassReleased)
 	releaseCtx, cancel := run.receiver.shutdownContext(ctx)
 	defer cancel()
 	// A transaction a cut-short commit left open is aborted first.
@@ -371,12 +397,38 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 		return r.rekey(ctx, pending, events, keys, current)
 	}
 	check := &claimCheck{r: r, events: events, keys: keys, now: time.Now(), suspended: suspended, terms: terms}
+	topic := operator.PoolEventsTopic(r.config.Pool)
 	for _, request := range pending {
 		records := check.decide(ctx, request)
 		if len(records) == 0 {
 			continue
 		}
-		if err := r.transact(ctx, r.custody.producer, records...); err != nil {
+		// The custodian's CONSUMER span of the request, parented through the request's header, and the PRODUCER span of
+		// its answer, whose context the answer's records carry back. Both carry the run and tenant of the verified task
+		// the decision looked up, neither when the lookup found no task.
+		var attrs []attribute.KeyValue
+		if r.custodian.Enabled() {
+			attrs = []attribute.KeyValue{semconv.MessagingKafkaOffset(int(request.record.Offset))}
+			if check.run != "" {
+				attrs = append(attrs, telemetry.AttrRun.String(check.run))
+			}
+			if request.request != nil {
+				attrs = append(attrs, telemetry.AttrAttempt.Int64(request.request.Attempt), telemetry.AttrReceiver.String(request.request.Receiver))
+			}
+		}
+		answerCtx, process := r.custodian.Consumer(r.custodian.WithTenant(ctx, check.tenant), request.record, attrs...)
+		sendCtx, send := r.custodian.Producer(answerCtx, topic, attrs...)
+		for _, record := range records {
+			r.custodian.Inject(sendCtx, record)
+		}
+		if check.refused != "" {
+			telemetry.Fail(process, check.refused)
+			telemetry.Fail(send, check.refused)
+		}
+		err := r.transact(ctx, r.custody.producer, records...)
+		send.End()
+		process.End()
+		if err != nil {
 			if fenced(err) {
 				r.contest()
 			} else {
@@ -488,13 +540,18 @@ type claimCheck struct {
 	ads       []*kgo.Record
 	adsRead   bool
 	changed   string
+	// refused is the reason of the refusal the last decision answered with, empty for a wrap; run and tenant are the
+	// verified task's the last decision looked up, empty when the lookup found none.
+	refused string
+	run     string
+	tenant  string
 }
 
 // decide checks one open request against the claim check's four rules and returns the records answering it, in one
 // transaction: a new claim decision with the attempt wrap or the refusal. None while the custodian waits for a key.
 func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Record {
 	r := c.r
-	c.changed = ""
+	c.changed, c.refused, c.run, c.tenant = "", "", "", ""
 	var decision *wire.ClaimDecision
 	answer := func(value wire.Record) []*kgo.Record {
 		event := func(value wire.Record) *kgo.Record {
@@ -507,6 +564,7 @@ func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Reco
 	}
 	refuse := func(reason string) []*kgo.Record {
 		r.logger.Printf("custodian: refused an open request for run %s: %s", opened.record.Key, reason)
+		c.refused = reason
 		return answer(&wire.OpenRefusal{Custodian: r.id, Request: opened.digest, Reason: reason})
 	}
 	request := opened.request
@@ -519,6 +577,7 @@ func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Reco
 		return refuse(reason)
 	}
 	binding, statuses := task.record.Wherry, c.events.statuses[request.Run]
+	c.run, c.tenant = binding.Run, binding.Tenant
 	adopting := slices.ContainsFunc(statuses, func(status wire.RunStatus) bool {
 		return status.Wherry.TaskHash == task.hash && status.Wherry.Kind == "adopting" && status.Wherry.Receiver == request.Receiver && status.Wherry.Attempt == request.Attempt
 	})

@@ -9,3 +9,5 @@ drain_timeout: 20s
 credentials:
   nomad-token:
     file: /etc/wherry/nomad-token
+# Write the receiver's spans to the trace topics; off without it.
+tracing: true

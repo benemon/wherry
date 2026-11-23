@@ -30,3 +30,5 @@ storage:
   build:
     access_key: s3-access-key
     secret_key: s3-secret-key
+# Write the host's spans to wherry.traces.<tenant>; off without it.
+tracing: true

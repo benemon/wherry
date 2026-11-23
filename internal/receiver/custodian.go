@@ -22,12 +22,14 @@ import (
 
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
+	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -423,7 +425,7 @@ func (r *Receiver) tend(ctx context.Context, now time.Time) error {
 		case r.custody.contested:
 			reason = "contested"
 		}
-		return r.mint(ctx, keys, reason, latest, now)
+		return r.minted(ctx, keys, reason, latest, now)
 	}
 	if becoming {
 		r.logger.Printf("custodian: continuing as custodian of pool %s with key %s", r.config.Pool, latest.snapshot.Current.KeyID)
@@ -437,9 +439,20 @@ func (r *Receiver) tend(ctx context.Context, now time.Time) error {
 	}
 	// A rotate-key record above the offset the current snapshot carries rotates the key at once.
 	if state, _, _ := r.snapshot(); state.RotateRequested[r.config.Pool] > latest.snapshot.RotatedFor || !now.Before(rotationAt(time.UnixMilli(key.PublishedMS), r.config.Pool, latest.snapshot.Current.KeyID)) {
-		return r.mint(ctx, keys, "rotation", latest, now)
+		return r.minted(ctx, keys, "rotation", latest, now)
 	}
 	return nil
+}
+
+// minted is mint under the root span of a custodian rotation.
+func (r *Receiver) minted(ctx context.Context, keys map[string]*poolKey, reason string, from current, now time.Time) error {
+	ctx, span := r.custodian.Root(ctx, "custodian rotation", trace.SpanKindInternal)
+	defer span.End()
+	err := r.mint(ctx, keys, reason, from, now)
+	if err != nil {
+		telemetry.Fail(span, telemetry.ClassError)
+	}
+	return err
 }
 
 // contest handles the custodian producer's fence while the group still assigns this receiver the partition: the first

@@ -31,6 +31,7 @@ import (
 
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
+	"github.com/benemon/wherry/internal/telemetry/teletest"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
 	"github.com/prometheus/client_golang/prometheus"
@@ -809,7 +810,11 @@ func (f fixture) newReceiver(t *testing.T, config operator.ReceiverConfig) (*Rec
 		plugin.mu.Unlock()
 		return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: plugin, Exited: plugin.exited}, nil
 	}
-	return &Receiver{id: config.Receiver, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), factory: factory, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry())}, logs
+	r := &Receiver{id: config.Receiver, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), factory: factory, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry())}
+	if teletest.On() {
+		r.Trace()
+	}
+	return r, logs
 }
 
 func (f fixture) produce(t *testing.T, topic, key string, value []byte) *kgo.Record {

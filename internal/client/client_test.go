@@ -29,6 +29,7 @@ import (
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
+	"github.com/benemon/wherry/internal/telemetry/teletest"
 	"github.com/benemon/wherry/internal/wire"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -179,6 +180,12 @@ func (f *fixture) newHost(t *testing.T, host, stateDir string) *Host {
 	h, err := NewHost(kafka, key, principal, stateDir, map[string]credential.Source{"model": {File: f.secret}, "openai": {File: f.secret}}, nil, log.New(f.logs, host+": ", 0))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if teletest.On() {
+		if err := h.Trace(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = h.tracing.Close() })
 	}
 	if _, err := h.Register(f.ctx); err != nil {
 		t.Fatal(err)
