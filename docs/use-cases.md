@@ -6,7 +6,7 @@ You have a task that takes an hour, and you don't want to keep your laptop awake
 Submit it to wherry and close the lid.
 The run keeps going on a receiver.
 Its result waits in Kafka, for 30 days by default.
-When you're back, run `wherry host wait RUN_ID` on the same host to collect it.
+When you're back, run `wherry host result RUN_ID` on the same host to collect it.
 If you asked for the agent's commits with `--git-changes`, they come back as a patch or a bundle.
 
 [Runs and attempts](concepts.md#runs-and-attempts) explains what happens if a receiver stops mid-run.

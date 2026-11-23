@@ -315,7 +315,7 @@ func RotateKey(ctx context.Context, config Config) (string, string, error) {
 	}
 	if len(unfinished) > 0 {
 		slices.Sort(unfinished)
-		return "", "", fmt.Errorf("runs %s have not ended; rotate the key once they have, with every other wherry process of this host (the MCP server, any wherry wait) stopped", strings.Join(unfinished, ", "))
+		return "", "", fmt.Errorf("runs %s have not ended; rotate the key once they have, with every other wherry process of this host (the MCP server, any wherry result) stopped", strings.Join(unfinished, ", "))
 	}
 	old := host.key
 	next, err := operator.RotateKey(ctx, host.kafka, signed.HostOwner(host.tenant, host.host), operator.HostTopic(host.tenant, host.host), config.HostKey, old)

@@ -56,7 +56,7 @@ func (h *Host) continued(runID string) (continuation, error) {
 		return continuation{}, fmt.Errorf("%w: continue: run %s has no git input", ErrInvalidInput, local.Run)
 	}
 	if local.Bundle == nil {
-		return continuation{}, fmt.Errorf("%w: continue: wait has collected no %s of run %s", ErrInvalidInput, wire.GitBundle, local.Run)
+		return continuation{}, fmt.Errorf("%w: continue: result has collected no %s of run %s", ErrInvalidInput, wire.GitBundle, local.Run)
 	}
 	// A FIFO would block Open.
 	info, err := os.Lstat(local.Bundle.Path)

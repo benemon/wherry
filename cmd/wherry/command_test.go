@@ -946,7 +946,7 @@ func TestUsageErrors(t *testing.T) {
 		}, "usage: wherry host cancel"},
 		{"wait argument", func(stderr *bytes.Buffer) error {
 			return runWait(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
-		}, "usage: wherry host wait"},
+		}, "usage: wherry host result"},
 		{"wait quiet", func(stderr *bytes.Buffer) error {
 			return runWait(context.Background(), nil, []string{"run-a", "-q"}, stderr, stderr)
 		}, "flag provided but not defined: -q"},
@@ -1234,7 +1234,7 @@ func TestShortcutsRunTheHostCommands(t *testing.T) {
 	}
 	for _, help := range []string{"--help", "-h"} {
 		var stdout bytes.Buffer
-		if err := run([]string{help}, &stdout, io.Discard); err != nil || !strings.Contains(stdout.String(), "shortcuts for wherry host submit|wait|status|events|logs|cancel:\n  wherry submit|wait|status|events|logs|cancel\n") {
+		if err := run([]string{help}, &stdout, io.Discard); err != nil || !strings.Contains(stdout.String(), "shortcuts for wherry host submit|result|status|events|logs|cancel:\n  wherry submit|result|status|events|logs|cancel\n") {
 			t.Errorf("wherry %s = %v printing\n%s\nwant the shortcuts listed", help, err, stdout.String())
 		}
 	}

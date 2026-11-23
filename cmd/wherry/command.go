@@ -37,9 +37,9 @@ receiver:
   wherry receiver run
 host:
   wherry host init|key rotate|receivers|mcp
-  wherry host submit|wait|status|events|logs|cancel
-shortcuts for wherry host submit|wait|status|events|logs|cancel:
-  wherry submit|wait|status|events|logs|cancel
+  wherry host submit|result|status|events|logs|cancel
+shortcuts for wherry host submit|result|status|events|logs|cancel:
+  wherry submit|result|status|events|logs|cancel
 developer:
   wherry dev init|up|down [--reset]
 wherry version
@@ -51,7 +51,7 @@ const hostRefreshCommand = "wherry operator tenant host refresh TENANT HOST"
 
 // dayToDay are the host's day-to-day commands, which wherry also runs without the host word.
 var dayToDay = map[string]func(context.Context, *busclient.Host, []string, io.Writer, io.Writer) error{
-	"submit": runSubmit, "cancel": runCancel, "wait": runWait, "status": runStatus, "events": runEvents, "logs": runLogs,
+	"submit": runSubmit, "cancel": runCancel, "result": runWait, "status": runStatus, "events": runEvents, "logs": runLogs,
 }
 
 func run(args []string, stdout, stderr io.Writer) error {
@@ -103,7 +103,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 }
 
 func runHost(args []string, stdout, stderr io.Writer) error {
-	const hostUsage = "usage: wherry host <init|key rotate|receivers|mcp|submit|wait|status|events|logs|cancel>"
+	const hostUsage = "usage: wherry host <init|key rotate|receivers|mcp|submit|result|status|events|logs|cancel>"
 	if len(args) == 0 {
 		return errors.New(hostUsage)
 	}
@@ -324,6 +324,8 @@ func runCancel(ctx context.Context, client *busclient.Host, args []string, stdou
 func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("submit", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	wait := flags.Bool("wait", false, "collect the result after submitting")
+	outputsDir := flags.String("outputs-dir", "", "directory for the run's outputs (requires --wait)")
 	configFile := flags.String("config-file", "", "host configuration file")
 	agent := flags.String("agent", "", "agent to run (default: the pool's default agent)")
 	model := flags.String("model", "", "model the agent runs, one of its models as receivers lists them (default: the agent's default model)")
@@ -333,7 +335,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	gitRemote := flags.String("git", "", "REMOTE@REF: git repository the agent clones, an https or ssh URL or user@host:path, at a branch, tag or commit")
 	gitPath := flags.String("git-path", "", "checkout directory, relative (default: the repository name)")
 	gitChanges := flags.String("git-changes", "", "patch or bundle: ask for the agent's commits back as changes.patch or changes.bundle")
-	continueRun := flags.String("continue", "", "RUN_ID: continue from the changes.bundle wait collected for a run of this host, in its repository, and return the next one through the pool's bucket")
+	continueRun := flags.String("continue", "", "RUN_ID: continue from the changes.bundle result collected for a run of this host, in its repository, and return the next one through the pool's bucket")
 	var inputs, s3Inputs []string
 	flags.Func("input", "FILE[:s3]: a file to deliver to the agent's input directory, through the pool's bucket with :s3 (repeatable)", func(value string) error {
 		path, suffix, found := strings.Cut(value, ":")
@@ -372,7 +374,10 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry host submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE@REF [--git-path PATH] [--git-changes patch|bundle] | --continue RUN_ID] [--input FILE[:s3]]... [--credential NAME|NAME:file=FILE|NAME:env=VAR]... [--output NAME[:required][:s3]]... [--start-by TIME|DURATION] [--end-by TIME|DURATION]")
+		return errors.New("usage: wherry host submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE@REF [--git-path PATH] [--git-changes patch|bundle] | --continue RUN_ID] [--input FILE[:s3]]... [--credential NAME|NAME:file=FILE|NAME:env=VAR]... [--output NAME[:required][:s3]]... [--start-by TIME|DURATION] [--end-by TIME|DURATION] [--wait [--outputs-dir DIR]]")
+	}
+	if wasSet(flags, "outputs-dir") && !*wait {
+		return errors.New("--outputs-dir requires --wait")
 	}
 	parts, err := inputParts(inputs)
 	if err != nil {
@@ -446,11 +451,25 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "run_id=%s pool=%s", result.RunID, result.Pool)
+	unsupplied := ""
 	if len(result.Unsupplied) > 0 {
-		fmt.Fprintf(stdout, " unsupplied=%s", strings.Join(result.Unsupplied, ","))
+		unsupplied = " unsupplied=" + strings.Join(result.Unsupplied, ",")
 	}
-	fmt.Fprintln(stdout)
+	if _, err := fmt.Fprintf(stdout, "run_id=%s pool=%s%s\n", result.RunID, result.Pool, unsupplied); err != nil {
+		return err
+	}
+	if *wait {
+		bound := max(time.Until(endTime.Add(submitWaitMargin)), time.Second)
+		err := runWait(ctx, client, []string{result.RunID, "--timeout", bound.String(), "--outputs-dir", *outputsDir}, stdout, stderr)
+		var exit *exitError
+		if errors.As(err, &exit) && exit.code == timeoutCode {
+			command, commandErr := waitCommand(*configFile)
+			if commandErr == nil {
+				fmt.Fprintln(stderr, "collect it later with: "+command(result.RunID))
+			}
+		}
+		return err
+	}
 	return nil
 }
 
@@ -491,6 +510,10 @@ func outputFlag(outputs *[]wire.ExpectedOutput) func(string) error {
 var stdin io.Reader = os.Stdin
 
 // defaultWaitTimeout covers a run at the default task_started_by and task_ended_by.
+const defaultSubmitWaitMargin = 10 * time.Minute
+
+var submitWaitMargin = defaultSubmitWaitMargin
+
 const defaultWaitTimeout = busclient.DefaultStartBy + busclient.DefaultEndBy
 
 // streamRetry separates a failed read of a run's transcript that logs follows from the next, and bounds each wait for
@@ -516,8 +539,8 @@ var stateCodes = map[wire.TaskState]int{
 const timeoutCode = 6
 
 func runWait(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
-	const waitUsage = "usage: wherry host wait RUN_ID [--timeout 2h10m] [--outputs-dir DIR]"
-	flags := flag.NewFlagSet("wait", flag.ContinueOnError)
+	const waitUsage = "usage: wherry host result RUN_ID [--timeout 2h10m] [--outputs-dir DIR]"
+	flags := flag.NewFlagSet("result", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, waitUsage)

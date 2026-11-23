@@ -68,7 +68,7 @@ literally and interprets only the agent name.
 A profile whose agent lists `models` runs `default_model` unless you pass
 `model`, one of those `models`, to `submit`; an agent with one model runs
 it, and with two or more and no `default_model` you must pass one. A model outside them, or none where one is required, returns
-`INVALID_ARGUMENT`. `wait` returns the `model` the run's placement names.
+`INVALID_ARGUMENT`. `result` returns the `model` the run's placement names.
 
 ## Submit, then keep working
 
@@ -76,8 +76,8 @@ Call `submit` with `prompt`, and `agent`, `selector` and `git` when you
 need them. For a long brief, write it to a file and pass its path as
 `prompt_file` instead of `prompt`; the server reads it as it reads `inputs`,
 and refuses an empty one.
-It returns `id`, `pool` and `wait` straight away. `wait` is a shell
-command, `wherry wait <id>`. Where your harness runs shell
+It returns `id`, `pool` and `result` straight away. `result` is a shell
+command, `wherry result <id>`. Where your harness runs shell
 commands in the background and tells you when they finish, start that command
 in the background now, before anything else. The command:
 
@@ -89,7 +89,7 @@ in the background now, before anything else. The command:
   6 timed out, and 1 when it could not wait or collect. It exits 1 at once
   when `task_started_by` passes with no receiver claiming the run.
 
-Its completion is how you learn the run ended, so you skip the `wait` tool
+Its completion is how you learn the run ended, so you skip the `result` tool
 loop below. Then carry on with other work.
 
 `git` names a repository the agent clones itself: `remote` (an `https` or `ssh`
@@ -115,7 +115,7 @@ Pick the route by what this host can reach:
   `git fetch` it. No credential is involved.
 
 To build on a finished run's commits, submit with `continue` set to its run
-id, without `git`, once `wait` has collected its `changes.bundle`. The new run
+id, without `git`, once `result` has collected its `changes.bundle`. The new run
 clones the same repository, continues from that bundle and returns its own
 `changes.bundle`, holding every round's commits, through the pool's bucket:
 it needs a pool with storage and a host storage credential, or `submit`
@@ -165,15 +165,15 @@ to its input: the server uploads it to the pool's bucket and the agent finds it
 in its input directory like any input. Add `storage: "s3"` to an output to
 return it through the bucket. Both need a pool with storage and a storage
 credential for that pool in the user's wherry configuration; without them `submit`
-returns `INVALID_ARGUMENT` saying which is missing. `wait` downloads S3
+returns `INVALID_ARGUMENT` saying which is missing. `result` downloads S3
 outputs like any output, and deletes the run's objects from the bucket
 once the run has ended and every one has verified. A run that ended while
-nothing waited for it keeps them until a `wait` on it, or the bucket's
+nothing waited for it keeps them until a `result` on it, or the bucket's
 lifecycle rule, removes them.
 
 ## Collect the result
 
-Without a background command, call the `wait` tool with the id, and call it
+Without a background command, call the `result` tool with the id, and call it
 again until the run ends; nothing tells you when it does. It waits up to 45
 seconds and returns one of:
 
@@ -201,7 +201,7 @@ seconds and returns one of:
   `queued: <profile> on <receiver> advertises room` (a claim is due), or
   `no live profile offers the run's signature`. It is worked out from
   advertisements up to 120 seconds old. A queued run is not broken:
-  wait that many seconds, or do other work, then call `wait` again.
+  wait that many seconds, or do other work, then call `result` again.
 - `cancel requested <time>; applies when a receiver claims the task` in the
   `message` after `cancel`: the cancel is published and takes effect when a
   receiver claims the run.
@@ -209,7 +209,7 @@ seconds and returns one of:
 A run whose pool lost its key before the run started ends
 `TASK_STATE_FAILED` with `cannot be opened: the pool's custodian changed and
 its key was lost`. Before its `task_started_by`, wherry resubmits it for you
-under a new run ID, with the same input. `wait` follows the new run, and `runs` then lists every run ID
+under a new run ID, with the same input. `result` follows the new run, and `runs` then lists every run ID
 it followed, the run whose result it returns last. `status` returns the new
 run's ID as `replaced_by`. Use the last run ID for `status`, `events`,
 `logs` and `cancel`. Do not submit the task again yourself.
@@ -258,7 +258,7 @@ fix a source for the credential under that name in `credentials` in their
 wherry configuration: a file, an environment variable of the MCP server's
 process, or a command. Never ask for the value or handle it
 yourself. When the user says it is in place, call `submit` again with the
-same input, and start its `wait` as before.
+same input, and start its `result` as before.
 
 ## Cancel unneeded work
 
@@ -286,7 +286,13 @@ now, whose CLI error says `pool <pool> is suspended; submit again once
 it is resumed` or `pool <pool> has no custodian yet; submit again once a
 receiver of the pool has published one`. A suspended pool waits for its
 operator to resume it, so tell the user. For a missing custodian, submit
-again after a few minutes. A resubmission refused the same way fails `wait`. `OUTPUTS_NOT_WRITTEN` means
+again after a few minutes. A resubmission refused the same way fails `result`. `OUTPUTS_NOT_WRITTEN` means
 the result arrived but its outputs could not be written, downloaded or cleaned
 up; the message starts with the step that failed,
 and the MCP server's log holds the cause.
+
+For a short run, use `wherry submit --wait` to submit and collect in one
+command, with `--outputs-dir DIR` when needed. In MCP, set submit's `wait` to
+`true` only when the run is expected to finish within 45 seconds. Read its
+nested `result`, or its sanitised `error` after publish; `command` collects
+later. For longer runs submit first and call `result` separately.

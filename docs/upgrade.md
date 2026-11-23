@@ -220,7 +220,7 @@ Upgrade hosts and receivers together, and let queued tasks drain first.
 
 A v0.1.2 host cannot read a run record that a host before v0.1.2 wrote with
 `unsupplied_credentials` in its state directory: `wherry host runs` skips
-it, and `status`, `wait` and resubmission of the run fail. Let runs finish,
+it, and `status`, `result` and resubmission of the run fail. Let runs finish,
 or wait them out, before you upgrade a host.
 
 A run that loses its pool key before it starts is resubmitted with the
@@ -250,7 +250,7 @@ matches the old ending exactly.
 
 `wherry host cancel` records when it first cancelled a run in the run's local
 record, and a host before v0.1.2-rc.2 cannot read a record holding that time:
-`status`, `wait` and resubmission of the run fail on it. Upgrade every wherry
+`status`, `result` and resubmission of the run fail on it. Upgrade every wherry
 binary that shares a state directory together, and do not go back to an
 older one while a cancelled run's record is kept.
 
@@ -274,7 +274,7 @@ record whose `contextId` is not its run ID:
   the ref; only the `contextId` check stops it.
 - A host before v0.1.3 drops every record of such a run from the tenant
   feed, and cannot read a run record that holds a continued run's task or a
-  collected `changes.bundle`: `status`, `wait` and resubmission of the run
+  collected `changes.bundle`: `status`, `result` and resubmission of the run
   fail on it.
 
 Upgrade in this order:
@@ -330,7 +330,7 @@ A 30-second window accommodates `drain_timeout: 20s`.
 
 1. Run `wherry operator check`.
 2. Run `wherry host receivers` and check that the expected profiles are live and ready.
-3. Submit a task and collect its result with `wherry host wait RUN_ID`.
+3. Submit a task and collect its result with `wherry host result RUN_ID`.
 
 Readers ignore unknown operator-record members.
 They reject a record version higher than they support.
@@ -369,3 +369,14 @@ Each receiver page gives its platform's upgrade and uninstall steps.
 Removing the host does not revoke the Claude token.
 
 Check that it worked: `wherry operator tenant list` no longer lists the host under its tenant.
+
+## `wait` is now `result`
+
+The host command `wherry wait` is now `wherry result`, also under
+`wherry host`. There is no alias. Update scripts and skills that call it.
+The MCP tool is now `result`, and submit's `wait` response member is
+`command`. Operator `--wait` flags are unchanged.
+
+For a short run, `wherry submit --wait` submits and collects the result in
+one command. MCP submit accepts `wait: true` and returns the reply under
+`result`, or a sanitised `error` after a successful publish.

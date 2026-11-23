@@ -101,20 +101,20 @@ wherry submit --prompt "List the files in your input directory."
 `unsupplied=<names>` when the agent has optional credentials the host could
 not resolve. Each harness runs its own
 default model. `wherry submit` is a [shortcut](commands.md#shortcuts) for
-`wherry host submit`, as `wherry wait` is for `wherry host wait`.
+`wherry host submit`, as `wherry result` is for `wherry host result`.
 
 ### 4. Wait
 
 ```sh
-wherry wait run-<id>
+wherry result run-<id>
 ```
 
-`wait` prints the agent's message once the run ends. `wherry logs run-<id>`
+`result` prints the agent's message once the run ends. `wherry logs run-<id>`
 prints its transcript.
 
 ### Check that it worked
 
-Confirm that `wait` prints the agent's response and exits successfully.
+Confirm that `result` prints the agent's response and exits successfully.
 Use `wherry host status RUN_ID` to inspect the terminal state.
 
 ### 5. Stop
