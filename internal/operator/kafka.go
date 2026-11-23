@@ -1006,14 +1006,18 @@ func (service *Service) checkTraceTopics(ctx context.Context, state State) error
 	return nil
 }
 
-// EnsureTraceTopics creates wherry.traces and the trace topic of every live tenant where missing and sets traceConfigs
-// on each, new or existing, for operator init: a re-run gives an install that predates the topics every one of them.
+// EnsureTraceTopics creates wherry.traces and the trace topic of every live tenant where missing, sets traceConfigs
+// on each, new or existing, and converges, for operator init: a re-run gives an install that predates the topics every
+// one of them and their grants.
 func (service *Service) EnsureTraceTopics(ctx context.Context) error {
 	state, err := service.LoadState(ctx)
 	if err != nil {
 		return err
 	}
-	return service.traceTopics(ctx, traceTopics(state)...)
+	if err := service.traceTopics(ctx, traceTopics(state)...); err != nil {
+		return err
+	}
+	return service.converge(ctx)
 }
 
 // traceTopics creates topics with traceConfigs, then sets the configs on them, new or existing.

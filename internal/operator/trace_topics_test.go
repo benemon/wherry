@@ -151,6 +151,38 @@ func TestEnsureTraceTopicsOnAPredatingInstall(t *testing.T) {
 	}
 }
 
+// On an install that predates the trace grants, EnsureTraceTopics, operator init's step, grants every trace row and
+// operator check passes.
+func TestEnsureTraceTopicsGrantsTheTraceRows(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := t.Context()
+	_, _, rows := traceFixture(t, service)
+	for _, acl := range rows {
+		builder, err := aclBuilder(acl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := service.deleteACLs(ctx, builder); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := service.Check(ctx); err == nil {
+		t.Fatal("check passed with the trace rows deleted")
+	}
+	if err := service.EnsureTraceTopics(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, acl := range rows {
+		if ok, err := granted(ctx, service, acl); err != nil || !ok {
+			t.Fatalf("%s %v on %s after EnsureTraceTopics: %t, %v", acl.Principal, acl.Operations, acl.Resource, ok, err)
+		}
+	}
+	if err := service.Check(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Brief test 7: operator check reports a missing trace topic and drifted trace configs, wherry.traces and a tenant's
 // alike, naming operator init; once init's step has run it passes.
 func TestCheckReportsTraceTopics(t *testing.T) {

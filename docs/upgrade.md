@@ -298,8 +298,8 @@ its tenants and the grant by running `init` again:
 1. Upgrade the operator's binary.
 2. Run `wherry operator init` with the Kafka super user, as at setup. It
    grants `wherry.operator` `Describe` on the group prefix `p-`, creates
-   `wherry.traces` and the trace topic of every live tenant where missing, and
-   sets their configuration.
+   `wherry.traces` and the trace topic of every live tenant where missing,
+   sets their configuration, and grants hosts and receivers their rows on them.
 3. `init` rotates `wherry.operator`'s password, as every re-run does: every
    other copy of the operator's working directory must take the new
    `operator.password` before its commands run again.
@@ -307,7 +307,8 @@ its tenants and the grant by running `init` again:
 `wherry operator check` is the signal that the step is due: on an install
 that predates it, check reports
 `missing DESCRIBE ACL on p- for wherry.operator` or
-`trace topic wherry.traces is missing; operator init creates it`. Until the
+`trace topic wherry.traces is missing; operator init creates it`, or a missing
+`WRITE` ACL on `wherry.traces` for a receiver. Until the
 step runs, a process with tracing on logs the expected refusals,
 `UNKNOWN_TOPIC_OR_PARTITION` and `TOPIC_AUTHORIZATION_FAILED`, once an hour
 and loses those spans; nothing else is affected.
