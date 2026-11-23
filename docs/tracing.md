@@ -43,22 +43,39 @@ ID in lowercase hex. A trace spans the roles, so a run's trace is several
 records with the same key, in append order. Records of different traces are
 never mixed.
 
-A principal needs these grants, literal, on the topics it writes; the
-operator does not yet create the topics or the grants, which come with the
-trace-topic slice, so until then an operator creates them with the broker's
-tools, auto-creation staying off:
+The operator creates the topics and the grants. `wherry operator tenant add`
+creates `wherry.traces.<tenant>` and `wherry operator init` creates
+`wherry.traces`; on an install that predates them, running `init` again
+creates every live tenant's topic too
+([Upgrade](upgrade.md#trace-topics-and-the-operator-s-group-grant)). Each
+has one partition, `cleanup.policy=delete`,
+`message.timestamp.type=LogAppendTime`, `retention.ms` of 7 days and
+`max.message.bytes` of 1 MiB, the trace client's batch maximum; `operator
+check` reports one that is missing or drifted. Auto-creation stays off.
+Tracing turned on before the topics and grants exist logs the expected
+refusals, `UNKNOWN_TOPIC_OR_PARTITION` and `TOPIC_AUTHORIZATION_FAILED`, once
+an hour, and loses those spans. The grants are literal and reconciled from
+the operator's records like every other
+([ACLs](design.md#acls)):
 
 | Principal | Topic | Operations |
 | --- | --- | --- |
-| host `wherry.tnt.<tenant>.<host>` | `wherry.traces.<tenant>` | WRITE, DESCRIBE |
-| receiver `wherry.rcv.<receiver>` | `wherry.traces.<t>` for each tenant `<t>` entitled to its pool, and `wherry.traces` | WRITE, DESCRIBE |
+| host `wherry.tnt.<tenant>.<host>` | `wherry.traces.<tenant>`, whether or not the tenant has a live entitlement | READ, WRITE, DESCRIBE |
+| receiver `wherry.rcv.<receiver>` | `wherry.traces.<t>` for each tenant `<t>` entitled to its pool now or before, and `wherry.traces` | WRITE, DESCRIBE |
 | `wherry.operator` | `wherry.traces` and `wherry.traces.<tenant>` | WRITE, DESCRIBE, held through its `wherry.` prefix grant |
 
 A host can write only its own tenant's topic, so a span claiming another
 tenant is refused by the broker with `TOPIC_AUTHORIZATION_FAILED` and lands
-nowhere. The same holds the other way: any host of a tenant can write that
-tenant's topic, so a span is evidence of timing, not of a run's state; the
-signed records on the tenant feed stay the authority for what happened.
+nowhere; a host's spans all carry its tenant, so none routes to
+`wherry.traces` and no host is granted there. The same holds the other way:
+any host of a tenant can write that tenant's topic, so a span is evidence of
+timing, not of a run's state; the signed records on the tenant feed stay the
+authority for what happened. Every host of a tenant reads all its tenant's
+retained spans, other hosts' runs included, and keeps reading them after an
+entitlement ends, so it sees the spans of runs finishing then. Tenant removal
+revokes the hosts' grants, and the receivers' follow the ended entitlement as
+their feed grants do; the topic stays and expires by its retention
+([Removal and retained data](security.md#removal-and-retained-data)).
 
 ## Delivery
 
@@ -93,6 +110,12 @@ call and waits for each record's acknowledgement or failure:
 - A topic that does not exist is reported as a `timeout` rather than
   `UNKNOWN_TOPIC_OR_PARTITION` when the client is still asking the broker for
   it at the bound.
+- The trace client batches at most 1 MiB on every role, the topics'
+  `max.message.bytes`, whatever the process's own client batches. A record
+  holds at most that less 256 bytes of record and batch overhead. A trace's
+  group over the limit is split by spans into as many records under its key;
+  a span over the limit alone is dropped and reported as `oversize` for its
+  topic, the rest of its export delivered.
 
 On a stall, a broker that answers produce requests with a retriable error or
 not at all, each export waits out its second, fails its records and reports
@@ -105,8 +128,8 @@ request for at most two seconds, the request timeout plus the client's one
 second of overhead, after which the request's records are failed.
 
 A failed export is logged with the topic and the error's class, the Kafka
-error name or `timeout`, `canceled`, `client closed` or `error`, and nothing of
-the spans: at most once a minute for each topic and class, every refused or
+error name or `timeout`, `canceled`, `client closed`, `oversize` or `error`,
+and nothing of the spans: at most once a minute for each topic and class, every refused or
 timed-out topic of an export on its own line. A refusal a topic not yet created
 or an ended entitlement explains, `UNKNOWN_TOPIC_OR_PARTITION` or
 `TOPIC_AUTHORIZATION_FAILED`, is logged once an hour and marked expected. A
@@ -228,7 +251,8 @@ service:
       exporters: [otlp]
 ```
 
-The topics are not compacted; records expire by the topics' retention.
+The topics are not compacted; records expire by the topics' retention, 7
+days.
 
 ## Cost
 

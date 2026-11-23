@@ -287,6 +287,31 @@ Upgrade in this order:
 A host upgraded before its receivers breaks the resubmission of every run
 that loses its pool key, not only of continued runs.
 
+## Trace topics and the operator's group grant
+
+Spans go to a trace topic per tenant, `wherry.traces.<tenant>`, and to
+`wherry.traces` ([Tracing](tracing.md)). `tenant add` now creates the
+tenant's topic, and `wherry.operator` needs `Describe` on the pool groups for
+the operator view's share-group state. An existing install gets the topics of
+its tenants and the grant by running `init` again:
+
+1. Upgrade the operator's binary.
+2. Run `wherry operator init` with the Kafka super user, as at setup. It
+   grants `wherry.operator` `Describe` on the group prefix `p-`, creates
+   `wherry.traces` and the trace topic of every live tenant where missing, and
+   sets their configuration.
+3. `init` rotates `wherry.operator`'s password, as every re-run does: every
+   other copy of the operator's working directory must take the new
+   `operator.password` before its commands run again.
+
+`wherry operator check` is the signal that the step is due: on an install
+that predates it, check reports
+`missing DESCRIBE ACL on p- for wherry.operator` or
+`trace topic wherry.traces is missing; operator init creates it`. Until the
+step runs, a process with tracing on logs the expected refusals,
+`UNKNOWN_TOPIC_OR_PARTITION` and `TOPIC_AUTHORIZATION_FAILED`, once an hour
+and loses those spans; nothing else is affected.
+
 ## What happens to running work?
 
 On `SIGINT` or `SIGTERM`, a receiver stops claiming and closes idle claims.
