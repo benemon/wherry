@@ -1407,6 +1407,15 @@ outputs, unless `--output` names it already; neither is required. On a pool
 with storage, `--git-changes bundle --output changes.bundle:s3` returns the
 bundle through the pool's bucket, outside the pool's `output_limit`: the route for a first run that later runs continue.
 
+The prompt asks the agent to write the bundle after every commit and once
+more before it finishes, so a run that ends early after committing, by an
+exit, a timeout or a cancel, returns the bundle of its commits so far, best
+effort, when the agent followed the instruction. A patch is written once, at
+the end, and a run that ends before then returns none. A collected bundle is
+checked as bytes, by size and SHA-256; git checks its pack when the bundle is
+fetched. A run killed in the middle of an export may also return
+`changes.bundle.lock`, the export's partial file, which can be ignored.
+
 `--continue RUN_ID` starts the next round of work on a run's commits. It
 reuses the run's `--git` remote, ref and `--git-path`, and takes the
 credential and host key from the current client configuration, as `--git`
@@ -1425,6 +1434,10 @@ records when it collects it. The new run:
 - joins the run's A2A context, so every round of a chain shares the first
   run's ID as its `contextId`, and names the run it continues in
   `referenceTaskIds`.
+
+A run that failed, timed out or was canceled may have returned a
+`changes.bundle` too. It holds the commits up to the agent's last export, not
+the agent's final state, and `--continue` starts the next round from there.
 
 `submit` refuses `--continue`, before it uploads or publishes:
 
