@@ -126,7 +126,10 @@ func Serve(v *View, opts ServeOptions) (*Server, error) {
 	mux.Handle("GET /api/runs/{id}", s.guard(http.HandlerFunc(s.run), true))
 	mux.Handle("GET /api/runs/{id}/trace", s.guard(http.HandlerFunc(s.trace), true))
 	mux.Handle("GET /api/stream", s.guard(http.HandlerFunc(s.stream), true))
-	mux.Handle("/", s.guard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.fail(w, http.StatusNotFound, textNotFound) }), false))
+	mux.Handle("/", s.guard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.fail(w, http.StatusNotFound, textNotFound)
+		s.log(r, http.StatusNotFound)
+	}), false))
 	// WriteTimeout stays 0 for the stream, whose writes carry their own deadline.
 	s.server = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(io.Discard, "", 0)}
 	go func() {
@@ -188,7 +191,7 @@ func (s *Server) allowedOrigin(origin string) bool {
 }
 
 // guard checks Host, then Origin when present, sets the fixed headers and, with cookie, requires a session cookie.
-// Forwarded headers are ignored. Nothing of the request is logged but its method, path and status.
+// Forwarded headers are ignored. Nothing of the request is logged but its method, route and status.
 func (s *Server) guard(next http.Handler, cookie bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -227,9 +230,20 @@ func (s *Server) authenticated(r *http.Request) bool {
 	return ok
 }
 
+// routes are the fixed identifiers the log names each matched pattern by; a request matching none is "other".
+var routes = map[string]string{
+	"GET /{$}": "page", "GET /app.js": "asset", "GET /app.css": "asset", "POST /session": "session",
+	"GET /api/model": "model", "GET /api/runs/{id}": "run", "GET /api/runs/{id}/trace": "trace", "GET /api/stream": "stream",
+}
+
+// log writes the method, the matched route's fixed identifier and the status: nothing of the path's free components,
+// which a request can fill with anything.
 func (s *Server) log(r *http.Request, status int) {
-	// The path alone: a query, which no endpoint takes, is never written.
-	s.opts.Logger.Printf("view: %s %s %d", r.Method, r.URL.Path, status)
+	route := routes[r.Pattern]
+	if route == "" {
+		route = "other"
+	}
+	s.opts.Logger.Printf("view: %s %s %d", r.Method, route, status)
 }
 
 func (s *Server) fail(w http.ResponseWriter, status int, text string) {

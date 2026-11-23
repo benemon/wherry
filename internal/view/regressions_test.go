@@ -2,6 +2,7 @@ package view
 
 import (
 	json "encoding/json/v2"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
@@ -226,5 +227,28 @@ func TestRetainedStateBounds(t *testing.T) {
 	}
 	if encoded, fits, err := marshalBounded(d, 1<<20); !fits || err != nil || !strings.Contains(string(encoded), `"truncated":["run_attempts","run_opens"]`) {
 		t.Errorf("an encoding under its bound: fits %v, %v, %.200s", fits, err, encoded)
+	}
+}
+
+// The access log names a fixed route and the status, never a path's free components: a token or any other secret
+// put in a path never reaches it.
+func TestReviewTokenInPathLog(t *testing.T) {
+	s := newServed(t, ServeOptions{})
+	s.request(t, http.MethodGet, "/api/runs/"+s.token, nil, nil, nil)
+	s.request(t, http.MethodGet, "/api/runs/"+s.token+"/trace", nil, nil, nil)
+	s.request(t, http.MethodGet, "/s3cr3t-path%07", nil, nil, nil)
+	cookie := s.session(t)
+	s.request(t, http.MethodGet, "/api/runs/run-s3cr3t-missing", nil, cookie, nil)
+	s.request(t, http.MethodGet, "/api/runs/"+s.run, nil, cookie, nil)
+	logs := s.logs.String()
+	for _, secret := range []string{s.token, "s3cr3t", "\x07", "%07", s.run} {
+		if strings.Contains(logs, secret) {
+			t.Errorf("a path component reached the access log: %q in %q", secret, logs)
+		}
+	}
+	for _, line := range []string{"view: GET run 403", "view: GET trace 403", "view: GET other 404", "view: GET run 404", "view: GET run 200", "view: POST session 204"} {
+		if !strings.Contains(logs, line+"\n") {
+			t.Errorf("the log lacks %q: %q", line, logs)
+		}
 	}
 }
