@@ -34,7 +34,11 @@ const (
 	capTraceScan    = "trace_scan"
 	capTraceScans   = "trace_scans"
 	capTraceRuns    = "trace_runs"
+	capTraceLinks   = "trace_links"
 )
+
+// maxLinks bounds the links kept of one span.
+const maxLinks = 16
 
 // traceSkew is how far before a run's first record its tenant's trace topic is scanned from: a host's submit spans
 // are exported after the task record, on another leader's clock.
@@ -144,7 +148,7 @@ func (t *traces) Trace(ctx context.Context, id string) (Forest, error) {
 			from = admitted
 		}
 	}
-	caps := v.m.caps
+	caps, names := v.m.caps, v.m.catalog()
 	v.mu.RUnlock()
 	if !ok || tenant == "" {
 		return Forest{}, errNotFound
@@ -167,7 +171,7 @@ func (t *traces) Trace(ctx context.Context, id string) (Forest, error) {
 	if err != nil {
 		return Forest{}, err
 	}
-	forest := Forest{Run: id, Tenant: tenant, Topic: s.topic, Traces: []Trace{}, Markers: []string{}}
+	forest := Forest{Run: id, Tenant: names.tenant(tenant), Topic: s.topic, Traces: []Trace{}, Markers: []string{}}
 	if !topics[s.topic] {
 		forest.Markers = append(forest.Markers, MarkerNoTopic)
 		return forest, nil
@@ -328,6 +332,10 @@ func (t *traces) decode(s *scan, id string, value []byte, caps Caps) {
 				if runOf(span.Attributes) != id {
 					continue
 				}
+				if len(span.TraceId) != 16 || len(span.SpanId) != 8 || len(span.ParentSpanId) != 0 && len(span.ParentSpanId) != 8 {
+					s.markers[MarkerMalformed] = true
+					continue
+				}
 				if len(s.spans) >= caps.TraceSpans {
 					s.markers[markerTruncated+capTraceSpans] = true
 					t.v.mu.Lock()
@@ -341,8 +349,15 @@ func (t *traces) decode(s *scan, id string, value []byte, caps Caps) {
 					status: allow.status(span.Status), events: len(span.Events)}
 				fact.attributes, fact.filtered = allow.attributes(span.Attributes)
 				for _, link := range span.Links {
-					if linked := hex.EncodeToString(link.TraceId); len(linked) == 32 {
-						fact.links = append(fact.links, linked)
+					if len(fact.links) >= maxLinks {
+						s.markers[markerTruncated+capTraceLinks] = true
+						t.v.mu.Lock()
+						t.v.m.count(capTraceLinks, 1)
+						t.v.mu.Unlock()
+						break
+					}
+					if len(link.TraceId) == 16 {
+						fact.links = append(fact.links, hex.EncodeToString(link.TraceId))
 					}
 				}
 				if fact.filtered {
@@ -472,66 +487,17 @@ func (t *traces) forest(spans []*spanFact, caps Caps) ([]Trace, int) {
 }
 
 // allowlist is what a span of the selected run may name: the fixed span names, the attribute keys of the tracing
-// allowlist, and for each key the values the model knows. Anything else is filtered: a span from any host of the
-// tenant can claim any text.
+// allowlist, and for each key the values the configuration's catalog knows. Anything else is filtered: a span from
+// any host of the tenant can claim any text.
 type allowlist struct {
-	run                                  string
-	state                                operator.State
-	topics                               map[string]bool
-	outputs, credentials, models, agents map[string]bool
-	endpoints, buckets, profiles         map[string]bool
+	run   string
+	state operator.State
+	names *catalog
 }
 
 // allowlist is the allowlist for run id; the caller holds v.mu.
 func (t *traces) allowlist(id string) allowlist {
-	m := t.v.m
-	a := allowlist{run: id, state: m.history.State, topics: map[string]bool{}, outputs: map[string]bool{}, credentials: map[string]bool{}, models: map[string]bool{}, agents: map[string]bool{}, endpoints: map[string]bool{}, buckets: map[string]bool{}, profiles: map[string]bool{}}
-	for topic := range followed(m.history.State) {
-		a.topics[topic] = true
-	}
-	a.topics[operator.OperatorTopic] = true
-	for pool, terms := range m.history.State.Pools {
-		a.topics[operator.PoolReceiversTopic(pool)] = true
-		for _, entry := range m.history.Terms[pool] {
-			if entry.Terms.Storage != nil {
-				a.endpoints[entry.Terms.Storage.Endpoint], a.buckets[entry.Terms.Storage.Bucket] = true, true
-			}
-		}
-		for _, agent := range terms.Agents {
-			a.agents[agent.Name] = true
-			for _, credential := range agent.Credentials {
-				a.credentials[credential.Name] = true
-			}
-			for _, model := range agent.Models {
-				a.models[model] = true
-			}
-		}
-	}
-	for tenant := range m.history.State.Tenants {
-		a.topics[telemetry.TraceTopic(tenant)] = true
-		a.topics[operator.TenantTranscriptTopic(tenant)] = true
-	}
-	a.topics[telemetry.TraceTopic("")] = true
-	for _, host := range m.history.State.Hosts {
-		a.topics[operator.HostTopic(host.Tenant, host.Name)] = true
-	}
-	for receiver, config := range m.history.State.Receivers {
-		a.topics[operator.ReceiverTopic(receiver)] = true
-		for _, profile := range config.Profiles {
-			a.profiles[profile.Name] = true
-		}
-	}
-	if r := m.runs[id]; r != nil && r.Result != nil {
-		for _, list := range [][]outputFact{r.Result.Outputs, r.Result.S3Outputs} {
-			for _, output := range list {
-				a.outputs[output.Name] = true
-			}
-		}
-		for _, output := range r.Result.NotReturned {
-			a.outputs[output.Name] = true
-		}
-	}
-	return a
+	return allowlist{run: id, state: t.v.m.history.State, names: t.v.m.catalog()}
 }
 
 // spanNames are the fixed span names; the prefixes take a tail checked by its kind.
@@ -546,22 +512,22 @@ var spanNames = map[string]bool{
 const nameOther = "[other]"
 
 // name is the span's name rebuilt from validated components: a fixed name, "send" or "process" with a topic the
-// model knows and a configured profile, "operator" with one of the fixed commands, or a revocation step's number.
-// Anything else is the fixed placeholder, never the record's text.
+// configuration derives and a configured profile, "operator" with one of the fixed commands, or a revocation step's
+// number. Anything else is the fixed placeholder, never the record's text.
 func (a allowlist) name(name string) string {
 	if spanNames[name] {
 		return name
 	}
-	if topic, ok := strings.CutPrefix(name, "send "); ok && a.topic(topic) {
+	if topic, ok := strings.CutPrefix(name, "send "); ok && a.names.topic(topic) {
 		return "send " + topic
 	}
 	if rest, ok := strings.CutPrefix(name, "process "); ok {
 		topic, profile, _ := strings.Cut(rest, " ")
 		switch {
-		case !a.topic(topic):
+		case !a.names.topic(topic):
 		case profile == "":
 			return "process " + topic
-		case a.profiles[profile]:
+		case a.names.allProfiles[profile]:
 			return "process " + topic + " " + profile
 		}
 	}
@@ -574,17 +540,6 @@ func (a allowlist) name(name string) string {
 		}
 	}
 	return nameOther
-}
-
-// topic reports whether name is a topic the model knows: a followed topic, a key, receivers, transcript or trace
-// topic, or a task topic of a known pool.
-func (a allowlist) topic(name string) bool {
-	if a.topics[name] {
-		return true
-	}
-	pool, _, ok := wire.ParseTaskTopic(name)
-	_, known := a.state.Pools[pool]
-	return ok && known
 }
 
 // attributes is attrs under the allowlist: a key outside it, or a value the model does not know for its key, is
@@ -621,39 +576,38 @@ func (a allowlist) value(key attribute.Key, value *commonpb.AnyValue) (string, b
 		case telemetry.AttrRun:
 			ok = s == a.run
 		case telemetry.AttrTenant:
-			_, ok = a.state.Tenants[s]
+			ok = a.names.tenants[s]
 		case telemetry.AttrHost:
-			ok = slices.ContainsFunc(slices.Collect(maps.Values(a.state.Hosts)), func(host operator.Host) bool { return host.Name == s })
+			ok = a.names.hostNames[s]
 		case telemetry.AttrPool:
-			_, ok = a.state.Pools[s]
+			ok = a.names.pools[s]
 		case telemetry.AttrReceiver:
-			_, ok = a.state.Receivers[s]
+			ok = a.names.receivers[s]
 		case telemetry.AttrProfile:
-			ok = a.profiles[s]
+			ok = a.names.allProfiles[s]
 		case telemetry.AttrAgent:
-			ok = a.agents[s]
+			ok = a.names.allAgents[s]
 		case telemetry.AttrModel:
-			ok = a.models[s]
+			ok = a.names.allModels[s]
 		case telemetry.AttrCredential:
-			ok = a.credentials[s]
+			ok = a.names.credentials[s]
 		case telemetry.AttrCredentialSource:
 			ok = s == "file" || s == "env" || s == "command"
 		case telemetry.AttrOutput:
-			ok = a.outputs[s]
+			// Output names are a record's text; the model keeps none to match against.
+			ok = false
 		case telemetry.AttrStorageEndpoint:
-			ok = a.endpoints[s]
+			ok = a.names.endpoints[s]
 		case telemetry.AttrStorageBucket:
-			ok = a.buckets[s]
+			ok = a.names.buckets[s]
 		case telemetry.AttrSystemName:
 			ok = s == "kafka"
 		case "messaging.operation.type", "messaging.operation.name":
 			ok = s == "send" || s == "process" || s == "receive" || s == "create" || s == "settle"
 		case "messaging.destination.name":
-			ok = a.topic(s)
+			ok = a.names.topic(s)
 		case "messaging.consumer.group.name":
-			for pool := range a.state.Pools {
-				ok = ok || s == operator.PoolGroup(pool) || s == operator.CustodianGroup(pool)
-			}
+			ok = a.names.groups[s]
 		}
 		return s, ok
 	}

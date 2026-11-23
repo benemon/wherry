@@ -271,14 +271,13 @@ type Result struct {
 	Artifacts   int          `json:"artifacts"`
 }
 
+// Output is a returned output's size and hash; the name a record gives it is never carried.
 type Output struct {
-	Name   string `json:"name"`
 	Size   int64  `json:"size"`
 	SHA256 string `json:"sha256"`
 }
 
 type Unreturned struct {
-	Name   string `json:"name"`
 	Size   int64  `json:"size"`
 	Reason string `json:"reason"`
 }
@@ -327,19 +326,21 @@ type BoundHit struct {
 }
 
 // capNames are the counters that are caps.
-var capNames = []string{capRecordBytes, capRuns, capDigests, capPending, capCursors, capRunEvents, capRunAttempts, capRunOpens, capRunBytes, capEvents, capBytes, capProgress,
-	capResponse, capEvent, capTraceBytes, capTraceRecords, capTraceSpans, capTraceForest, capTraceScan, capTraceScans, capTraceRuns}
+var capNames = []string{capRecordBytes, capRuns, capDigests, capPending, capCursors, capRunEvents, capRunAttempts, capRunEchoes, capRunCancels, capRunOpens, capRunBytes,
+	capEvents, capAttempts, capEchoes, capCancels, capOpens, capBytes, capProgress, capResponse, capEvent, capSessions,
+	capTraceBytes, capTraceRecords, capTraceSpans, capTraceForest, capTraceScan, capTraceScans, capTraceRuns, capTraceLinks}
 
-// Snapshot is the model now, with at most maxRuns runs, newest last activity first; 0 is every run.
+// Snapshot is the model now, with at most maxRuns runs, newest last activity first; 0 is every run. Every name it
+// carries is one the configuration yields, through the catalog, or a fixed placeholder.
 func (v *View) Snapshot(maxRuns int) Snapshot {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	m, now := v.m, v.opts.Now()
-	state := m.history.State
+	state, names := m.history.State, m.catalog()
 	s := Snapshot{Version: v.version, Now: now, WindowStart: v.windowStart, Rebuilt: v.rebuilt, RebuiltAt: v.rebuiltAt, Counts: maps.Clone(m.counts), Errors: slices.Clone(v.errs)}
 	s.Counts["pending"] = int64(len(m.pending))
 	for _, broker := range v.brokers {
-		s.Brokers = append(s.Brokers, Broker(broker))
+		s.Brokers = append(s.Brokers, Broker{ID: broker.ID, Host: plainText(broker.Host), Port: broker.Port, Rack: plainText(broker.Rack), Controller: broker.Controller, Listeners: broker.Listeners})
 	}
 	runs := slices.SortedFunc(maps.Values(m.runs), func(a, b *run) int { return cmp.Or(b.Last.Compare(a.Last), strings.Compare(a.ID, b.ID)) })
 	s.RunsTotal = len(runs)
@@ -372,7 +373,7 @@ func (v *View) Snapshot(maxRuns int) Snapshot {
 		}
 	}
 	for i, r := range runs {
-		summary := m.summary(r)
+		summary := m.summary(r, names)
 		if maxRuns <= 0 || i < maxRuns {
 			s.Runs = append(s.Runs, summary)
 		} else {
@@ -439,8 +440,8 @@ func (v *View) Snapshot(maxRuns int) Snapshot {
 		}
 		slices.Sort(p.Tenants)
 		if custodian, ok := m.custodians[pool]; ok {
-			p.Custodian = custodian.Custodian
-			s.Custodians = append(s.Custodians, Custodian{Pool: pool, Receiver: custodian.Custodian, Status: operator.ReceiverStatus(state, m.ads, custodian.Custodian, now), KeyID: custodian.KeyID, Reason: custodian.Reason, At: custodian.At,
+			p.Custodian = names.receiver(custodian.Custodian)
+			s.Custodians = append(s.Custodians, Custodian{Pool: pool, Receiver: p.Custodian, Status: operator.ReceiverStatus(state, m.ads, custodian.Custodian, now), KeyID: custodian.KeyID, Reason: custodian.Reason, At: custodian.At,
 				RotatedFor: custodian.RotatedFor, SuspendedFor: custodian.SuspendedFor, ResumedFor: custodian.ResumedFor, Suspended: state.Suspended[pool]})
 		}
 		s.Pools = append(s.Pools, p)
@@ -455,11 +456,11 @@ func (v *View) Snapshot(maxRuns int) Snapshot {
 			node.Profiles = append(node.Profiles, profile.Name)
 		}
 		if ad, ok := m.ads[receiver]; ok && !node.Ended {
-			node.Capacity, node.InFlight, node.Gated, node.LastAdvertised = ad.Capacity, ad.InFlight, ad.Gated, time.UnixMilli(ad.AtMS).UTC()
+			node.Capacity, node.InFlight, node.Gated, node.LastAdvertised = ad.Capacity, ad.InFlight, fixed(gates, ad.Gated), time.UnixMilli(ad.AtMS).UTC()
 			// An offer is shown as the configuration names its profile and the pool's terms its agent.
 			for _, offer := range ad.Offers {
-				if profile := m.configuredProfile(receiver, offer.Profile); profile != "" {
-					node.Offers = append(node.Offers, Offer{Profile: profile, Agent: m.configuredAgent(config.Pool, offer.Agent), Replicas: offer.Replicas, InFlight: offer.InFlight})
+				if profile := names.profile(receiver, offer.Profile); profile != "" && profile != Unknown {
+					node.Offers = append(node.Offers, Offer{Profile: profile, Agent: names.agent(config.Pool, offer.Agent), Replicas: offer.Replicas, InFlight: offer.InFlight})
 				}
 			}
 		}
@@ -541,15 +542,16 @@ func (v *View) Snapshot(maxRuns int) Snapshot {
 	return s
 }
 
-// summary is r as the API lists it; the caller holds mu.
-func (m *model) summary(r *run) RunSummary {
-	summary := RunSummary{ID: r.ID, Tenant: r.Tenant, Host: r.Host(), Pool: r.Pool, Receiver: r.holder(), Attempt: r.Highest, Stage: r.stage(), State: string(r.state()), Class: r.class(),
-		Admitted: r.Admitted(), First: r.First, Last: r.Last, Cancelled: len(r.Cancels) > 0, StorageUnknown: !r.StorageKnown}
+// summary is r as the API lists it, its names through the catalog; the caller holds mu.
+func (m *model) summary(r *run, names *catalog) RunSummary {
+	summary := RunSummary{ID: r.ID, Tenant: names.tenant(r.Tenant), Host: names.host(r.Tenant, r.Host()), Pool: names.pool(r.Pool), Receiver: names.receiver(r.holder()), Attempt: r.Highest,
+		Stage: r.stage(), State: string(r.state()), Class: r.class(), Admitted: r.Admitted(), First: r.First, Last: r.Last, Cancelled: len(r.Cancels) > 0, StorageUnknown: !r.StorageKnown}
 	if len(r.truncated) > 0 {
 		summary.Truncated = slices.Sorted(maps.Keys(r.truncated))
 	}
-	placement := r.Placement()
-	summary.Agent, summary.Model = placement.Agent, placement.Model
+	if e, ok := r.echo(); ok {
+		summary.Agent, summary.Model = names.agent(r.Pool, e.Agent), names.model(r.Pool, e.Model)
+	}
 	if _, ok := r.terminal(); ok {
 		summary.Terminal = true
 	}
@@ -577,7 +579,8 @@ func (m *model) now() time.Time {
 	return time.Now()
 }
 
-// RunDetail is run id's detail: its echoes, attempts and events, open exchange, cancels, result references and path.
+// RunDetail is run id's detail: its echoes, attempts and events, open exchange, cancels, result references and path,
+// every name through the catalog.
 func (v *View) RunDetail(id string) (RunDetail, bool) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
@@ -585,23 +588,23 @@ func (v *View) RunDetail(id string) (RunDetail, bool) {
 	if !ok {
 		return RunDetail{}, false
 	}
-	d := RunDetail{RunSummary: v.m.summary(r), Hash: r.Hash, Echoes: []Echo{}, Attempts: []Attempt{}, Opens: []Open{}, Cancels: []Cancel{}, Path: []PathStep{}}
+	names := v.m.catalog()
+	receiver, host := names.receiver, func(name string) string { return names.host(r.Tenant, name) }
+	d := RunDetail{RunSummary: v.m.summary(r, names), Hash: r.Hash, Echoes: []Echo{}, Attempts: []Attempt{}, Opens: []Open{}, Cancels: []Cancel{}, Path: []PathStep{}}
 	// An echo carrying another task hash than the run's statuses did not admit them; it is counted, never shown.
 	if e, ok := r.echo(); ok {
-		d.Echoes = append(d.Echoes, Echo{Receiver: e.Receiver, Host: e.Host, Pool: e.Pool, Agent: e.Placement.Agent, Model: e.Placement.Model, At: e.At, Joined: true})
+		d.Echoes = append(d.Echoes, Echo{Receiver: receiver(e.Receiver), Host: host(e.Host), Pool: names.pool(e.Pool), Agent: names.agent(r.Pool, e.Agent), Model: names.model(r.Pool, e.Model), At: e.At, Joined: true})
+		d.Path = append(d.Path, PathStep{Step: "admitted", Actor: host(e.Host) + " > " + receiver(e.Receiver), At: e.At})
 	}
 	d.MismatchedEchoes = len(r.Echoes) - len(d.Echoes)
-	if e, ok := r.echo(); ok {
-		d.Path = append(d.Path, PathStep{Step: "admitted", Actor: e.Host + " > " + e.Receiver, At: e.At})
-	}
 	for _, number := range slices.Sorted(maps.Keys(r.Attempts)) {
 		a := r.Attempts[number]
-		attempt := Attempt{Number: number, Receiver: a.Receiver, TaskTopic: a.TaskTopic, TaskOffset: a.TaskOffset, Events: []Event{}}
+		attempt := Attempt{Number: number, Receiver: receiver(a.Receiver), TaskTopic: names.taskTopic(a.TaskTopic), TaskOffset: a.TaskOffset, Events: []Event{}}
 		for _, e := range a.Events {
-			attempt.Events = append(attempt.Events, Event{Kind: e.Kind, State: string(e.State), EventID: e.EventID, Receiver: e.Receiver, At: e.At, ReceiverAt: e.ReceiverAt, LogOffset: e.LogOffset, Event: e.Event, Class: e.Class})
-			step := PathStep{Step: e.Kind, Actor: e.Receiver, Attempt: number, At: e.At}
+			attempt.Events = append(attempt.Events, Event{Kind: e.Kind, State: string(e.State), EventID: e.EventID, Receiver: receiver(e.Receiver), At: e.At, ReceiverAt: e.ReceiverAt, LogOffset: e.LogOffset, Event: e.Event, Class: e.Class})
+			step := PathStep{Step: e.Kind, Actor: receiver(e.Receiver), Attempt: number, At: e.At}
 			if e.Kind == "terminal" || e.Kind == "rejected" {
-				step.Detail = strings.ToLower(strings.TrimPrefix(string(e.State), "TASK_STATE_"))
+				step.Detail = stateWord(e.State)
 				if e.Class != "" {
 					step.Detail += " " + e.Class
 				}
@@ -609,29 +612,29 @@ func (v *View) RunDetail(id string) (RunDetail, bool) {
 			d.Path = append(d.Path, step)
 		}
 		if a.Decision != nil {
-			attempt.Decision = &Decision{Custodian: a.Decision.Custodian, Previous: a.Decision.Previous, Reason: a.Decision.Reason, Served: a.Decision.Served, At: a.Decision.At}
-			d.Path = append(d.Path, PathStep{Step: "claim decided", Actor: a.Decision.Custodian, Attempt: number, At: a.Decision.At, Detail: a.Decision.Reason})
+			attempt.Decision = &Decision{Custodian: receiver(a.Decision.Custodian), Previous: receiver(a.Decision.Previous), Reason: a.Decision.Reason, Served: a.Decision.Served, At: a.Decision.At}
+			d.Path = append(d.Path, PathStep{Step: "claim decided", Actor: receiver(a.Decision.Custodian), Attempt: number, At: a.Decision.At, Detail: a.Decision.Reason})
 		}
-		if a.StartFailure != nil {
-			attempt.StartFailure = &StartFailure{Profile: a.StartFailure.Profile, Agent: a.StartFailure.Agent, Class: a.StartFailure.Class, At: a.StartFailure.At}
-			d.Path = append(d.Path, PathStep{Step: "start failed", Actor: a.Receiver, Attempt: number, At: a.StartFailure.At, Detail: StartFailureClass(a.StartFailure.Class)})
+		if f := a.StartFailure; f != nil {
+			attempt.StartFailure = &StartFailure{Profile: names.profile(a.Receiver, f.Profile), Agent: names.agent(r.Pool, f.Agent), Class: f.Class, At: f.At}
+			d.Path = append(d.Path, PathStep{Step: "start failed", Actor: receiver(a.Receiver), Attempt: number, At: f.At, Detail: StartFailureClass(f.Class)})
 		}
 		d.Attempts = append(d.Attempts, attempt)
 	}
 	for _, digest := range slices.Sorted(maps.Keys(r.Opens)) {
 		o := r.Opens[digest]
-		d.Opens = append(d.Opens, Open{Attempt: o.Attempt, Receiver: o.Receiver, At: o.At, Answer: o.Answer, Custodian: o.Custodian, Reason: o.Reason, AnsweredAt: o.AnsweredAt})
-		d.Path = append(d.Path, PathStep{Step: "open requested", Actor: o.Receiver, Attempt: o.Attempt, At: o.At})
+		d.Opens = append(d.Opens, Open{Attempt: o.Attempt, Receiver: receiver(o.Receiver), At: o.At, Answer: o.Answer, Custodian: receiver(o.Custodian), Reason: o.Reason, AnsweredAt: o.AnsweredAt})
+		d.Path = append(d.Path, PathStep{Step: "open requested", Actor: receiver(o.Receiver), Attempt: o.Attempt, At: o.At})
 		if o.Answer != "" {
-			d.Path = append(d.Path, PathStep{Step: "open " + o.Answer, Actor: o.Custodian, Attempt: o.Attempt, At: o.AnsweredAt, Detail: o.Reason})
+			d.Path = append(d.Path, PathStep{Step: "open " + o.Answer, Actor: receiver(o.Custodian), Attempt: o.Attempt, At: o.AnsweredAt, Detail: o.Reason})
 		}
 	}
 	for _, c := range r.Cancels {
-		d.Cancels = append(d.Cancels, Cancel{Host: c.Host, At: c.At})
-		d.Path = append(d.Path, PathStep{Step: "cancelled", Actor: c.Host, At: c.At})
+		d.Cancels = append(d.Cancels, Cancel{Host: host(c.Host), At: c.At})
+		d.Path = append(d.Path, PathStep{Step: "cancelled", Actor: host(c.Host), At: c.At})
 	}
 	if f := r.Result; f != nil {
-		result := &Result{Receiver: f.Receiver, Attempt: f.Attempt, State: string(f.State), At: f.At, Profile: f.Profile, Outputs: []Output{}, S3Outputs: []Output{}, NotReturned: []Unreturned{}, ReplySize: f.ReplySize, ReplyCut: f.ReplyCut, Artifacts: f.Artifacts}
+		result := &Result{Receiver: receiver(f.Receiver), Attempt: f.Attempt, State: string(f.State), At: f.At, Profile: names.profile(f.Receiver, f.Profile), Outputs: []Output{}, S3Outputs: []Output{}, NotReturned: []Unreturned{}, ReplySize: f.ReplySize, ReplyCut: f.ReplyCut, Artifacts: f.Artifacts}
 		for _, o := range f.Outputs {
 			result.Outputs = append(result.Outputs, Output(o))
 		}
@@ -642,7 +645,7 @@ func (v *View) RunDetail(id string) (RunDetail, bool) {
 			result.NotReturned = append(result.NotReturned, Unreturned(o))
 		}
 		d.Result = result
-		d.Path = append(d.Path, PathStep{Step: "result", Actor: f.Receiver, Attempt: f.Attempt, At: f.At, Detail: strings.ToLower(strings.TrimPrefix(string(f.State), "TASK_STATE_"))})
+		d.Path = append(d.Path, PathStep{Step: "result", Actor: receiver(f.Receiver), Attempt: f.Attempt, At: f.At, Detail: stateWord(f.State)})
 	}
 	slices.SortStableFunc(d.Path, func(a, b PathStep) int { return a.At.Compare(b.At) })
 	return d, true

@@ -15,7 +15,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -78,8 +77,8 @@ const csp = "default-src 'none'; script-src 'self'; style-src 'self'; connect-sr
 // sessionBodyLimit bounds a POST /session body.
 const sessionBodyLimit = 1024
 
-// runIDPattern is the grammar of a run ID in a path.
-var runIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+// maxSessions bounds the sessions issued; the oldest is dropped beyond it.
+const maxSessions = 1024
 
 // Serve listens on 127.0.0.1 at opts.Port and serves v until Close. It returns once it listens; the token is in URL.
 func Serve(v *View, opts ServeOptions) (*Server, error) {
@@ -236,14 +235,14 @@ var routes = map[string]string{
 	"GET /api/model": "model", "GET /api/runs/{id}": "run", "GET /api/runs/{id}/trace": "trace", "GET /api/stream": "stream",
 }
 
-// log writes the method, the matched route's fixed identifier and the status: nothing of the path's free components,
-// which a request can fill with anything.
+// log writes the method as one of the fixed set, the matched route's fixed identifier and the status: nothing of the
+// request line's free text, which a request can fill with anything.
 func (s *Server) log(r *http.Request, status int) {
 	route := routes[r.Pattern]
 	if route == "" {
 		route = "other"
 	}
-	s.opts.Logger.Printf("view: %s %s %d", r.Method, route, status)
+	s.opts.Logger.Printf("view: %s %s %d", fixed(httpMethods, r.Method), route, status)
 }
 
 func (s *Server) fail(w http.ResponseWriter, status int, text string) {
@@ -305,7 +304,23 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 	session := hex.EncodeToString(id)
 	s.mu.Lock()
 	s.sessions[session] = time.Now()
+	dropped := 0
+	for len(s.sessions) > maxSessions {
+		oldest := ""
+		for other, issued := range s.sessions {
+			if oldest == "" || issued.Before(s.sessions[oldest]) {
+				oldest = other
+			}
+		}
+		delete(s.sessions, oldest)
+		dropped++
+	}
 	s.mu.Unlock()
+	if dropped > 0 {
+		s.v.mu.Lock()
+		s.v.m.count(capSessions, int64(dropped))
+		s.v.mu.Unlock()
+	}
 	// Host-only (no Domain), named with the port since cookies are not port-isolated on loopback.
 	http.SetCookie(w, &http.Cookie{Name: s.cookie, Value: session, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: s.external != nil && s.external.Scheme == "https"})
 	w.WriteHeader(http.StatusNoContent)

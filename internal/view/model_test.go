@@ -394,8 +394,8 @@ func TestModelCompleteness(t *testing.T) {
 		t.Errorf("path facts: %+v", d)
 	}
 	// Question 2: where its results went in S3.
-	if d.Storage == nil || d.Storage.Endpoint != endpointA || d.Storage.Bucket != bucketA || d.Result == nil || len(d.Result.S3Outputs) != 1 || d.Result.S3Outputs[0].Name != "big.tar" || d.Result.S3Outputs[0].Size != 5000 ||
-		len(d.Result.Outputs) != 1 || d.Result.Outputs[0].Name != "notes.md" || len(d.Result.NotReturned) != 1 || d.Result.NotReturned[0].Reason != "missing" || d.Result.ReplySize != 70000 || d.Result.Profile != "profile-a" {
+	if d.Storage == nil || d.Storage.Endpoint != endpointA || d.Storage.Bucket != bucketA || d.Result == nil || len(d.Result.S3Outputs) != 1 || d.Result.S3Outputs[0].SHA256 != hashOf("big") || d.Result.S3Outputs[0].Size != 5000 ||
+		len(d.Result.Outputs) != 1 || d.Result.Outputs[0].SHA256 != hashOf("notes") || len(d.Result.NotReturned) != 1 || d.Result.NotReturned[0].Reason != "missing" || d.Result.ReplySize != 70000 || d.Result.Profile != "profile-a" {
 		t.Errorf("S3 and result references: storage %+v result %+v", d.Storage, d.Result)
 	}
 	if len(s.Storage) != 2 || s.Storage[0].Bucket != bucketA || s.Storage[0].Outputs != 1 || s.Storage[0].Bytes != 5000 || s.Storage[0].Runs != 6 || s.Storage[0].FailedRuns != 3 || s.Storage[1].Bucket != bucketB || s.Storage[1].Runs != 0 {

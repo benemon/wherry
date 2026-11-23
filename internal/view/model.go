@@ -1,6 +1,7 @@
 // Package view is the operator network view: a model of the cluster rebuilt from the records Kafka keeps, kept live
 // by tailing them, served read-only over loopback HTTP as JSON, a Server-Sent Events stream and a placeholder page.
-// The view never produces to Kafka and never holds agent text: every record is projected to named fields.
+// The view never produces to Kafka and never holds agent text: every record is projected to named fields, and every
+// name it holds is one the operator's configuration yields or a fixed placeholder.
 package view
 
 import (
@@ -33,13 +34,15 @@ type Caps struct {
 	// Runs bounds the runs kept, the oldest by last activity dropped; Digests the record digests kept for
 	// de-duplication; Pending the records held for a key or an echo; Cursors the topics followed.
 	Runs, Digests, Pending, Cursors int
-	// RunEvents, RunAttempts and RunOpens bound one run's events, attempts and open requests kept and RunBytes its
-	// retained size, the oldest dropped first and the run marked truncated; Events and Bytes bound the model's events
-	// and retained size over every run, the oldest runs dropped beyond them; Progress bounds the progress records
-	// kept over every receiver.
-	RunEvents, RunAttempts, RunOpens int
-	RunBytes, Events, Bytes          int64
-	Progress                         int
+	// RunEvents, RunAttempts, RunEchoes, RunCancels and RunOpens bound one run's events, attempts, echoes, cancels and
+	// open requests kept, and RunBytes its retained size: the oldest is dropped first and the run marked truncated,
+	// and a run whose joined echo and result alone are over a bound is dropped. Events, Attempts, Echoes, Cancels,
+	// Opens and Bytes bound the same over every run: the oldest runs are dropped beyond them, the growing run too
+	// when it alone is over. Progress bounds the progress records kept over every receiver.
+	RunEvents, RunAttempts, RunEchoes, RunCancels, RunOpens int
+	RunBytes                                                int64
+	Events, Attempts, Echoes, Cancels, Opens, Bytes         int64
+	Progress                                                int
 	// ResponseBytes bounds a JSON response and EventBytes one SSE event.
 	ResponseBytes, EventBytes int
 	// TraceBytes, TraceRecords and TraceSpans bound one drill-down scan's bytes read, records decoded and spans kept;
@@ -55,7 +58,8 @@ type Caps struct {
 var DefaultCaps = Caps{
 	BatchRecords: 2000, BatchBytes: 8 << 20, RecordBytes: operator.FeedRecordLimit,
 	Runs: 50000, Digests: 400000, Pending: 10000, Cursors: 10000,
-	RunEvents: 1000, RunAttempts: 64, RunOpens: 64, RunBytes: 512 << 10, Events: 2000000, Bytes: 512 << 20, Progress: 200000,
+	RunEvents: 1000, RunAttempts: 64, RunEchoes: 16, RunCancels: 16, RunOpens: 64, RunBytes: 512 << 10,
+	Events: 2000000, Attempts: 1000000, Echoes: 200000, Cancels: 200000, Opens: 200000, Bytes: 512 << 20, Progress: 200000,
 	ResponseBytes: 8 << 20, EventBytes: 64 << 10,
 	TraceBytes: 32 << 20, TraceRecords: 20000, TraceSpans: 5000, TraceForest: 5000, TraceScans: 2, TraceScan: 5 * time.Second, TraceRuns: 32,
 }
@@ -69,25 +73,34 @@ const (
 	capCursors     = "cursors"
 	capResponse    = "response_bytes"
 	capEvent       = "event_bytes"
+	capSessions    = "sessions"
 	capRunEvents   = "run_events"
 	capRunAttempts = "run_attempts"
+	capRunEchoes   = "run_echoes"
+	capRunCancels  = "run_cancels"
 	capRunOpens    = "run_opens"
 	capRunBytes    = "run_bytes"
 	capEvents      = "events"
+	capAttempts    = "attempts"
+	capEchoes      = "echoes"
+	capCancels     = "cancels"
+	capOpens       = "opens"
 	capBytes       = "bytes"
 	capProgress    = "progress"
 )
 
 // The retained size of each fact kept, estimated for the byte bounds: the struct, its map entry and its strings.
 const (
-	runOverhead     = 384
-	echoOverhead    = 256
-	attemptOverhead = 160
-	eventOverhead   = 192
-	openOverhead    = 256
-	cancelOverhead  = 96
-	resultOverhead  = 256
-	outputOverhead  = 128
+	runOverhead          = 384
+	echoOverhead         = 256
+	attemptOverhead      = 160
+	eventOverhead        = 192
+	decisionOverhead     = 128
+	startFailureOverhead = 128
+	openOverhead         = 256
+	cancelOverhead       = 96
+	resultOverhead       = 256
+	outputOverhead       = 96
 )
 
 // Failure classes, from a fixed table: the wire carries no class except a start failure's, so each is derived from a
@@ -143,7 +156,7 @@ func (s source) retiredBy(owner, keyID string, since time.Time) bool {
 	return s.owner == owner && s.keyID == keyID && !s.at.Before(since)
 }
 
-// event is a status projected: no message, no metadata.
+// event is a status projected: no message, no metadata. Its kind, state and event are of the fixed sets.
 type event struct {
 	Kind       string
 	State      wire.TaskState
@@ -155,13 +168,17 @@ type event struct {
 	LogOffset  *int64
 	Event      string
 	Class      string
-	src        source
+	// via is the task hash of the echo the event's admission depends on: set when its tenant was not entitled to
+	// the pool when it was appended, so it was taken only joined to that echo.
+	via string
+	src source
 }
 
 type attempt struct {
-	Number     int64
-	Receiver   string
-	Events     []event
+	Number   int64
+	Receiver string
+	Events   []event
+	// TaskTopic is the claimed task topic when the configuration derives it, else the placeholder.
 	TaskTopic  string
 	TaskOffset *int64
 	// ClaimDigest is the digest of the attempt's claimed status, which a claim decision names.
@@ -180,12 +197,15 @@ type decisionFact struct {
 type startFailureFact struct {
 	Profile, Agent, Class string
 	At                    time.Time
+	via                   string
 	src                   source
 }
 
+// echoFact is an echo projected: its names as the configuration knows them, its agent and model as the pool's terms
+// name them, else the placeholder.
 type echoFact struct {
 	Receiver, Host, Pool string
-	Placement            wire.Placement
+	Agent, Model         string
 	At                   time.Time
 	src                  source
 }
@@ -208,7 +228,7 @@ type openFact struct {
 	src, answerSrc            source
 }
 
-// resultFact is the Reference facts of a result: output names and sizes, never a part's content.
+// resultFact is the Reference facts of a result: output sizes and hashes, never a part's content or an output's name.
 type resultFact struct {
 	Receiver    string
 	Attempt     int64
@@ -221,19 +241,29 @@ type resultFact struct {
 	ReplySize   int64
 	ReplyCut    bool
 	Artifacts   int
+	via         string
 	src         source
 }
 
 type outputFact struct {
-	Name   string
 	Size   int64
 	SHA256 string
 }
 
 type unreturnedFact struct {
-	Name   string
 	Size   int64
 	Reason string
+}
+
+// measure is a run's retained collections counted and its estimated retained size, and the model's totals.
+type measure struct {
+	events, attempts, echoes, cancels, opens int
+	bytes                                    int64
+}
+
+func (a measure) plus(b measure, sign int) measure {
+	return measure{events: a.events + sign*b.events, attempts: a.attempts + sign*b.attempts, echoes: a.echoes + sign*b.echoes,
+		cancels: a.cancels + sign*b.cancels, opens: a.opens + sign*b.opens, bytes: a.bytes + int64(sign)*b.bytes}
 }
 
 // run is one run's records projected: its echoes by task hash, its attempts, its cancels and its result.
@@ -254,41 +284,41 @@ type run struct {
 	Storage      *operator.Storage
 	StorageKnown bool
 	First, Last  time.Time
-	// seen holds the event IDs of the statuses kept.
+	// seen holds the event IDs of the statuses kept, one per event.
 	seen map[string]bool
-	// events and bytes are the run's last measure, and truncated the caps that cut it.
-	events    int
-	bytes     int64
+	// me is the run's last measure, and truncated the caps that cut it.
+	me        measure
 	truncated map[string]bool
 }
 
-// measure is the run's events and estimated retained size.
-func (r *run) measure() (int, int64) {
-	events := 0
-	bytes := int64(runOverhead + len(r.ID) + len(r.Tenant) + len(r.Pool) + len(r.Hash))
-	for hash := range r.Echoes {
-		bytes += int64(echoOverhead + len(hash))
+// measure is the run's collections counted and its estimated retained size.
+func (r *run) measure() measure {
+	me := measure{attempts: len(r.Attempts), echoes: len(r.Echoes), cancels: len(r.Cancels), opens: len(r.Opens)}
+	me.bytes = int64(runOverhead + len(r.ID) + len(r.Tenant) + len(r.Pool) + len(r.Hash))
+	for hash, e := range r.Echoes {
+		me.bytes += int64(echoOverhead + len(hash) + len(e.Receiver) + len(e.Host) + len(e.Pool) + len(e.Agent) + len(e.Model))
 	}
 	for _, a := range r.Attempts {
-		bytes += int64(attemptOverhead + len(a.TaskTopic) + len(a.ClaimDigest))
-		events += len(a.Events)
+		me.bytes += int64(attemptOverhead + len(a.Receiver) + len(a.TaskTopic) + len(a.ClaimDigest))
+		me.events += len(a.Events)
 		for _, e := range a.Events {
-			bytes += int64(eventOverhead + len(e.EventID) + len(e.Receiver) + len(e.Event))
+			me.bytes += int64(eventOverhead + len(e.EventID) + len(e.Receiver) + len(e.via))
+		}
+		if a.Decision != nil {
+			me.bytes += decisionOverhead
+		}
+		if a.StartFailure != nil {
+			me.bytes += int64(startFailureOverhead + len(a.StartFailure.via))
 		}
 	}
-	bytes += int64(len(r.Opens))*openOverhead + int64(len(r.Cancels))*cancelOverhead
+	for _, o := range r.Opens {
+		me.bytes += int64(openOverhead + len(o.Digest))
+	}
+	me.bytes += int64(len(r.Cancels)) * cancelOverhead
 	if f := r.Result; f != nil {
-		bytes += resultOverhead
-		for _, list := range [][]outputFact{f.Outputs, f.S3Outputs} {
-			for _, o := range list {
-				bytes += int64(outputOverhead + len(o.Name))
-			}
-		}
-		for _, o := range f.NotReturned {
-			bytes += int64(outputOverhead + len(o.Name))
-		}
+		me.bytes += int64(resultOverhead + len(f.via) + (len(f.Outputs)+len(f.S3Outputs)+len(f.NotReturned))*outputOverhead)
 	}
-	return events, bytes
+	return me
 }
 
 // mark records that cap cut the run.
@@ -299,9 +329,30 @@ func (r *run) mark(cap string) {
 	r.truncated[cap] = true
 }
 
-// dropOldest drops the run's oldest event, from its lowest attempt, so the state derived from the highest stands; an
-// attempt left with nothing goes with it. It reports false when the run has no event.
-func (r *run) dropOldest() bool {
+// forget drops what e left on its attempt: its event ID and, for a claim, the claim facts and decision.
+func (r *run) forget(a *attempt, e event) {
+	delete(r.seen, e.EventID)
+	if e.Kind == "claimed" {
+		a.TaskTopic, a.TaskOffset, a.ClaimDigest, a.Decision = "", nil, "", nil
+	}
+}
+
+// prune drops an attempt left with nothing and re-derives the highest.
+func (r *run) prune() {
+	for number, a := range r.Attempts {
+		if len(a.Events) == 0 && a.StartFailure == nil {
+			delete(r.Attempts, number)
+		}
+	}
+	r.Highest = 0
+	for number := range r.Attempts {
+		r.Highest = max(r.Highest, number)
+	}
+}
+
+// dropOldestEvent drops the run's oldest event, from its lowest attempt, so the state derived from the highest
+// stands; an attempt left with nothing goes with it. It reports false when the run has no event.
+func (r *run) dropOldestEvent() bool {
 	for _, number := range slices.Sorted(maps.Keys(r.Attempts)) {
 		a := r.Attempts[number]
 		if len(a.Events) == 0 {
@@ -309,20 +360,69 @@ func (r *run) dropOldest() bool {
 		}
 		e := a.Events[0]
 		a.Events = slices.Delete(a.Events, 0, 1)
-		delete(r.seen, e.EventID)
-		if e.Kind == "claimed" {
-			a.TaskTopic, a.TaskOffset, a.ClaimDigest, a.Decision = "", nil, "", nil
-		}
-		if len(a.Events) == 0 && a.StartFailure == nil {
-			delete(r.Attempts, number)
-			r.Highest = 0
-			for other := range r.Attempts {
-				r.Highest = max(r.Highest, other)
-			}
-		}
+		r.forget(a, e)
+		r.prune()
 		return true
 	}
 	return false
+}
+
+// dropLowestAttempt drops the run's lowest attempt with what it holds, a newly made one included.
+func (r *run) dropLowestAttempt() bool {
+	if len(r.Attempts) == 0 {
+		return false
+	}
+	lowest := slices.Min(slices.Collect(maps.Keys(r.Attempts)))
+	for _, e := range r.Attempts[lowest].Events {
+		delete(r.seen, e.EventID)
+	}
+	delete(r.Attempts, lowest)
+	r.prune()
+	return true
+}
+
+func (r *run) dropOldestCancel() bool {
+	if len(r.Cancels) == 0 {
+		return false
+	}
+	oldest := 0
+	for i, c := range r.Cancels {
+		if c.At.Before(r.Cancels[oldest].At) {
+			oldest = i
+		}
+	}
+	r.Cancels = slices.Delete(r.Cancels, oldest, oldest+1)
+	return true
+}
+
+func (r *run) dropOldestOpen() bool {
+	oldest := ""
+	for digest, o := range r.Opens {
+		if oldest == "" || o.At.Before(r.Opens[oldest].At) || o.At.Equal(r.Opens[oldest].At) && digest < oldest {
+			oldest = digest
+		}
+	}
+	if oldest == "" {
+		return false
+	}
+	delete(r.Opens, oldest)
+	return true
+}
+
+// oldestEcho is the hash of the run's oldest echo other than the joined one, or false when there is none.
+func (r *run) oldestEcho() (string, bool) {
+	oldest := ""
+	for hash, e := range r.Echoes {
+		if hash != r.Hash && (oldest == "" || e.At.Before(r.Echoes[oldest].At) || e.At.Equal(r.Echoes[oldest].At) && hash < oldest) {
+			oldest = hash
+		}
+	}
+	return oldest, oldest != ""
+}
+
+// empty reports whether nothing is left of the run.
+func (r *run) empty() bool {
+	return len(r.Echoes) == 0 && len(r.Attempts) == 0 && len(r.Opens) == 0 && len(r.Cancels) == 0 && r.Result == nil
 }
 
 // echo is the echo the run's statuses join to: the one carrying the run's task hash.
@@ -341,12 +441,6 @@ func (r *run) Host() string {
 func (r *run) Admitted() time.Time {
 	e, _ := r.echo()
 	return e.At
-}
-
-// Placement is the run's placement, from its joined echo.
-func (r *run) Placement() wire.Placement {
-	e, _ := r.echo()
-	return e.Placement
 }
 
 // terminal is the run's terminal event, at the highest attempt that has one; a lower attempt's never overrides.
@@ -403,7 +497,7 @@ func (r *run) state() wire.TaskState {
 // stage is the run's stage: its terminal's state, else its latest event's kind, else "echoed".
 func (r *run) stage() string {
 	if t, ok := r.terminal(); ok {
-		return strings.ToLower(strings.TrimPrefix(string(t.State), "TASK_STATE_"))
+		return stateWord(t.State)
 	}
 	if e, ok := r.latest(); ok {
 		return e.Kind
@@ -486,9 +580,11 @@ func (d *digests) add(sum [32]byte) (added, dropped bool) {
 
 // model is the view's state behind its mutex: what the records read so far say.
 type model struct {
-	caps       Caps
-	clock      func() time.Time
-	history    operator.History
+	caps    Caps
+	clock   func() time.Time
+	history operator.History
+	// names is the catalog of the configuration's names, rebuilt when the history extends.
+	names      *catalog
 	keys       signed.Keys
 	runs       map[string]*run
 	progress   map[string]map[string]progressFact // holder -> run
@@ -498,10 +594,8 @@ type model struct {
 	pending    []pending
 	// counts are the model's counters: records applied, refused, skipped and dropped, and each cap's hits.
 	counts map[string]int64
-	// events, bytes and progressed are the model's measure: the events kept, their estimated retained size and the
-	// progress records kept, over every run and receiver.
-	events     int64
-	bytes      int64
+	// total is the model's measure over every run, and progressed the progress records kept over every receiver.
+	total      measure
 	progressed int
 	// topics holds what the reads report of each topic followed.
 	topics map[string]*topicState
@@ -532,6 +626,14 @@ func newModel(caps Caps) *model {
 
 func (m *model) count(name string, n int64) {
 	m.counts[name] += n
+}
+
+// catalog is the configuration's names; it is rebuilt by the operator read, and built here only before the first.
+func (m *model) catalog() *catalog {
+	if m.names == nil {
+		return newCatalog(m.history)
+	}
+	return m.names
 }
 
 // header is the JWS type and the kid's owner and key ID of value, unverified; ok is false when value is not shaped as
@@ -667,7 +769,8 @@ func parseRecord(kind string, p *parsed, record *kgo.Record, keys signed.Keys) {
 
 // apply folds one record of a topic of kind ("events" with pool, "feed" with tenant, "progress" with the holder,
 // "custodian" with pool), prepared, admitted and parsed as p, or inline when p is nil. It returns the reason the
-// record is held pending, or "" when it was applied or refused.
+// record is held pending, or "" when it was applied or refused. A record keyed by anything but a run ID wherry
+// derives is refused.
 func (m *model) apply(kind, name string, record *kgo.Record, p *parsed) string {
 	if len(record.Value) > m.caps.RecordBytes {
 		m.count(capRecordBytes, 1)
@@ -691,6 +794,10 @@ func (m *model) apply(kind, name string, record *kgo.Record, p *parsed) string {
 	}
 	if !p.ok {
 		m.count("undecodable", 1)
+		return ""
+	}
+	if !validRunID(string(record.Key)) {
+		m.count("refused", 1)
 		return ""
 	}
 	var err error
@@ -765,97 +872,120 @@ func (m *model) runFor(id, tenant, pool string, at time.Time) *run {
 	return r
 }
 
-// bound applies the retained-state bounds after a record of r was folded: the run's own caps trim its oldest events,
-// its measure is taken again, and the model's caps evict the oldest runs beyond them.
+// bound applies the retained-state bounds after a record of r was folded: the run's own caps trim its oldest facts,
+// its measure is taken again, and the model's caps evict the oldest runs beyond them, r among them.
 func (m *model) bound(r *run) {
-	m.trim(r)
+	if m.trim(r) {
+		return
+	}
 	m.remeasure(r)
 	m.evict(r)
 }
 
-// trim drops r's oldest events beyond the per-run caps on events and bytes, the run marked by the cap that cut it.
-func (m *model) trim(r *run) {
+// trim drops r's oldest facts beyond the per-run caps, the run marked by each cap that cut it: the oldest events from
+// the lowest attempt, the lowest attempt, the oldest echo other than the joined one, the oldest cancel and open
+// request, and for the byte cap each of those in turn. A run whose joined echo and result alone are over a bound
+// is dropped and counted; trim reports whether it was.
+func (m *model) trim(r *run) bool {
 	for {
-		events, bytes := r.measure()
-		cap := ""
+		me := r.measure()
+		cap, dropped := "", false
 		switch {
-		case m.caps.RunEvents > 0 && events > m.caps.RunEvents:
-			cap = capRunEvents
-		case m.caps.RunBytes > 0 && bytes > m.caps.RunBytes:
-			cap = capRunBytes
+		case m.caps.RunEvents > 0 && me.events > m.caps.RunEvents:
+			cap, dropped = capRunEvents, r.dropOldestEvent()
+		case m.caps.RunAttempts > 0 && me.attempts > m.caps.RunAttempts:
+			cap, dropped = capRunAttempts, r.dropLowestAttempt()
+		case m.caps.RunEchoes > 0 && me.echoes > m.caps.RunEchoes:
+			cap, dropped = capRunEchoes, m.dropOldestEcho(r)
+		case m.caps.RunCancels > 0 && me.cancels > m.caps.RunCancels:
+			cap, dropped = capRunCancels, r.dropOldestCancel()
+		case m.caps.RunOpens > 0 && me.opens > m.caps.RunOpens:
+			cap, dropped = capRunOpens, r.dropOldestOpen()
+		case m.caps.RunBytes > 0 && me.bytes > m.caps.RunBytes:
+			cap, dropped = capRunBytes, r.dropOldestEvent() || m.dropOldestEcho(r) || r.dropOldestCancel() || r.dropOldestOpen() || r.dropLowestAttempt()
 		}
-		if cap == "" || !r.dropOldest() {
-			return
+		if cap == "" {
+			return false
+		}
+		m.count(cap, 1)
+		if !dropped {
+			m.drop(r)
+			return true
 		}
 		r.mark(cap)
-		m.count(cap, 1)
 	}
+}
+
+// dropOldestEcho drops r's oldest echo other than the joined one, with the facts whose admission depended on it.
+func (m *model) dropOldestEcho(r *run) bool {
+	hash, ok := r.oldestEcho()
+	if !ok {
+		return false
+	}
+	if retracted := m.removeEcho(r, hash); retracted > 0 {
+		m.count("retracted", retracted)
+	}
+	return true
 }
 
 // remeasure takes r's measure again and moves the model's totals by the difference.
 func (m *model) remeasure(r *run) {
-	events, bytes := r.measure()
-	m.events += int64(events - r.events)
-	m.bytes += bytes - r.bytes
-	r.events, r.bytes = events, bytes
+	me := r.measure()
+	m.total = m.total.plus(me, 1).plus(r.me, -1)
+	r.me = me
 }
 
 // drop forgets r and its measure.
 func (m *model) drop(r *run) {
-	m.events -= int64(r.events)
-	m.bytes -= r.bytes
+	m.total = m.total.plus(r.me, -1)
 	delete(m.runs, r.ID)
 }
 
-// over is the model cap the runs kept exceed, if any: the runs, their events or their retained size.
+// over is the model cap the runs kept exceed, if any: the runs, or their events, attempts, echoes, cancels, open
+// requests or retained size over every run.
 func (m *model) over() string {
+	t := m.total
 	switch {
 	case len(m.runs) > m.caps.Runs:
 		return capRuns
-	case m.caps.Events > 0 && m.events > m.caps.Events:
+	case m.caps.Events > 0 && int64(t.events) > m.caps.Events:
 		return capEvents
-	case m.caps.Bytes > 0 && m.bytes > m.caps.Bytes:
+	case m.caps.Attempts > 0 && int64(t.attempts) > m.caps.Attempts:
+		return capAttempts
+	case m.caps.Echoes > 0 && int64(t.echoes) > m.caps.Echoes:
+		return capEchoes
+	case m.caps.Cancels > 0 && int64(t.cancels) > m.caps.Cancels:
+		return capCancels
+	case m.caps.Opens > 0 && int64(t.opens) > m.caps.Opens:
+		return capOpens
+	case m.caps.Bytes > 0 && t.bytes > m.caps.Bytes:
 		return capBytes
 	}
 	return ""
 }
 
-// evict drops the oldest runs by last activity beyond the model's caps, never kept, and counts each under the cap it
-// was dropped for: applied as each run is made or grows, while reading, not after.
+// evict drops the oldest runs by last activity beyond the model's caps, kept last, and counts each under the cap it
+// was dropped for: applied as each run is made or grows, while reading, not after. A run that alone exceeds a cap
+// goes too.
 func (m *model) evict(kept *run) {
-	if m.over() == "" {
+	cap := m.over()
+	if cap == "" {
 		return
 	}
-	runs := slices.SortedFunc(maps.Values(m.runs), func(a, b *run) int { return a.Last.Compare(b.Last) })
-	for _, r := range runs {
-		cap := m.over()
-		if cap == "" {
-			break
+	for _, r := range slices.SortedFunc(maps.Values(m.runs), func(a, b *run) int { return a.Last.Compare(b.Last) }) {
+		if r == kept {
+			continue
 		}
-		if r != kept {
-			m.drop(r)
-			m.count(cap, 1)
+		m.drop(r)
+		m.count(cap, 1)
+		if cap = m.over(); cap == "" {
+			return
 		}
 	}
-}
-
-// attemptFor is r's attempt number, made on first sight within the per-run cap on attempts, the lowest dropped beyond
-// it and the run marked.
-func (m *model) attemptFor(r *run, number int64) *attempt {
-	a := r.attempt(number)
-	for m.caps.RunAttempts > 0 && len(r.Attempts) > m.caps.RunAttempts {
-		lowest := slices.Min(slices.Collect(maps.Keys(r.Attempts)))
-		if lowest == number {
-			break
-		}
-		for _, e := range r.Attempts[lowest].Events {
-			delete(r.seen, e.EventID)
-		}
-		delete(r.Attempts, lowest)
-		r.mark(capRunAttempts)
-		m.count(capRunAttempts, 1)
+	if kept != nil && m.runs[kept.ID] == kept {
+		m.drop(kept)
+		m.count(cap, 1)
 	}
-	return a
 }
 
 // joined reports whether the record of binding, carrying hash and read under key, joins the echo that admitted its
@@ -871,12 +1001,61 @@ func (m *model) joined(binding wire.ReceiverBinding, hash, key string) bool {
 	return ok && e.Pool == binding.Pool && m.history.EntitledAt(binding.Tenant, binding.Pool, e.At)
 }
 
+// via is the task hash a record's admission depends on: hash when binding's tenant was not entitled to the pool
+// when the record was appended, so it was taken only joined to the echo of that hash; else empty.
+func (m *model) via(binding wire.ReceiverBinding, hash string, at time.Time) string {
+	if m.history.EntitledAt(binding.Tenant, binding.Pool, at) {
+		return ""
+	}
+	return hash
+}
+
+// admits reports whether a fact of r appended at at and taken through the echo of hash is still authorised: the
+// tenant is entitled to the pool now or was then, or r still holds that echo, appended while the tenant was.
+func (m *model) admits(r *run, hash string, at time.Time) bool {
+	if m.history.EntitledAt(r.Tenant, r.Pool, at) {
+		return true
+	}
+	e, ok := r.Echoes[hash]
+	return ok && e.Pool == r.Pool && m.history.EntitledAt(r.Tenant, r.Pool, e.At)
+}
+
+// removeEcho drops r's echo of hash and rechecks every event, start failure and result whose admission depended on
+// it, whatever its signer: one it no longer authorises is retracted. It returns how many were.
+func (m *model) removeEcho(r *run, hash string) int64 {
+	delete(r.Echoes, hash)
+	var retracted int64
+	for _, a := range r.Attempts {
+		a.Events = slices.DeleteFunc(a.Events, func(e event) bool {
+			if e.via != hash || m.admits(r, hash, e.src.at) {
+				return false
+			}
+			r.forget(a, e)
+			retracted++
+			return true
+		})
+		if f := a.StartFailure; f != nil && f.via == hash && !m.admits(r, hash, f.src.at) {
+			a.StartFailure = nil
+			retracted++
+		}
+	}
+	if f := r.Result; f != nil && f.via == hash && !m.admits(r, hash, f.src.at) {
+		r.Result = nil
+		retracted++
+	}
+	r.prune()
+	r.rehash()
+	m.storage(r)
+	return retracted
+}
+
 // applyEvent folds a parsed pool events record, read from pool's events.
 func (m *model) applyEvent(pool string, p *parsed, record *kgo.Record) error {
 	if p.err != nil {
 		return p.err
 	}
 	at, id, src := record.Timestamp, string(record.Key), p.src(record)
+	names := m.catalog()
 	switch value := p.value.(type) {
 	case *wire.RunStatus:
 		if value.Wherry.Run != id {
@@ -894,9 +1073,10 @@ func (m *model) applyEvent(pool string, p *parsed, record *kgo.Record) error {
 			return m.unjoined(err, id)
 		}
 		r := m.runFor(value.Wherry.Run, value.Wherry.Tenant, value.Wherry.Pool, at)
-		a := m.attemptFor(r, value.Wherry.Attempt)
+		a := r.attempt(value.Wherry.Attempt)
 		a.Receiver = cmp.Or(a.Receiver, value.Wherry.Receiver)
-		a.StartFailure = &startFailureFact{Profile: m.configuredProfile(value.Wherry.Receiver, value.Profile), Agent: m.configuredAgent(value.Wherry.Pool, value.Agent), Class: value.Class, At: at, src: src}
+		a.StartFailure = &startFailureFact{Profile: names.profile(value.Wherry.Receiver, value.Profile), Agent: names.agent(value.Wherry.Pool, value.Agent), Class: fixed(startClasses, value.Class),
+			At: at, via: m.via(value.Wherry, value.TaskHash, at), src: src}
 		return nil
 	case *wire.OpenRequest:
 		if !m.history.MemberAt(value.Receiver, pool, at) || value.Run != id {
@@ -904,22 +1084,11 @@ func (m *model) applyEvent(pool string, p *parsed, record *kgo.Record) error {
 		}
 		r := m.runFor(value.Run, "", pool, at)
 		r.Opens[p.digest] = &openFact{Digest: p.digest, Attempt: value.Attempt, Receiver: value.Receiver, At: at, src: src}
-		for m.caps.RunOpens > 0 && len(r.Opens) > m.caps.RunOpens {
-			oldest := ""
-			for digest, o := range r.Opens {
-				if digest != p.digest && (oldest == "" || o.At.Before(r.Opens[oldest].At)) {
-					oldest = digest
-				}
-			}
-			delete(r.Opens, oldest)
-			r.mark(capRunOpens)
-			m.count(capRunOpens, 1)
-		}
 		return nil
 	case *wire.AttemptWrap:
 		return m.answer(id, pool, value.Custodian, value.Request, "wrap", "", src)
 	case *wire.OpenRefusal:
-		return m.answer(id, pool, value.Custodian, value.Request, "refusal", value.Reason, src)
+		return m.answer(id, pool, value.Custodian, value.Request, "refusal", fixed(refuseReasons, value.Reason), src)
 	case *wire.ClaimDecision:
 		if !m.history.MemberAt(value.Custodian, pool, at) {
 			return errors.New("claim decision is not from a member")
@@ -930,7 +1099,7 @@ func (m *model) applyEvent(pool string, p *parsed, record *kgo.Record) error {
 		}
 		for _, a := range r.Attempts {
 			if a.ClaimDigest == value.Claim && a.Decision == nil {
-				a.Decision = &decisionFact{Custodian: value.Custodian, Previous: value.Previous, Reason: value.Reason, Served: value.Served, At: at, src: src}
+				a.Decision = &decisionFact{Custodian: value.Custodian, Previous: names.receiver(value.Previous), Reason: fixed(claimReasons, value.Reason), Served: value.Served, At: at, src: src}
 				r.touch(at)
 				return nil
 			}
@@ -993,6 +1162,7 @@ func (m *model) applyFeed(tenant string, p *parsed, record *kgo.Record) error {
 		return p.err
 	}
 	at, id, src := record.Timestamp, string(record.Key), p.src(record)
+	names := m.catalog()
 	switch value := p.value.(type) {
 	case *wire.Echo:
 		echo := *value
@@ -1014,7 +1184,8 @@ func (m *model) applyFeed(tenant string, p *parsed, record *kgo.Record) error {
 			r.Tenant, r.Attempts, r.Highest, r.Hash, r.hashed, r.seen = echo.Tenant, map[int64]*attempt{}, 0, "", "", map[string]bool{}
 		}
 		if _, dup := r.Echoes[echo.TaskHash]; !dup {
-			r.Echoes[echo.TaskHash] = echoFact{Receiver: echo.Receiver, Host: echo.Host, Pool: echo.Pool, Placement: echo.Placement, At: at, src: src}
+			r.Echoes[echo.TaskHash] = echoFact{Receiver: echo.Receiver, Host: names.host(echo.Tenant, echo.Host), Pool: echo.Pool,
+				Agent: names.agent(echo.Pool, echo.Placement.Agent), Model: names.model(echo.Pool, echo.Placement.Model), At: at, src: src}
 		}
 		if r.Hash == "" {
 			r.Hash, r.hashed = echo.TaskHash, "echo"
@@ -1056,6 +1227,7 @@ func (m *model) applyFeed(tenant string, p *parsed, record *kgo.Record) error {
 func (m *model) storage(r *run) {
 	e, ok := r.echo()
 	if !ok {
+		r.Storage, r.StorageKnown = nil, false
 		return
 	}
 	terms, known := m.history.TermsAt(r.Pool, e.At)
@@ -1067,7 +1239,8 @@ func (m *model) storage(r *run) {
 }
 
 // addStatus keeps an authorised status under its run and attempt, once per event ID, never a lower attempt over a
-// higher one's terminal: each attempt keeps its own history and the run's state is derived from the highest.
+// higher one's terminal: each attempt keeps its own history and the run's state is derived from the highest. Its
+// kind, state and event are taken from the fixed sets, its event ID as wherry issues them or derived from the digest.
 func (m *model) addStatus(status wire.RunStatus, digest string, src source) error {
 	binding, at := status.Wherry, src.at
 	r := m.runFor(binding.Run, binding.Tenant, binding.Pool, at)
@@ -1082,37 +1255,41 @@ func (m *model) addStatus(status wire.RunStatus, digest string, src source) erro
 		r.Hash, r.hashed = binding.TaskHash, "status"
 		m.storage(r)
 	}
-	if r.seen[binding.EventID] {
+	id := eventID(binding.EventID, digest)
+	if r.seen[id] {
 		return nil
 	}
-	r.seen[binding.EventID] = true
-	a := m.attemptFor(r, binding.Attempt)
+	r.seen[id] = true
+	a := r.attempt(binding.Attempt)
 	a.Receiver = binding.Receiver
 	receiverAt, _ := time.Parse(time.RFC3339, status.StatusUpdate.Status.Timestamp)
-	e := event{Kind: binding.Kind, State: status.StatusUpdate.Status.State, EventID: binding.EventID, Attempt: binding.Attempt, Receiver: binding.Receiver,
-		At: at, ReceiverAt: receiverAt, LogOffset: binding.LogOffset, Event: binding.Event, Class: FailureClass(binding.Kind, status.StatusUpdate.Status.State, binding.Event), src: src}
+	kind, state, named := fixed(statusKinds, binding.Kind), taskState(status.StatusUpdate.Status.State), fixed(statusEvents, binding.Event)
+	e := event{Kind: kind, State: state, EventID: id, Attempt: binding.Attempt, Receiver: binding.Receiver, At: at, ReceiverAt: receiverAt, LogOffset: binding.LogOffset,
+		Event: named, Class: FailureClass(kind, state, named), via: m.via(binding.ReceiverBinding, binding.TaskHash, at), src: src}
 	// Records of one attempt arrive in log order on each topic; the dual-written copy is the same event.
 	i, _ := slices.BinarySearchFunc(a.Events, e, func(x, y event) int { return x.At.Compare(y.At) })
 	a.Events = slices.Insert(a.Events, i, e)
 	if binding.Kind == "claimed" {
-		a.TaskTopic, a.TaskOffset, a.ClaimDigest = binding.TaskTopic, binding.TaskOffset, digest
+		a.TaskTopic, a.TaskOffset, a.ClaimDigest = m.catalog().taskTopic(binding.TaskTopic), binding.TaskOffset, digest
 	}
 	return nil
 }
 
-// projectResult is the Reference facts of result: where it ran, output names and sizes, and the reply's size. The
-// result's text, history, artifact parts and labels are never read; the profile is kept only as the receiver's
-// configuration names it.
+// projectResult is the Reference facts of result: where it ran, output sizes and hashes, and the reply's size. The
+// result's text, history, artifact parts, labels and output names are never kept; the profile is kept only as the
+// receiver's configuration names it.
 func (m *model) projectResult(result wire.Result, src source) *resultFact {
-	fact := &resultFact{Receiver: result.Wherry.Receiver, Attempt: result.Wherry.Attempt, State: result.Task.Status.State, At: src.at, Artifacts: len(result.Task.Artifacts), src: src}
+	binding := result.Wherry
+	fact := &resultFact{Receiver: binding.Receiver, Attempt: binding.Attempt, State: taskState(result.Task.Status.State), At: src.at, Artifacts: len(result.Task.Artifacts),
+		via: m.via(binding.ReceiverBinding, binding.TaskHash, src.at), src: src}
 	var metadata wire.ResultMetadata
 	if result.Task.Metadata != nil && json.Unmarshal(result.Task.Metadata, &metadata, signed.Tolerant) == nil {
-		fact.Profile = m.configuredProfile(result.Wherry.Receiver, metadata.Profile)
+		fact.Profile = m.catalog().profile(binding.Receiver, metadata.Profile)
 		fact.Outputs = outputs(metadata.Outputs)
 		fact.S3Outputs = outputs(metadata.S3Outputs)
 		for _, output := range metadata.NotReturned {
 			if wire.ValidOutputName(output.Name) {
-				fact.NotReturned = append(fact.NotReturned, unreturnedFact{Name: output.Name, Size: output.Size, Reason: unreturnedReason(output.Reason)})
+				fact.NotReturned = append(fact.NotReturned, unreturnedFact{Size: output.Size, Reason: unreturnedReason(output.Reason)})
 			}
 		}
 		if metadata.Reply != nil {
@@ -1122,30 +1299,11 @@ func (m *model) projectResult(result wire.Result, src source) *resultFact {
 	return fact
 }
 
-// configuredProfile is profile when receiver's configuration names it, else empty: what a record says of a profile is
-// shown only as the operator configured it.
-func (m *model) configuredProfile(receiver, profile string) string {
-	config, ok := m.history.State.Receivers[receiver]
-	if ok && profile != "" && slices.ContainsFunc(config.Profiles, func(p operator.ProfileSettings) bool { return p.Name == profile }) {
-		return profile
-	}
-	return ""
-}
-
-// configuredAgent is agent when pool's terms name it, else empty.
-func (m *model) configuredAgent(pool, agent string) string {
-	terms, ok := m.history.State.Pools[pool]
-	if ok && agent != "" && slices.ContainsFunc(terms.Agents, func(a operator.AgentTerms) bool { return a.Name == agent }) {
-		return agent
-	}
-	return ""
-}
-
 func outputs(returned []wire.ReturnedOutput) []outputFact {
 	var facts []outputFact
 	for _, output := range returned {
 		if wire.ValidOutputName(output.Name) && wire.ValidHash(output.SHA256) {
-			facts = append(facts, outputFact{Name: output.Name, Size: output.Size, SHA256: output.SHA256})
+			facts = append(facts, outputFact{Size: output.Size, SHA256: output.SHA256})
 		}
 	}
 	return facts
@@ -1163,9 +1321,15 @@ func unreturnedReason(reason string) string {
 	return "other"
 }
 
-// applyProgress keeps the latest progress record per run of holder's progress topic; a tombstone drops the run's.
+// applyProgress keeps the latest progress record per run of holder's progress topic; a tombstone drops the run's. A
+// record keyed by anything but a run ID wherry derives is dropped, and a tenant the configuration does not name is
+// kept as none, so the record matches no run's echo.
 func (m *model) applyProgress(holder string, record *kgo.Record) {
 	id := string(record.Key)
+	if !validRunID(id) {
+		m.count("undecodable", 1)
+		return
+	}
 	if m.progress[holder] == nil {
 		m.progress[holder] = map[string]progressFact{}
 	}
@@ -1185,7 +1349,11 @@ func (m *model) applyProgress(holder string, record *kgo.Record) {
 	if _, ok := m.progress[holder][id]; !ok {
 		m.progressed++
 	}
-	m.progress[holder][id] = progressFact{Holder: holder, Run: id, Tenant: progress.Tenant, Hash: progress.TaskHash, Attempt: progress.Attempt, LogOffset: progress.LogOffset, At: record.Timestamp}
+	tenant := ""
+	if m.catalog().tenants[progress.Tenant] {
+		tenant = progress.Tenant
+	}
+	m.progress[holder][id] = progressFact{Holder: holder, Run: id, Tenant: tenant, Hash: progress.TaskHash, Attempt: progress.Attempt, LogOffset: progress.LogOffset, At: record.Timestamp}
 	// Beyond the cap on progress records kept, the oldest over every receiver is dropped.
 	for m.caps.Progress > 0 && m.progressed > m.caps.Progress {
 		var oldest *progressFact
@@ -1206,6 +1374,9 @@ func (m *model) applyProgress(holder string, record *kgo.Record) {
 	m.changed = true
 }
 
+// custodianReasons are the fixed reasons a snapshot gives.
+var custodianReasons = []string{"bootstrap", "rotation", "takeover", "contested"}
+
 // applyCustodian keeps pool's latest authorised snapshot.
 func (m *model) applyCustodian(pool string, record *kgo.Record) {
 	if string(record.Key) != wire.CustodianKey || record.Value == nil {
@@ -1216,33 +1387,29 @@ func (m *model) applyCustodian(pool string, record *kgo.Record) {
 		m.count("refused", 1)
 		return
 	}
+	if !keyIDPattern.MatchString(snapshot.Current.KeyID) {
+		m.count("refused", 1)
+		return
+	}
 	_, owner, keyID, _ := header(record.Value)
-	m.custodians[pool] = custodianFact{Pool: pool, Custodian: snapshot.Custodian, Reason: snapshot.Reason, KeyID: snapshot.Current.KeyID, At: record.Timestamp,
+	m.custodians[pool] = custodianFact{Pool: pool, Custodian: snapshot.Custodian, Reason: fixed(custodianReasons, snapshot.Reason), KeyID: snapshot.Current.KeyID, At: record.Timestamp,
 		RotatedFor: snapshot.RotatedFor, SuspendedFor: snapshot.SuspendedFor, ResumedFor: snapshot.ResumedFor, src: source{owner: owner, keyID: keyID, at: record.Timestamp}}
 	m.changed = true
 }
 
 // retire retracts every fact folded from a record signed under owner's keyID and appended at or after since, the time
-// a rotation seen since retired it: such a record no longer verifies. A run left with nothing is dropped.
+// a rotation seen since retired it: such a record no longer verifies. An echo so retracted takes with it every fact
+// whose admission depended on it, whatever its signer. A run left with nothing is dropped.
 func (m *model) retire(owner, keyID string, since time.Time) {
 	gone := func(s source) bool { return s.retiredBy(owner, keyID, since) }
 	var retracted int64
 	for _, r := range m.runs {
-		for hash, e := range r.Echoes {
-			if gone(e.src) {
-				delete(r.Echoes, hash)
-				retracted++
-			}
-		}
 		for number, a := range r.Attempts {
 			a.Events = slices.DeleteFunc(a.Events, func(e event) bool {
 				if !gone(e.src) {
 					return false
 				}
-				delete(r.seen, e.EventID)
-				if e.Kind == "claimed" {
-					a.TaskTopic, a.TaskOffset, a.ClaimDigest, a.Decision = "", nil, "", nil
-				}
+				r.forget(a, e)
 				retracted++
 				return true
 			})
@@ -1257,10 +1424,6 @@ func (m *model) retire(owner, keyID string, since time.Time) {
 			if len(a.Events) == 0 && a.StartFailure == nil {
 				delete(r.Attempts, number)
 			}
-		}
-		r.Highest = 0
-		for number := range r.Attempts {
-			r.Highest = max(r.Highest, number)
 		}
 		for digest, o := range r.Opens {
 			switch {
@@ -1283,10 +1446,16 @@ func (m *model) retire(owner, keyID string, since time.Time) {
 			r.Result = nil
 			retracted++
 		}
+		for _, hash := range slices.Sorted(maps.Keys(r.Echoes)) {
+			if gone(r.Echoes[hash].src) {
+				retracted += 1 + m.removeEcho(r, hash)
+			}
+		}
+		r.prune()
 		r.rehash()
 		m.storage(r)
 		m.remeasure(r)
-		if len(r.Echoes) == 0 && len(r.Attempts) == 0 && len(r.Opens) == 0 && len(r.Cancels) == 0 && r.Result == nil {
+		if r.empty() {
 			m.drop(r)
 		}
 	}

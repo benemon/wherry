@@ -58,6 +58,14 @@ func newServed(t *testing.T, opts ServeOptions) *served {
 	tid := id(16)
 	f.traceRecord(t0.Add(6*time.Second), "wherry-host."+tenantA+"."+hostA,
 		span(tid, id(8), nil, "s3cr3t-span-name", run, t0, str(string(telemetry.AttrOutput), "s3cr3t-span-attr"), str("s3cr3t-host-record", "s3cr3t-host-record")))
+	s := serveFixture(t, f, opts)
+	s.run = run
+	return s
+}
+
+// serveFixture rebuilds a view over f's cluster and serves it with opts, its log captured.
+func serveFixture(t *testing.T, f *fixture, opts ServeOptions) *served {
+	t.Helper()
 	logs := &bytes.Buffer{}
 	opts.Logger = log.New(logs, "", 0)
 	v := f.view(time.Hour, testCaps())
@@ -78,7 +86,7 @@ func newServed(t *testing.T, opts ServeOptions) *served {
 	if !ok || parsed.RawQuery != "" || strings.Contains(parsed.Path, token) {
 		t.Fatalf("the token is not in the fragment alone: %s", server.URL())
 	}
-	return &served{f: f, v: v, server: server, token: token, run: run, logs: logs}
+	return &served{f: f, v: v, server: server, token: token, logs: logs}
 }
 
 // request sends method path to the server with headers and the cookie, reading the whole body.
@@ -190,7 +198,7 @@ func TestServing(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(bodies["/api/model"], `"runs_total":3`) || !strings.Contains(bodies["/api/model"], `"offers":[{"profile":"profile-a","agent":"","replicas":1,"in_flight":0}]`) || !strings.Contains(bodies["/api/runs/"+s.run], `"path"`) || !strings.Contains(bodies["/api/runs/"+s.run+"/trace"], `"[other]"`) {
+	if !strings.Contains(bodies["/api/model"], `"runs_total":3`) || !strings.Contains(bodies["/api/model"], `"offers":[{"profile":"profile-a","agent":"unknown","replicas":1,"in_flight":0}]`) || !strings.Contains(bodies["/api/runs/"+s.run], `"path"`) || !strings.Contains(bodies["/api/runs/"+s.run+"/trace"], `"[other]"`) {
 		t.Errorf("responses: model %.200s; run %.200s; trace %.300s", bodies["/api/model"], bodies["/api/runs/"+s.run], bodies["/api/runs/"+s.run+"/trace"])
 	}
 	// The stream serves an event at once with the cookie, and the token never appears in a request line.

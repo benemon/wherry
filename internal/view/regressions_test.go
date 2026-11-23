@@ -94,7 +94,7 @@ func TestReviewWrongHashAfterEnd(t *testing.T) {
 }
 
 // Nothing a result or start failure says of labels, a profile or an agent is returned: a profile or agent is shown
-// only as the configuration names it, labels never.
+// only as the configuration names it, else as the placeholder, labels never.
 func TestReviewLabelsProjection(t *testing.T) {
 	f := newFixture(t)
 	at := f.now.Add(-time.Minute)
@@ -114,8 +114,8 @@ func TestReviewLabelsProjection(t *testing.T) {
 			t.Errorf("result metadata projected into the API detail: %s", encoded)
 		}
 	}
-	if d.Result == nil || d.Result.Profile != "" || len(d.Attempts) != 1 || d.Attempts[0].StartFailure == nil || d.Attempts[0].StartFailure.Profile != "" || d.Attempts[0].StartFailure.Agent != "" {
-		t.Errorf("an unconfigured profile or agent shown: %+v %+v", d.Result, d.Attempts)
+	if d.Result == nil || d.Result.Profile != Unknown || len(d.Attempts) != 1 || d.Attempts[0].StartFailure == nil || d.Attempts[0].StartFailure.Profile != Unknown || d.Attempts[0].StartFailure.Agent != Unknown {
+		t.Errorf("an unconfigured profile or agent shown as other than the placeholder: %+v %+v", d.Result, d.Attempts)
 	}
 	if d, _ := v.RunDetail(known); d.Result == nil || d.Result.Profile != "profile-a" {
 		t.Errorf("the configured profile is not shown: %+v", d.Result)
@@ -125,7 +125,7 @@ func TestReviewLabelsProjection(t *testing.T) {
 // A span name is rebuilt from validated components: a profile the configuration names, an operator command of the
 // fixed set; any other text becomes the placeholder.
 func TestReviewSpanNameAllowlist(t *testing.T) {
-	a := allowlist{topics: map[string]bool{"known-topic": true}, profiles: map[string]bool{"profile-a": true}}
+	a := allowlist{names: &catalog{topics: map[string]bool{"known-topic": true}, allProfiles: map[string]bool{"profile-a": true}}}
 	for _, name := range []string{"process known-topic s3cr3t-prompt", "operator reveal secret prompt", "operator pool apply ", "operator pool-apply", "process other-topic profile-a", "send other-topic", "revocation step 12", "s3cr3t"} {
 		if got := a.name(name); got != nameOther {
 			t.Errorf("untrusted span name %q passed as %q", name, got)
@@ -153,7 +153,7 @@ func TestReviewPerRunBound(t *testing.T) {
 	v := f.view(time.Hour, caps)
 	v.mu.RLock()
 	r := v.m.runs[run]
-	seen, events, kept := len(r.seen), len(r.Attempts[1].Events), r.events
+	seen, events, kept := len(r.seen), len(r.Attempts[1].Events), r.me.events
 	v.mu.RUnlock()
 	if seen > caps.RunEvents || events > caps.RunEvents || kept != events {
 		t.Fatalf("one run retains %d event IDs and %d events (measured %d) despite runs=1/digests=4/run_events=4", seen, events, kept)

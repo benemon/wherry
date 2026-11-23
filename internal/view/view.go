@@ -194,21 +194,26 @@ func (v *View) Run(ctx context.Context) error {
 		case <-ticker.C:
 		}
 		if err := v.tick(ctx, false); err != nil && ctx.Err() == nil {
-			v.opts.Logger.Printf("view: %v", err)
+			// The error's text can quote a record; the log and the model get its class alone.
+			class := errClass(err)
+			v.opts.Logger.Printf("view: tick failed: %s", class)
 			v.mu.Lock()
-			v.errs = append(v.errs[max(len(v.errs)-9, 0):], v.opts.Now().UTC().Format(time.RFC3339)+" "+errClass(err))
+			v.errs = append(v.errs[max(len(v.errs)-9, 0):], v.opts.Now().UTC().Format(time.RFC3339)+" "+class)
 			v.mu.Unlock()
 		}
 	}
 }
 
 // errClass is a fixed word for err: a Kafka error's name, else the context's, else "error". Error text can quote a
-// record, so none reaches the model.
+// record, so none reaches the model or the log.
 func errClass(err error) string {
 	var kafka *kerr.Error
 	switch {
 	case errors.As(err, &kafka):
-		return kafka.Message
+		if named, ok := kerr.ErrorForCode(kafka.Code).(*kerr.Error); ok && named.Message == kafka.Message {
+			return kafka.Message
+		}
+		return "kafka error"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "timeout"
 	case errors.Is(err, context.Canceled):
@@ -324,6 +329,7 @@ func (v *View) readOperator(ctx context.Context) error {
 			v.mu.Unlock()
 			return err
 		}
+		v.m.names = newCatalog(v.m.history)
 		if len(r.Records) > 0 {
 			v.m.changed = true
 		}
@@ -452,6 +458,9 @@ func (v *View) readData(ctx context.Context, admin *kadm.Client, existing map[st
 	for topic, ref := range refs {
 		state := v.m.topics[topic]
 		if state == nil {
+			if len(v.m.topics) >= caps.Cursors {
+				continue
+			}
 			state = &topicState{Kind: ref.kind}
 			v.m.topics[topic] = state
 		}
@@ -505,6 +514,9 @@ func (v *View) readData(ctx context.Context, admin *kadm.Client, existing map[st
 	defer v.mu.Unlock()
 	for topic, r := range ranges {
 		state := v.m.topics[topic]
+		if state == nil {
+			continue
+		}
 		if r.Err != nil {
 			state.Err = errClass(r.Err)
 			continue
@@ -612,7 +624,7 @@ func (v *View) readBrokers(ctx context.Context, admin *kadm.Client) []brokerFact
 		if broker.Rack != nil {
 			rack = *broker.Rack
 		}
-		brokers = append(brokers, brokerFact{ID: broker.NodeID, Host: broker.Host, Port: broker.Port, Rack: rack, Controller: broker.NodeID == metadata.Controller})
+		brokers = append(brokers, brokerFact{ID: broker.NodeID, Host: plainText(broker.Host), Port: broker.Port, Rack: plainText(rack), Controller: broker.NodeID == metadata.Controller})
 		ids = append(ids, broker.NodeID)
 	}
 	if configs, err := admin.DescribeBrokerConfigs(ctx, ids...); err == nil {
@@ -666,7 +678,7 @@ func (v *View) readLag(ctx context.Context, admin *kadm.Client, pools []string, 
 		group := operator.PoolGroup(pool)
 		if describeErr == nil {
 			if d, ok := described[group]; ok && d.Err == nil {
-				groups[pool] = groupFact{State: d.GroupState, Members: len(d.Members)}
+				groups[pool] = groupFact{State: fixed(groupStates, d.GroupState), Members: len(d.Members)}
 			}
 		}
 		var topics []string

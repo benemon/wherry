@@ -88,9 +88,9 @@
       detail.appendChild(table('Cancels', ['host', 'at'], run.cancels));
       if (run.result) {
         detail.appendChild(keyValues('Result', { receiver: run.result.receiver, attempt: run.result.attempt, state: run.result.state, at: run.result.at, profile: run.result.profile, reply_size: run.result.reply_size, reply_cut: run.result.reply_cut, artifacts: run.result.artifacts }));
-        detail.appendChild(table('Outputs', ['name', 'size', 'sha256'], run.result.outputs));
-        detail.appendChild(table('S3 outputs', ['name', 'size', 'sha256'], run.result.s3_outputs));
-        detail.appendChild(table('Not returned', ['name', 'size', 'reason'], run.result.not_returned));
+        detail.appendChild(table('Outputs', ['size', 'sha256'], run.result.outputs));
+        detail.appendChild(table('S3 outputs', ['size', 'sha256'], run.result.s3_outputs));
+        detail.appendChild(table('Not returned', ['size', 'reason'], run.result.not_returned));
       }
       detail.appendChild(keyValues('Storage', run.storage || { unknown: run.storage_unknown }));
       var button = text(document.createElement('button'), 'Load spans');

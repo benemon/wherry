@@ -217,7 +217,7 @@ func (f *fixture) statusRecord(at time.Time, s st) []byte {
 		if s.taskOffset != nil {
 			offset = *s.taskOffset
 		}
-		status.Wherry.TaskTopic, status.Wherry.TaskOffset = operator.SignatureTopic(s.pool, agentA, nil), &offset
+		status.Wherry.TaskTopic, status.Wherry.TaskOffset = operator.SignatureTopic(s.pool, agentA, map[string]string{"zone": "dc1"}), &offset
 	}
 	return f.sign(status, s.key)
 }
