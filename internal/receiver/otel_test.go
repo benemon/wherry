@@ -437,9 +437,15 @@ func TestTracingShutsTheFirstProviderDownWhenTheSecondFails(t *testing.T) {
 		return exporter, nil
 	}
 	logs := &strings.Builder{}
-	r := &Receiver{id: testReceiver, logger: log.New(logs, "", 0), traced: true}
+	// The trace clients are built from the base client's options; the hooked exporter never starts one.
+	base, err := kgo.NewClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	r := &Receiver{id: testReceiver, base: base, logger: log.New(logs, "", 0), traced: true}
 	began := time.Now()
-	err := r.trace(context.Background(), testPool)
+	err = r.trace(context.Background(), testPool)
 	if err == nil || !strings.Contains(err.Error(), "exporter refused") {
 		t.Fatalf("trace = %v, want the second constructor's error", err)
 	}
