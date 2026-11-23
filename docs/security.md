@@ -511,7 +511,7 @@ On Strimzi, the User Operator must ignore the principals wherry creates, as
 | Cluster | `Alter` | creating and deleting SCRAM credentials; creating, describing and deleting ACLs |
 | Cluster | `AlterConfigs` | client quotas; reading broker settings |
 | Topic, prefix `wherry.` | `Create`, `AlterConfigs`, `Read`, `Write` | the operator, receiver, pool, tenant and host topics |
-| Group, prefix `p-` | `AlterConfigs`, `Describe` | share-group settings; share-group state for the operator view |
+| Group, prefix `p-` | `AlterConfigs`, `Describe` | share-group settings; share-group state for the [operator view](operator-view.md) |
 
 Kafka implies `Describe` by `Read`, `Write` and `Alter`, and
 `DescribeConfigs` by `AlterConfigs`

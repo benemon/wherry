@@ -122,6 +122,10 @@ const sidebar = [
             "link": "/operations-operator"
           },
           {
+            "text": "Operator view",
+            "link": "/operator-view"
+          },
+          {
             "text": "Receivers",
             "link": "/operations-receivers"
           },

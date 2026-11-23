@@ -12,7 +12,7 @@ Every command but `version` and the shortcuts runs under its role's word:
 
 | Role | Commands |
 | --- | --- |
-| Operator | `wherry operator init`; `wherry operator pool apply`, `suspend`, `resume` and `rotate-key`; `wherry operator tenant add`, `list`, `storage` and `remove`; `wherry operator tenant pool add` and `remove`; `wherry operator tenant host add`, `refresh` and `remove`; `wherry operator receiver apply`, `show` and `remove`; `wherry operator check` |
+| Operator | `wherry operator init`; `wherry operator pool apply`, `suspend`, `resume` and `rotate-key`; `wherry operator tenant add`, `list`, `storage` and `remove`; `wherry operator tenant pool add` and `remove`; `wherry operator tenant host add`, `refresh` and `remove`; `wherry operator receiver apply`, `show` and `remove`; `wherry operator check`; `wherry operator view` |
 | Receiver | `wherry receiver run` |
 | Host user | `wherry host init`, `key rotate`, `receivers`, `mcp`, `submit`, `result`, `status`, `events`, `logs` and `cancel` |
 | Development | [Development commands](commands-dev.md) |
@@ -901,6 +901,21 @@ It prints nothing when there are none. It deletes nothing:
 [Check a deployment](operations-operator.md#check-a-deployment) says what may
 be deleted. It does not report ACLs beyond those, and does not check a plugin
 profile's plugin or `config` section.
+
+### `wherry operator view`
+
+```sh
+wherry operator view [--dir DIR] [--window 24h] [--port N] [--external-url URL]
+```
+
+Rebuilds a model of the cluster from the records of the last `--window`, 24 hours by default, tails them, and
+serves it read-only on `127.0.0.1`, on `--port` or a free port, until Ctrl-C: JSON endpoints, a Server-Sent Events
+stream and a placeholder page of plain tables. It prints the address to open on standard output, with a token in
+the URL fragment that the page exchanges once for a session cookie, and the rebuild's run count and time on standard
+error. `--external-url` names the https or http origin a reverse proxy serves the view at, whose `Host` and
+`Origin` are then accepted and whose scheme makes the cookie `Secure`; a URL with a path is refused. The view never
+produces to Kafka. [Operator view](operator-view.md) describes the model, its bounds, freshness, the API and running
+it behind a proxy.
 
 ## Receiver command
 

@@ -795,6 +795,15 @@ deleted topic drops from the report. Nothing in the report fails the check.
 The report is read while no other operator command runs: run `check` again
 with none running before you delete a topic it lists.
 
+## Watch a deployment
+
+```sh
+wherry operator view
+```
+
+The [operator view](operator-view.md) rebuilds the last 24 hours of runs from the records and serves them, with
+every node and each pool's lag, on loopback; behind a TLS-terminating proxy with `--external-url` it serves a team.
+
 ## Reset a deployment
 
 Every reader of `wherry.operator` stops while any record on it fails to
