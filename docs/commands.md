@@ -1410,7 +1410,10 @@ bundle through the pool's bucket, outside the pool's `output_limit`: the route f
 The prompt asks the agent to write the bundle after every commit and once
 more before it finishes, so a run that ends early after committing, by an
 exit, a timeout or a cancel, returns the bundle of its commits so far, best
-effort, when the agent followed the instruction. A patch is written once, at
+effort, when the agent followed the instruction. After a timeout this holds
+for outputs returned inline only: an S3 output's upload URL is valid until
+the run's end-by time, so a bundle sent as `changes.bundle:s3` is not uploaded
+when the run is collected after that bound. A patch is written once, at
 the end, and a run that ends before then returns none. A collected bundle is
 checked as bytes, by size and SHA-256; git checks its pack when the bundle is
 fetched. A run killed in the middle of an export may also return

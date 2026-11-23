@@ -1503,7 +1503,9 @@ with `not ended by task_ended_by (<RFC 3339 time>)`. After a stop that
 succeeds, at that bound or on a cancel, the receiver collects the job's
 outputs as it does when the job ends ([Inputs and outputs](#inputs-and-outputs))
 and the result lists them; the state and message stay the bound's or the
-cancel's, whatever the outcome file says.
+cancel's, whatever the outcome file says. An S3 output's presigned upload
+expires at `task_ended_by`, so after the bound an S3 output is listed as not
+uploaded.
 
 A claimed run whose job has not started by `task_started_by`, while it
 waits for its open or for the platform to place its job, ends
