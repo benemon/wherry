@@ -33,6 +33,13 @@ type Caps struct {
 	// Runs bounds the runs kept, the oldest by last activity dropped; Digests the record digests kept for
 	// de-duplication; Pending the records held for a key or an echo; Cursors the topics followed.
 	Runs, Digests, Pending, Cursors int
+	// RunEvents, RunAttempts and RunOpens bound one run's events, attempts and open requests kept and RunBytes its
+	// retained size, the oldest dropped first and the run marked truncated; Events and Bytes bound the model's events
+	// and retained size over every run, the oldest runs dropped beyond them; Progress bounds the progress records
+	// kept over every receiver.
+	RunEvents, RunAttempts, RunOpens int
+	RunBytes, Events, Bytes          int64
+	Progress                         int
 	// ResponseBytes bounds a JSON response and EventBytes one SSE event.
 	ResponseBytes, EventBytes int
 	// TraceBytes, TraceRecords and TraceSpans bound one drill-down scan's bytes read, records decoded and spans kept;
@@ -48,6 +55,7 @@ type Caps struct {
 var DefaultCaps = Caps{
 	BatchRecords: 2000, BatchBytes: 8 << 20, RecordBytes: operator.FeedRecordLimit,
 	Runs: 50000, Digests: 400000, Pending: 10000, Cursors: 10000,
+	RunEvents: 1000, RunAttempts: 64, RunOpens: 64, RunBytes: 512 << 10, Events: 2000000, Bytes: 512 << 20, Progress: 200000,
 	ResponseBytes: 8 << 20, EventBytes: 64 << 10,
 	TraceBytes: 32 << 20, TraceRecords: 20000, TraceSpans: 5000, TraceForest: 5000, TraceScans: 2, TraceScan: 5 * time.Second, TraceRuns: 32,
 }
@@ -61,6 +69,25 @@ const (
 	capCursors     = "cursors"
 	capResponse    = "response_bytes"
 	capEvent       = "event_bytes"
+	capRunEvents   = "run_events"
+	capRunAttempts = "run_attempts"
+	capRunOpens    = "run_opens"
+	capRunBytes    = "run_bytes"
+	capEvents      = "events"
+	capBytes       = "bytes"
+	capProgress    = "progress"
+)
+
+// The retained size of each fact kept, estimated for the byte bounds: the struct, its map entry and its strings.
+const (
+	runOverhead     = 384
+	echoOverhead    = 256
+	attemptOverhead = 160
+	eventOverhead   = 192
+	openOverhead    = 256
+	cancelOverhead  = 96
+	resultOverhead  = 256
+	outputOverhead  = 128
 )
 
 // Failure classes, from a fixed table: the wire carries no class except a start failure's, so each is derived from a
@@ -229,6 +256,73 @@ type run struct {
 	First, Last  time.Time
 	// seen holds the event IDs of the statuses kept.
 	seen map[string]bool
+	// events and bytes are the run's last measure, and truncated the caps that cut it.
+	events    int
+	bytes     int64
+	truncated map[string]bool
+}
+
+// measure is the run's events and estimated retained size.
+func (r *run) measure() (int, int64) {
+	events := 0
+	bytes := int64(runOverhead + len(r.ID) + len(r.Tenant) + len(r.Pool) + len(r.Hash))
+	for hash := range r.Echoes {
+		bytes += int64(echoOverhead + len(hash))
+	}
+	for _, a := range r.Attempts {
+		bytes += int64(attemptOverhead + len(a.TaskTopic) + len(a.ClaimDigest))
+		events += len(a.Events)
+		for _, e := range a.Events {
+			bytes += int64(eventOverhead + len(e.EventID) + len(e.Receiver) + len(e.Event))
+		}
+	}
+	bytes += int64(len(r.Opens))*openOverhead + int64(len(r.Cancels))*cancelOverhead
+	if f := r.Result; f != nil {
+		bytes += resultOverhead
+		for _, list := range [][]outputFact{f.Outputs, f.S3Outputs} {
+			for _, o := range list {
+				bytes += int64(outputOverhead + len(o.Name))
+			}
+		}
+		for _, o := range f.NotReturned {
+			bytes += int64(outputOverhead + len(o.Name))
+		}
+	}
+	return events, bytes
+}
+
+// mark records that cap cut the run.
+func (r *run) mark(cap string) {
+	if r.truncated == nil {
+		r.truncated = map[string]bool{}
+	}
+	r.truncated[cap] = true
+}
+
+// dropOldest drops the run's oldest event, from its lowest attempt, so the state derived from the highest stands; an
+// attempt left with nothing goes with it. It reports false when the run has no event.
+func (r *run) dropOldest() bool {
+	for _, number := range slices.Sorted(maps.Keys(r.Attempts)) {
+		a := r.Attempts[number]
+		if len(a.Events) == 0 {
+			continue
+		}
+		e := a.Events[0]
+		a.Events = slices.Delete(a.Events, 0, 1)
+		delete(r.seen, e.EventID)
+		if e.Kind == "claimed" {
+			a.TaskTopic, a.TaskOffset, a.ClaimDigest, a.Decision = "", nil, "", nil
+		}
+		if len(a.Events) == 0 && a.StartFailure == nil {
+			delete(r.Attempts, number)
+			r.Highest = 0
+			for other := range r.Attempts {
+				r.Highest = max(r.Highest, other)
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // echo is the echo the run's statuses join to: the one carrying the run's task hash.
@@ -404,6 +498,11 @@ type model struct {
 	pending    []pending
 	// counts are the model's counters: records applied, refused, skipped and dropped, and each cap's hits.
 	counts map[string]int64
+	// events, bytes and progressed are the model's measure: the events kept, their estimated retained size and the
+	// progress records kept, over every run and receiver.
+	events     int64
+	bytes      int64
+	progressed int
 	// topics holds what the reads report of each topic followed.
 	topics map[string]*topicState
 	// keyNext is the offset each key topic's tail resumes at; keysRead counts the tails.
@@ -604,6 +703,9 @@ func (m *model) apply(kind, name string, record *kgo.Record, p *parsed) string {
 	switch {
 	case err == nil:
 		m.changed = true
+		if r := m.runs[string(record.Key)]; r != nil {
+			m.bound(r)
+		}
 		return ""
 	case errors.Is(err, errUnjoined):
 		return pendingJoin
@@ -663,24 +765,97 @@ func (m *model) runFor(id, tenant, pool string, at time.Time) *run {
 	return r
 }
 
-// evict drops the oldest runs by last activity beyond the runs cap, never kept, and counts them: applied as each run
-// is made, while reading, not after.
+// bound applies the retained-state bounds after a record of r was folded: the run's own caps trim its oldest events,
+// its measure is taken again, and the model's caps evict the oldest runs beyond them.
+func (m *model) bound(r *run) {
+	m.trim(r)
+	m.remeasure(r)
+	m.evict(r)
+}
+
+// trim drops r's oldest events beyond the per-run caps on events and bytes, the run marked by the cap that cut it.
+func (m *model) trim(r *run) {
+	for {
+		events, bytes := r.measure()
+		cap := ""
+		switch {
+		case m.caps.RunEvents > 0 && events > m.caps.RunEvents:
+			cap = capRunEvents
+		case m.caps.RunBytes > 0 && bytes > m.caps.RunBytes:
+			cap = capRunBytes
+		}
+		if cap == "" || !r.dropOldest() {
+			return
+		}
+		r.mark(cap)
+		m.count(cap, 1)
+	}
+}
+
+// remeasure takes r's measure again and moves the model's totals by the difference.
+func (m *model) remeasure(r *run) {
+	events, bytes := r.measure()
+	m.events += int64(events - r.events)
+	m.bytes += bytes - r.bytes
+	r.events, r.bytes = events, bytes
+}
+
+// drop forgets r and its measure.
+func (m *model) drop(r *run) {
+	m.events -= int64(r.events)
+	m.bytes -= r.bytes
+	delete(m.runs, r.ID)
+}
+
+// over is the model cap the runs kept exceed, if any: the runs, their events or their retained size.
+func (m *model) over() string {
+	switch {
+	case len(m.runs) > m.caps.Runs:
+		return capRuns
+	case m.caps.Events > 0 && m.events > m.caps.Events:
+		return capEvents
+	case m.caps.Bytes > 0 && m.bytes > m.caps.Bytes:
+		return capBytes
+	}
+	return ""
+}
+
+// evict drops the oldest runs by last activity beyond the model's caps, never kept, and counts each under the cap it
+// was dropped for: applied as each run is made or grows, while reading, not after.
 func (m *model) evict(kept *run) {
-	if len(m.runs) <= m.caps.Runs {
+	if m.over() == "" {
 		return
 	}
 	runs := slices.SortedFunc(maps.Values(m.runs), func(a, b *run) int { return a.Last.Compare(b.Last) })
-	dropped := 0
 	for _, r := range runs {
-		if len(m.runs) <= m.caps.Runs {
+		cap := m.over()
+		if cap == "" {
 			break
 		}
 		if r != kept {
-			delete(m.runs, r.ID)
-			dropped++
+			m.drop(r)
+			m.count(cap, 1)
 		}
 	}
-	m.count(capRuns, int64(dropped))
+}
+
+// attemptFor is r's attempt number, made on first sight within the per-run cap on attempts, the lowest dropped beyond
+// it and the run marked.
+func (m *model) attemptFor(r *run, number int64) *attempt {
+	a := r.attempt(number)
+	for m.caps.RunAttempts > 0 && len(r.Attempts) > m.caps.RunAttempts {
+		lowest := slices.Min(slices.Collect(maps.Keys(r.Attempts)))
+		if lowest == number {
+			break
+		}
+		for _, e := range r.Attempts[lowest].Events {
+			delete(r.seen, e.EventID)
+		}
+		delete(r.Attempts, lowest)
+		r.mark(capRunAttempts)
+		m.count(capRunAttempts, 1)
+	}
+	return a
 }
 
 // joined reports whether the record of binding, carrying hash and read under key, joins the echo that admitted its
@@ -719,7 +894,7 @@ func (m *model) applyEvent(pool string, p *parsed, record *kgo.Record) error {
 			return m.unjoined(err, id)
 		}
 		r := m.runFor(value.Wherry.Run, value.Wherry.Tenant, value.Wherry.Pool, at)
-		a := r.attempt(value.Wherry.Attempt)
+		a := m.attemptFor(r, value.Wherry.Attempt)
 		a.Receiver = cmp.Or(a.Receiver, value.Wherry.Receiver)
 		a.StartFailure = &startFailureFact{Profile: m.configuredProfile(value.Wherry.Receiver, value.Profile), Agent: m.configuredAgent(value.Wherry.Pool, value.Agent), Class: value.Class, At: at, src: src}
 		return nil
@@ -729,6 +904,17 @@ func (m *model) applyEvent(pool string, p *parsed, record *kgo.Record) error {
 		}
 		r := m.runFor(value.Run, "", pool, at)
 		r.Opens[p.digest] = &openFact{Digest: p.digest, Attempt: value.Attempt, Receiver: value.Receiver, At: at, src: src}
+		for m.caps.RunOpens > 0 && len(r.Opens) > m.caps.RunOpens {
+			oldest := ""
+			for digest, o := range r.Opens {
+				if digest != p.digest && (oldest == "" || o.At.Before(r.Opens[oldest].At)) {
+					oldest = digest
+				}
+			}
+			delete(r.Opens, oldest)
+			r.mark(capRunOpens)
+			m.count(capRunOpens, 1)
+		}
 		return nil
 	case *wire.AttemptWrap:
 		return m.answer(id, pool, value.Custodian, value.Request, "wrap", "", src)
@@ -900,7 +1086,7 @@ func (m *model) addStatus(status wire.RunStatus, digest string, src source) erro
 		return nil
 	}
 	r.seen[binding.EventID] = true
-	a := r.attempt(binding.Attempt)
+	a := m.attemptFor(r, binding.Attempt)
 	a.Receiver = binding.Receiver
 	receiverAt, _ := time.Parse(time.RFC3339, status.StatusUpdate.Status.Timestamp)
 	e := event{Kind: binding.Kind, State: status.StatusUpdate.Status.State, EventID: binding.EventID, Attempt: binding.Attempt, Receiver: binding.Receiver,
@@ -984,6 +1170,9 @@ func (m *model) applyProgress(holder string, record *kgo.Record) {
 		m.progress[holder] = map[string]progressFact{}
 	}
 	if record.Value == nil {
+		if _, ok := m.progress[holder][id]; ok {
+			m.progressed--
+		}
 		delete(m.progress[holder], id)
 		m.changed = true
 		return
@@ -993,7 +1182,27 @@ func (m *model) applyProgress(holder string, record *kgo.Record) {
 		m.count("undecodable", 1)
 		return
 	}
+	if _, ok := m.progress[holder][id]; !ok {
+		m.progressed++
+	}
 	m.progress[holder][id] = progressFact{Holder: holder, Run: id, Tenant: progress.Tenant, Hash: progress.TaskHash, Attempt: progress.Attempt, LogOffset: progress.LogOffset, At: record.Timestamp}
+	// Beyond the cap on progress records kept, the oldest over every receiver is dropped.
+	for m.caps.Progress > 0 && m.progressed > m.caps.Progress {
+		var oldest *progressFact
+		for _, runs := range m.progress {
+			for _, fact := range runs {
+				if (fact.Holder != holder || fact.Run != id) && (oldest == nil || fact.At.Before(oldest.At)) {
+					oldest = &fact
+				}
+			}
+		}
+		if oldest == nil {
+			break
+		}
+		delete(m.progress[oldest.Holder], oldest.Run)
+		m.progressed--
+		m.count(capProgress, 1)
+	}
 	m.changed = true
 }
 
@@ -1018,7 +1227,7 @@ func (m *model) applyCustodian(pool string, record *kgo.Record) {
 func (m *model) retire(owner, keyID string, since time.Time) {
 	gone := func(s source) bool { return s.retiredBy(owner, keyID, since) }
 	var retracted int64
-	for id, r := range m.runs {
+	for _, r := range m.runs {
 		for hash, e := range r.Echoes {
 			if gone(e.src) {
 				delete(r.Echoes, hash)
@@ -1076,8 +1285,9 @@ func (m *model) retire(owner, keyID string, since time.Time) {
 		}
 		r.rehash()
 		m.storage(r)
+		m.remeasure(r)
 		if len(r.Echoes) == 0 && len(r.Attempts) == 0 && len(r.Opens) == 0 && len(r.Cancels) == 0 && r.Result == nil {
-			delete(m.runs, id)
+			m.drop(r)
 		}
 	}
 	for pool, c := range m.custodians {

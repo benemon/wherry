@@ -179,6 +179,8 @@ type RunSummary struct {
 	First          time.Time `json:"first"`
 	Last           time.Time `json:"last"`
 	Outputs        int       `json:"outputs"`
+	// Truncated names the caps that cut the run's retained events, attempts or open requests.
+	Truncated []string `json:"truncated,omitzero"`
 }
 
 type RunDetail struct {
@@ -281,6 +283,24 @@ type Unreturned struct {
 	Reason string `json:"reason"`
 }
 
+// The least bytes each element of a run's detail encodes to, for the size check before encoding.
+const (
+	eventJSONAtLeast   = 120
+	attemptJSONAtLeast = 48
+	pathJSONAtLeast    = 64
+	openJSONAtLeast    = 80
+	cancelJSONAtLeast  = 48
+)
+
+// atLeast is a lower bound on the detail's encoded size, from its element counts alone.
+func (d RunDetail) atLeast() int {
+	size := len(d.Attempts)*attemptJSONAtLeast + len(d.Path)*pathJSONAtLeast + len(d.Opens)*openJSONAtLeast + len(d.Cancels)*cancelJSONAtLeast
+	for _, a := range d.Attempts {
+		size += len(a.Events) * eventJSONAtLeast
+	}
+	return size
+}
+
 // PathStep is one hop of a run's path: who did what, when.
 type PathStep struct {
 	Step    string    `json:"step"`
@@ -307,7 +327,8 @@ type BoundHit struct {
 }
 
 // capNames are the counters that are caps.
-var capNames = []string{capRecordBytes, capRuns, capDigests, capPending, capCursors, capResponse, capEvent, capTraceBytes, capTraceRecords, capTraceSpans, capTraceForest, capTraceScan, capTraceScans, capTraceRuns}
+var capNames = []string{capRecordBytes, capRuns, capDigests, capPending, capCursors, capRunEvents, capRunAttempts, capRunOpens, capRunBytes, capEvents, capBytes, capProgress,
+	capResponse, capEvent, capTraceBytes, capTraceRecords, capTraceSpans, capTraceForest, capTraceScan, capTraceScans, capTraceRuns}
 
 // Snapshot is the model now, with at most maxRuns runs, newest last activity first; 0 is every run.
 func (v *View) Snapshot(maxRuns int) Snapshot {
@@ -524,6 +545,9 @@ func (v *View) Snapshot(maxRuns int) Snapshot {
 func (m *model) summary(r *run) RunSummary {
 	summary := RunSummary{ID: r.ID, Tenant: r.Tenant, Host: r.Host(), Pool: r.Pool, Receiver: r.holder(), Attempt: r.Highest, Stage: r.stage(), State: string(r.state()), Class: r.class(),
 		Admitted: r.Admitted(), First: r.First, Last: r.Last, Cancelled: len(r.Cancels) > 0, StorageUnknown: !r.StorageKnown}
+	if len(r.truncated) > 0 {
+		summary.Truncated = slices.Sorted(maps.Keys(r.truncated))
+	}
 	placement := r.Placement()
 	summary.Agent, summary.Model = placement.Agent, placement.Model
 	if _, ok := r.terminal(); ok {

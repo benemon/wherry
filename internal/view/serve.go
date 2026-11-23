@@ -1,6 +1,7 @@
 package view
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -311,20 +312,53 @@ func (s *Server) take() bool {
 	return true
 }
 
+// boundedBuffer collects an encoding up to its limit and refuses the write that would pass it, so no encoding
+// larger than the bound is built.
+type boundedBuffer struct {
+	buf   bytes.Buffer
+	limit int
+	over  bool
+}
+
+var errOverBound = errors.New("encoding over its bound")
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if b.buf.Len()+len(p) > b.limit {
+		b.over = true
+		return 0, errOverBound
+	}
+	return b.buf.Write(p)
+}
+
+// marshalBounded encodes value within limit bytes; fits is false when the encoding passed the limit and was stopped.
+func marshalBounded(value any, limit int) (encoded []byte, fits bool, err error) {
+	b := &boundedBuffer{limit: limit}
+	err = json.MarshalWrite(b, value)
+	if b.over {
+		return nil, false, nil
+	}
+	return b.buf.Bytes(), err == nil, err
+}
+
+// tooLarge counts the response bound hit and answers the fixed over-bound text.
+func (s *Server) tooLarge(w http.ResponseWriter, r *http.Request) {
+	s.v.mu.Lock()
+	s.v.m.count(capResponse, 1)
+	s.v.mu.Unlock()
+	s.fail(w, http.StatusInsufficientStorage, textTooLarge)
+	s.log(r, http.StatusInsufficientStorage)
+}
+
 // writeJSON writes value within the response bound, or the fixed over-bound text.
 func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, value any) bool {
-	encoded, err := json.Marshal(value)
-	if err != nil {
+	encoded, fits, err := marshalBounded(value, s.v.opts.Caps.ResponseBytes)
+	switch {
+	case err != nil:
 		s.fail(w, http.StatusInternalServerError, textUnavailable)
 		s.log(r, http.StatusInternalServerError)
 		return false
-	}
-	if len(encoded) > s.v.opts.Caps.ResponseBytes {
-		s.v.mu.Lock()
-		s.v.m.count(capResponse, 1)
-		s.v.mu.Unlock()
-		s.fail(w, http.StatusInsufficientStorage, textTooLarge)
-		s.log(r, http.StatusInsufficientStorage)
+	case !fits:
+		s.tooLarge(w, r)
 		return false
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -338,13 +372,13 @@ func (s *Server) model(w http.ResponseWriter, r *http.Request) {
 	maxRuns := 0
 	for {
 		snapshot := s.v.Snapshot(maxRuns)
-		encoded, err := json.Marshal(snapshot)
+		encoded, fits, err := marshalBounded(snapshot, s.v.opts.Caps.ResponseBytes)
 		if err != nil {
 			s.fail(w, http.StatusInternalServerError, textUnavailable)
 			s.log(r, http.StatusInternalServerError)
 			return
 		}
-		if len(encoded) <= s.v.opts.Caps.ResponseBytes {
+		if fits {
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(encoded)
 			s.log(r, http.StatusOK)
@@ -376,6 +410,11 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		s.fail(w, http.StatusNotFound, textNotFound)
 		s.log(r, http.StatusNotFound)
+		return
+	}
+	// A detail whose least possible encoding is over the bound is refused before any of it is encoded.
+	if detail.atLeast() > s.v.opts.Caps.ResponseBytes {
+		s.tooLarge(w, r)
 		return
 	}
 	s.writeJSON(w, r, detail)

@@ -2,6 +2,7 @@ package view
 
 import (
 	json "encoding/json/v2"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -133,5 +134,97 @@ func TestReviewSpanNameAllowlist(t *testing.T) {
 		if got := a.name(name); got != name {
 			t.Errorf("valid span name %q became %q", name, got)
 		}
+	}
+}
+
+// One run's retained events are bounded while folding whatever the runs and digests caps allow: the oldest are
+// dropped, the run marked and the cap reported.
+func TestReviewPerRunBound(t *testing.T) {
+	f := newFixture(t)
+	at := f.now.Add(-time.Minute)
+	run := f.echo(at, receiverA, tenantA, hostA, poolA, "many-events")
+	f.status(at.Add(time.Millisecond), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: run, kind: "claimed", state: wire.TaskStateWorking})
+	for i := 1; i < 100; i++ {
+		f.status(at.Add(time.Duration(i)*time.Millisecond), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: run, kind: "started", state: wire.TaskStateWorking})
+	}
+	caps := testCaps()
+	caps.Runs, caps.Digests, caps.RunEvents = 1, 4, 4
+	v := f.view(time.Hour, caps)
+	v.mu.RLock()
+	r := v.m.runs[run]
+	seen, events, kept := len(r.seen), len(r.Attempts[1].Events), r.events
+	v.mu.RUnlock()
+	if seen > caps.RunEvents || events > caps.RunEvents || kept != events {
+		t.Fatalf("one run retains %d event IDs and %d events (measured %d) despite runs=1/digests=4/run_events=4", seen, events, kept)
+	}
+	s := v.Snapshot(0)
+	if r := summaryOf(t, s, run); !slices.Equal(r.Truncated, []string{capRunEvents}) || r.Attempt != 1 || r.State != string(wire.TaskStateWorking) {
+		t.Errorf("truncated run: %+v", r)
+	}
+	// Under a digest cap of 4 the feed copies are not de-duplicated and re-enter as the oldest, to be dropped again.
+	if s.Counts[capRunEvents] < 96 {
+		t.Errorf("counts %v; want run_events reported at least 96 times", s.Counts)
+	}
+}
+
+// The model's events and bytes caps evict the oldest runs, the per-run attempts and opens caps drop the lowest and
+// oldest, the progress cap drops the oldest record, and a detail over the response bound is refused before encoding.
+func TestRetainedStateBounds(t *testing.T) {
+	f := newFixture(t)
+	t0 := f.now.Add(-30 * time.Minute)
+	// Three runs of five statuses each on the pool's events alone, so an evicted run is made again by no later record.
+	var runs []string
+	for i := range 3 {
+		run := runID(tenantA, hostA, "run-"+string(rune('a'+i)))
+		for j := range 5 {
+			f.poolOnly(t0.Add(time.Duration(i)*time.Minute+time.Duration(j+1)*time.Second), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: run, kind: "started", state: wire.TaskStateWorking})
+		}
+		runs = append(runs, run)
+	}
+	// Six attempts of one run; four open requests; progress for three runs.
+	attempts := f.echo(t0.Add(10*time.Minute), receiverA, tenantA, hostA, poolA, "attempts")
+	for attempt := int64(1); attempt <= 6; attempt++ {
+		f.status(t0.Add(10*time.Minute+time.Duration(attempt)*time.Second), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: attempts, attempt: attempt, kind: "claimed", state: wire.TaskStateWorking})
+	}
+	for i := range 4 {
+		f.openRequest(t0.Add(11*time.Minute+time.Duration(i)*time.Second), receiverA, poolA, attempts, 6)
+	}
+	for i, run := range runs {
+		f.progress(t0.Add(12*time.Minute+time.Duration(i)*time.Second), receiverA, run, tenantA, 1, 1)
+	}
+	caps := testCaps()
+	caps.Events, caps.RunAttempts, caps.RunOpens, caps.Progress = 12, 3, 2, 2
+	v := f.view(time.Hour, caps)
+	s := v.Snapshot(0)
+	if s.RunsTotal != 2 || hasRun(s, runs[0]) || hasRun(s, runs[1]) || !hasRun(s, runs[2]) || !hasRun(s, attempts) {
+		t.Errorf("runs kept under the events cap: %d %v", s.RunsTotal, s.Runs)
+	}
+	d, _ := v.RunDetail(attempts)
+	if r := summaryOf(t, s, attempts); len(d.Attempts) != 3 || d.Attempts[0].Number != 4 || r.Attempt != 6 || len(d.Opens) != 2 || !slices.Equal(r.Truncated, []string{capRunAttempts, capRunOpens}) {
+		t.Errorf("attempts and opens: %+v %+v %+v", r, d.Attempts, d.Opens)
+	}
+	v.mu.RLock()
+	progressed, held := v.m.progressed, len(v.m.progress[receiverA])
+	_, oldest := v.m.progress[receiverA][runs[0]]
+	v.mu.RUnlock()
+	if progressed != 2 || held != 2 || oldest {
+		t.Errorf("progress kept: %d %d, oldest kept %v", progressed, held, oldest)
+	}
+	for _, cap := range []string{capEvents, capRunAttempts, capRunOpens, capProgress} {
+		if s.Counts[cap] == 0 {
+			t.Errorf("%s not reported: %v", cap, s.Counts)
+		}
+	}
+	// A run whose events alone cannot encode under the bound is refused before encoding; a smaller bound still fits a
+	// run of one event.
+	if least := d.atLeast(); least < 3*eventJSONAtLeast || least > 2000 {
+		t.Errorf("detail lower bound %d", least)
+	}
+	encoded, fits, err := marshalBounded(d, 100)
+	if fits || err != nil || encoded != nil {
+		t.Errorf("an encoding over its bound was built: %d bytes, fits %v, %v", len(encoded), fits, err)
+	}
+	if encoded, fits, err := marshalBounded(d, 1<<20); !fits || err != nil || !strings.Contains(string(encoded), `"truncated":["run_attempts","run_opens"]`) {
+		t.Errorf("an encoding under its bound: fits %v, %v, %.200s", fits, err, encoded)
 	}
 }
