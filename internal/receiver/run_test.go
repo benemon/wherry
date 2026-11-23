@@ -1448,6 +1448,62 @@ func TestEndedAgentNamesItsReason(t *testing.T) {
 	}
 }
 
+// A run stopped at task_ended_by or by a cancel returns the outputs its job left, with the failed or canceled status
+// unchanged, as a run whose agent exited does.
+func TestTimedOutAndCanceledRunsReturnTheirOutputs(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		end   func(t *testing.T, f fixture, record *kgo.Record, endBy int64) (kgo.AckStatus, string)
+		state wire.TaskState
+		ack   kgo.AckStatus
+	}{
+		{"timed out", func(t *testing.T, f fixture, record *kgo.Record, endBy int64) (kgo.AckStatus, string) {
+			return f.execute(t, record, 1), wire.NotEndedBy(endBy)
+		}, wire.TaskStateFailed, kgo.AckReject},
+		{"canceled", func(t *testing.T, f fixture, record *kgo.Record, _ int64) (kgo.AckStatus, string) {
+			done := f.executing(t, f.ctx, record, 1)
+			for _, _, follows, _ := f.plugin.counts(); follows == 0; _, _, follows, _ = f.plugin.counts() {
+				time.Sleep(20 * time.Millisecond)
+			}
+			f.publishCancel(t, testRun("run-a"), 1, f.host, nil)
+			select {
+			case status := <-done:
+				return status, cancelReason
+			case <-time.After(10 * time.Second):
+				t.Fatalf("the run kept going after its cancel; logs:\n%s", f.logs.String())
+				return 0, ""
+			}
+		}, wire.TaskStateCanceled, kgo.AckAccept},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakePlugin{stream: noResultStream, endDelay: 30 * time.Second, outputs: []pluginsdk.Output{file("report.md", "r")}}
+			f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": fake})
+			endBy := time.Now().Add(2 * time.Second).Unix()
+			record := f.submit(t, f.host, func(task *wire.Submission) {
+				task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = endBy, endBy
+				task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.md", Required: true}}
+			})
+			status, reason := test.end(t, f, record, endBy)
+			if status != test.ack {
+				t.Fatalf("status %v, want %v; logs:\n%s", status, test.ack, f.logs.String())
+			}
+			if state, text := terminalReason(t, f, testRun("run-a")); state != test.state || text != reason {
+				t.Fatalf("terminal %s %q, want %s %q", state, text, test.state, reason)
+			}
+			task := f.lastTask(t)
+			if task.Status.State != test.state || fake.stops != 1 || fake.collects != 1 {
+				t.Fatalf("task %s stops=%d collects=%d, want %s with the job stopped and collected once", task.Status.State, fake.stops, fake.collects, test.state)
+			}
+			if outputs := f.outputChunks(t); len(outputs) != 1 || !bytes.Equal(outputs[0].ArtifactUpdate.Artifact.Parts[0].Raw, []byte("r")) {
+				t.Fatalf("output chunks %+v, want report.md as written", outputs)
+			}
+			if listed := manifest(t, task); len(listed.Outputs) != 1 || listed.Outputs[0].Name != "report.md" || len(listed.NotReturned) != 0 {
+				t.Fatalf("manifest %+v, want report.md returned and nothing missing", listed)
+			}
+		})
+	}
+}
+
 func TestOutcomeFileIsNotAnOutput(t *testing.T) {
 	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, outputs: []pluginsdk.Output{
 		{Name: wire.OutcomeDir + "/notes.md", Size: 5, Data: []byte("notes")}, {Name: "report.md", Size: 6, Data: []byte("report")},

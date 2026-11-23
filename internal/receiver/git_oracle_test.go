@@ -1,6 +1,7 @@
 package receiver
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -261,6 +262,8 @@ func TestGitPreambleCommandsWorkWithGit(t *testing.T) {
 	if readme, err := os.ReadFile(filepath.Join(checkout, "README")); err != nil || string(readme) != "feature\n" {
 		t.Fatalf("checkout README %q, %v; want the ref's", readme, err)
 	}
+	plain := []string{"HOME=" + filepath.Join(o.root, "parent-home"), "PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1", "GIT_COMMITTER_NAME=parent", "GIT_COMMITTER_EMAIL=parent@example.test"}
+	bundle := filepath.Join(o.directories.Output, wire.GitBundle)
 	for i, content := range []string{"changed by the agent\n", "changed again\n"} {
 		if err := os.WriteFile(filepath.Join(checkout, "README"), []byte(content), 0o600); err != nil {
 			t.Fatal(err)
@@ -268,6 +271,13 @@ func TestGitPreambleCommandsWorkWithGit(t *testing.T) {
 		output, err := o.run(t, env, "git -C repo commit -q -am 'agent change "+string(rune('1'+i))+"'")
 		if err != nil {
 			t.Fatalf("commit: %v\n%s", err, output)
+		}
+		// The bundle is exported after every commit; the export after the last one is among the closing commands.
+		if i == 0 {
+			runAll(lines[4:5])
+			if heads := git(t, checkout, plain, "bundle", "list-heads", bundle); heads != git(t, checkout, plain, "rev-parse", "HEAD")+" HEAD" {
+				t.Fatalf("bundle heads %q after the first commit, want that commit as HEAD", heads)
+			}
 		}
 	}
 	runAll(lines[3:])
@@ -289,7 +299,8 @@ func TestGitPreambleCommandsWorkWithGit(t *testing.T) {
 	if !slices.ContainsFunc(o.forge.seen(), func(request string) bool { return strings.HasSuffix(request, " "+basic) }) {
 		t.Fatalf("the forge never received the token: %v", o.forge.seen())
 	}
-	if recorded, err := os.ReadFile(filepath.Join(o.root, "argv")); err != nil || strings.Count(string(recorded), "\n") != len(lines)+2 {
+	// Two commits and the export after the first are the agent's own commands.
+	if recorded, err := os.ReadFile(filepath.Join(o.root, "argv")); err != nil || strings.Count(string(recorded), "\n") != len(lines)+3 {
 		t.Fatalf("git arguments %q, %v; want every command's", recorded, err)
 	}
 	patch := filepath.Join(o.directories.Output, wire.GitPatch)
@@ -299,7 +310,6 @@ func TestGitPreambleCommandsWorkWithGit(t *testing.T) {
 	if data := string(must(t)(os.ReadFile(patch))); strings.Count(data, "\nSubject: [PATCH ") != 2 {
 		t.Fatalf("patch holds %d patches, want both commits:\n%s", strings.Count(data, "\nSubject: [PATCH "), data)
 	}
-	plain := []string{"HOME=" + filepath.Join(o.root, "parent-home"), "PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1", "GIT_COMMITTER_NAME=parent", "GIT_COMMITTER_EMAIL=parent@example.test"}
 	parent := filepath.Join(o.root, "parent")
 	git(t, o.root, plain, "clone", "-q", "--branch", "feature", o.repository, parent)
 	git(t, parent, plain, "am", "-q", patch)
@@ -307,12 +317,63 @@ func TestGitPreambleCommandsWorkWithGit(t *testing.T) {
 		t.Fatalf("README after git am %q, %v", readme, err)
 	}
 	git(t, parent, plain, "reset", "-q", "--hard", "HEAD~2")
-	git(t, parent, plain, "fetch", "-q", filepath.Join(o.directories.Output, wire.GitBundle), "HEAD")
-	if fetched := git(t, parent, plain, "log", "-1", "--format=%s", "FETCH_HEAD"); fetched != "agent change 2" {
-		t.Fatalf("bundle's head %q, want the agent's last commit", fetched)
+	git(t, parent, plain, "fetch", "-q", bundle, "HEAD")
+	if fetched := git(t, parent, plain, "log", "--format=%s", "HEAD..FETCH_HEAD"); fetched != "agent change 2\nagent change 1" {
+		t.Fatalf("bundle's commits %q, want both of the agent's, the last as its head", fetched)
 	}
 	if branches := git(t, o.repository, plain, "for-each-ref", "--format=%(refname)", "refs/heads"); branches != "refs/heads/feature\nrefs/heads/main\nrefs/heads/wherry/run-git" {
 		t.Fatalf("forge branches %q, want the run's branch pushed beside the others", branches)
+	}
+}
+
+// A bundle export that dies while it writes leaves the previous bundle intact and fetchable: git bundle create writes
+// a lock file and renames it over the bundle once complete. The export dies here of a file size limit that kills its
+// pack-objects, as a quota stop or a platform kill would an agent's.
+func TestGitBundleExportInterruptedKeepsThePreviousBundle(t *testing.T) {
+	o := newOracle(t)
+	lines := o.preamble(&wire.GitInput{Remote: o.forge.URL + "/org/repo.git", Ref: "feature", Credential: "forge-token"})
+	env := o.agentEnvironment()
+	for _, line := range lines[:3] {
+		if output, err := o.run(t, env, line); err != nil {
+			t.Fatalf("%s: %v\n%s", line, err, output)
+		}
+	}
+	checkout := filepath.Join(o.work, "repo")
+	commit := func(message string, content []byte) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(checkout, "README"), content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if output, err := o.run(t, env, "git -C repo commit -q -am '"+message+"'"); err != nil {
+			t.Fatalf("commit: %v\n%s", err, output)
+		}
+	}
+	export := lines[4]
+	commit("agent change 1", []byte("changed by the agent\n"))
+	if output, err := o.run(t, env, export); err != nil {
+		t.Fatalf("%s: %v\n%s", export, err, output)
+	}
+	bundle := filepath.Join(o.directories.Output, wire.GitBundle)
+	previous := must(t)(os.ReadFile(bundle))
+	// Random content packs no smaller, so the second bundle is far over the limit: 16 blocks of 1 KiB in bash, 512
+	// bytes in other shells.
+	big := make([]byte, 256<<10)
+	if _, err := rand.Read(big); err != nil {
+		t.Fatal(err)
+	}
+	commit("agent change 2", big)
+	if output, err := o.run(t, env, "ulimit -f 16; "+export); err == nil {
+		t.Fatalf("export under the file size limit succeeded:\n%s", output)
+	}
+	if data := must(t)(os.ReadFile(bundle)); !bytes.Equal(data, previous) {
+		t.Fatalf("%s is %d bytes after the interrupted export, want the previous %d intact", wire.GitBundle, len(data), len(previous))
+	}
+	plain := []string{"HOME=" + filepath.Join(o.root, "parent-home"), "PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1", "GIT_COMMITTER_NAME=parent", "GIT_COMMITTER_EMAIL=parent@example.test"}
+	parent := filepath.Join(o.root, "parent")
+	git(t, o.root, plain, "clone", "-q", "--branch", "feature", o.repository, parent)
+	git(t, parent, plain, "fetch", "-q", bundle, "HEAD")
+	if fetched := git(t, parent, plain, "log", "--format=%s", "HEAD..FETCH_HEAD"); fetched != "agent change 1" {
+		t.Fatalf("previous bundle's commits %q, want the first alone", fetched)
 	}
 }
 

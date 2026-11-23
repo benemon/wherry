@@ -1499,7 +1499,13 @@ A run a cancel covers skips steps 7, 11, 12 and 13, and ends `TASK_STATE_CANCELE
 after its `claimed` status. A redelivered run that a member has claimed
 goes on to adoption past its bounds. When its `task_ended_by` has passed,
 the receiver stops the job it finds and ends the run `TASK_STATE_FAILED`
-with `not ended by task_ended_by (<RFC 3339 time>)`.
+with `not ended by task_ended_by (<RFC 3339 time>)`. After a stop that
+succeeds, at that bound or on a cancel, the receiver collects the job's
+outputs as it does when the job ends ([Inputs and outputs](#inputs-and-outputs))
+and the result lists them; the state and message stay the bound's or the
+cancel's, whatever the outcome file says. An S3 output's presigned upload
+expires at `task_ended_by`, so after the bound an S3 output is listed as not
+uploaded.
 
 A claimed run whose job has not started by `task_started_by`, while it
 waits for its open or for the platform to place its job, ends
@@ -1619,9 +1625,13 @@ The commands read the credential from its file, so its value is on no
 command line and in no environment variable or prompt. When the run
 expects the output `changes.patch`, the lines give the
 `git format-patch --output=<file> refs/wherry/start..HEAD` command that
-writes it; for `changes.bundle`, the `git bundle create` command for the
-same range. They ask the agent to push only when the request says so, and
-then only to the branch `wherry/<run>`.
+writes it, once, at the end; for `changes.bundle`, the `git bundle create`
+command for the same range, which they ask the agent to run after every
+commit and once more before it finishes. `git bundle create` replaces the
+file only once it is complete, so a run that ends early returns the commits
+exported before it ended, best effort; `format-patch` rewrites its file in
+place, so the patch is not repeated. They ask the agent to push only when
+the request says so, and then only to the branch `wherry/<run>`.
 
 A plugin gives its agent an environment in which `git` reads no system,
 global or environment configuration, uses no template, never prompts and
@@ -1765,7 +1775,11 @@ submission, and act on each run a valid cancel names:
   reading the cancel.
 
 In each case the run ends with a result and a `terminal` status in
-`TASK_STATE_CANCELED`, with the message text `canceled by user`. If
+`TASK_STATE_CANCELED`, with the message text `canceled by user`. After a
+stop that succeeds, the receiver collects the stopped job's outputs as it
+does when a job ends ([Inputs and outputs](#inputs-and-outputs)) and the
+result lists them; the state stays `TASK_STATE_CANCELED` whatever the
+outcome file says. If
 stopping a job fails, the receiver releases the submission without a
 terminal status, and the next delivery tries again. A run that ends before
 a receiver acts on the cancel keeps the state it ended in.

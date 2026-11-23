@@ -100,3 +100,29 @@ func TestGitInputReachesTheAgentAsFilesAndCommands(t *testing.T) {
 		t.Fatalf("prompt %q, want no credential value and the text after the preamble", prompt)
 	}
 }
+
+// The bundle's line asks for its export after every commit; the patch's asks for one export at the end. Both stay
+// prose over one command line each.
+func TestGitPreambleAsksForTheBundleAfterEveryCommit(t *testing.T) {
+	directories := pluginsdk.Directories{Input: "/task/inputs", Output: "/task/outputs", Credentials: "/task/secrets/credentials"}
+	git := &wire.GitInput{Remote: "https://git.example.test/org/repo.git", Ref: "main"}
+	preamble := Preamble(directories, nil, nil, nil, []wire.ExpectedOutput{{Name: wire.GitPatch}, {Name: wire.GitBundle}}, git, "run-a", operator.DefaultReplyLimit)
+	lines := strings.Split(preamble, "\n")
+	before := func(command string) string {
+		t.Helper()
+		index := slices.IndexFunc(lines, func(line string) bool { return strings.HasPrefix(line, "    git -C 'repo' "+command+" ") })
+		if index < 1 {
+			t.Fatalf("preamble has no %s command:\n%s", command, preamble)
+		}
+		return lines[index-1]
+	}
+	if bundle := before("bundle create"); !strings.Contains(bundle, "after every commit") || !strings.Contains(bundle, "before you finish") {
+		t.Errorf("bundle line %q, want the export asked for after every commit and before finishing", bundle)
+	}
+	if patch := before("format-patch"); patch != "Commit your changes, then write them as a patch series with:" {
+		t.Errorf("patch line %q, want the single export at the end", patch)
+	}
+	if got := commands(preamble); len(got) != 6 || slices.ContainsFunc(got, func(command string) bool { return strings.Contains(command, ">") }) {
+		t.Errorf("commands %q, want six with no redirect", got)
+	}
+}
