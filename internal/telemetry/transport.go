@@ -15,6 +15,7 @@ import (
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -37,6 +38,16 @@ const (
 	retryWait          = 250 * time.Millisecond
 )
 
+// TraceBatchMaxBytes is the trace client's batch maximum on every role, whatever the process's own client batches, and
+// the trace topics' max.message.bytes. TraceRecordLimit is the largest value one trace record carries: the batch
+// maximum less the record batch header, the record's framing and its key, a trace ID in hex. A group over it splits by
+// spans; a span over it alone is dropped as oversize.
+const (
+	TraceBatchMaxBytes  = 1 << 20
+	traceRecordOverhead = 256
+	TraceRecordLimit    = TraceBatchMaxBytes - traceRecordOverhead
+)
+
 // ClientOpts are the options of the trace client built from base, the process's own Kafka options: the same brokers,
 // credentials and trust, with idempotence off (traces are best-effort and a record is failed, never resent, once its
 // export has timed out), the bounds above, and no topic creation.
@@ -50,6 +61,7 @@ func ClientOpts(base []kgo.Opt) []kgo.Opt {
 		kgo.MetadataMinAge(retryWait),
 		kgo.MaxBufferedRecords(MaxBufferedRecords),
 		kgo.MaxBufferedBytes(MaxBufferedBytes),
+		kgo.ProducerBatchMaxBytes(TraceBatchMaxBytes),
 	)
 }
 
@@ -119,7 +131,7 @@ func (c *Transport) UploadTraces(ctx context.Context, spans []*tracepb.ResourceS
 	c.uploads.Add(1)
 	c.mu.Unlock()
 	defer c.uploads.Done()
-	records, err := Records(spans)
+	records, oversize, err := Records(spans)
 	if err != nil {
 		return err
 	}
@@ -135,12 +147,17 @@ func (c *Transport) UploadTraces(ctx context.Context, spans []*tracepb.ResourceS
 			errs = append(errs, exportError(record.Topic, err))
 		}
 	}
+	for _, topic := range oversize {
+		errs = append(errs, &ExportError{Topic: topic, Class: ClassOversize})
+	}
 	return errors.Join(errs...)
 }
 
 // Records are the records of spans: one ExportTraceServiceRequest per tenant and trace, in the order the spans came,
-// on the tenant's topic and keyed by the trace ID. A span's tenant is its wherry.tenant attribute, else its resource's.
-func Records(spans []*tracepb.ResourceSpans) ([]*kgo.Record, error) {
+// on the tenant's topic and keyed by the trace ID, each value within TraceRecordLimit. A span's tenant is its
+// wherry.tenant attribute, else its resource's. A trace's group over the limit is split by spans into records under
+// the same key; a span over the limit alone is left out, and oversize names each topic that lost one, once.
+func Records(spans []*tracepb.ResourceSpans) (records []*kgo.Record, oversize []string, err error) {
 	type key struct{ topic, trace string }
 	var order []key
 	groups := map[key]*tracepb.ResourceSpans{}
@@ -169,15 +186,86 @@ func Records(spans []*tracepb.ResourceSpans) ([]*kgo.Record, error) {
 			}
 		}
 	}
-	records := make([]*kgo.Record, 0, len(order))
+	records = make([]*kgo.Record, 0, len(order))
+	lost := map[string]bool{}
 	for _, k := range order {
-		value, err := proto.Marshal(&coltracepb.ExportTraceServiceRequest{ResourceSpans: []*tracepb.ResourceSpans{groups[k]}})
+		value, err := proto.Marshal(request(groups[k]))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		records = append(records, &kgo.Record{Topic: k.topic, Key: []byte(k.trace), Value: value})
+		if len(value) <= TraceRecordLimit {
+			records = append(records, &kgo.Record{Topic: k.topic, Key: []byte(k.trace), Value: value})
+			continue
+		}
+		chunks, dropped := split(groups[k])
+		if dropped > 0 && !lost[k.topic] {
+			lost[k.topic] = true
+			oversize = append(oversize, k.topic)
+		}
+		for _, chunk := range chunks {
+			if value, err = proto.Marshal(request(chunk)); err != nil {
+				return nil, nil, err
+			}
+			records = append(records, &kgo.Record{Topic: k.topic, Key: []byte(k.trace), Value: value})
+		}
 	}
-	return records, nil
+	return records, oversize, nil
+}
+
+func request(group *tracepb.ResourceSpans) *coltracepb.ExportTraceServiceRequest {
+	return &coltracepb.ExportTraceServiceRequest{ResourceSpans: []*tracepb.ResourceSpans{group}}
+}
+
+// split is group, whose request is over TraceRecordLimit, in chunks whose requests each stay within it, and the count
+// of spans over the limit alone, which no chunk holds. A chunk is bounded from its spans' encoded sizes, so its
+// request may fall a few bytes short of the limit; a span that the bound puts over it is measured exactly, alone.
+func split(group *tracepb.ResourceSpans) (chunks []*tracepb.ResourceSpans, dropped int) {
+	empty := &tracepb.ResourceSpans{Resource: group.Resource, SchemaUrl: group.SchemaUrl}
+	for _, ss := range group.ScopeSpans {
+		empty.ScopeSpans = append(empty.ScopeSpans, &tracepb.ScopeSpans{Scope: ss.Scope, SchemaUrl: ss.SchemaUrl})
+	}
+	// base bounds a chunk's request beyond its span fields: the resource, every scope and the nested length prefixes,
+	// each of which grows by at most 4 bytes as spans fill it.
+	base := proto.Size(request(empty)) + 4*(1+len(group.ScopeSpans))
+	var chunk *tracepb.ResourceSpans
+	var source, scope *tracepb.ScopeSpans
+	size := base
+	flush := func() {
+		if chunk != nil {
+			chunks = append(chunks, chunk)
+		}
+		chunk, scope, size = nil, nil, base
+	}
+	for _, ss := range group.ScopeSpans {
+		for _, span := range ss.Spans {
+			field := proto.Size(span)
+			field += 1 + protowire.SizeVarint(uint64(field))
+			if base+field > TraceRecordLimit {
+				alone := &tracepb.ResourceSpans{Resource: group.Resource, SchemaUrl: group.SchemaUrl, ScopeSpans: []*tracepb.ScopeSpans{{Scope: ss.Scope, SchemaUrl: ss.SchemaUrl, Spans: []*tracepb.Span{span}}}}
+				if proto.Size(request(alone)) > TraceRecordLimit {
+					dropped++
+					continue
+				}
+				flush()
+				chunks = append(chunks, alone)
+				continue
+			}
+			if size+field > TraceRecordLimit {
+				flush()
+			}
+			if chunk == nil {
+				chunk = &tracepb.ResourceSpans{Resource: group.Resource, SchemaUrl: group.SchemaUrl}
+			}
+			if scope == nil || source != ss {
+				source, scope = ss, &tracepb.ScopeSpans{Scope: ss.Scope, SchemaUrl: ss.SchemaUrl}
+				chunk.ScopeSpans = append(chunk.ScopeSpans, scope)
+			}
+			scope.Spans = append(scope.Spans, span)
+			size += field
+		}
+	}
+	flush()
+	return chunks, dropped
 }
 
 func tenantAttribute(attrs []*commonpb.KeyValue) string {

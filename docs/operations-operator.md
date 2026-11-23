@@ -81,7 +81,10 @@ and connects as `wherry.operator` alone. Keep the directory private: it
 holds every bundle ([Security](security.md#the-operator-working-directory)).
 
 To rotate `wherry.operator`'s password, run `init` again with the super
-user. Commands then use the new password. When every operator command fails
+user. Commands then use the new password. A re-run also creates any trace
+topic the install lacks and grants `wherry.operator` `Describe` on the pool
+groups, which an install set up before them needs once
+([Upgrade](upgrade.md#trace-topics-and-the-operator-s-group-grant)). When every operator command fails
 to log in, an interrupted `init` left `operator.password` behind the
 broker's: run `init` again with the Kafka super user.
 

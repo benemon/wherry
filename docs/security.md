@@ -511,13 +511,18 @@ On Strimzi, the User Operator must ignore the principals wherry creates, as
 | Cluster | `Alter` | creating and deleting SCRAM credentials; creating, describing and deleting ACLs |
 | Cluster | `AlterConfigs` | client quotas; reading broker settings |
 | Topic, prefix `wherry.` | `Create`, `AlterConfigs`, `Read`, `Write` | the operator, receiver, pool, tenant and host topics |
-| Group, prefix `p-` | `AlterConfigs` | share-group settings |
+| Group, prefix `p-` | `AlterConfigs`, `Describe` | share-group settings; share-group state for the operator view |
 
 Kafka implies `Describe` by `Read`, `Write` and `Alter`, and
 `DescribeConfigs` by `AlterConfigs`
 ([authorization](https://kafka.apache.org/documentation/#security_authz_primitives)),
-so `init` grants neither. `operator check` reports any of these grants
-that is missing.
+so on the cluster and the topics `init` grants neither. On the pool groups
+`AlterConfigs` implies `DescribeConfigs` alone, and describing a share
+group's state needs `Describe`, so `init` grants it there. `operator check`
+reports any of these grants that is missing. On an install set up before the
+group `Describe` it reports `missing DESCRIBE ACL on p- for wherry.operator`;
+a re-run of `init` grants it, and creates the trace topics, as
+[Upgrade](upgrade.md#trace-topics-and-the-operator-s-group-grant) describes.
 
 `Alter` on the cluster lets its holder grant itself any ACL, so
 `wherry.operator` is close to the super user in effect: whoever holds
@@ -585,6 +590,23 @@ Before you start, have:
 4. Once every bundle is refreshed, remove the old certificate from the
    operator's file. The next refresh of each bundle drops it there.
 
+## Trace topics
+
+With [tracing](tracing.md) on, every process writes its spans to its
+tenant's trace topic `wherry.traces.<T>` under its own principal, and the
+spans of no tenant to `wherry.traces`. A host holds `Read`, `Write` and
+`Describe` on its own tenant's trace topic alone, entitled or not; a receiver
+`Write` and `Describe` on the trace topic of each tenant entitled to its pool,
+now or before, and on `wherry.traces`. What a host can read of its tenant
+therefore grows by the spans: every host of a tenant reads all its tenant's
+retained spans, other hosts' runs included, and sees on them the credential
+names, output file names and receiver names those runs carried, never a
+value, a URL or a prompt ([What is never exported](tracing.md#what-is-never-exported)).
+Every host of a tenant can also write spans into that topic, so span facts
+are advisory: the signed records on the tenant feed stay the authority for
+what happened, and nothing takes a run's state from a span. The trace topics
+expire by their own retention, 7 days, where the feeds keep 30.
+
 ## Removal and retained data
 
 Removing a tenant or an entitlement revokes access. Run data stays where it is; tenant removal deletes only the
@@ -593,16 +615,19 @@ tenant's bundle files.
 The pool's receivers keep some grants after an entitlement ends, so runs they already hold can finish:
 
 - Write and Describe on the tenant's feed and transcript topics.
+- Write and Describe on the tenant's trace topic `wherry.traces.<T>`, so the spans of the runs they finish land.
 - Read and Describe on every host key topic of the tenant, including ended hosts.
 
 Only a receiver's own revocation removes these grants. They follow current pool membership, so a receiver that joins
-the pool later also gets them, and those receivers can read the key topic of a host added later. The over-grant
-allows writes to a feed the tenant's hosts ignore for that pool, and reads of public keys.
+the pool later also gets them, trace writes included, and those receivers can read the key topic of a host added
+later. The over-grant allows writes to a feed the tenant's hosts ignore for that pool, writes of spans, and reads of
+public keys.
 
 What happens to work after an entitlement ends:
 
 - Unclaimed tasks, and redeliveries of claimed ones, fail admission. The receiver writes nothing for them.
-- Running jobs finish normally into the tenant's feed. The tenant's hosts can no longer read or cancel them.
+- Running jobs finish normally into the tenant's feed. The tenant's hosts can no longer read or cancel them. A live
+  host keeps Read on its tenant's trace topic and sees the finishing runs' spans.
 - A run waiting for its pool key is refused its open, and the receiver releases the task. Its next admission
   rejects it.
 - A job whose run was released or whose receiver restarted mid-run is not adopted. The plugin's sweep cleans it up.
@@ -610,6 +635,7 @@ What happens to work after an entitlement ends:
 Residue and manual cleanup after revocation:
 
 - Feed and transcript topics `wherry.tenant.<T>` and `wherry.tenant.<T>.transcript` retain data for 30 days; delete the topics with Kafka's Admin API when no retained work needs them.
+- The trace topic `wherry.traces.<T>` retains the tenant's spans for 7 days. Tenant removal revokes the hosts' grants on it and leaves it; delete it with the Admin API when no retained work needs it.
 - Host public key topics `wherry.host.<T>.<H>` are kept forever; delete them manually after revocation and retained work completes.
 - Tenant statuses remain on shared pool events for pool retention. Wait for retention; deleting the shared topic also deletes other tenants' statuses.
 - S3 objects under the tenant's prefix remain until the bucket lifecycle rule deletes them; delete that prefix manually if needed.

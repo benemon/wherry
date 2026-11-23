@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/kafkatest"
+	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
@@ -361,7 +362,7 @@ func TestPoolApplyDryRunCreatesNoTopic(t *testing.T) {
 	defer closeFixture()
 	ctx := context.Background()
 	admin := kadm.NewClient(service.Operator)
-	responses, err := admin.DeleteTopics(ctx, OperatorTopic)
+	responses, err := admin.DeleteTopics(ctx, OperatorTopic, telemetry.TraceTopic(""))
 	if err == nil {
 		err = responses.Error()
 	}

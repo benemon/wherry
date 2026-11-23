@@ -506,9 +506,6 @@ func TestTracedHostFlushesBeforeClosingItsClient(t *testing.T) {
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, nil)
 	topic := telemetry.TraceTopic("tenant-a")
-	if err := f.cluster.CreateTopic(topic, 1, nil); err != nil {
-		t.Fatal(err)
-	}
 	host, logs, bundle := f.tracedHost(t, "host-t")
 	const prompt = "s3cr3t-prompt-text"
 	submitted, err := host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: prompt, EndBy: time.Now().Add(30 * time.Minute), StartBy: time.Now().Add(10 * time.Minute)})
@@ -558,9 +555,6 @@ func TestTracedSubmitUnaffectedByATraceOutage(t *testing.T) {
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, nil)
 	topic := telemetry.TraceTopic("tenant-a")
-	if err := f.cluster.CreateTopic(topic, 1, nil); err != nil {
-		t.Fatal(err)
-	}
 	traced, logs, _ := f.tracedHost(t, "host-t")
 	stalled := f.cluster.Fault(kfake.Fault{Keys: []kmsg.Key{kmsg.Produce}, Topic: topic, Err: kerr.NotLeaderForPartition, Count: -1})
 	defer stalled.Remove()

@@ -209,6 +209,9 @@ wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] \
 ```
 
 `operator init` delegates provisioning from the Kafka super user to `wherry.operator`.
+It also creates `wherry.traces` and the trace topic of every live tenant where
+missing and sets their configuration, so a re-run on an install that predates
+them gives it every one ([Upgrade](upgrade.md#trace-topics-and-the-operator-s-group-grant)).
 When standard input and standard error are terminals and `TERM` is not
 `dumb`, you answer each question the flags do not give under a Broker heading.
 You see one question per page.
@@ -492,7 +495,7 @@ the exposure.
 
 ### `wherry operator tenant add TENANT`
 
-Records a new tenant and creates its feed and transcript topics at 2 MiB per record batch. Refuses a tenant that exists or has ended: a tenant name can never return.
+Records a new tenant and creates its feed and transcript topics at 2 MiB per record batch and its trace topic `wherry.traces.<tenant>` at 1 MiB ([Tracing](tracing.md#topics-and-grants)). Refuses a tenant that exists or has ended: a tenant name can never return.
 
 ### `wherry operator tenant list`
 
@@ -861,6 +864,10 @@ Loads `wherry.operator` and checks, in order:
   plus six hours;
 - that every tenant feed and transcript topic has a `max.message.bytes` of at
   least 2 MiB;
+- that `wherry.traces` and every live tenant's trace topic exist with one
+  partition, `cleanup.policy=delete`, `message.timestamp.type=LogAppendTime`,
+  `retention.ms=604800000` and `max.message.bytes=1048576`, naming
+  `operator init`, which creates and sets them;
 - that every ACL the state calls for is present, the prefixed task-topic
   grants of hosts and receivers included, with `wherry.operator`'s own
   [grants](security.md#the-operator-principal).

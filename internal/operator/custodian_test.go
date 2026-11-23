@@ -92,7 +92,7 @@ func TestSnapshotTopicACLs(t *testing.T) {
 		"group " + ReceiverPrincipal("receiver-a"):       {"READ", "DESCRIBE"},
 		"topic " + TenantPrincipal("tenant-a", "host-a"): {"READ", "DESCRIBE"},
 		"topic " + OperatorPrincipal:                     {"CREATE", "ALTER_CONFIGS", "READ", "WRITE"},
-		"group " + OperatorPrincipal:                     {"ALTER_CONFIGS"},
+		"group " + OperatorPrincipal:                     {"ALTER_CONFIGS", "DESCRIBE"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("pool-a snapshot ACLs %v, want %v", got, want)

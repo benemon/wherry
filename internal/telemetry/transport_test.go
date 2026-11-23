@@ -22,9 +22,11 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
+	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -437,14 +439,14 @@ func TestRecordsGroupByTenantAndTrace(t *testing.T) {
 	span := func(name string, traceID []byte, attrs []*commonpb.KeyValue) *tracepb.Span {
 		return &tracepb.Span{TraceId: traceID, SpanId: []byte("spanspan"), Name: name, Attributes: attrs}
 	}
-	records, err := telemetry.Records([]*tracepb.ResourceSpans{
+	records, oversize, err := telemetry.Records([]*tracepb.ResourceSpans{
 		{Resource: &resourcepb.Resource{Attributes: tenanted("tenant-r")}, ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{
 			span("a1", traceOne, tenanted(tenantA)), span("r1", traceOne, nil), span("a2", traceTwo, tenanted(tenantA)), span("a1b", traceOne, tenanted(tenantA)),
 		}}}},
 		{ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{span("n", traceTwo, nil)}}}},
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || len(oversize) != 0 {
+		t.Fatal(err, oversize)
 	}
 	type want struct{ topic, key, names string }
 	wants := []want{
@@ -468,5 +470,113 @@ func TestRecordsGroupByTenantAndTrace(t *testing.T) {
 	}
 	if attrs := teletest.Spans(t, records[1:2])[0].Resource.Attributes(); len(attrs) != 1 || attrs[0] != attribute.String(string(telemetry.AttrTenant), "tenant-r") {
 		t.Errorf("record 1 resource %v", attrs)
+	}
+}
+
+// sized is one span of tenant whose ExportTraceServiceRequest encodes to exactly n bytes, its name the padding.
+func sized(t *testing.T, tenant string, n int) []*tracepb.ResourceSpans {
+	t.Helper()
+	spans := resourceSpans(tenant)
+	span := spans[0].ScopeSpans[0].Spans[0]
+	for range 8 {
+		size := proto.Size(&coltracepb.ExportTraceServiceRequest{ResourceSpans: spans})
+		if size == n {
+			return spans
+		}
+		span.Name = strings.Repeat("x", max(len(span.Name)+n-size, 0))
+	}
+	t.Fatalf("no span of %d bytes", n)
+	return nil
+}
+
+// Brief test 6, record limit: the trace client built from the host's options, compression off, batches at most
+// TraceBatchMaxBytes whatever the process's client batches; an export of exactly TraceRecordLimit bytes is one record
+// the topic takes; a trace's group over the limit splits by spans into records under its key, in order; a span over the
+// limit alone is dropped, the rest of its export delivered, and reported as oversize for its topic, which the handler
+// logs.
+func TestTransportBoundsRecordSize(t *testing.T) {
+	c := newCluster(t)
+	c.grantTraces(t, tenantA, tenantB)
+	// A receiver's client batches the feed's 2 MiB; the trace client built from it batches 1 MiB.
+	pinned, err := kgo.NewClient(telemetry.ClientOpts(append(c.opts(), kgo.ProducerBatchMaxBytes(2<<20)))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned.Close()
+	if got, _ := pinned.OptValue(kgo.ProducerBatchMaxBytes).(int32); got != telemetry.TraceBatchMaxBytes {
+		t.Fatalf("trace client batches %d bytes, want %d", got, telemetry.TraceBatchMaxBytes)
+	}
+	host := append(c.opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()), kgo.ProducerBatchCompression(kgo.NoCompression()))
+	transport := telemetry.NewTransport(host)
+	if err := transport.Start(c.ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = transport.Stop(c.ctx) }()
+	if err := transport.UploadTraces(c.ctx, sized(t, tenantA, telemetry.TraceRecordLimit)); err != nil {
+		t.Fatalf("upload of %d bytes = %v, want delivery", telemetry.TraceRecordLimit, err)
+	}
+	records := c.read(t, tenantA)
+	if len(records) != 1 || len(records[0].Value) != telemetry.TraceRecordLimit {
+		t.Fatalf("%d records on %s, want one of %d bytes", len(records), telemetry.TraceTopic(tenantA), telemetry.TraceRecordLimit)
+	}
+	var export *telemetry.ExportError
+	err = transport.UploadTraces(c.ctx, sized(t, tenantA, telemetry.TraceRecordLimit+1))
+	if !errors.As(err, &export) || export.Topic != telemetry.TraceTopic(tenantA) || export.Class != telemetry.ClassOversize || export.Expected {
+		t.Fatalf("upload of %d bytes = %v, want oversize for %s", telemetry.TraceRecordLimit+1, err, telemetry.TraceTopic(tenantA))
+	}
+	if records := c.read(t, tenantA); len(records) != 1 {
+		t.Fatalf("%d records on %s after the oversize span, want the one before it", len(records), telemetry.TraceTopic(tenantA))
+	}
+
+	// One trace of five spans, each three tenths of the limit, splits into two records of three and two; among them a
+	// span over the limit is dropped; another tenant's span in the export is delivered.
+	traceID, spanID := []byte("0123456789abcdef"), []byte("spanspan")
+	tenanted := func(tenant string) []*commonpb.KeyValue {
+		return []*commonpb.KeyValue{{Key: string(telemetry.AttrTenant), Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: tenant}}}}
+	}
+	var group []*tracepb.Span
+	for _, name := range []string{"one", "two", "huge", "three", "four", "five"} {
+		size := telemetry.TraceRecordLimit * 3 / 10
+		if name == "huge" {
+			size = telemetry.TraceRecordLimit + 1
+		}
+		group = append(group, &tracepb.Span{TraceId: traceID, SpanId: spanID, Name: name + strings.Repeat(".", size), Attributes: tenanted(tenantA)})
+	}
+	export = nil
+	err = transport.UploadTraces(c.ctx, []*tracepb.ResourceSpans{
+		{ScopeSpans: []*tracepb.ScopeSpans{{Spans: group}}},
+		{ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{{TraceId: traceID, SpanId: spanID, Name: "other", Attributes: tenanted(tenantB)}}}}},
+	})
+	if !errors.As(err, &export) || export.Topic != telemetry.TraceTopic(tenantA) || export.Class != telemetry.ClassOversize || len(exportErrors(err)) != 1 {
+		t.Fatalf("upload = %v, want one oversize for %s", err, telemetry.TraceTopic(tenantA))
+	}
+	records = c.read(t, tenantA)
+	if len(records) != 3 {
+		t.Fatalf("%d records on %s, want the earlier one and the split group's two", len(records), telemetry.TraceTopic(tenantA))
+	}
+	var names []string
+	for _, record := range records[1:] {
+		if string(record.Key) != "30313233343536373839616263646566" || len(record.Value) > telemetry.TraceRecordLimit {
+			t.Fatalf("split record keyed %s of %d bytes", record.Key, len(record.Value))
+		}
+		for _, s := range teletest.Spans(t, []*kgo.Record{record}) {
+			names = append(names, strings.TrimRight(s.Name, "."))
+		}
+	}
+	if !slices.Equal(names, []string{"one", "two", "three", "four", "five"}) {
+		t.Fatalf("split records hold %v", names)
+	}
+	if records := c.read(t, tenantB); len(records) != 1 {
+		t.Fatalf("%d records on %s, want the other tenant's span", len(records), telemetry.TraceTopic(tenantB))
+	}
+
+	// Through the provider: the handler logs the class and the topic, nothing of the span.
+	tracing, logs := provider(t, host)
+	span(tracing, tenantA, "s3cr3t-span-name"+strings.Repeat(".", telemetry.TraceRecordLimit))
+	if err := tracing.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if logs.String() != "tracing: export to wherry.traces.tenant-a failed: oversize\n" {
+		t.Fatalf("logged:\n%s", logs)
 	}
 }

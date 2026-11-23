@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -128,7 +129,7 @@ func TestTenantKeptACLMatrix(t *testing.T) {
 			acls := ACLs(state)
 			var got []string
 			for _, acl := range acls {
-				if strings.HasPrefix(acl.Resource, "wherry.tenant.t") || strings.HasPrefix(acl.Resource, "wherry.host.t.") {
+				if strings.HasPrefix(acl.Resource, "wherry.tenant.t") || strings.HasPrefix(acl.Resource, "wherry.host.t.") || acl.Resource == telemetry.TraceTopic("t") {
 					if strings.HasPrefix(acl.Principal, "wherry.rcv.") {
 						got = append(got, fmt.Sprintf("%s %s %s", acl.Principal, acl.Resource, strings.Join(acl.Operations, ",")))
 					}
@@ -142,10 +143,11 @@ func TestTenantKeptACLMatrix(t *testing.T) {
 				"wherry.rcv.r wherry.host.t.old READ,DESCRIBE",
 				"wherry.rcv.r wherry.tenant.t WRITE,DESCRIBE",
 				"wherry.rcv.r wherry.tenant.t.transcript WRITE,DESCRIBE",
+				"wherry.rcv.r wherry.traces.t WRITE,DESCRIBE",
 			}
 			if phase == "new receiver" {
 				want = append(want, "wherry.rcv.r wherry.host.t.later READ,DESCRIBE")
-				for _, resource := range []string{"wherry.host.t.live READ,DESCRIBE", "wherry.host.t.old READ,DESCRIBE", "wherry.host.t.later READ,DESCRIBE", "wherry.tenant.t WRITE,DESCRIBE", "wherry.tenant.t.transcript WRITE,DESCRIBE"} {
+				for _, resource := range []string{"wherry.host.t.live READ,DESCRIBE", "wherry.host.t.old READ,DESCRIBE", "wherry.host.t.later READ,DESCRIBE", "wherry.tenant.t WRITE,DESCRIBE", "wherry.tenant.t.transcript WRITE,DESCRIBE", "wherry.traces.t WRITE,DESCRIBE"} {
 					want = append(want, "wherry.rcv.later "+resource)
 				}
 			}

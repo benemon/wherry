@@ -8,12 +8,13 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// OperatorACLs are what wherry.operator needs to provision. Alter on the cluster lets it grant itself any other ACL, so
-// it is close to the Kafka super user in effect.
+// OperatorACLs are what wherry.operator needs to provision, and DESCRIBE on the pool groups for the operator view's
+// share-group state. Alter on the cluster lets it grant itself any other ACL, so it is close to the Kafka super user
+// in effect.
 var OperatorACLs = []ACL{
 	{OperatorPrincipal, "cluster", "kafka-cluster", false, []string{"ALTER", "ALTER_CONFIGS"}},
 	{OperatorPrincipal, "topic", "wherry.", true, []string{"CREATE", "ALTER_CONFIGS", "READ", "WRITE"}},
-	{OperatorPrincipal, "group", PoolGroup(""), true, []string{"ALTER_CONFIGS"}},
+	{OperatorPrincipal, "group", PoolGroup(""), true, []string{"ALTER_CONFIGS", "DESCRIBE"}},
 }
 
 // Delegate, connected as the Kafka super user, grants wherry.operator OperatorACLs, creates the wherry.operator

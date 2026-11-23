@@ -291,6 +291,8 @@ naming 256 outputs fits.
 | `wherry.receiver.<receiver>` | `receiver apply` | `-1`, kept after revocation |
 | `wherry.receiver.<receiver>.progress` | `receiver apply`, `pool apply` | at least the pool's greatest task topic; never lowered |
 | `wherry.host.<tenant>.<host>` | `tenant host add` | `-1`, kept after revocation |
+| `wherry.traces` | `operator init` | `604800000` (7 days) |
+| `wherry.traces.<tenant>` | `tenant add`; `operator init` for a live tenant whose topic is missing | `604800000` (7 days), kept after tenant removal |
 
 The task topics' retention keeps `start_by_limit`, the six-hour maximum run
 time, and a one-day margin. Events and the pool's progress topics stay at
@@ -305,7 +307,12 @@ lowering it, timestamp type, `cleanup.policy`, `retention.bytes` and `segment.ms
 the configuration of its snapshot and receivers topics, and `receiver apply` and `pool apply` set every
 configuration above on the progress topics of the pool's live receivers, never lowering their retention.
 `tenant add` and `pool apply` set `max.message.bytes` on
-existing tenant feeds and transcript topics. A
+existing tenant feeds and transcript topics. The trace topics have
+`cleanup.policy=delete`, `message.timestamp.type=LogAppendTime` and
+`max.message.bytes=1048576`, the 1 MiB the trace client batches; `tenant add`
+sets them on the tenant's and `operator init` on `wherry.traces` and every
+live tenant's, creating the missing ones, so a re-run gives an install that
+predates the trace topics every one of them ([Tracing](tracing.md#topics-and-grants)). A
 tenant feed's or transcript topic's retention can be changed with Kafka's
 own tools. `pool apply` and `tenant pool add` refuse terms that need more than
 an entitled tenant's feed or transcript topic keeps, and `wherry operator
@@ -316,7 +323,8 @@ pool's greatest task topic, a pool topic whose timestamp type is not
 `LogAppendTime`, a task or events topic without the hourly `segment.ms` or
 with more than one partition,
 and a snapshot or receivers topic whose configuration differs from the above
-or that has more than one partition.
+or that has more than one partition, and a trace topic that is missing or
+whose configuration differs from the above, naming `operator init`.
 
 ### ACLs
 
@@ -333,11 +341,12 @@ creates nothing.
 | --- | --- | --- |
 | `wherry.operator` | cluster | Alter, AlterConfigs |
 | `wherry.operator` | topic prefix `wherry.` | Create, AlterConfigs, Read, Write |
-| `wherry.operator` | group prefix `p-` | AlterConfigs |
+| `wherry.operator` | group prefix `p-` | AlterConfigs, Describe |
 | host | topic `wherry.operator` | Read, Describe |
 | host | topic `wherry.tenant.<own tenant>` | Read, Describe |
 | host | topic `wherry.tenant.<own tenant>.transcript` | Read, Describe |
 | host | topic `wherry.host.<own tenant>.<own host>` | Read, Write, Describe |
+| host | topic `wherry.traces.<own tenant>`, entitled or not | Read, Write, Describe |
 | host | topic prefix `wherry.pool.<p>.tasks.` and topic `wherry.pool.<p>.events`, each entitled pool | Write, Describe |
 | host | topic `wherry.pool.<p>.custodian`, each entitled pool | Read, Describe |
 | host | topic `wherry.pool.<p>.receivers`, each entitled pool | Read, Describe |
@@ -357,6 +366,8 @@ creates nothing.
 | receiver | topic `wherry.tenant.<t>`, each tenant entitled to its pool now or before | Write, Describe |
 | receiver | topic `wherry.tenant.<t>.transcript`, each tenant entitled to its pool now or before | Write, Describe |
 | receiver | topic `wherry.host.<t>.<h>`, each host of those tenants, including revoking and ended hosts | Read, Describe |
+| receiver | topic `wherry.traces.<t>`, each tenant entitled to its pool now or before | Write, Describe |
+| receiver | topic `wherry.traces` | Write, Describe |
 
 A principal whose membership has ended, or whose revocation is under way,
 has no grants. While a pool is [suspended](commands.md#wherry-operator-pool-suspend-pool),

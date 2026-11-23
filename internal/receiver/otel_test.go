@@ -584,10 +584,11 @@ func TestTracedStatusPublishUnaffectedByATraceOutage(t *testing.T) {
 
 	f := newFixture(t, resultStream)
 	topics := []string{telemetry.TraceTopic(""), telemetry.TraceTopic(testTenant)}
+	// wherry.traces as operator init leaves it; the tenant's topic came with tenant add.
+	if err := f.service.EnsureTraceTopics(f.ctx); err != nil {
+		t.Fatal(err)
+	}
 	for _, topic := range topics {
-		if err := f.cluster.CreateTopic(topic, 1, nil); err != nil {
-			t.Fatal(err)
-		}
 		stalled := f.cluster.Fault(kfake.Fault{Keys: []kmsg.Key{kmsg.Produce}, Topic: topic, Err: kerr.NotLeaderForPartition, Count: -1})
 		defer stalled.Remove()
 	}

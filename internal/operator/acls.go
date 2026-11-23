@@ -3,6 +3,8 @@ package operator
 import (
 	"slices"
 	"strings"
+
+	"github.com/benemon/wherry/internal/telemetry"
 )
 
 type ACL struct {
@@ -27,6 +29,9 @@ func ACLs(state State) []ACL {
 	for principal, host := range state.Hosts {
 		if !state.Ended[principal] && !state.Revoking[principal] {
 			acls = append(acls, ACL{principal, "topic", OperatorTopic, false, readDescribe}, ACL{principal, "topic", TenantTopic(host.Tenant), false, readDescribe}, ACL{principal, "topic", TenantTranscriptTopic(host.Tenant), false, readDescribe}, ACL{principal, "topic", HostTopic(host.Tenant, host.Name), false, []string{"READ", "WRITE", "DESCRIBE"}})
+			// A host's one tenant is on every span it writes, so its trace rows are its tenant's topic alone, entitled or not:
+			// it reads the spans of runs finishing after an entitlement ends.
+			acls = append(acls, ACL{principal, "topic", telemetry.TraceTopic(host.Tenant), false, []string{"READ", "WRITE", "DESCRIBE"}})
 		}
 	}
 	for receiver, config := range state.Receivers {
@@ -34,7 +39,7 @@ func ACLs(state State) []ACL {
 		if state.Ended[principal] || state.Revoking[principal] {
 			continue
 		}
-		acls = append(acls, ACL{principal, "topic", OperatorTopic, false, readDescribe}, ACL{principal, "topic", ReceiverTopic(receiver), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", ReceiverProgressTopic(receiver), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", PoolReceiversTopic(config.Pool), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", PoolTasksPrefix(config.Pool), true, readDescribe}, ACL{principal, "topic", PoolEventsTopic(config.Pool), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "group", PoolGroup(config.Pool), false, []string{"READ", "DESCRIBE", "DESCRIBE_CONFIGS"}}, ACL{principal, "topic", CustodianTopic(config.Pool), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "group", CustodianGroup(config.Pool), false, readDescribe}, ACL{principal, "transactional", TransactionalPrefix(config.Pool), true, writeDescribe})
+		acls = append(acls, ACL{principal, "topic", OperatorTopic, false, readDescribe}, ACL{principal, "topic", ReceiverTopic(receiver), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", ReceiverProgressTopic(receiver), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", PoolReceiversTopic(config.Pool), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", PoolTasksPrefix(config.Pool), true, readDescribe}, ACL{principal, "topic", PoolEventsTopic(config.Pool), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "group", PoolGroup(config.Pool), false, []string{"READ", "DESCRIBE", "DESCRIBE_CONFIGS"}}, ACL{principal, "topic", CustodianTopic(config.Pool), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "group", CustodianGroup(config.Pool), false, readDescribe}, ACL{principal, "transactional", TransactionalPrefix(config.Pool), true, writeDescribe}, ACL{principal, "topic", telemetry.TraceTopic(""), false, writeDescribe})
 		for peer, peerConfig := range state.Receivers {
 			if peer == receiver || peerConfig.Pool != config.Pool {
 				continue
@@ -69,7 +74,7 @@ func ACLs(state State) []ACL {
 					if config.Pool != pool || state.Ended[principal] || state.Revoking[principal] {
 						continue
 					}
-					acls = append(acls, ACL{principal, "topic", TenantTopic(tenant), false, writeDescribe}, ACL{principal, "topic", TenantTranscriptTopic(tenant), false, writeDescribe})
+					acls = append(acls, ACL{principal, "topic", TenantTopic(tenant), false, writeDescribe}, ACL{principal, "topic", TenantTranscriptTopic(tenant), false, writeDescribe}, ACL{principal, "topic", telemetry.TraceTopic(tenant), false, writeDescribe})
 					for _, host := range state.Hosts {
 						if host.Tenant == tenant {
 							acls = append(acls, ACL{principal, "topic", HostTopic(host.Tenant, host.Name), false, readDescribe})
