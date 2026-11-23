@@ -102,25 +102,41 @@ func TestTraceTopicGrantsOnRealBroker(t *testing.T) {
 		defer func() { _ = transport.Stop(ctx) }()
 		spans := []*tracepb.ResourceSpans{{ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{{TraceId: []byte("0123456789abcdef"), SpanId: []byte("spanspan"), Name: "submit",
 			Attributes: []*commonpb.KeyValue{{Key: string(telemetry.AttrTenant), Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: f.tenantA}}}}}}}}}}
-		// The span's name pads its record to exactly the limit.
+		// The span's name pads its record to the largest size Records still keeps: a binary search, since the
+		// nested length prefixes grow with the name and Records drops a span over the limit.
 		span := spans[0].ScopeSpans[0].Spans[0]
-		for size := 0; size != telemetry.TraceRecordLimit; {
+		kept := func(n int) int {
+			span.Name = strings.Repeat("x", n)
 			records, _, err := telemetry.Records(spans)
-			if err != nil || len(records) != 1 {
-				t.Fatal(err, records)
+			if err != nil {
+				t.Fatal(err)
 			}
-			size = len(records[0].Value)
-			span.Name = strings.Repeat("x", max(len(span.Name)+telemetry.TraceRecordLimit-size, 0))
+			if len(records) != 1 {
+				return 0
+			}
+			return len(records[0].Value)
+		}
+		low, high := 0, telemetry.TraceRecordLimit
+		for low < high {
+			if middle := (low + high + 1) / 2; kept(middle) > 0 {
+				low = middle
+			} else {
+				high = middle - 1
+			}
+		}
+		size := kept(low)
+		if size < telemetry.TraceRecordLimit-4 || size > telemetry.TraceRecordLimit {
+			t.Fatalf("largest kept record is %d bytes, want within 4 bytes under the limit %d", size, telemetry.TraceRecordLimit)
 		}
 		if err := transport.UploadTraces(ctx, spans); err != nil {
 			t.Fatalf("upload of the largest permitted export = %v, want the topic to take it", err)
 		}
 		largest := false
 		for _, record := range teletest.Read(t, ctx, hostA.Opts(), tracesA) {
-			largest = largest || len(record.Value) == telemetry.TraceRecordLimit
+			largest = largest || len(record.Value) == size
 		}
 		if !largest {
-			t.Fatalf("no record of %d bytes on %s", telemetry.TraceRecordLimit, tracesA)
+			t.Fatalf("no record of %d bytes on %s", size, tracesA)
 		}
 	})
 }
