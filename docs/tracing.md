@@ -65,10 +65,13 @@ signed records on the tenant feed stay the authority for what happened.
 Delivery is best-effort. Spans are batched by the OpenTelemetry SDK and
 exported through a trace client of the process's own: a second franz-go
 client built from the same broker, credentials and trust as the process's
-Kafka client, so a process with tracing on holds one extra Kafka connection,
-authenticated as the same principal. The trace client is connected in the
+Kafka client, authenticated as the same principal. A host or operator command
+holds one trace client; a receiver holds two, one for the receiver and one for
+its custodian. Each trace client can open its own metadata and produce
+connections to the brokers. The trace client is connected in the
 background when tracing starts, so no submit waits for its session. It never
-creates a topic, keeps a small buffer (256 records, 4 MiB) and produces
+creates a topic, keeps a small buffer (256 records, 4 MiB per trace client, so
+512 records and 8 MiB in a receiver) and produces
 without idempotence: a trace record is written once or dropped, never resent
 after its export has timed out. The process's own client, the one its task
 records go through, is never touched by tracing.
@@ -232,10 +235,11 @@ The topics are not compacted; records expire by the topics' retention.
 With tracing on, a submit builds its spans, puts one 55-byte header on the
 task record and queues the spans for export; the export itself runs in the
 background through the trace client, except the flush inside the command's
-close. The second connection is the one cost a process pays up front: its
-dial, TLS handshake, SCRAM exchange and first metadata took about 20 ms on an
-in-process broker with TLS, in the background, and it holds one more socket
-and one more SASL session on the broker for as long as the process runs. In
+close. The trace client is the one cost a process pays up front: its dial,
+TLS handshake, SCRAM exchange and first metadata took about 20 ms on an
+in-process broker with TLS, in the background, and it holds its own
+connections and SASL sessions on the broker for as long as the process runs:
+one trace client for a host or operator command, two for a receiver. In
 the round-trip test on that broker, the submit's median wall time was within
 the run-to-run noise of tracing off, the host's close with the flush took
 under 5 ms, and a run of the test plugin produced 28 spans, about 9 KB on
