@@ -188,7 +188,6 @@ type resultFact struct {
 	State       wire.TaskState
 	At          time.Time
 	Profile     string
-	Labels      map[string]string
 	Outputs     []outputFact
 	S3Outputs   []outputFact
 	NotReturned []unreturnedFact
@@ -722,7 +721,7 @@ func (m *model) applyEvent(pool string, p *parsed, record *kgo.Record) error {
 		r := m.runFor(value.Wherry.Run, value.Wherry.Tenant, value.Wherry.Pool, at)
 		a := r.attempt(value.Wherry.Attempt)
 		a.Receiver = cmp.Or(a.Receiver, value.Wherry.Receiver)
-		a.StartFailure = &startFailureFact{Profile: value.Profile, Agent: value.Agent, Class: value.Class, At: at, src: src}
+		a.StartFailure = &startFailureFact{Profile: m.configuredProfile(value.Wherry.Receiver, value.Profile), Agent: m.configuredAgent(value.Wherry.Pool, value.Agent), Class: value.Class, At: at, src: src}
 		return nil
 	case *wire.OpenRequest:
 		if !m.history.MemberAt(value.Receiver, pool, at) || value.Run != id {
@@ -860,7 +859,7 @@ func (m *model) applyFeed(tenant string, p *parsed, record *kgo.Record) error {
 			return errors.New("result names another tenant than its run")
 		}
 		if r.Result == nil || result.Wherry.Attempt >= r.Result.Attempt {
-			r.Result = projectResult(result, src)
+			r.Result = m.projectResult(result, src)
 		}
 		return nil
 	}
@@ -916,17 +915,13 @@ func (m *model) addStatus(status wire.RunStatus, digest string, src source) erro
 }
 
 // projectResult is the Reference facts of result: where it ran, output names and sizes, and the reply's size. The
-// result's text, history and artifact parts are never read.
-func projectResult(result wire.Result, src source) *resultFact {
+// result's text, history, artifact parts and labels are never read; the profile is kept only as the receiver's
+// configuration names it.
+func (m *model) projectResult(result wire.Result, src source) *resultFact {
 	fact := &resultFact{Receiver: result.Wherry.Receiver, Attempt: result.Wherry.Attempt, State: result.Task.Status.State, At: src.at, Artifacts: len(result.Task.Artifacts), src: src}
 	var metadata wire.ResultMetadata
 	if result.Task.Metadata != nil && json.Unmarshal(result.Task.Metadata, &metadata, signed.Tolerant) == nil {
-		if wire.ValidName(metadata.Profile) {
-			fact.Profile = metadata.Profile
-		}
-		if wire.ValidateLabels(metadata.Labels) == nil {
-			fact.Labels = metadata.Labels
-		}
+		fact.Profile = m.configuredProfile(result.Wherry.Receiver, metadata.Profile)
 		fact.Outputs = outputs(metadata.Outputs)
 		fact.S3Outputs = outputs(metadata.S3Outputs)
 		for _, output := range metadata.NotReturned {
@@ -939,6 +934,25 @@ func projectResult(result wire.Result, src source) *resultFact {
 		}
 	}
 	return fact
+}
+
+// configuredProfile is profile when receiver's configuration names it, else empty: what a record says of a profile is
+// shown only as the operator configured it.
+func (m *model) configuredProfile(receiver, profile string) string {
+	config, ok := m.history.State.Receivers[receiver]
+	if ok && profile != "" && slices.ContainsFunc(config.Profiles, func(p operator.ProfileSettings) bool { return p.Name == profile }) {
+		return profile
+	}
+	return ""
+}
+
+// configuredAgent is agent when pool's terms name it, else empty.
+func (m *model) configuredAgent(pool, agent string) string {
+	terms, ok := m.history.State.Pools[pool]
+	if ok && agent != "" && slices.ContainsFunc(terms.Agents, func(a operator.AgentTerms) bool { return a.Name == agent }) {
+		return agent
+	}
+	return ""
 }
 
 func outputs(returned []wire.ReturnedOutput) []outputFact {

@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -23,7 +24,8 @@ import (
 )
 
 // Sentinels the stored records carry and no response may.
-var sentinels = []string{"s3cr3t-working-line", "s3cr3t-reply-text", "s3cr3t-artifact-text", "s3cr3t-span-attr", "s3cr3t-span-name", "s3cr3t-host-record", "s3cr3t-rejection"}
+var sentinels = []string{"s3cr3t-working-line", "s3cr3t-reply-text", "s3cr3t-artifact-text", "s3cr3t-span-attr", "s3cr3t-span-name", "s3cr3t-host-record", "s3cr3t-rejection",
+	"s3cr3t-label-key", "s3cr3t-label-value", "s3cr3t-profile", "s3cr3t-agent", "s3cr3t-unreturned-reason", "s3cr3t-offer"}
 
 // served is a view with a recorded workload holding every sentinel, served, with the token parsed from the URL.
 type served struct {
@@ -43,9 +45,15 @@ func newServed(t *testing.T, opts ServeOptions) *served {
 	f.status(t0.Add(time.Second), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: run, kind: "claimed", state: wire.TaskStateWorking})
 	f.status(t0.Add(2*time.Second), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: run, kind: "working", state: wire.TaskStateWorking, text: "s3cr3t-working-line"})
 	f.status(t0.Add(3*time.Second), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: run, kind: "terminal", state: wire.TaskStateCompleted})
-	f.result(t0.Add(3*time.Second), receiverA, tenantA, poolA, run, 1, wire.TaskStateCompleted, wire.ResultMetadata{Profile: "profile-a", Outputs: []wire.ReturnedOutput{{Name: "notes.txt", SHA256: hashOf("x"), Size: 3}}}, "s3cr3t-reply-text s3cr3t-artifact-text")
+	// Nested metadata sentinels: a label, a profile the configuration does not name, an unreturned reason.
+	f.result(t0.Add(3*time.Second), receiverA, tenantA, poolA, run, 1, wire.TaskStateCompleted, wire.ResultMetadata{Profile: "s3cr3t-profile", Labels: map[string]string{"s3cr3t-label-key": "s3cr3t-label-value"},
+		Outputs: []wire.ReturnedOutput{{Name: "notes.txt", SHA256: hashOf("x"), Size: 3}}, NotReturned: []wire.UnreturnedOutput{{Name: "gone.txt", Reason: "s3cr3t-unreturned-reason"}}}, "s3cr3t-reply-text s3cr3t-artifact-text")
 	rejected := f.echo(t0.Add(4*time.Second), receiverA, tenantA, hostA, poolA, "rejected")
 	f.status(t0.Add(5*time.Second), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: rejected, kind: "rejected", state: wire.TaskStateRejected, text: "s3cr3t-rejection"})
+	unstarted := f.echo(t0.Add(5*time.Second), receiverB, tenantA, hostA, poolA, "unstarted")
+	f.startFailureWith(t0.Add(6*time.Second), receiverB, tenantA, poolA, unstarted, 1, "dispatch", "s3cr3t-profile", "s3cr3t-agent", hashOf(unstarted))
+	ad := &wire.Advertisement{Receiver: receiverB, Pool: poolA, Offers: []wire.Offer{{Profile: "s3cr3t-offer", Agent: "s3cr3t-agent", Replicas: 1}, {Profile: "profile-a", Agent: "s3cr3t-agent", Replicas: 1}}, Capacity: 2, AtMS: f.now.UnixMilli()}
+	f.produce(operator.PoolReceiversTopic(poolA), receiverB, f.sign(ad, f.keys[receiverB]), f.now)
 	raiseTraceLimit(t, f)
 	tid := id(16)
 	f.traceRecord(t0.Add(6*time.Second), "wherry-host."+tenantA+"."+hostA,
@@ -182,7 +190,7 @@ func TestServing(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(bodies["/api/model"], `"runs_total":2`) || !strings.Contains(bodies["/api/runs/"+s.run], `"path"`) || !strings.Contains(bodies["/api/runs/"+s.run+"/trace"], `"[other]"`) {
+	if !strings.Contains(bodies["/api/model"], `"runs_total":3`) || !strings.Contains(bodies["/api/model"], `"offers":[{"profile":"profile-a","agent":"","replicas":1,"in_flight":0}]`) || !strings.Contains(bodies["/api/runs/"+s.run], `"path"`) || !strings.Contains(bodies["/api/runs/"+s.run+"/trace"], `"[other]"`) {
 		t.Errorf("responses: model %.200s; run %.200s; trace %.300s", bodies["/api/model"], bodies["/api/runs/"+s.run], bodies["/api/runs/"+s.run+"/trace"])
 	}
 	// The stream serves an event at once with the cookie, and the token never appears in a request line.

@@ -1,6 +1,8 @@
 package view
 
 import (
+	json "encoding/json/v2"
+	"strings"
 	"testing"
 	"time"
 
@@ -86,5 +88,34 @@ func TestReviewWrongHashAfterEnd(t *testing.T) {
 	f.tick(v)
 	if r := summaryOf(t, v.Snapshot(0), run); !r.Terminal {
 		t.Errorf("the joined terminal was not taken: %+v", r)
+	}
+}
+
+// Nothing a result or start failure says of labels, a profile or an agent is returned: a profile or agent is shown
+// only as the configuration names it, labels never.
+func TestReviewLabelsProjection(t *testing.T) {
+	f := newFixture(t)
+	at := f.now.Add(-time.Minute)
+	run := f.echo(at, receiverA, tenantA, hostA, poolA, "labels")
+	f.result(at.Add(time.Second), receiverA, tenantA, poolA, run, 1, wire.TaskStateCompleted, wire.ResultMetadata{Profile: "s3cr3t-profile", Labels: map[string]string{"secret": "s3cr3t-label-value"}}, "reply")
+	f.startFailureWith(at.Add(time.Second), receiverA, tenantA, poolA, run, 2, "dispatch", "s3cr3t-profile", "s3cr3t-agent", hashOf(run))
+	known := f.echo(at, receiverA, tenantA, hostA, poolA, "known")
+	f.result(at.Add(time.Second), receiverA, tenantA, poolA, known, 1, wire.TaskStateCompleted, wire.ResultMetadata{Profile: "profile-a", Labels: map[string]string{"zone": "dc1"}}, "reply")
+	v := f.view(time.Hour, testCaps())
+	d, _ := v.RunDetail(run)
+	encoded, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sentinel := range []string{"s3cr3t", "secret", "label"} {
+		if strings.Contains(string(encoded), sentinel) {
+			t.Errorf("result metadata projected into the API detail: %s", encoded)
+		}
+	}
+	if d.Result == nil || d.Result.Profile != "" || len(d.Attempts) != 1 || d.Attempts[0].StartFailure == nil || d.Attempts[0].StartFailure.Profile != "" || d.Attempts[0].StartFailure.Agent != "" {
+		t.Errorf("an unconfigured profile or agent shown: %+v %+v", d.Result, d.Attempts)
+	}
+	if d, _ := v.RunDetail(known); d.Result == nil || d.Result.Profile != "profile-a" {
+		t.Errorf("the configured profile is not shown: %+v", d.Result)
 	}
 }

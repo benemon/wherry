@@ -87,7 +87,7 @@
       detail.appendChild(table('Open exchange', ['attempt', 'receiver', 'at', 'answer', 'custodian', 'reason', 'answered_at'], run.opens));
       detail.appendChild(table('Cancels', ['host', 'at'], run.cancels));
       if (run.result) {
-        detail.appendChild(keyValues('Result', { receiver: run.result.receiver, attempt: run.result.attempt, state: run.result.state, at: run.result.at, profile: run.result.profile, labels: run.result.labels, reply_size: run.result.reply_size, reply_cut: run.result.reply_cut, artifacts: run.result.artifacts }));
+        detail.appendChild(keyValues('Result', { receiver: run.result.receiver, attempt: run.result.attempt, state: run.result.state, at: run.result.at, profile: run.result.profile, reply_size: run.result.reply_size, reply_cut: run.result.reply_cut, artifacts: run.result.artifacts }));
         detail.appendChild(table('Outputs', ['name', 'size', 'sha256'], run.result.outputs));
         detail.appendChild(table('S3 outputs', ['name', 'size', 'sha256'], run.result.s3_outputs));
         detail.appendChild(table('Not returned', ['name', 'size', 'reason'], run.result.not_returned));

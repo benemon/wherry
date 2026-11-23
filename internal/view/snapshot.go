@@ -256,18 +256,17 @@ type Cancel struct {
 }
 
 type Result struct {
-	Receiver    string            `json:"receiver"`
-	Attempt     int64             `json:"attempt"`
-	State       string            `json:"state"`
-	At          time.Time         `json:"at"`
-	Profile     string            `json:"profile,omitzero"`
-	Labels      map[string]string `json:"labels,omitzero"`
-	Outputs     []Output          `json:"outputs"`
-	S3Outputs   []Output          `json:"s3_outputs"`
-	NotReturned []Unreturned      `json:"not_returned"`
-	ReplySize   int64             `json:"reply_size"`
-	ReplyCut    bool              `json:"reply_cut,omitzero"`
-	Artifacts   int               `json:"artifacts"`
+	Receiver    string       `json:"receiver"`
+	Attempt     int64        `json:"attempt"`
+	State       string       `json:"state"`
+	At          time.Time    `json:"at"`
+	Profile     string       `json:"profile,omitzero"`
+	Outputs     []Output     `json:"outputs"`
+	S3Outputs   []Output     `json:"s3_outputs"`
+	NotReturned []Unreturned `json:"not_returned"`
+	ReplySize   int64        `json:"reply_size"`
+	ReplyCut    bool         `json:"reply_cut,omitzero"`
+	Artifacts   int          `json:"artifacts"`
 }
 
 type Output struct {
@@ -436,8 +435,11 @@ func (v *View) Snapshot(maxRuns int) Snapshot {
 		}
 		if ad, ok := m.ads[receiver]; ok && !node.Ended {
 			node.Capacity, node.InFlight, node.Gated, node.LastAdvertised = ad.Capacity, ad.InFlight, ad.Gated, time.UnixMilli(ad.AtMS).UTC()
+			// An offer is shown as the configuration names its profile and the pool's terms its agent.
 			for _, offer := range ad.Offers {
-				node.Offers = append(node.Offers, Offer{Profile: offer.Profile, Agent: offer.Agent, Replicas: offer.Replicas, InFlight: offer.InFlight})
+				if profile := m.configuredProfile(receiver, offer.Profile); profile != "" {
+					node.Offers = append(node.Offers, Offer{Profile: profile, Agent: m.configuredAgent(config.Pool, offer.Agent), Replicas: offer.Replicas, InFlight: offer.InFlight})
+				}
 			}
 		}
 		for _, h := range held.Identified {
@@ -605,7 +607,7 @@ func (v *View) RunDetail(id string) (RunDetail, bool) {
 		d.Path = append(d.Path, PathStep{Step: "cancelled", Actor: c.Host, At: c.At})
 	}
 	if f := r.Result; f != nil {
-		result := &Result{Receiver: f.Receiver, Attempt: f.Attempt, State: string(f.State), At: f.At, Profile: f.Profile, Labels: f.Labels, Outputs: []Output{}, S3Outputs: []Output{}, NotReturned: []Unreturned{}, ReplySize: f.ReplySize, ReplyCut: f.ReplyCut, Artifacts: f.Artifacts}
+		result := &Result{Receiver: f.Receiver, Attempt: f.Attempt, State: string(f.State), At: f.At, Profile: f.Profile, Outputs: []Output{}, S3Outputs: []Output{}, NotReturned: []Unreturned{}, ReplySize: f.ReplySize, ReplyCut: f.ReplyCut, Artifacts: f.Artifacts}
 		for _, o := range f.Outputs {
 			result.Outputs = append(result.Outputs, Output(o))
 		}
