@@ -601,7 +601,7 @@ func (v *View) RunDetail(id string) (RunDetail, bool) {
 		}
 	}
 	for _, c := range r.Cancels {
-		d.Cancels = append(d.Cancels, Cancel(c))
+		d.Cancels = append(d.Cancels, Cancel{Host: c.Host, At: c.At})
 		d.Path = append(d.Path, PathStep{Step: "cancelled", Actor: c.Host, At: c.At})
 	}
 	if f := r.Result; f != nil {

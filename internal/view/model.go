@@ -104,6 +104,18 @@ const (
 	StageNotIdentified = "in flight, not identified"
 )
 
+// source is the signer of a folded record and its append time: a rotation seen later that retired the key before
+// the append time retracts the fact.
+type source struct {
+	owner, keyID string
+	at           time.Time
+}
+
+// retiredBy reports whether the source signed under owner's keyID at or after since, the time a rotation retired it.
+func (s source) retiredBy(owner, keyID string, since time.Time) bool {
+	return s.owner == owner && s.keyID == keyID && !s.at.Before(since)
+}
+
 // event is a status projected: no message, no metadata.
 type event struct {
 	Kind       string
@@ -116,6 +128,7 @@ type event struct {
 	LogOffset  *int64
 	Event      string
 	Class      string
+	src        source
 }
 
 type attempt struct {
@@ -134,22 +147,26 @@ type decisionFact struct {
 	Custodian, Previous, Reason string
 	Served                      bool
 	At                          time.Time
+	src                         source
 }
 
 type startFailureFact struct {
 	Profile, Agent, Class string
 	At                    time.Time
+	src                   source
 }
 
 type echoFact struct {
 	Receiver, Host, Pool string
 	Placement            wire.Placement
 	At                   time.Time
+	src                  source
 }
 
 type cancelFact struct {
 	Host string
 	At   time.Time
+	src  source
 }
 
 // openFact is an open request and its answer, by the request's digest.
@@ -161,6 +178,7 @@ type openFact struct {
 	// Answer is "wrap" or "refusal", with Reason a refusal's fixed reason, and AnsweredAt its append time.
 	Answer, Custodian, Reason string
 	AnsweredAt                time.Time
+	src, answerSrc            source
 }
 
 // resultFact is the Reference facts of a result: output names and sizes, never a part's content.
@@ -177,6 +195,7 @@ type resultFact struct {
 	ReplySize   int64
 	ReplyCut    bool
 	Artifacts   int
+	src         source
 }
 
 type outputFact struct {
@@ -331,16 +350,17 @@ type custodianFact struct {
 	At                             time.Time
 	RotatedFor, SuspendedFor       int64
 	ResumedFor                     int64
+	src                            source
 }
 
-// pending is a record held for a key its signer rotated or registered since the keys were read, or for the echo
+// pending is a record held for a key its signer rotated or registered since the keys were tailed, or for the echo
 // that admits its run, revalidated on each tick.
 type pending struct {
 	topic  string
 	record *kgo.Record
 	reason string
 	since  time.Time
-	// keysRead is the model's count of key reads when the record was held: a record still wanting a key after one
+	// keysRead is the model's count of key tails when the record was held: a record still wanting a key after one
 	// more is refused.
 	keysRead int
 }
@@ -387,12 +407,10 @@ type model struct {
 	counts map[string]int64
 	// topics holds what the reads report of each topic followed.
 	topics map[string]*topicState
-	// keyRefresh is set when the operator records added or ended members, or a record waits on a key; keyAsked is
-	// when a pending record last asked.
-	keyRefresh bool
-	keyAsked   time.Time
-	keysRead   int
-	changed    bool
+	// keyNext is the offset each key topic's tail resumes at; keysRead counts the tails.
+	keyNext  map[string]int64
+	keysRead int
+	changed  bool
 }
 
 // topicState is what the view knows of a topic it follows.
@@ -411,7 +429,7 @@ type topicState struct {
 
 func newModel(caps Caps) *model {
 	return &model{caps: caps, runs: map[string]*run{}, progress: map[string]map[string]progressFact{}, custodians: map[string]custodianFact{}, ads: map[string]wire.Advertisement{},
-		digests: digests{cap: max(caps.Digests, 1)}, counts: map[string]int64{}, topics: map[string]*topicState{}}
+		digests: digests{cap: max(caps.Digests, 1)}, counts: map[string]int64{}, topics: map[string]*topicState{}, keyNext: map[string]int64{}}
 }
 
 func (m *model) count(name string, n int64) {
@@ -483,6 +501,11 @@ func prepare(record *kgo.Record) *parsed {
 	p.digest = hex.EncodeToString(p.sum[:])
 	p.typ, p.owner, p.keyID, p.ok = header(record.Value)
 	return p
+}
+
+// src is the record's signer, as its verified header names, and its append time.
+func (p *parsed) src(record *kgo.Record) source {
+	return source{owner: p.owner, keyID: p.keyID, at: record.Timestamp}
 }
 
 // admit is the second phase, under the lock: a record over the size bound is skipped and counted before decoding,
@@ -595,9 +618,6 @@ func (m *model) apply(kind, name string, record *kgo.Record, p *parsed) string {
 
 // hold keeps record pending for reason, within the pending cap, dropping and counting the oldest beyond it.
 func (m *model) hold(kind, name string, record *kgo.Record, reason string, now time.Time) {
-	if reason == pendingKey && (m.keyAsked.IsZero() || now.Sub(m.keyAsked) >= keyAskInterval) {
-		m.keyRefresh, m.keyAsked = true, now
-	}
 	m.pending = append(m.pending, pending{topic: kind + "\x00" + name, record: record, reason: reason, since: now, keysRead: m.keysRead})
 	if excess := len(m.pending) - m.caps.Pending; excess > 0 {
 		m.pending = slices.Clone(m.pending[excess:])
@@ -605,12 +625,8 @@ func (m *model) hold(kind, name string, record *kgo.Record, reason string, now t
 	}
 }
 
-// pendingFor is how long a record is held pending before it is dropped as refused; keyAskInterval separates the key
-// re-reads that pending records alone ask for.
-const (
-	pendingFor     = 10 * time.Minute
-	keyAskInterval = 10 * time.Second
-)
+// pendingFor is how long a record is held pending before it is dropped as refused.
+const pendingFor = 10 * time.Minute
 
 // revalidate applies each pending record again; one still pending is kept until it has waited pendingFor, one applied
 // or refused is dropped. A retried record was de-duplicated when first seen, so its digest is forgotten first.
@@ -625,7 +641,7 @@ func (m *model) revalidate(now time.Time) {
 		switch {
 		case reason == "":
 		case reason == pendingKey && m.keysRead > p.keysRead:
-			// The keys were read again and the record still verifies under none: it is signed by no member.
+			// The key topics were tailed again and the record still verifies under none: it is signed by no member.
 			m.count("refused", 1)
 		case now.Sub(p.since) >= pendingFor:
 			m.count("expired", 1)
@@ -680,13 +696,13 @@ func (m *model) applyEvent(pool string, p *parsed, record *kgo.Record) error {
 	if p.err != nil {
 		return p.err
 	}
-	at, id := record.Timestamp, string(record.Key)
+	at, id, src := record.Timestamp, string(record.Key), p.src(record)
 	switch value := p.value.(type) {
 	case *wire.RunStatus:
 		if err := m.history.CheckStatus(*value, pool, "", at, m.joined(id)); err != nil {
 			return m.unjoined(err, id)
 		}
-		return m.addStatus(*value, p.digest, at)
+		return m.addStatus(*value, p.digest, src)
 	case *wire.StartFailure:
 		if err := m.history.CheckStartFailure(*value, pool, at, m.joined(id)); err != nil {
 			return m.unjoined(err, id)
@@ -697,19 +713,19 @@ func (m *model) applyEvent(pool string, p *parsed, record *kgo.Record) error {
 		r := m.runFor(value.Wherry.Run, value.Wherry.Tenant, value.Wherry.Pool, at)
 		a := r.attempt(value.Wherry.Attempt)
 		a.Receiver = cmp.Or(a.Receiver, value.Wherry.Receiver)
-		a.StartFailure = &startFailureFact{Profile: value.Profile, Agent: value.Agent, Class: value.Class, At: at}
+		a.StartFailure = &startFailureFact{Profile: value.Profile, Agent: value.Agent, Class: value.Class, At: at, src: src}
 		return nil
 	case *wire.OpenRequest:
 		if !m.history.MemberAt(value.Receiver, pool, at) || value.Run != id {
 			return errors.New("open request is not from a live member for its key's run")
 		}
 		r := m.runFor(value.Run, "", pool, at)
-		r.Opens[p.digest] = &openFact{Digest: p.digest, Attempt: value.Attempt, Receiver: value.Receiver, At: at}
+		r.Opens[p.digest] = &openFact{Digest: p.digest, Attempt: value.Attempt, Receiver: value.Receiver, At: at, src: src}
 		return nil
 	case *wire.AttemptWrap:
-		return m.answer(id, pool, value.Custodian, value.Request, "wrap", "", at)
+		return m.answer(id, pool, value.Custodian, value.Request, "wrap", "", src)
 	case *wire.OpenRefusal:
-		return m.answer(id, pool, value.Custodian, value.Request, "refusal", value.Reason, at)
+		return m.answer(id, pool, value.Custodian, value.Request, "refusal", value.Reason, src)
 	case *wire.ClaimDecision:
 		if !m.history.MemberAt(value.Custodian, pool, at) {
 			return errors.New("claim decision is not from a member")
@@ -720,7 +736,7 @@ func (m *model) applyEvent(pool string, p *parsed, record *kgo.Record) error {
 		}
 		for _, a := range r.Attempts {
 			if a.ClaimDigest == value.Claim && a.Decision == nil {
-				a.Decision = &decisionFact{Custodian: value.Custodian, Previous: value.Previous, Reason: value.Reason, Served: value.Served, At: at}
+				a.Decision = &decisionFact{Custodian: value.Custodian, Previous: value.Previous, Reason: value.Reason, Served: value.Served, At: at, src: src}
 				r.touch(at)
 				return nil
 			}
@@ -743,7 +759,7 @@ func (m *model) applyEvent(pool string, p *parsed, record *kgo.Record) error {
 		if value.Run != id {
 			return errors.New("cancel names another run than its key")
 		}
-		r.Cancels = append(r.Cancels, cancelFact{Host: value.Host, At: at})
+		r.Cancels = append(r.Cancels, cancelFact{Host: value.Host, At: at, src: src})
 		r.touch(at)
 		return nil
 	}
@@ -760,7 +776,8 @@ func (m *model) unjoined(err error, id string) error {
 }
 
 // answer joins a custodian's wrap or refusal to the open request it names, by digest.
-func (m *model) answer(id, pool, custodian, request, kind, reason string, at time.Time) error {
+func (m *model) answer(id, pool, custodian, request, kind, reason string, src source) error {
+	at := src.at
 	if !m.history.MemberAt(custodian, pool, at) {
 		return errors.New("answer is not from a member")
 	}
@@ -770,7 +787,7 @@ func (m *model) answer(id, pool, custodian, request, kind, reason string, at tim
 	}
 	open := r.Opens[request]
 	if open.Answer == "" {
-		open.Answer, open.Custodian, open.Reason, open.AnsweredAt = kind, custodian, reason, at
+		open.Answer, open.Custodian, open.Reason, open.AnsweredAt, open.answerSrc = kind, custodian, reason, at, src
 	}
 	r.touch(at)
 	return nil
@@ -781,7 +798,7 @@ func (m *model) applyFeed(tenant string, p *parsed, record *kgo.Record) error {
 	if p.err != nil {
 		return p.err
 	}
-	at, id := record.Timestamp, string(record.Key)
+	at, id, src := record.Timestamp, string(record.Key), p.src(record)
 	switch value := p.value.(type) {
 	case *wire.Echo:
 		echo := *value
@@ -803,7 +820,7 @@ func (m *model) applyFeed(tenant string, p *parsed, record *kgo.Record) error {
 			r.Tenant, r.Attempts, r.Highest, r.Hash, r.hashed, r.seen = echo.Tenant, map[int64]*attempt{}, 0, "", "", map[string]bool{}
 		}
 		if _, dup := r.Echoes[echo.TaskHash]; !dup {
-			r.Echoes[echo.TaskHash] = echoFact{Receiver: echo.Receiver, Host: echo.Host, Pool: echo.Pool, Placement: echo.Placement, At: at}
+			r.Echoes[echo.TaskHash] = echoFact{Receiver: echo.Receiver, Host: echo.Host, Pool: echo.Pool, Placement: echo.Placement, At: at, src: src}
 		}
 		if r.Hash == "" {
 			r.Hash, r.hashed = echo.TaskHash, "echo"
@@ -817,7 +834,7 @@ func (m *model) applyFeed(tenant string, p *parsed, record *kgo.Record) error {
 		if err := m.history.CheckStatus(*value, "", tenant, at, m.joined(id)); err != nil {
 			return m.unjoined(err, id)
 		}
-		return m.addStatus(*value, p.digest, at)
+		return m.addStatus(*value, p.digest, src)
 	case *wire.Result:
 		result := *value
 		if err := m.history.CheckResult(result, tenant, at, m.joined(id)); err != nil {
@@ -831,7 +848,7 @@ func (m *model) applyFeed(tenant string, p *parsed, record *kgo.Record) error {
 			return errors.New("result names another tenant than its run")
 		}
 		if r.Result == nil || result.Wherry.Attempt >= r.Result.Attempt {
-			r.Result = projectResult(result, at)
+			r.Result = projectResult(result, src)
 		}
 		return nil
 	}
@@ -854,8 +871,8 @@ func (m *model) storage(r *run) {
 
 // addStatus keeps an authorised status under its run and attempt, once per event ID, never a lower attempt over a
 // higher one's terminal: each attempt keeps its own history and the run's state is derived from the highest.
-func (m *model) addStatus(status wire.RunStatus, digest string, at time.Time) error {
-	binding := status.Wherry
+func (m *model) addStatus(status wire.RunStatus, digest string, src source) error {
+	binding, at := status.Wherry, src.at
 	r := m.runFor(binding.Run, binding.Tenant, binding.Pool, at)
 	if r.Tenant != binding.Tenant {
 		return errors.New("status names another tenant than its run")
@@ -876,7 +893,7 @@ func (m *model) addStatus(status wire.RunStatus, digest string, at time.Time) er
 	a.Receiver = binding.Receiver
 	receiverAt, _ := time.Parse(time.RFC3339, status.StatusUpdate.Status.Timestamp)
 	e := event{Kind: binding.Kind, State: status.StatusUpdate.Status.State, EventID: binding.EventID, Attempt: binding.Attempt, Receiver: binding.Receiver,
-		At: at, ReceiverAt: receiverAt, LogOffset: binding.LogOffset, Event: binding.Event, Class: FailureClass(binding.Kind, status.StatusUpdate.Status.State, binding.Event)}
+		At: at, ReceiverAt: receiverAt, LogOffset: binding.LogOffset, Event: binding.Event, Class: FailureClass(binding.Kind, status.StatusUpdate.Status.State, binding.Event), src: src}
 	// Records of one attempt arrive in log order on each topic; the dual-written copy is the same event.
 	i, _ := slices.BinarySearchFunc(a.Events, e, func(x, y event) int { return x.At.Compare(y.At) })
 	a.Events = slices.Insert(a.Events, i, e)
@@ -888,8 +905,8 @@ func (m *model) addStatus(status wire.RunStatus, digest string, at time.Time) er
 
 // projectResult is the Reference facts of result: where it ran, output names and sizes, and the reply's size. The
 // result's text, history and artifact parts are never read.
-func projectResult(result wire.Result, at time.Time) *resultFact {
-	fact := &resultFact{Receiver: result.Wherry.Receiver, Attempt: result.Wherry.Attempt, State: result.Task.Status.State, At: at, Artifacts: len(result.Task.Artifacts)}
+func projectResult(result wire.Result, src source) *resultFact {
+	fact := &resultFact{Receiver: result.Wherry.Receiver, Attempt: result.Wherry.Attempt, State: result.Task.Status.State, At: src.at, Artifacts: len(result.Task.Artifacts), src: src}
 	var metadata wire.ResultMetadata
 	if result.Task.Metadata != nil && json.Unmarshal(result.Task.Metadata, &metadata, signed.Tolerant) == nil {
 		if wire.ValidName(metadata.Profile) {
@@ -964,9 +981,111 @@ func (m *model) applyCustodian(pool string, record *kgo.Record) {
 		m.count("refused", 1)
 		return
 	}
+	_, owner, keyID, _ := header(record.Value)
 	m.custodians[pool] = custodianFact{Pool: pool, Custodian: snapshot.Custodian, Reason: snapshot.Reason, KeyID: snapshot.Current.KeyID, At: record.Timestamp,
-		RotatedFor: snapshot.RotatedFor, SuspendedFor: snapshot.SuspendedFor, ResumedFor: snapshot.ResumedFor}
+		RotatedFor: snapshot.RotatedFor, SuspendedFor: snapshot.SuspendedFor, ResumedFor: snapshot.ResumedFor, src: source{owner: owner, keyID: keyID, at: record.Timestamp}}
 	m.changed = true
+}
+
+// retire retracts every fact folded from a record signed under owner's keyID and appended at or after since, the time
+// a rotation seen since retired it: such a record no longer verifies. A run left with nothing is dropped.
+func (m *model) retire(owner, keyID string, since time.Time) {
+	gone := func(s source) bool { return s.retiredBy(owner, keyID, since) }
+	var retracted int64
+	for id, r := range m.runs {
+		for hash, e := range r.Echoes {
+			if gone(e.src) {
+				delete(r.Echoes, hash)
+				retracted++
+			}
+		}
+		for number, a := range r.Attempts {
+			a.Events = slices.DeleteFunc(a.Events, func(e event) bool {
+				if !gone(e.src) {
+					return false
+				}
+				delete(r.seen, e.EventID)
+				if e.Kind == "claimed" {
+					a.TaskTopic, a.TaskOffset, a.ClaimDigest, a.Decision = "", nil, "", nil
+				}
+				retracted++
+				return true
+			})
+			if a.Decision != nil && gone(a.Decision.src) {
+				a.Decision = nil
+				retracted++
+			}
+			if a.StartFailure != nil && gone(a.StartFailure.src) {
+				a.StartFailure = nil
+				retracted++
+			}
+			if len(a.Events) == 0 && a.StartFailure == nil {
+				delete(r.Attempts, number)
+			}
+		}
+		r.Highest = 0
+		for number := range r.Attempts {
+			r.Highest = max(r.Highest, number)
+		}
+		for digest, o := range r.Opens {
+			switch {
+			case gone(o.src):
+				delete(r.Opens, digest)
+				retracted++
+			case o.Answer != "" && gone(o.answerSrc):
+				o.Answer, o.Custodian, o.Reason, o.AnsweredAt, o.answerSrc = "", "", "", time.Time{}, source{}
+				retracted++
+			}
+		}
+		r.Cancels = slices.DeleteFunc(r.Cancels, func(c cancelFact) bool {
+			if gone(c.src) {
+				retracted++
+				return true
+			}
+			return false
+		})
+		if r.Result != nil && gone(r.Result.src) {
+			r.Result = nil
+			retracted++
+		}
+		r.rehash()
+		m.storage(r)
+		if len(r.Echoes) == 0 && len(r.Attempts) == 0 && len(r.Opens) == 0 && len(r.Cancels) == 0 && r.Result == nil {
+			delete(m.runs, id)
+		}
+	}
+	for pool, c := range m.custodians {
+		if gone(c.src) {
+			delete(m.custodians, pool)
+			retracted++
+		}
+	}
+	if retracted > 0 {
+		m.count("retracted", retracted)
+		m.changed = true
+	}
+}
+
+// rehash re-derives the run's task hash after a retraction: the statuses' when a non-rejected status remains, else
+// the earliest echo's, else none.
+func (r *run) rehash() {
+	if r.hashed == "status" {
+		for _, a := range r.Attempts {
+			if slices.ContainsFunc(a.Events, func(e event) bool { return e.Kind != "rejected" }) {
+				return
+			}
+		}
+	} else if r.hashed == "echo" {
+		if _, ok := r.Echoes[r.Hash]; ok {
+			return
+		}
+	}
+	r.Hash, r.hashed = "", ""
+	for hash, e := range r.Echoes {
+		if r.Hash == "" || e.At.Before(r.Echoes[r.Hash].At) {
+			r.Hash, r.hashed = hash, "echo"
+		}
+	}
 }
 
 // inFlight is what a receiver holds: the runs its progress records identify, newest first, up to its advertised count

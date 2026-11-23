@@ -239,9 +239,9 @@ func followed(state operator.State) map[string]topicRef {
 	return topics
 }
 
-// tick is one pass: the operator topic from its cursor, keys when members changed or a record waits on one, the
-// topics listed, then the data topics in one bounded call, or with drain in as many as reach every end; then the
-// pending records, and every refresh interval the advertisements, custodians, broker metadata and lag.
+// tick is one pass: the operator topic from its cursor, the topics listed, then before each data batch the key
+// topics' new records, and the data topics in one bounded call, or with drain in as many as reach every end; then
+// the pending records, and every refresh interval the advertisements, custodians, broker metadata and lag.
 func (v *View) tick(ctx context.Context, drain bool) error {
 	admin, err := v.reader.Admin()
 	if err != nil {
@@ -254,10 +254,10 @@ func (v *View) tick(ctx context.Context, drain bool) error {
 	if err != nil {
 		return fmt.Errorf("list topics: %w", err)
 	}
-	if err := v.readKeys(ctx, existing); err != nil {
-		return fmt.Errorf("read keys: %w", err)
-	}
 	for {
+		if err := v.readKeys(ctx, existing); err != nil {
+			return fmt.Errorf("read keys: %w", err)
+		}
 		more, err := v.readData(ctx, admin, existing)
 		if err != nil {
 			return err
@@ -301,7 +301,7 @@ func listTopics(ctx context.Context, admin *kadm.Client) (map[string]bool, error
 }
 
 // readOperator extends the history from its cursor to the end it lists, in bounded batches, before any data topic
-// is read; members added or ended ask for the keys again.
+// is read; a member it adds has its key topic tailed from the next batch on.
 func (v *View) readOperator(ctx context.Context) error {
 	for {
 		v.mu.RLock()
@@ -320,14 +320,9 @@ func (v *View) readOperator(ctx context.Context) error {
 			v.mu.Unlock()
 			return nil
 		}
-		before := v.m.history
 		if err := v.m.history.Extend(r.Records, r.Next); err != nil {
 			v.mu.Unlock()
 			return err
-		}
-		after := v.m.history
-		if before.Terms == nil || !reflect.DeepEqual(before.State.Receivers, after.State.Receivers) || !reflect.DeepEqual(before.State.Hosts, after.State.Hosts) || !reflect.DeepEqual(before.State.Ended, after.State.Ended) {
-			v.m.keyRefresh = true
 		}
 		if len(r.Records) > 0 {
 			v.m.changed = true
@@ -340,31 +335,58 @@ func (v *View) readOperator(ctx context.Context) error {
 	}
 }
 
-// readKeys reads every receiver's and host's key topic that exists when the model asks for keys.
+// readKeys tails every receiver's and host's key topic that exists, each from the offset its last tail reached, in
+// bounded batches to the end it lists, and folds the new records into the keys. A rotation seen for the first time
+// retires a key from its append time: the facts folded from records signed with it after that are retracted.
 func (v *View) readKeys(ctx context.Context, existing map[string]bool) error {
 	v.mu.RLock()
-	refresh, state := v.m.keyRefresh || v.m.keys == nil, v.m.history.State
-	v.mu.RUnlock()
-	if !refresh {
-		return nil
-	}
-	topics := operator.AllKeyTopics(state)
-	for owner, topic := range topics {
-		if !existing[topic] {
-			delete(topics, owner)
+	state, caps := v.m.history.State, v.m.caps
+	owners, offsets := map[string]string{}, map[string]int64{}
+	for owner, topic := range operator.AllKeyTopics(state) {
+		if existing[topic] {
+			owners[topic], offsets[topic] = owner, v.m.keyNext[topic]
 		}
 	}
-	keys, err := v.reader.ReadKeys(ctx, topics)
-	if err != nil {
-		return err
+	v.mu.RUnlock()
+	for len(offsets) > 0 {
+		ranges, err := v.reader.ReadRanges(ctx, offsets, operator.Bounds{Records: caps.BatchRecords, Bytes: caps.BatchBytes})
+		if err != nil {
+			return err
+		}
+		v.mu.Lock()
+		if v.m.keys == nil {
+			v.m.keys = signed.Keys{}
+		}
+		for topic, r := range ranges {
+			if r.Err != nil {
+				delete(offsets, topic)
+				continue
+			}
+			owner := owners[topic]
+			before := v.m.keys[owner]
+			after := before
+			for _, record := range r.Records {
+				// ApplyKeyRecord returns the prior state with its error.
+				after, _ = signed.ApplyKeyRecord(after, owner, record.Value, record.Timestamp)
+			}
+			for _, retired := range after.Retired[min(len(before.Retired), len(after.Retired)):] {
+				v.m.retire(owner, signed.KeyID(retired.Key), retired.At)
+			}
+			if !after.Current.Equal(before.Current) || len(after.Retired) != len(before.Retired) {
+				v.m.changed = true
+			}
+			v.m.keys[owner], v.m.keyNext[topic] = after, r.Next
+			if r.Next < r.End {
+				offsets[topic] = r.Next
+			} else {
+				delete(offsets, topic)
+			}
+		}
+		v.mu.Unlock()
 	}
 	v.mu.Lock()
-	defer v.mu.Unlock()
-	if !maps.EqualFunc(keys, v.m.keys, func(a, b signed.KeyState) bool { return a.Current.Equal(b.Current) && len(a.Retired) == len(b.Retired) }) {
-		v.m.changed = true
-	}
-	v.m.keys, v.m.keyRefresh = keys, false
 	v.m.keysRead++
+	v.mu.Unlock()
 	return nil
 }
 
