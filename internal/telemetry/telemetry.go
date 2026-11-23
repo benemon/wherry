@@ -117,13 +117,14 @@ const (
 	ClassNoKey     = "no pool key"
 	ClassUnsealed  = "sealing failed"
 	ClassNotLoaded = "read failed"
+	ClassOversize  = "oversize"
 )
 
 // Classes are the error classes this package sets.
 var Classes = []string{
 	ClassReleased, ClassRejected, ClassFailed, ClassCanceled, ClassTimeout, ClassError, ClassLinkLost, ClassTooLarge,
 	ClassFetch, ClassPlugin, ClassRedirect, ClassStatus, ClassInvalid, ClassUnplaced, ClassStartBy, ClassNoKey,
-	ClassUnsealed, ClassNotLoaded,
+	ClassUnsealed, ClassNotLoaded, ClassOversize,
 }
 
 // NewExporter builds the exporter every provider sends to, over transport. A variable so tests can install an
