@@ -14,11 +14,11 @@ Every command but `version` and the shortcuts runs under its role's word:
 | --- | --- |
 | Operator | `wherry operator init`; `wherry operator pool apply`, `suspend`, `resume` and `rotate-key`; `wherry operator tenant add`, `list`, `storage` and `remove`; `wherry operator tenant pool add` and `remove`; `wherry operator tenant host add`, `refresh` and `remove`; `wherry operator receiver apply`, `show` and `remove`; `wherry operator check` |
 | Receiver | `wherry receiver run` |
-| Host user | `wherry host init`, `key rotate`, `receivers`, `mcp`, `submit`, `wait`, `status`, `events`, `logs` and `cancel` |
+| Host user | `wherry host init`, `key rotate`, `receivers`, `mcp`, `submit`, `result`, `status`, `events`, `logs` and `cancel` |
 | Development | [Development commands](commands-dev.md) |
 | None | `wherry version` |
 
-`wherry submit`, `wait`, `status`, `events`, `logs` and `cancel` are
+`wherry submit`, `result`, `status`, `events`, `logs` and `cancel` are
 [shortcuts](#shortcuts) for the `wherry host` commands of the same name.
 `wherry --help` and `wherry -h` print the tree and list the shortcuts.
 `-h` after `wherry operator`, `wherry host` or a command prints its usage on standard error and exits with status 0.
@@ -39,17 +39,17 @@ Every command but `version` and the shortcuts runs under its role's word:
   A leading `~/` is expanded.
 - A command's flags may come before or after its `RUN_ID`.
 - A failed command prints `wherry: <error>` on standard error and exits
-  with status 1. `wait` has its own [exit codes](#exit-codes).
+  with status 1. `result`, and `submit --wait`, have their own [exit codes](#exit-codes).
 - Durations use Go syntax, such as `90s`, `45m` or `720h`, and must be
   positive. [`receiver remove`](#wherry-operator-receiver-remove-receiver)
   gives the rules for `--wait`.
-- `cancel`, `wait`, `status`, `events` and `logs` print
+- `cancel`, `result`, `status`, `events` and `logs` print
   `skipped N unverifiable records` on standard error when N records of the
   run fail verification.
 - Standard output carries a command's result and standard error its
-  errors and diagnostics, so `wherry wait ID >/dev/null` keeps only the
+  errors and diagnostics, so `wherry result ID >/dev/null` keeps only the
   diagnostics and the exit status.
-- `wait` and `status` print each redaction marker of a run this host
+- `result` and `status` print each redaction marker of a run this host
   submitted as `[redacted:<name>]`, naming the credential or S3 object,
   and `<name> redacted N times` on standard error for each name whose
   markers they printed. A host maps a marker with the run's redaction key
@@ -1120,9 +1120,9 @@ The host user's commands run under `wherry host`.
 
 ### Shortcuts
 
-`wherry submit`, `wherry wait`, `wherry status`, `wherry events`,
+`wherry submit`, `wherry result`, `wherry status`, `wherry events`,
 `wherry logs` and `wherry cancel` are shortcuts for `wherry host submit`,
-`wait`, `status`, `events`, `logs` and `cancel`, with the same arguments and
+`result`, `status`, `events`, `logs` and `cancel`, with the same arguments and
 flags. No other command has a shortcut.
 
 ### `wherry host init`
@@ -1262,7 +1262,7 @@ Replaces the host key with a new one:
    `old_key_id=<id> new_key_id=<id>`.
 
 Stop every other wherry process of the host first, such as the MCP server
-and any `wherry wait`; they hold the old key.
+and any `wherry result`; they hold the old key.
 
 Every host command that finds `<host_key>.next` folds the host's key topic
 before anything else. When the current key is the next key's, it renames
@@ -1359,13 +1359,15 @@ and needs `wherry host init` on a re-provisioned host.
 | `--git REMOTE@REF` | | repository the agent clones: an `https` or `ssh` URL, or `user@host:path`, at a branch, tag or commit |
 | `--git-path` | the repository name | checkout directory, relative to the agent's working directory |
 | `--git-changes patch\|bundle` | | ask for the agent's commits back as the output `changes.patch` or `changes.bundle` |
-| `--continue RUN_ID` | | continue from the `changes.bundle` `wait` collected for a run of this host, in that run's repository, and return the next bundle through the pool's bucket |
+| `--continue RUN_ID` | | continue from the `changes.bundle` `result` collected for a run of this host, in that run's repository, and return the next bundle through the pool's bucket |
 | `--input FILE[:s3]` | | file the agent gets in `WHERRY_INPUT_DIR` under its base name; `:s3` uploads it, at most 5 GiB, to the pool's bucket; repeatable |
 | `--credential NAME` | | name an optional credential of the placed agent the task cannot go without, at the target the pool's terms give it: the submit fails when this host cannot resolve it; one the host resolves is delivered without being named; repeatable |
 | `--credential NAME:file=FILE` or `--credential NAME:env=VAR` | | credential `NAME` from `credentials` in the client configuration, which the agent gets as the file `FILE` in `WHERRY_CREDENTIALS_DIR` or in the environment variable `VAR`; repeatable |
 | `--output NAME[:required][:s3]` | | file the agent is asked to leave in `WHERRY_OUTPUT_DIR`; `:required` fails the run without it, and `:s3` returns it through the pool's bucket, in either order; repeatable |
 | `--start-by` | `10m` | `task_started_by`: an RFC 3339 time, or a Go duration from now, by which the agent's job must start |
 | `--end-by` | `2h` | `task_ended_by`: an RFC 3339 time, or a Go duration from now, by which the run must end |
+| `--wait` | false | collect the result after publishing |
+| `--outputs-dir` | `<state_dir>/runs/<run>/outputs/` | where the run's outputs go; requires `--wait` |
 
 Each bound must fall after now, and travels in whole seconds. `submit`
 refuses, before it publishes, an `--end-by` later than `--start-by` plus
@@ -1431,7 +1433,7 @@ reuses the run's `--git` remote, ref and `--git-path`, and takes the
 credential and host key from the current client configuration, as `--git`
 does. It follows the run's
 [resubmissions](a2a-extension-v1.md#resubmission) to the last, and needs
-that run's `changes.bundle`, which [`wait`](#wherry-host-wait-run-id)
+that run's `changes.bundle`, which [`result`](#wherry-host-result-run-id)
 records when it collects it. The new run:
 
 - gets the bundle as the input `base.bundle`, uploaded through the pool's
@@ -1454,7 +1456,7 @@ the agent's final state, and `--continue` starts the next round from there.
 - with `--git`, `--git-path` or `--git-changes`;
 - with an `--input` or `--output` named `base.bundle` or `changes.bundle`;
 - for a run this host did not submit under its tenant, a run without a git
-  input, or one whose `changes.bundle` `wait` has not collected or is
+  input, or one whose `changes.bundle` `result` has not collected or is
   missing;
 - for a bundle that is not a git bundle with exactly one prerequisite and a
   `HEAD` ref, the form `git bundle create` gives `refs/wherry/start..HEAD`;
@@ -1463,7 +1465,7 @@ the agent's final state, and `--continue` starts the next round from there.
   bundles travel through S3`.
 
 After the upload, a bundle whose size or SHA-256 no longer matches what
-`wait` verified is refused, and the upload deleted. A run that continues
+`result` verified is refused, and the upload deleted. A run that continues
 needs receivers and custodians of this release or later
 ([Upgrade](upgrade.md)).
 
@@ -1572,6 +1574,14 @@ standard error for each. A resubmission that fails is logged as
 `run <id>: resubmit: <error>` and retried by the next host command that
 reads the run. It does not fail the submission.
 
+With `--wait`, `submit` prints the `run_id=` line, then collects the run as
+`result` does. `--outputs-dir DIR` sets the output directory and requires
+`--wait`. The waiting budget is the published `task_ended_by` plus ten minutes,
+less the time already spent, with a minimum of one second. Downloads after
+the run finishes are outside that budget. On timeout it prints a command to
+collect later. It exits with `result`'s [exit codes](#exit-codes).
+Leaving the command does not cancel the run.
+
 ### `wherry host cancel RUN_ID`
 
 Publishes a signed cancel of the run to its pool's events and prints
@@ -1581,7 +1591,7 @@ it. A run cancelled after it lost its pool key, before this host resubmitted
 it, is not resubmitted.
 
 A receiver applies the cancel when it holds the run or claims it. Until a
-receiver reports a status of the run, `status` and `wait` show
+receiver reports a status of the run, `status` and `result` show
 `cancel requested <RFC 3339 time>; applies when a receiver claims the task`,
 the time of this host's first cancel of the run, also after
 `task_started_by`: a receiver that claims a cancelled run ends it
@@ -1593,7 +1603,7 @@ A run takes no new input after `submit`
 cancel it and submit again with the requirement in the prompt, or let it
 finish and submit a follow-up that passes its outputs with `--input`.
 
-### `wherry host wait RUN_ID`
+### `wherry host result RUN_ID`
 
 Waits for a run to finish and collects it. `--timeout` sets the wait,
 `2h10m` by default: the default `--start-by` and `--end-by` together.
@@ -1606,7 +1616,7 @@ Waits for a run to finish and collects it. `--timeout` sets the wait,
 | `--outputs-dir` | `<state_dir>/runs/<run>/outputs/` | where the run's outputs go |
 
 Standard output carries the result: the `output=` lines, then each part of
-the status message on its own line, so the reply is last. `wait` prints no
+the status message on its own line, so the reply is last. `result` prints no
 transcript; [`wherry logs`](#wherry-host-logs-run-id) reads it, and `wherry logs ID > file`
 keeps it. Standard error carries errors and the diagnostics below.
 
@@ -1616,16 +1626,16 @@ receiver's reason, for every state. A part prints as its text, its JSON
 data, `[url <url>]`, or `[raw <media type> <n> bytes]`. For a
 [reply](a2a-extension-v1.md#the-reply) over 64 KiB, the reply chunks'
 verified bytes print whole in place of the preview the message carries, and
-`wait` writes no file of it. Standard error then says
+`result` writes no file of it. Standard error then says
 `reply cut at the pool's reply limit` when the reply was longer than the
 pool's `reply_limit`, or
 `reply rejected by this host: <reason>; printed its preview` when the chunks
 do not verify, with a reason as for an output.
 
-For a run whose placement names a model, `wait` prints `model=<model>` on
+For a run whose placement names a model, `result` prints `model=<model>` on
 standard error.
 
-`wait` writes each output that [verifies](a2a-extension-v1.md#inputs-and-outputs)
+`result` writes each output that [verifies](a2a-extension-v1.md#inputs-and-outputs)
 against the result, at its relative path beneath the outputs directory, and
 prints a line for it:
 
@@ -1635,13 +1645,13 @@ output=<name> path=<path> sha256=<hex> size=<bytes>
 
 For `changes.patch` it also prints `apply with: git am <path>`, and for
 `changes.bundle` `fetch with: git fetch <path> HEAD`, on standard error.
-`wait` also records the verified `changes.bundle`, its absolute path, size
+`result` also records the verified `changes.bundle`, its absolute path, size
 and SHA-256, in the run's local record, wherever `--outputs-dir` puts it,
-for [`submit --continue`](#wherry-host-submit). A later `wait` that collects
+for [`submit --continue`](#wherry-host-submit). A later `result` that collects
 a bundle replaces the record; one that collects none keeps it.
 No expected output takes the name `reply.txt`.
 
-`wait` reads the run's statuses and result from the tenant feed, and its
+`result` reads the run's statuses and result from the tenant feed, and its
 output chunks from the tenant's transcript topic, from the first offset at
 or after one minute before the append time of the run's earliest echo on
 the feed. Once it sees a terminal status, it reads the transcript topic to
@@ -1653,33 +1663,33 @@ output the result lists as not returned and each one that fails
 verification. A write never leaves the outputs directory, whatever links
 it holds.
 
-`wait` downloads each S3 output the result lists with the host's storage
+`result` downloads each S3 output the result lists with the host's storage
 credential, to the same place, and prints it as it prints any output. It
 downloads only an S3 output the run declares, at its key
 `wherry/<tenant>/<run>/outputs/<name>`, and writes it only when its bytes
 match the listed size and SHA-256; a file already there that matches is
 kept. Once the run is terminal and every listed S3 output has verified,
-`wait` deletes every object under `wherry/<tenant>/<run>/` in the pool's
-bucket, inputs included. A run that ends while no `wait` runs keeps them
-until a `wait` on it or the bucket's lifecycle rule removes them.
+`result` deletes every object under `wherry/<tenant>/<run>/` in the pool's
+bucket, inputs included. A run that ends while no `result` runs keeps them
+until a `result` on it or the bucket's lifecycle rule removes them.
 
 A run this host submitted whose `task_started_by` passes with no status from
-a receiver can never start. `wait` then collects nothing, prints nothing on
+a receiver can never start. `result` then collects nothing, prints nothing on
 standard output, and exits at once with status 1 and
 `not started by task_started_by (<RFC 3339 time>): no receiver claimed the task; now: <reason>`,
 with the [waiting reason](#why-a-run-waits) as of the call, and before it
 on standard error any pending cancel.
 `task_started_by` comes from this host's record of the submission, so
-`wait` on another host of the tenant waits for its timeout.
+`result` on another host of the tenant waits for its timeout.
 
 When `--timeout` passes before a receiver reports a status of a run this host
-submitted, `wait` prints the waiting reason, and any pending cancel, on
+submitted, `result` prints the waiting reason, and any pending cancel, on
 standard error before it exits with status 6. For a resubmitted run they are
 the last replacement's, the run `cancel` names.
 
 A run this host submitted that ends with the wherry event `key-lost` before
 its `task_started_by` never started: its pool key was lost
-([Lost pool keys](concepts.md#lost-pool-keys)). `wait` resubmits it under a
+([Lost pool keys](concepts.md#lost-pool-keys)). `result` resubmits it under a
 new run ID, or produces the replacement this host already stored, and
 follows the replacement to its outcome, through every later replacement. A
 run cancelled before its resubmission is not resubmitted. It prints one line
@@ -1690,23 +1700,23 @@ run <id> lost its pool key before it started; resubmitted as run <id>
 ```
 
 The result, outputs and exit code are those of the last run followed, and
-the default outputs directory is that run's. `wait` refuses a chain of
+the default outputs directory is that run's. `result` refuses a chain of
 replacements that names a run twice. When the resubmission fails, for
 example on a suspended pool or a pool whose current snapshot is missing or
-not authorised, `wait`
+not authorised, `result`
 exits with status 1 and
-`wait <id>: run <id> lost its pool key and is resubmittable until <RFC 3339 time>; resubmitting it failed: <error>`.
+`result <id>: run <id> lost its pool key and is resubmittable until <RFC 3339 time>; resubmitting it failed: <error>`.
 
 #### Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | 0 | the run ended `TASK_STATE_COMPLETED` and its outputs were written |
-| 1 | `wait` could not wait or collect: usage, run not found, broker unreachable, outputs not written or failing verification, `task_started_by` passed unclaimed |
+| 1 | `result` could not wait or collect: usage, run not found, broker unreachable, outputs not written or failing verification, `task_started_by` passed unclaimed |
 | 2 | the run ended `TASK_STATE_FAILED` |
 | 3 | the run ended `TASK_STATE_CANCELED` |
 | 4 | the run ended `TASK_STATE_REJECTED` |
-| 6 | `--timeout` passed with the run still going |
+| 6 | `--timeout`, or `submit --wait`'s budget, passed with the run still going |
 
 For codes 2 to 4 the error is `run ended in <state>`. A run that ends in
 any other state but `TASK_STATE_COMPLETED` exits 1 with the same error.
@@ -1744,7 +1754,7 @@ A run that ended with the wherry event `key-lost` before its
 `status`, with or without `RUN_ID`, resubmits such a run of this host under
 a new run ID, as `submit` does. With `RUN_ID`, its last line is then
 `replaced_by=<id>`, the replacement's run ID. `wherry status` with that ID
-reads the replacement, and `wherry wait` on either run follows it to its
+reads the replacement, and `wherry result` on either run follows it to its
 outcome.
 
 `status` exits with status 0 whenever it reads a state, whatever the
@@ -1837,7 +1847,7 @@ sha256=<hex> size=<bytes>` on standard error. Each redaction marker reads
 the markers in every line of the transcript. The transcript grows while the agent
 runs.
 
-`wait`, `status`, `events`, `logs` and `cancel`
+`result`, `status`, `events`, `logs` and `cancel`
 find a run from this host's record of it in `state_dir`, or from a receiver's
 echo on the tenant feed. They fail with `run not found` when there is neither.
 

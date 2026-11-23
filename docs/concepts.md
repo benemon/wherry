@@ -162,7 +162,7 @@ following links. The receiver publishes each file as the agent wrote it, in chun
 the tenant's transcript topic in the result's transaction, and lists every
 output in the result with the size and SHA-256 it computed, or with the
 reason it was not returned. A required output that is not returned fails
-the run. `wherry wait` verifies each output's chunks against the result
+the run. `wherry result` verifies each output's chunks against the result
 before it writes the file locally.
 
 A pool can also carry files through an S3-compatible bucket its operator
@@ -231,7 +231,7 @@ run before a receiver claims it.
 A run passes through these records from submission to result.
 
 ![A run's lifecycle: submission with the host then free to go offline, claim, open request, attempt
-wrap, re-key wrap or open refusal, dispatch, statuses and transcript, result and wait, with where a
+wrap, re-key wrap or open refusal, dispatch, statuses and transcript, result and collection, with where a
 redelivery and an adoption enter](diagrams/run-lifecycle.svg)
 
 ## Pool keys and the key custodian
@@ -302,7 +302,7 @@ It waits up to five minutes for a re-key wrap before refusing an open request wi
 The submitting host can resubmit a `key-lost` run before its original `task_started_by`.
 It resolves credentials again and creates a replacement run under the current key.
 It preserves the original task content and absolute bounds.
-`wait` follows the replacement chain.
+`result` follows the replacement chain.
 [Resubmission](a2a-extension-v1.md#resubmission) lists the commands that trigger this recovery.
 
 Recovery requires the submitting host's state and credential sources.
@@ -365,7 +365,7 @@ record. Readers
 reject its records once they read the step 6 record. A host also skips
 every record a receiver wrote once that receiver's membership has ended,
 including records it wrote before, so the runs it served lose that history
-in `wait` and `events`.
+in `result` and `events`.
 
 A receiver exits at its first authorisation error, or once it reads its
 membership ended. It stops claiming, serving open requests and key custody

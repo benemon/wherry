@@ -570,7 +570,7 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err == nil && continued.last != nil {
 		uploaded := submission.Wherry.S3Inputs[slices.IndexFunc(submission.Wherry.S3Inputs, func(input wire.S3Input) bool { return input.Name == baseBundle })]
 		if collected := continued.last.Bundle; uploaded.Size != collected.Size || uploaded.SHA256 != collected.SHA256 {
-			err = fmt.Errorf("%w: continue: the %s collected for run %s changed after wait verified it", ErrInvalidInput, wire.GitBundle, continued.last.Run)
+			err = fmt.Errorf("%w: continue: the %s collected for run %s changed after result verified it", ErrInvalidInput, wire.GitBundle, continued.last.Run)
 		}
 		// Set once base.bundle is among the S3 inputs, which validation requires of the base.
 		submission.Wherry.Git.Base = &wire.GitBase{Bundle: baseBundle, Commit: continued.commit}
@@ -1006,7 +1006,7 @@ type runRecord struct {
 	Produced bool   `json:"produced,omitzero"`
 	// CancelRequestedMS is when this host first published a cancel of the run.
 	CancelRequestedMS int64 `json:"cancel_requested_at_ms,omitzero"`
-	// Bundle is the run's changes.bundle as wait last collected and verified it.
+	// Bundle is the run's changes.bundle as result last collected and verified it.
 	Bundle *collectedBundle `json:"bundle,omitzero"`
 	// TraceParent is the submit span's context as a traceparent header, which a cancel is parented to and a
 	// resubmission links to; empty when tracing was off.

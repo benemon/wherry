@@ -26,7 +26,7 @@ For a host:
 
 1. Wait for the runs the host submitted to end. `wherry status` lists them.
 2. Stop every other wherry process of the host, such as the MCP server and
-   any `wherry wait`. They hold the old key.
+   any `wherry result`. They hold the old key.
 3. Run the rotation:
 
    ```sh
@@ -96,7 +96,7 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
 
 3. Give each tenant's hosts a credential that reaches only that tenant's
    prefix: read, write and delete objects under `wherry/<tenant>/`, and list
-   the bucket under that prefix, which `wait` uses at the end of a
+   the bucket under that prefix, which `result` uses at the end of a
    run. A bucket policy for tenant `alice`, whose principal syntax varies by
    store (Ceph RGW names a user `arn:aws:iam:::user/<uid>`):
 
@@ -313,7 +313,7 @@ credential as a file and checks the host:
 - A public repository needs no credential.
 
 With `--git-changes`, the agent returns its commits as `changes.patch` or
-`changes.bundle`, which `wait` writes like any output, and the parent
+`changes.bundle`, which `result` writes like any output, and the parent
 applies them with its own credentials:
 
 ```
@@ -323,7 +323,7 @@ apply with: git am /home/me/.local/state/wherry/runs/run-.../outputs/changes.pat
 On a pool with storage, `--output changes.bundle:s3` beside
 `--git-changes bundle` returns the bundle through the pool's bucket. To
 build on a run's commits in a new run, `wherry host submit --continue RUN_ID`
-reuses its repository and continues from the `changes.bundle` that `wait`
+reuses its repository and continues from the `changes.bundle` that `result`
 collected; each round returns its bundle through the pool's bucket, so the
 pool needs storage and the host a storage credential for it
 ([`submit`](commands.md#wherry-host-submit)).
@@ -393,7 +393,7 @@ brokers or to the storage endpoint.
 the client configuration when it starts, and connects to Kafka as one host at
 its first tool call.
 Every tool call reuses that host and its one tenant-feed follower, and
-`wait`, `events` and `logs` also read the tenant's transcript topic. While
+`result`, `events` and `logs` also read the tenant's transcript topic. While
 the connection fails, the server retries it on each tool call.
 [MCP tools](mcp.md) lists the tools.
 

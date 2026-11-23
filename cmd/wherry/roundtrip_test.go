@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	json "encoding/json/v2"
 	"encoding/pem"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -620,7 +621,35 @@ func fallbackS3(t *testing.T) *s3Store {
 		case http.MethodPut:
 			objects[r.URL.Path], _ = io.ReadAll(r.Body)
 			w.Header().Set("ETag", `"test"`)
+		case http.MethodPost:
+			var request struct {
+				Objects []struct{ Key string } `xml:"Object"`
+			}
+			if err := xml.NewDecoder(r.Body).Decode(&request); err != nil {
+				http.Error(w, "delete request", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/xml")
+			fmt.Fprint(w, "<DeleteResult>")
+			for _, object := range request.Objects {
+				delete(objects, "/"+s3Bucket+"/"+object.Key)
+				fmt.Fprintf(w, "<Deleted><Key>%s</Key></Deleted>", object.Key)
+			}
+			fmt.Fprint(w, "</DeleteResult>")
 		case http.MethodGet:
+			if r.URL.Query().Has("list-type") {
+				w.Header().Set("Content-Type", "application/xml")
+				fmt.Fprint(w, "<ListBucketResult><IsTruncated>false</IsTruncated>")
+				for path, data := range objects {
+					key := strings.TrimPrefix(path, "/"+s3Bucket+"/")
+					if strings.HasPrefix(key, r.URL.Query().Get("prefix")) {
+						fmt.Fprintf(w, "<Contents><Key>%s</Key><Size>%d</Size></Contents>", key, len(data))
+					}
+				}
+				fmt.Fprint(w, "</ListBucketResult>")
+				return
+			}
+
 			data, ok := objects[r.URL.Path]
 			if !ok {
 				http.NotFound(w, r)

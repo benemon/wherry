@@ -1320,7 +1320,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 			if local, localErr := h.localRun(last); localErr == nil && local != nil {
 				err = fmt.Errorf("run %s lost its pool key and is resubmittable until %s; resubmitting it failed: %w", last, wire.RFC3339(local.TaskStartedBy), err)
 			}
-			return outcome, fmt.Errorf("wait %s: %w", runs[0], err)
+			return outcome, fmt.Errorf("result %s: %w", runs[0], err)
 		}
 		if replacement == "" {
 			return outcome, nil
@@ -1353,12 +1353,12 @@ func (h *Host) awaitRun(waitCtx context.Context, runID string) (AwaitResult, err
 	r := newRunView(h, v, runID, local)
 	r.read(waitCtx, records)
 	if r.pool == "" {
-		return AwaitResult{}, fmt.Errorf("wait %s: %w", runID, ErrRunNotFound)
+		return AwaitResult{}, fmt.Errorf("result %s: %w", runID, ErrRunNotFound)
 	}
 	rederive := func() error {
 		v, err := h.load(waitCtx)
 		if err != nil {
-			return fmt.Errorf("wait %s: %w", runID, err)
+			return fmt.Errorf("result %s: %w", runID, err)
 		}
 		r.v, r.reread = v, map[string]bool{}
 		r.derive()
@@ -1375,7 +1375,7 @@ func (h *Host) awaitRun(waitCtx context.Context, runID string) (AwaitResult, err
 			outcome.Skipped, outcome.Model, outcome.keyLost = r.skipped, r.model(), r.keyLost()
 			if r.result != nil {
 				if err := r.readTranscript(waitCtx); err != nil {
-					return AwaitResult{}, fmt.Errorf("wait %s: %w", runID, err)
+					return AwaitResult{}, fmt.Errorf("result %s: %w", runID, err)
 				}
 				outcome.Skipped = r.skipped
 				outcome.Outputs, outcome.Stored, outcome.NotReturned, outcome.Rejected, outcome.Reply = r.verifiedOutputs(r.result)
@@ -1424,7 +1424,7 @@ func (h *Host) awaitRun(waitCtx context.Context, runID string) (AwaitResult, err
 		}
 		stopPoll()
 		if err := waitCtx.Err(); err != nil {
-			return AwaitResult{}, fmt.Errorf("wait %s: %w", runID, err)
+			return AwaitResult{}, fmt.Errorf("result %s: %w", runID, err)
 		}
 		if err != nil {
 			return AwaitResult{}, err

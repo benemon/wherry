@@ -173,7 +173,7 @@ Then:
 ## A task unclaimed on a signature nobody serves
 
 A task waits on its signature's topic, spending no delivery, until a member
-with a ready profile of that signature fetches it. `wherry wait` reports one
+with a ready profile of that signature fetches it. `wherry result` reports one
 that none fetched by its `task_started_by` with
 `not started by task_started_by (<RFC 3339 time>): no receiver claimed the task`.
 
@@ -330,8 +330,8 @@ Confirm it:
 Then:
 
 - The hosts resubmit each run before its `task_started_by` when `submit` or
-  `status` next runs there, or `wait`, `logs -f` or `status` for the run, or
-  the MCP server's `submit`, `status` or `wait`
+  `status` next runs there, or `result`, `logs -f` or `status` for the run, or
+  the MCP server's `submit`, `status` or `result`
   ([Lost pool keys](concepts.md#lost-pool-keys));
   `wherry status RUN_ID` then shows `replaced_by=<run>`. A run past its
   `task_started_by`, or whose host does not come back, is submitted again by

@@ -8,6 +8,8 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
@@ -75,6 +77,9 @@ const credentialText = "s3cr3t-model-credential"
 // bus is a kfake cluster provisioned through operator.Service: pool-a with receiver-a live in it, and host-a of
 // tenant-a entitled to it with its key registered.
 type bus struct {
+	cluster     *kfake.Cluster
+	ca          string
+	keyFile     string
 	ctx         context.Context
 	service     *operator.Service
 	client      *busclient.Host
@@ -89,32 +94,52 @@ type bus struct {
 	logs *syncBuffer
 }
 
-func newBus(t *testing.T) *bus {
+func newBus(t *testing.T) *bus { return newBusStorage(t, nil) }
+
+func newBusStorage(t *testing.T, storage *s3Store) *bus {
 	t.Helper()
-	cluster := kfake.MustCluster(kfake.EnableSASL(), kfake.EnableACLs(), kfake.Superuser("SCRAM-SHA-512", "admin", "password"), kfake.Superuser("PLAIN", "wherry.operator", "operator-password"))
+	var cluster *kfake.Cluster
+	var ca string
+	if storage != nil {
+		cluster, ca = tlsCluster(t, kfake.Superuser("PLAIN", "wherry.operator", "operator-password"))
+	} else {
+		cluster = kfake.MustCluster(kfake.EnableSASL(), kfake.EnableACLs(), kfake.Superuser("SCRAM-SHA-512", "admin", "password"), kfake.Superuser("PLAIN", "wherry.operator", "operator-password"))
+	}
 	t.Cleanup(cluster.Close)
 	if err := cluster.CreateTopic(operator.OperatorTopic, 1, nil); err != nil {
 		t.Fatal(err)
 	}
-	root, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.SASL(scram.Auth{User: "admin", Pass: "password"}.AsSha512Mechanism()))
+	var tlsOpts []kgo.Opt
+	if ca != "" {
+		roots := x509.NewCertPool()
+		roots.AppendCertsFromPEM([]byte(ca))
+		tlsOpts = append(tlsOpts, kgo.DialTLSConfig(&tls.Config{RootCAs: roots}))
+	}
+	rootOpts := append(tlsOpts, kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.SASL(scram.Auth{User: "admin", Pass: "password"}.AsSha512Mechanism()))
+	root, err := kgo.NewClient(rootOpts...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(root.Close)
-	operatorClient, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.SASL(plain.Auth{User: "wherry.operator", Pass: "operator-password"}.AsMechanism()), kgo.FetchMaxWait(10*time.Millisecond))
+	operatorOpts := append(tlsOpts, kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.SASL(plain.Auth{User: "wherry.operator", Pass: "operator-password"}.AsMechanism()), kgo.FetchMaxWait(10*time.Millisecond))
+	operatorClient, err := kgo.NewClient(operatorOpts...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(operatorClient.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
-	b := &bus{ctx: ctx, service: &operator.Service{Operator: operatorClient, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10, LockCeilingMS: 60000}, stateDir: t.TempDir(), logs: &syncBuffer{}}
+	b := &bus{cluster: cluster, ca: ca, ctx: ctx, service: &operator.Service{Operator: operatorClient, Broker: cluster.ListenAddrs()[0], CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}, stateDir: t.TempDir(), logs: &syncBuffer{}}
 	optional := false
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{
 		{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}},
 		{TaskCredential: wire.TaskCredential{Name: "github-token", Env: "GH_TOKEN"}, Description: "GitHub token for gh", Required: &optional},
 	}}}, DefaultAgent: "claude", DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
 		VCS: []string{"git.example.test"}}
+	if storage != nil {
+		terms.Storage = &operator.Storage{Endpoint: storage.endpoint, Bucket: s3Bucket}
+		b.service.Storage = func(string) (operator.StorageKeys, error) { return storage.keys, nil }
+	}
 	if err := b.service.PoolApply(ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +164,8 @@ func newBus(t *testing.T) *bus {
 		t.Fatal(err)
 	}
 	b.credentials = map[string]credential.Source{"model": {File: model}}
-	if _, b.hostKey, err = ed25519.GenerateKey(rand.Reader); err != nil {
+	b.keyFile = filepath.Join(t.TempDir(), "host.key")
+	if b.hostKey, err = trust.GenerateSigningKeyFile(b.keyFile); err != nil {
 		t.Fatal(err)
 	}
 	if b.client, err = b.connect(t)(); err != nil {
@@ -194,8 +220,15 @@ func (b *bus) kafka(t *testing.T, path string) (*kgo.Client, string) {
 	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
 		t.Fatal(err)
 	}
-	kafka, err := kgo.NewClient(kgo.SeedBrokers(b.service.Broker), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()),
+	var extra []kgo.Opt
+	if b.ca != "" {
+		roots := x509.NewCertPool()
+		roots.AppendCertsFromPEM([]byte(b.ca))
+		extra = append(extra, kgo.DialTLSConfig(&tls.Config{RootCAs: roots}))
+	}
+	opts := append(extra, kgo.SeedBrokers(b.service.Broker), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()),
 		kgo.FetchMaxWait(10*time.Millisecond), kgo.FetchIsolationLevel(kgo.ReadCommitted()))
+	kafka, err := kgo.NewClient(opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,6 +240,9 @@ func (b *bus) connect(t *testing.T) func() (*busclient.Host, error) {
 	kafka, principal := b.kafka(t, b.hostBundle)
 	kafka.Close()
 	return func() (*busclient.Host, error) {
+		if b.ca != "" {
+			return busclient.Connect(busclient.Config{Bundle: b.hostBundle, HostKey: b.keyFile, StateDir: b.stateDir, Credentials: b.credentials, Git: b.git}, log.New(b.logs, "", 0))
+		}
 		encoded, _ := os.ReadFile(b.hostBundle)
 		var bundle operator.Bundle
 		if err := yaml.Unmarshal(encoded, &bundle); err != nil {
@@ -946,7 +982,7 @@ func TestUsageErrors(t *testing.T) {
 		}, "usage: wherry host cancel"},
 		{"wait argument", func(stderr *bytes.Buffer) error {
 			return runWait(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
-		}, "usage: wherry host wait"},
+		}, "usage: wherry host result"},
 		{"wait quiet", func(stderr *bytes.Buffer) error {
 			return runWait(context.Background(), nil, []string{"run-a", "-q"}, stderr, stderr)
 		}, "flag provided but not defined: -q"},
@@ -1223,7 +1259,7 @@ func readTopic(ctx context.Context, client *kgo.Client, topic string) ([]*kgo.Re
 // Each shortcut runs the host command of its name, and wherry --help lists them as its shortcuts.
 func TestShortcutsRunTheHostCommands(t *testing.T) {
 	for name, args := range map[string][]string{
-		"submit": {"extra"}, "cancel": nil, "wait": nil, "status": {"run-a", "run-b"}, "events": nil, "logs": nil,
+		"submit": {"extra"}, "cancel": nil, "result": nil, "status": {"run-a", "run-b"}, "events": nil, "logs": nil,
 	} {
 		var stdout, stderr bytes.Buffer
 		shortcut := run(append([]string{name}, args...), &stdout, &stderr)
@@ -1234,7 +1270,7 @@ func TestShortcutsRunTheHostCommands(t *testing.T) {
 	}
 	for _, help := range []string{"--help", "-h"} {
 		var stdout bytes.Buffer
-		if err := run([]string{help}, &stdout, io.Discard); err != nil || !strings.Contains(stdout.String(), "shortcuts for wherry host submit|wait|status|events|logs|cancel:\n  wherry submit|wait|status|events|logs|cancel\n") {
+		if err := run([]string{help}, &stdout, io.Discard); err != nil || !strings.Contains(stdout.String(), "shortcuts for wherry host submit|result|status|events|logs|cancel:\n  wherry submit|result|status|events|logs|cancel\n") {
 			t.Errorf("wherry %s = %v printing\n%s\nwant the shortcuts listed", help, err, stdout.String())
 		}
 	}

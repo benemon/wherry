@@ -67,7 +67,7 @@ receivers)
 run)
   id=$(submit 'mock: ci' --output echo.txt:required)
   echo "$id" > "$work/run-id"
-  "$wherry" wait "$id" --timeout 5m --outputs-dir "$work/out" | tee "$work/watch.txt"
+  "$wherry" result "$id" --timeout 5m --outputs-dir "$work/out" | tee "$work/watch.txt"
   "$wherry" logs "$id" > "$work/out/transcript.jsonl"
   [ "$("$wherry" status "$id" | head -n 1)" = TASK_STATE_COMPLETED ] || fail "run $id did not complete"
   [ "$(cat "$work/out/echo.txt")" = "mock: ci" ] || fail "echo.txt does not hold the prompt"
@@ -75,7 +75,7 @@ run)
   if [ "${STORAGE:-false}" = true ]; then
     echo "s3 input" > "$work/s3-input.txt"
     id=$(submit 'mock: s3' --input "$work/s3-input.txt:s3" --output echo.txt:required:s3)
-    "$wherry" wait "$id" --timeout 5m --outputs-dir "$work/out-s3" | tee "$work/watch-s3.txt"
+    "$wherry" result "$id" --timeout 5m --outputs-dir "$work/out-s3" | tee "$work/watch-s3.txt"
     [ "$(cat "$work/out-s3/echo.txt")" = "mock: s3" ] || fail "the S3 echo.txt does not hold the prompt"
     grep -q '^input s3-input.txt ' "$work/watch-s3.txt" || fail "the mock saw no S3 input"
   fi
@@ -114,8 +114,8 @@ leak)
 fail)
   id=$(submit 'mock: fail')
   code=0
-  "$wherry" wait "$id" --timeout 5m --outputs-dir "$work/out-fail" > "$work/watch-fail.txt" || code=$?
-  [ "$code" = 2 ] || fail "wait of a failed run exited $code, want 2 (TASK_STATE_FAILED)"
+  "$wherry" result "$id" --timeout 5m --outputs-dir "$work/out-fail" > "$work/watch-fail.txt" || code=$?
+  [ "$code" = 2 ] || fail "result of a failed run exited $code, want 2 (TASK_STATE_FAILED)"
   ;;
 down)
   "$wherry" dev down

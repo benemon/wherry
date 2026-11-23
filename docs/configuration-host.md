@@ -125,7 +125,7 @@ the bundle carries a `ca`.
   `redaction_key`, the run's redaction key, made when this host submits the
   run. A replacement's record also holds its signed bytes, envelope
   included. No record holds a credential value in the clear.
-- `runs/<run>/outputs/`, where `wait` writes the run's outputs by default.
+- `runs/<run>/outputs/`, where `result` writes the run's outputs by default.
 - `resubmit/<run>.json.lock`, which every process sharing the directory
   holds while it resubmits that run.
 

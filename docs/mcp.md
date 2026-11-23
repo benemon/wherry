@@ -11,15 +11,15 @@ The defaults are `10m` and `2h`.
 | Tool | Input | Output |
 | --- | --- | --- |
 | `receivers` | none | `receivers`, the objects `wherry host receivers --json` prints |
-| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `continue`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by` | `id`, `pool`, `wait`, `unsupplied` |
+| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `continue`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by`, `wait` | `id`, `pool`, `command`, `unsupplied`, `result`, `error` |
 | `status` | `id`, optional | `runs`, `skipped` |
-| `wait` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `reply`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped`, `runs` |
+| `result` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `reply`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped`, `runs` |
 | `cancel` | `id` | `id`, `cancel`, `skipped` |
 | `events` | `id` | `id`, `events`, `chunks`, `redacted`, `skipped` |
 | `logs` | `id`, `offset`, `limit` | `id`, `attempt`, `total`, `next_offset`, `lines`, `redacted`, `skipped` |
 
-- `submit` returns `wait`, the shell command that waits for
-  the run and prints its reply, `wherry wait ID`, with
+- `submit` returns `command`, the shell command that waits for
+  the run and prints its reply, `wherry result ID`, with
   `--config-file` and the server's absolute configuration path when the
   server was started with one or with `WHERRY_CONFIG` set.
 - `submit` requires exactly one of `prompt` and `prompt_file`, a file path read
@@ -86,16 +86,16 @@ The defaults are `10m` and `2h`.
 - `cancel` returns `cancel` `requested` and `id`, the run cancelled: for a
   run resubmitted after it lost its pool key, the last replacement. The
   cancel applies when a receiver holds or claims the run.
-- `wait` waits up to 45 seconds for the run to end;
-  [The `wait` tool](#the-wait-tool) gives its fields.
+- `result` waits up to 45 seconds for the run to end;
+  [The `result` tool](#the-result-tool) gives its fields.
 - A run that ends with the wherry event `key-lost` before its
-  `task_started_by` never started: its pool key was lost. `wait` resubmits
-  it under a new run ID and follows each replacement, as `wherry wait` does.
+  `task_started_by` never started: its pool key was lost. `result` resubmits
+  it under a new run ID and follows each replacement, as `wherry result` does.
   `runs` then lists every run it followed, the run whose outcome it returns
   last, and `outputs` are that run's. `id` stays the run the call named. A
   resubmission that fails, for example on a suspended pool, fails the call.
-- `status`, `wait`, `events` and `logs` show each redaction marker as
-  `wherry status` and `wherry wait` print it, and `redacted` maps each name
+- `status`, `result`, `events` and `logs` show each redaction marker as
+  `wherry status` and `wherry result` print it, and `redacted` maps each name
   to the number of its markers in the messages, the artifacts, or every line
   of the transcript's attempt.
 - Before it connects to the bus, `submit` checks that exactly one of `prompt`
@@ -128,9 +128,9 @@ The defaults are `10m` and `2h`.
 - `skipped` counts the run's records that failed verification; for a
   `status` list, the records of every listed run.
 
-## The `wait` tool
+## The `result` tool
 
-`wait` waits up to 45 seconds, and with a progress token sends a progress
+`result` waits up to 45 seconds, and with a progress token sends a progress
 notification every 5 seconds. While the run is unfinished it returns the
 run's `state` with `retry_after`, and the `message` `status` gives, such as
 the step the agent last reported; for a resubmitted run, those of the last
@@ -139,9 +139,9 @@ with no status from a receiver, it returns at once with `state`
 `TASK_STATE_SUBMITTED`, the `message` `status` gives and no `retry_after`,
 and writes nothing.
 
-Once the run ends, `wait` writes the run's verified outputs as `wherry wait`
+Once the run ends, `result` writes the run's verified outputs as `wherry result`
 does, to the default outputs directory. It downloads and verifies the S3
-outputs, then deletes the run's prefix, as `wherry wait` does. It returns no
+outputs, then deletes the run's prefix, as `wherry result` does. It returns no
 transcript; `logs` pages it.
 
 | Field | Content |
@@ -151,7 +151,7 @@ transcript; `logs` pages it.
 | `model` | the run's placement's model, when it has one |
 | `retry_after` | 5, while the run is unfinished |
 | `message` | the status message's parts; for a [reply](a2a-extension-v1.md#the-reply) over 64 KiB, its first 64 KiB; while the run is unfinished, its latest status message |
-| `reply` | for a reply over 64 KiB, `{path, sha256, size, cut}` of `reply.txt`, which `wait` writes among the run's outputs, with `cut` set when the reply was longer than the pool's `reply_limit`; `{rejected}` with the reason when the reply's chunks do not verify; absent for a reply within 64 KiB |
+| `reply` | for a reply over 64 KiB, `{path, sha256, size, cut}` of `reply.txt`, which `result` writes among the run's outputs, with `cut` set when the reply was longer than the pool's `reply_limit`; `{rejected}` with the reason when the reply's chunks do not verify; absent for a reply within 64 KiB |
 | `artifacts` | the result's: `result`, then a [reference](a2a-extension-v1.md#reference-artifacts) for each returned output, the reply over 64 KiB and the transcript; each is `{artifact_id, parts}`, and each part has one of `text`, `data`, `url` or `raw_bytes` (the size of a binary part, which is not included), with `media_type` |
 | `outputs` | `{name, path, sha256, size}` for each output written, S3 outputs included |
 | `not_returned` | `{name, size, reason}` for each output the result lists as not returned and each one that fails verification |
@@ -175,3 +175,20 @@ error text from the bus, the broker or the host key.
 | `CANCELLED` | the request was cancelled |
 | `VERSION_SKEW` | `wherry.operator` holds records a later release wrote, with a `v` higher than this release knows; upgrade `wherry` and restart the MCP server |
 | `UNAVAILABLE` | any other failure; the server writes its cause to standard error, which the harness keeps in its MCP server log, and the CLI reports it too |
+
+Set submit's `wait` to `true` only for runs expected to finish within 45 seconds;
+otherwise call `result`. Omitted or false returns the submission alone.
+`command` is always present, to collect later; it is not needed when `result`
+is final. With `wait: true`, the reply is nested under `result`, including
+`retry_after` while unfinished. Its `id` is the submitted run and `runs` lists
+any replacements followed.
+
+Publishing is not cut short. The time spent preparing and publishing the task
+reduces the 45 second waiting budget. When none remains, submit returns the
+latest status without waiting. Output collection after completion is outside
+that budget. Progress starts after publish when there is a run ID.
+
+A failure after successful publication returns `id`, `pool`, `command` and a
+sanitised `error` object with `code` and `message`, without `result`. A response
+lost to transport cancellation loses the ID as any tool response would;
+`status` lists this host's runs.

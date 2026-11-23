@@ -254,7 +254,7 @@ func TestSubmitRefusesAContinuationBeforeUploadOrPublish(t *testing.T) {
 		"no bundle collected": {func(t *testing.T, f *fixture, first string) SubmitInput {
 			rewrite(t, f, first, func(local *runRecord) { local.Bundle = nil })
 			return continueInput(first)
-		}, "wait has collected no changes.bundle of run "},
+		}, "result has collected no changes.bundle of run "},
 		"the bundle removed": {func(t *testing.T, f *fixture, first string) SubmitInput {
 			local, _ := f.host.localRun(first)
 			os.Remove(local.Bundle.Path)
@@ -393,7 +393,7 @@ func TestSubmitRefusesABundleChangedAfterCollect(t *testing.T) {
 			if err := os.WriteFile(local.Bundle.Path, change(testBundle), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := f.host.Submit(f.ctx, continueInput(first)); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "changed after wait verified it") {
+			if _, err := f.host.Submit(f.ctx, continueInput(first)); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "changed after result verified it") {
 				t.Fatalf("submit = %v, want the changed bundle refused", err)
 			}
 			o.mu.Lock()

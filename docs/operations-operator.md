@@ -309,7 +309,7 @@ than one partition; partitions cannot be removed, so recreate the pool's topics.
 
 A tenant transcript topic whose retention is shorter than its feed's loses an
 old run's reply and transcript before its result: the result then keeps the
-reply's first 64 KiB, and `wherry wait` reports the rest
+reply's first 64 KiB, and `wherry result` reports the rest
 `rejected by this host: gap`. `wherry operator check` does not report the
 difference.
 
@@ -822,7 +822,7 @@ To onboard a tenant:
 
 Collect results before removing an entitlement.
 `wherry operator tenant pool remove acme build` withdraws the hosts' pool access.
-Hosts lose access to those runs through `status`, `wait` and `logs`.
+Hosts lose access to those runs through `status`, `result` and `logs`.
 They also lose the ability to cancel them.
 A command whose state load overlaps removal can fail while reading receiver keys.
 Run the next command with fresh state.

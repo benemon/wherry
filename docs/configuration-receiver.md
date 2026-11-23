@@ -543,7 +543,7 @@ kind `working` with state `TASK_STATE_WORKING` ([Status](a2a-extension-v1.md#sta
 at most one a minute. A file emptied later leaves the last line in place.
 A receiver that adopts the run's job publishes that job's last line again,
 with its time, after its `started` status. `wherry host status`, `wherry host events`
-and the MCP `status`, `events` and `wait` tools show it.
+and the MCP `status`, `events` and `result` tools show it.
 
 The run ends when the job ends. The receiver stops the job, collects its
 outputs whatever its exit, and reads the outcome file:

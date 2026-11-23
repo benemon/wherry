@@ -865,7 +865,7 @@ that key's public half, on the pool's compacted
 
 A run that ended with the wherry event `key-lost` before its
 `task_started_by` is resubmitted by its host when `submit`, `status`,
-`wait`, `logs -f` or the MCP server next reads it. The host keeps each run's
+`result`, `logs -f` or the MCP server next reads it. The host keeps each run's
 submission without `envelope` and `wrap` in its local record; it holds no
 credential. Under an exclusive `flock` on the failed run, shared by every
 process using the host's state directory, the host:
@@ -883,7 +883,7 @@ process using the host's state directory, the host:
 A crash before the bytes are stored resolves the credentials again on the
 next pass. A replacement's S3 outputs use its own prefix. A host keeps the
 first run's prefix until the last replacement has ended; a run that ended
-`key-lost` before its `task_started_by` has not ended. `wait` and the MCP
+`key-lost` before its `task_started_by` has not ended. `result` and the MCP
 server follow a run's replacements, refuse a chain that names a run twice,
 and report every run they follow.
 

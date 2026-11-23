@@ -21,7 +21,7 @@ clones itself.
    the pool's VCS hosts), and `--git-changes patch` to get its commits back as
    `changes.patch` (`git am` it). The clone's credential and an `ssh` remote's
    host key come from the `git` entries of your wherry configuration. To build
-   on a finished run's commits after `wherry wait` collected its
+   on a finished run's commits after `wherry result` collected its
    `changes.bundle`, use `--continue RUN_ID` in place of `--git`; the pool needs
    storage. Add
    `--input FILE` for each file the agent needs. Inputs over the broker's
@@ -42,7 +42,7 @@ clones itself.
    pool has storage and your configuration a storage credential for it,
    `--input FILE:s3` sends a larger file (5 GiB at most) through the pool's
    bucket, and `--output NAME:s3` returns one that way. Keep working.
-3. `wherry wait RUN_ID` blocks until the run ends (2 hours 10 minutes at
+3. `wherry result RUN_ID` blocks until the run ends (2 hours 10 minutes at
    most by default), then writes each returned output, S3 outputs included,
    prints an `output=<name> path=<path>` line for each, and prints the
    agent's reply last. Its exit status is 0 for
@@ -69,10 +69,10 @@ clones itself.
    `TASK_STATE_FAILED` with `cannot be opened: the pool's custodian changed
    and its key was lost`. Before its `task_started_by`, the host that
    submitted it resubmits it under a new run ID.
-   `wherry wait` follows the new run and prints
+   `wherry result` follows the new run and prints
    `run <id> lost its pool key before it started; resubmitted as run <id>`
    on standard error. `wherry status RUN_ID` prints `replaced_by=<id>`, and
-   the MCP `wait` tool lists every run ID it followed in `runs`, the last
+   the MCP `result` tool lists every run ID it followed in `runs`, the last
    one the run whose result it returns. Use the newest run ID from then on,
    and do not submit the task again yourself.
 6. `submit` refuses a pool that takes no task now, with an error that says `pool <pool> is
@@ -91,8 +91,14 @@ clones itself.
    `wherry logs -f RUN_ID` prints them as the agent runs until the run ends.
 
 Where the `wherry` MCP server (`wherry host mcp`) is configured, its tools do the
-same: `receivers`, `submit`, `status`, `wait`, `cancel`, `events`
-and `logs`. Its `submit` returns `wait`,
-the `wherry wait` command to start in the background. Its `wait` tool
+same: `receivers`, `submit`, `status`, `result`, `cancel`, `events`
+and `logs`. Its `submit` returns `command`,
+the `wherry result` command to start in the background. Its `result` tool
 waits up to 45 seconds; call it again while the reply carries `retry_after`. Its `logs`
 returns a page of lines; call it again with `next_offset` while it is set.
+
+For a short run, use `wherry submit --wait` to submit and collect in one
+command, which exits with `wherry result`'s exit codes, with `--outputs-dir DIR` when needed. In MCP, set submit's `wait` to
+`true` only when the run is expected to finish within 45 seconds. Read its
+nested `result`, or its sanitised `error` after publish; `command` collects
+later. For longer runs submit first and call `result` separately.

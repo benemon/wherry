@@ -60,6 +60,8 @@ check-names: ## Fail on the old provisioning-role and command names in tracked f
 	@p="wherry[ .]adm""in|WHERRY_TRUST_ADM""IN[A-Z_]*|wherry (k""ey|clean""up)|dev re""set|receiver (a""dd|up""date|re""voke)|pool (cre""ate|up""date)|host re""voke"; \
 	q="#wherry-adm""in-|internal/adm""in"; \
 	hits=$$(git grep -n -w -E "$$p" -- . ':!*CHANGELOG*'; git grep -n -E "$$q" -- . ':!*CHANGELOG*'); \
+	r='wherry (host )?wa''it\b|host-wa''it-run-id'; \
+	hits="$$hits$$(git grep -n -E "$$r" -- docs/ plugins/ test/ README.md '*.go' ':!*CHANGELOG*' ':!docs/upgrade.md' ':!*_test.go')"; \
 	if [ -n "$$hits" ]; then \
 		echo "$$hits"; echo "FAIL: old provisioning-role or command names in tracked files"; exit 1; \
 	fi; \

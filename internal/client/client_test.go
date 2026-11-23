@@ -1187,7 +1187,7 @@ func TestAwaitHighAttemptDoesNotMaskResult(t *testing.T) {
 
 func TestAwaitFailsClosedWithoutRun(t *testing.T) {
 	f := newFixture(t)
-	if _, err := f.host.Await(f.ctx, "run-missing", time.Second); !errors.Is(err, ErrRunNotFound) || !strings.HasPrefix(err.Error(), "wait run-missing: ") {
+	if _, err := f.host.Await(f.ctx, "run-missing", time.Second); !errors.Is(err, ErrRunNotFound) || !strings.HasPrefix(err.Error(), "result run-missing: ") {
 		t.Fatalf("await = %v, want run not found from watch run-missing", err)
 	}
 }

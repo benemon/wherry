@@ -135,7 +135,7 @@ func TestHelpPrintsUsage(t *testing.T) {
 		{[]string{"operator", "init", "-h"}, operatorUsage["init"] + "\n"},
 		{[]string{"operator", "pool", "apply", "-h"}, operatorUsage["pool apply"] + "\n"},
 		{[]string{"operator", "receiver", "remove", "nomad-1", "-h"}, operatorUsage["receiver remove"] + "\n"},
-		{[]string{"host", "-h"}, "usage: wherry host <init|key rotate|receivers|mcp|submit|wait|status|events|logs|cancel>\n"},
+		{[]string{"host", "-h"}, "usage: wherry host <init|key rotate|receivers|mcp|submit|result|status|events|logs|cancel>\n"},
 		{[]string{"host", "init", "-h"}, "Usage of host init:\n"},
 		{[]string{"host", "key", "rotate", "-h"}, "Usage of host key rotate:\n"},
 		{[]string{"host", "receivers", "-h"}, "Usage of receivers:\n"},

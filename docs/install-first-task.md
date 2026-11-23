@@ -18,10 +18,10 @@ Close the lid if you like.
 ## 2. Collect the result
 
 ```sh
-wherry wait "$run"
+wherry result "$run"
 ```
 
-`wait` prints the agent's reply once the run ends.
+`result` prints the agent's reply once the run ends.
 It exits 0 when the run completed.
 To follow the transcript while the run is going, use `wherry logs -f "$run"` in another terminal.
 
@@ -29,7 +29,7 @@ To follow the transcript while the run is going, use `wherry logs -f "$run"` in 
 
 - `wherry host receivers` shows your receiver as `live`: `nomad-1`, `kubernetes-1` or `systemd-1`, as your receiver
   page names it.
-- `wherry wait` prints `wherry is working` and exits 0.
+- `wherry result` prints `wherry is working` and exits 0.
 
 If `submit` refuses with `auth required`, the shell that ran it has no `CLAUDE_CODE_OAUTH_TOKEN` and the configuration
 names no source for the credential.

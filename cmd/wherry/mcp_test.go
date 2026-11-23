@@ -48,7 +48,7 @@ func mcpSessionReading(t *testing.T, connect func() (*busclient.Host, error), pr
 	t.Helper()
 	ctx := context.Background()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := newMCPServer(connect, inputReader(openInput), openInput, func(id string) string { return "wherry wait " + id }, log.New(testLog{t}, "mcp server: ", 0)).Connect(ctx, serverTransport, nil)
+	serverSession, err := newMCPServer(connect, inputReader(openInput), openInput, func(id string) string { return "wherry result " + id }, log.New(testLog{t}, "mcp server: ", 0)).Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,11 +138,11 @@ func TestMCPToolsList(t *testing.T) {
 			}
 		}
 	})
-	if want := []string{"cancel", "events", "logs", "receivers", "status", "submit", "wait"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"cancel", "events", "logs", "receivers", "result", "status", "submit"}; !reflect.DeepEqual(names, want) {
 		t.Fatalf("tools %v, want %v", names, want)
 	}
 	required := map[string][]string{
-		"wait": {"id"}, "cancel": {"id"}, "events": {"id"}, "receivers": nil, "status": nil,
+		"result": {"id"}, "cancel": {"id"}, "events": {"id"}, "receivers": nil, "status": nil,
 		"submit": nil, "logs": {"id"},
 	}
 	for name, tool := range schemas {
@@ -186,7 +186,7 @@ func TestMCPToolsList(t *testing.T) {
 	var wait struct {
 		Properties map[string]any `json:"properties"`
 	}
-	encoded, _ := json.Marshal(schemas["wait"].OutputSchema)
+	encoded, _ := json.Marshal(schemas["result"].OutputSchema)
 	if err := json.Unmarshal(encoded, &wait); err != nil {
 		t.Fatal(err)
 	}
@@ -195,6 +195,17 @@ func TestMCPToolsList(t *testing.T) {
 			t.Errorf("wait output schema lacks %s", field)
 		}
 	}
+	wait.Properties = nil
+	encoded, _ = json.Marshal(schemas["submit"].OutputSchema)
+	if err := json.Unmarshal(encoded, &wait); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"id", "pool", "command", "result", "error"} {
+		if _, ok := wait.Properties[field]; !ok {
+			t.Errorf("submit output schema lacks %s", field)
+		}
+	}
+
 }
 
 func TestBoundsTakeATimeOrADurationAndDefault(t *testing.T) {
@@ -330,7 +341,7 @@ func TestMCPSubmitWaitRoundTrip(t *testing.T) {
 	waited := make(chan waitReply, 1)
 	go func() {
 		var reply waitReply
-		result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "wait", Arguments: map[string]any{"id": submitted.ID}})
+		result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "result", Arguments: map[string]any{"id": submitted.ID}})
 		if err == nil && !result.IsError {
 			encoded, _ := json.Marshal(result.StructuredContent)
 			json.Unmarshal(encoded, &reply)
@@ -390,7 +401,7 @@ func TestMCPToolCallsShareOneHost(t *testing.T) {
 	callTool(t, ctx, session, "submit", submitArguments, &submitted)
 	waited := make(chan string, 1)
 	go func() {
-		result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "wait", Arguments: map[string]any{"id": submitted.ID}})
+		result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "result", Arguments: map[string]any{"id": submitted.ID}})
 		if err != nil || result.IsError {
 			waited <- fmt.Sprint(err, result)
 			return
@@ -452,7 +463,7 @@ func TestMCPWaitBoundedRetry(t *testing.T) {
 	waitCtx, cancel := context.WithTimeout(context.Background(), waitBound+15*time.Second)
 	defer cancel()
 	start := time.Now()
-	params := &mcp.CallToolParams{Name: "wait", Arguments: map[string]any{"id": submitted.ID}}
+	params := &mcp.CallToolParams{Name: "result", Arguments: map[string]any{"id": submitted.ID}}
 	params.SetProgressToken("wait-1")
 	result, err := session.CallTool(waitCtx, params)
 	elapsed := time.Since(start)
@@ -484,7 +495,7 @@ func TestMCPWaitUnfinishedCarriesTheWorkingLine(t *testing.T) {
 	b, runID, _ := workingRun(t)
 	session := mcpSession(t, b.connect(t), nil)
 	var reply map[string]any
-	callTool(t, b.ctx, session, "wait", map[string]any{"id": runID}, &reply)
+	callTool(t, b.ctx, session, "result", map[string]any{"id": runID}, &reply)
 	if want := map[string]any{"id": runID, "state": string(wire.TaskStateWorking), "message": workingLine, "retry_after": float64(retryAfter)}; !reflect.DeepEqual(reply, want) {
 		t.Fatalf("wait %#v, want %#v", reply, want)
 	}
@@ -505,7 +516,7 @@ func TestMCPWaitUnfinishedCountsRedactionsInTheWorkingLine(t *testing.T) {
 	status.Message = &wire.Message{MessageID: "msg-working-1", Role: wire.RoleAgent, Parts: []wire.Part{{Text: line}}, Extensions: []string{wire.ExtensionURI}}
 	b.feed(t, runID, b.status(t, admitted, "started-1", "started", now(wire.TaskStateWorking)), b.status(t, admitted, "working-1", "working", status))
 	var reply waitReply
-	callTool(t, b.ctx, mcpSession(t, b.connect(t), nil), "wait", map[string]any{"id": runID}, &reply)
+	callTool(t, b.ctx, mcpSession(t, b.connect(t), nil), "result", map[string]any{"id": runID}, &reply)
 	if reply.Message != "using [redacted:model]" || !reflect.DeepEqual(reply.Redacted, map[string]int{"model": 1}) {
 		t.Fatalf("wait %#v, want the working line with its redaction counted", reply)
 	}
@@ -519,7 +530,7 @@ func TestMCPWaitAndStatusReportAnUnclaimedRunPastItsStartBy(t *testing.T) {
 	callTool(t, ctx, session, "submit", map[string]any{"prompt": "fix the bug", "start_by": "2s"}, &submitted)
 	start := time.Now()
 	var reply map[string]any
-	callTool(t, ctx, session, "wait", map[string]any{"id": submitted.ID}, &reply)
+	callTool(t, ctx, session, "result", map[string]any{"id": submitted.ID}, &reply)
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("wait returned after %s, want soon after the 2s task_started_by", elapsed)
 	}
@@ -548,7 +559,7 @@ func TestMCPCancel(t *testing.T) {
 		}
 		b.cancelRun(t, admitted)
 		var reply waitReply
-		callTool(t, ctx, session, "wait", map[string]any{"id": runID}, &reply)
+		callTool(t, ctx, session, "result", map[string]any{"id": runID}, &reply)
 		if reply.State != string(wire.TaskStateCanceled) {
 			t.Fatalf("wait after cancel %#v", reply)
 		}
@@ -599,7 +610,7 @@ func TestMCPWaitOfAResubmittedRunSaysWhyItsReplacementWaits(t *testing.T) {
 	var cancelled cancelOutput
 	callTool(t, b.ctx, session, "cancel", map[string]any{"id": runID}, &cancelled)
 	var reply waitReply
-	callTool(t, b.ctx, session, "wait", map[string]any{"id": runID}, &reply)
+	callTool(t, b.ctx, session, "result", map[string]any{"id": runID}, &reply)
 	if reply.State != string(wire.TaskStateSubmitted) || reply.RetryAfter == 0 || !strings.HasPrefix(reply.Message, "queued: lab on receiver-a advertises room; cancel requested ") {
 		t.Fatalf("wait %#v, want the replacement's waiting reason and pending cancel", reply)
 	}
@@ -829,7 +840,7 @@ func TestWaitWritesNoTranscript(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "transcript.jsonl")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("wait wrote a transcript: %v", err)
 	}
-	result, err := mcpSession(t, b.connect(t), nil).CallTool(b.ctx, &mcp.CallToolParams{Name: "wait", Arguments: map[string]any{"id": runID}})
+	result, err := mcpSession(t, b.connect(t), nil).CallTool(b.ctx, &mcp.CallToolParams{Name: "result", Arguments: map[string]any{"id": runID}})
 	if err != nil || result.IsError {
 		t.Fatalf("MCP wait = %v, %v", result, err)
 	}
@@ -997,8 +1008,8 @@ func TestMCPPromptFile(t *testing.T) {
 		if text := b.tasks(t, submitted.ID)[0].submission.Message.Parts[0].Text; !strings.Contains(text, "the brief") {
 			t.Fatalf("prompt %q, want the file's", text)
 		}
-		if submitted.Wait != "wherry wait "+submitted.ID {
-			t.Errorf("submit wait %q, want the command that waits for %s", submitted.Wait, submitted.ID)
+		if submitted.Command != "wherry result "+submitted.ID {
+			t.Errorf("submit wait %q, want the command that waits for %s", submitted.Command, submitted.ID)
 		}
 		for name, arguments := range map[string]map[string]any{
 			"both":    {"prompt": "x", "prompt_file": "brief.md"},
@@ -1019,17 +1030,17 @@ func TestMCPPromptFile(t *testing.T) {
 func TestWaitCommand(t *testing.T) {
 	t.Setenv("WHERRY_CONFIG", "")
 	plain, err := waitCommand("")
-	if err != nil || plain("run-1") != "wherry wait run-1" {
+	if err != nil || plain("run-1") != "wherry result run-1" {
 		t.Fatalf("no config file: %v", err)
 	}
 	dir := t.TempDir()
 	t.Chdir(dir)
 	named, err := waitCommand("it's.yaml")
-	want := "wherry wait run-1 --config-file '" + strings.ReplaceAll(filepath.Join(dir, "it's.yaml"), "'", `'\''`) + "'"
+	want := "wherry result run-1 --config-file '" + strings.ReplaceAll(filepath.Join(dir, "it's.yaml"), "'", `'\''`) + "'"
 	if err != nil || named("run-1") != want {
 		t.Fatalf("config file: %q, %v; want %q", named("run-1"), err, want)
 	}
-	out, err := exec.Command("sh", "-c", "printf %s "+strings.TrimPrefix(named("run-1"), "wherry wait run-1 --config-file ")).Output()
+	out, err := exec.Command("sh", "-c", "printf %s "+strings.TrimPrefix(named("run-1"), "wherry result run-1 --config-file ")).Output()
 	if err != nil || string(out) != filepath.Join(dir, "it's.yaml") {
 		t.Fatalf("the shell reads the path as %q, %v", out, err)
 	}
@@ -1038,7 +1049,7 @@ func TestWaitCommand(t *testing.T) {
 	t.Setenv("WHERRY_CONFIG", "~/x.yaml")
 	for _, flag := range []string{"", "~/x.yaml"} {
 		named, err := waitCommand(flag)
-		if want := "wherry wait run-1 --config-file '" + filepath.Join(home, "x.yaml") + "'"; err != nil || named("run-1") != want {
+		if want := "wherry result run-1 --config-file '" + filepath.Join(home, "x.yaml") + "'"; err != nil || named("run-1") != want {
 			t.Fatalf("config file %q: %q, %v; want %q", flag, named("run-1"), err, want)
 		}
 	}
@@ -1087,7 +1098,7 @@ func TestMCPUnavailableLogsItsCause(t *testing.T) {
 	}
 	open := inputOpener(t.TempDir(), busclient.Config{})
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry wait " + id }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
+	serverSession, err := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry result " + id }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1119,7 +1130,7 @@ func TestMCPUnavailableLogNamesTheRefreshOnAnUnknownAuthority(t *testing.T) {
 	}
 	open := inputOpener(t.TempDir(), busclient.Config{})
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry wait " + id }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
+	serverSession, err := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry result " + id }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1149,7 +1160,7 @@ func TestMCPUnavailableLogRedactsResolvedCredentials(t *testing.T) {
 	}
 	open := inputOpener(t.TempDir(), busclient.Config{})
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry wait " + id }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
+	serverSession, err := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry result " + id }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
