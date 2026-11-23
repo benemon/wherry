@@ -194,16 +194,23 @@ func (h History) historicReceiver(binding wire.ReceiverBinding, topicPool, feedT
 }
 
 // AuthorizeHistoricStatus accepts a status appended at appended, verified with the keys current then, from a receiver
-// that was a live member of its pool then; topicPool, feedTenant and joined are as historicReceiver takes them.
+// that was a live member of its pool then; topicPool, feedTenant and joined are as CheckStatus takes them.
 func AuthorizeHistoricStatus(h History, keys signed.Keys, encoded []byte, topicPool, feedTenant string, appended time.Time, joined bool) (wire.RunStatus, error) {
 	var status wire.RunStatus
 	if err := wire.ParseHistory(appended)(encoded, keys, &status); err != nil {
 		return wire.RunStatus{}, err
 	}
-	if err := h.historicReceiver(status.Wherry.ReceiverBinding, topicPool, feedTenant, appended, joined); err != nil {
+	if err := h.CheckStatus(status, topicPool, feedTenant, appended, joined); err != nil {
 		return wire.RunStatus{}, err
 	}
 	return status, nil
+}
+
+// CheckStatus is AuthorizeHistoricStatus's check on a status already verified: a reader that verifies in parallel
+// applies it in order. topicPool is the events topic's pool, or empty on a tenant feed; feedTenant the feed's tenant,
+// or empty on pool events; joined whether the run has its echo.
+func (h History) CheckStatus(status wire.RunStatus, topicPool, feedTenant string, appended time.Time, joined bool) error {
+	return h.historicReceiver(status.Wherry.ReceiverBinding, topicPool, feedTenant, appended, joined)
 }
 
 // AuthorizeHistoricStartFailure is AuthorizeHistoricStatus for a start failure on topicPool's events.
@@ -212,10 +219,15 @@ func AuthorizeHistoricStartFailure(h History, keys signed.Keys, encoded []byte, 
 	if err := wire.ParseHistory(appended)(encoded, keys, &failure); err != nil {
 		return wire.StartFailure{}, err
 	}
-	if err := h.historicReceiver(failure.Wherry, topicPool, "", appended, joined); err != nil {
+	if err := h.CheckStartFailure(failure, topicPool, appended, joined); err != nil {
 		return wire.StartFailure{}, err
 	}
 	return failure, nil
+}
+
+// CheckStartFailure is CheckStatus for a start failure.
+func (h History) CheckStartFailure(failure wire.StartFailure, topicPool string, appended time.Time, joined bool) error {
+	return h.historicReceiver(failure.Wherry, topicPool, "", appended, joined)
 }
 
 // AuthorizeHistoricResult is AuthorizeHistoricStatus for a result on feedTenant's feed.
@@ -224,10 +236,15 @@ func AuthorizeHistoricResult(h History, keys signed.Keys, encoded []byte, feedTe
 	if err := wire.ParseHistory(appended)(encoded, keys, &result); err != nil {
 		return wire.Result{}, err
 	}
-	if err := h.historicReceiver(result.Wherry.ReceiverBinding, "", feedTenant, appended, joined); err != nil {
+	if err := h.CheckResult(result, feedTenant, appended, joined); err != nil {
 		return wire.Result{}, err
 	}
 	return result, nil
+}
+
+// CheckResult is CheckStatus for a result.
+func (h History) CheckResult(result wire.Result, feedTenant string, appended time.Time, joined bool) error {
+	return h.historicReceiver(result.Wherry.ReceiverBinding, "", feedTenant, appended, joined)
 }
 
 // AuthorizeHistoricEcho accepts an echo on feedTenant's feed appended at appended from a receiver that was a live
@@ -238,16 +255,24 @@ func AuthorizeHistoricEcho(h History, keys signed.Keys, encoded []byte, feedTena
 	if err := wire.ParseHistory(appended)(encoded, keys, &echo); err != nil {
 		return wire.Echo{}, err
 	}
-	if echo.Tenant != feedTenant {
-		return wire.Echo{}, errors.New("echo names another tenant than its feed")
-	}
-	if !h.MemberAt(echo.Receiver, echo.Pool, appended) {
-		return wire.Echo{}, errEndedMember
-	}
-	if !h.EntitledAt(feedTenant, echo.Pool, appended) {
-		return wire.Echo{}, errors.New("tenant was not entitled to the pool when the echo was appended")
+	if err := h.CheckEcho(echo, feedTenant, appended); err != nil {
+		return wire.Echo{}, err
 	}
 	return echo, nil
+}
+
+// CheckEcho is AuthorizeHistoricEcho's check on an echo already verified.
+func (h History) CheckEcho(echo wire.Echo, feedTenant string, appended time.Time) error {
+	if echo.Tenant != feedTenant {
+		return errors.New("echo names another tenant than its feed")
+	}
+	if !h.MemberAt(echo.Receiver, echo.Pool, appended) {
+		return errEndedMember
+	}
+	if !h.EntitledAt(feedTenant, echo.Pool, appended) {
+		return errors.New("tenant was not entitled to the pool when the echo was appended")
+	}
+	return nil
 }
 
 // AuthorizeHistoricCancel accepts a cancel on topicPool's events appended at appended, verified with the host's key
@@ -258,14 +283,22 @@ func AuthorizeHistoricCancel(h History, keys signed.Keys, encoded []byte, topicP
 	if err := wire.ParseHistory(appended)(encoded, keys, &cancel); err != nil {
 		return wire.Cancel{}, err
 	}
-	if cancel.Pool != topicPool || cancel.Tenant != runTenant {
-		return wire.Cancel{}, errors.New("cancel names another pool or tenant than its run")
-	}
-	if !h.HostAt(cancel.Tenant, cancel.Host, appended) {
-		return wire.Cancel{}, errors.New("cancel was appended after its host's membership ended")
-	}
-	if !h.EverEntitled(cancel.Tenant, topicPool) {
-		return wire.Cancel{}, errors.New("tenant was never entitled to the pool")
+	if err := h.CheckCancel(cancel, topicPool, runTenant, appended); err != nil {
+		return wire.Cancel{}, err
 	}
 	return cancel, nil
+}
+
+// CheckCancel is AuthorizeHistoricCancel's check on a cancel already verified.
+func (h History) CheckCancel(cancel wire.Cancel, topicPool, runTenant string, appended time.Time) error {
+	if cancel.Pool != topicPool || cancel.Tenant != runTenant {
+		return errors.New("cancel names another pool or tenant than its run")
+	}
+	if !h.HostAt(cancel.Tenant, cancel.Host, appended) {
+		return errors.New("cancel was appended after its host's membership ended")
+	}
+	if !h.EverEntitled(cancel.Tenant, topicPool) {
+		return errors.New("tenant was never entitled to the pool")
+	}
+	return nil
 }
