@@ -298,8 +298,11 @@ func (r *runView) add(ctx context.Context, record *kgo.Record, typ, kid string) 
 }
 
 // awaiting counts a wait on run and returns the func that ends it, which drops the run's traced records with its last
-// waiter: the dedup state lasts as long as the process waits on the run.
+// waiter: the dedup state lasts as long as the process waits on the run. Off, it keeps nothing.
 func (h *Host) awaiting(run string) func() {
+	if !h.tracing.Enabled() {
+		return func() {}
+	}
 	h.awaitedMu.Lock()
 	defer h.awaitedMu.Unlock()
 	a := h.awaited[run]
@@ -386,9 +389,13 @@ func (r *runView) derive() {
 		return ok && config.Pool == r.pool && !r.v.state.Ended[operator.ReceiverPrincipal(receiver)] && r.v.state.Entitlements[r.h.tenant][r.pool]
 	}
 	r.binding, r.statuses, r.chunks, r.outputs, r.skipped, r.outcome, r.result, r.accepted = binding{}, nil, nil, nil, r.unread, nil, nil, nil
-	// accept keeps e among the records that ended the run; a higher attempt's terminal replaces a lower's.
-	attempt := int64(-1)
+	// accept keeps e among the records that ended the run; a higher attempt's terminal replaces a lower's. Off, nothing
+	// is kept.
+	attempt, traced := int64(-1), r.h.tracing.Enabled()
 	accept := func(e entry, at int64) {
+		if !traced {
+			return
+		}
 		if at != attempt {
 			r.accepted, attempt = nil, at
 		}

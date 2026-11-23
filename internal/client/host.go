@@ -223,9 +223,9 @@ func NewHost(kafka *kgo.Client, key ed25519.PrivateKey, principal, stateDir stri
 }
 
 // Trace turns the host's tracing on, as its configuration's tracing field does: its spans go to its tenant's trace
-// topic through its own Kafka client.
+// topic through a trace client built from its own Kafka client's options.
 func (h *Host) Trace() error {
-	tracing, err := telemetry.New(context.Background(), telemetry.RoleHost, telemetry.Names{Tenant: h.tenant, Host: h.host}, h.kafka, h.logger)
+	tracing, err := telemetry.New(context.Background(), telemetry.RoleHost, telemetry.Names{Tenant: h.tenant, Host: h.host}, h.kafka.Opts(), h.logger)
 	if err != nil {
 		return err
 	}
@@ -233,7 +233,8 @@ func (h *Host) Trace() error {
 	return nil
 }
 
-// Close flushes the host's spans within telemetry.ShutdownBound, then closes the Kafka connections they went through.
+// Close flushes the host's spans within telemetry.ShutdownBound and closes their client, then closes the Kafka
+// connections of its own.
 func (h *Host) Close() {
 	if err := h.tracing.Close(); err != nil {
 		h.logger.Printf("tracing: %v", err)

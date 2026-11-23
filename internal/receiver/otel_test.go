@@ -9,6 +9,8 @@ import (
 	"log"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,7 +19,11 @@ import (
 	"github.com/benemon/wherry/internal/telemetry/teletest"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -537,4 +543,100 @@ func TestTracedHeaderBound(t *testing.T) {
 		}
 	}
 	teletest.Check(t, spans, rejectionLabels...)
+}
+
+// runTimed runs one task through the fixture, stops the receiver and returns the wall time from the task's
+// submission to its completed result.
+func (f fixture) runTimed(t *testing.T) time.Duration {
+	t.Helper()
+	ctx, stop := context.WithCancel(f.ctx)
+	defer stop()
+	ran := f.run(t, ctx)
+	began := time.Now()
+	f.submit(t, f.host, nil)
+	if task := f.await(t, testRun("run-a"), anyTask); task.Status.State != wire.TaskStateCompleted {
+		t.Fatalf("task %+v", task.Status)
+	}
+	took := time.Since(began)
+	stop()
+	select {
+	case err := <-ran:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("run = %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatalf("the receiver kept running; logs:\n%s", f.logs.String())
+	}
+	return took
+}
+
+// During a sustained outage of the trace topics, a receiver's status publishes complete with unchanged latency: the
+// run's result and terminal status reach the feed in the time they take with tracing off, every export into the
+// stall is dropped with a timeout, and the failure is logged once per topic.
+func TestTracedStatusPublishUnaffectedByATraceOutage(t *testing.T) {
+	off := newFixture(t, resultStream).runTimed(t)
+
+	f := newFixture(t, resultStream)
+	topics := []string{telemetry.TraceTopic(""), telemetry.TraceTopic(testTenant)}
+	for _, topic := range topics {
+		if err := f.cluster.CreateTopic(topic, 1, nil); err != nil {
+			t.Fatal(err)
+		}
+		stalled := f.cluster.Fault(kfake.Fault{Keys: []kmsg.Key{kmsg.Produce}, Topic: topic, Err: kerr.NotLeaderForPartition, Count: -1})
+		defer stalled.Remove()
+	}
+	builder := kadm.NewACLs().Allow(operator.ReceiverPrincipal(f.receiver.id)).AllowHosts("*").Topics(topics...).ResourcePatternType(kadm.ACLPatternLiteral).Operations(kadm.OpWrite, kadm.OpDescribe)
+	builder.PrefixUser()
+	if _, err := kadm.NewClient(f.service.Operator).CreateACLs(f.ctx, builder); err != nil {
+		t.Fatal(err)
+	}
+	f.receiver.Trace()
+	// Exports into the stall, one after another, as the processor issues them, each timing out and dropped.
+	exporting, stopExporting := context.WithCancel(f.ctx)
+	var exports sync.WaitGroup
+	var timedOut atomic.Int32
+	exports.Go(func() {
+		for exporting.Err() == nil {
+			tracing := f.receiver.tracing
+			if !tracing.Enabled() {
+				time.Sleep(20 * time.Millisecond)
+				continue
+			}
+			var export *telemetry.ExportError
+			if err := tracing.Flush(exporting); errors.As(err, &export) && export.Class == telemetry.ClassTimeout {
+				timedOut.Add(1)
+			}
+		}
+	})
+	on := f.runTimed(t)
+	stopExporting()
+	exports.Wait()
+	t.Logf("submission to completed result: tracing off %s; on, during a trace outage, %s; %d exports timed out", off, on, timedOut.Load())
+	if on > 2*off+500*time.Millisecond {
+		t.Fatalf("the run took %s during the trace outage, %s with tracing off", on, off)
+	}
+	if timedOut.Load() == 0 {
+		t.Fatal("no export timed out")
+	}
+	if text := f.logs.String(); strings.Count(text, "tracing: export to "+telemetry.TraceTopic(testTenant)+" failed: timeout") != 1 || strings.Count(text, "tracing:") > 2 {
+		t.Fatalf("logs:\n%s", text)
+	}
+	for _, topic := range topics {
+		if records := f.records(t, topic); len(records) != 0 {
+			t.Fatalf("%d records on %s during the stall", len(records), topic)
+		}
+	}
+}
+
+// Tracing off does nothing per terminal publish: no span, no header and no allocation.
+func TestTracingOffAllocatesNothingPerPublish(t *testing.T) {
+	run := &activeRun{receiver: &Receiver{}}
+	record := &kgo.Record{Topic: operator.TenantTopic(testTenant)}
+	call := func() { run.publishing(context.Background(), wire.TaskStateCompleted, record, record)() }
+	if allocs := testing.AllocsPerRun(100, call); allocs != 0 {
+		t.Errorf("publishing allocates %v times per call with tracing off", allocs)
+	}
+	if len(record.Headers) != 0 {
+		t.Fatalf("headers %v with tracing off", record.Headers)
+	}
 }

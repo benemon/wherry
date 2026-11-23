@@ -30,6 +30,7 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"gopkg.in/yaml.v3"
 )
 
@@ -63,10 +64,23 @@ type StorageKeys struct {
 	SecretKey string `yaml:"secret_key"`
 }
 
-// marker is the root span of an operator command.
-func (service *Service) marker(ctx context.Context, command string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
-	return service.Tracing.Root(ctx, "operator "+command, trace.SpanKindInternal, attrs...)
+// marker is the root span of an operator command. names are the command's arguments as identity attributes; each is
+// attached only once it passes validateNames, the check every command applies, so an invalid argument the command
+// refuses reaches no span, on the failure path or any other.
+func (service *Service) marker(ctx context.Context, command string, names ...attribute.KeyValue) (context.Context, trace.Span) {
+	if !service.Tracing.Enabled() {
+		return ctx, noopSpan
+	}
+	valid := make([]attribute.KeyValue, 0, len(names))
+	for _, name := range names {
+		if validateNames(name.Value.AsString()) == nil {
+			valid = append(valid, name)
+		}
+	}
+	return service.Tracing.Root(ctx, "operator "+command, trace.SpanKindInternal, valid...)
 }
+
+var noopSpan trace.Span = noop.Span{}
 
 // ended ends a command's span, failed with the class of *err when the command returned one.
 func ended(span trace.Span, err *error) {

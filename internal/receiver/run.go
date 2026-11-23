@@ -318,7 +318,7 @@ func (r *Receiver) claimNext(claiming, ctx context.Context, profile Named, turn 
 	}
 	binding := admitted.task.Wherry
 	// From here the run's context carries its tenant, so every span started under it carries wherry.tenant.
-	ctx = telemetry.WithTenant(ctx, binding.Tenant)
+	ctx = r.tracing.WithTenant(ctx, binding.Tenant)
 	process.SetAttributes(telemetry.AttrHost.String(binding.Host), telemetry.AttrModel.String(binding.Placement.Model))
 	process.End()
 	r.adjustInFlight(profile.Name, 1)
@@ -395,7 +395,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, profile Named)
 	run, attempt := task.Wherry.Run, attemptOf(record)
 	// The binding is known: the attempt's spans name the run and its tenant, and the spans started from here, a
 	// rejection's or a budget terminal's PRODUCER, carry the tenant through the context.
-	ctx = telemetry.WithTenant(ctx, task.Wherry.Tenant)
+	ctx = r.tracing.WithTenant(ctx, task.Wherry.Tenant)
 	span.SetAttributes(telemetry.AttrRun.String(run), telemetry.AttrTenant.String(task.Wherry.Tenant))
 	process.SetAttributes(telemetry.AttrRun.String(run), telemetry.AttrTenant.String(task.Wherry.Tenant))
 	// rejectAs counts the rejection under label, a fixed text for a reason that quotes the task; the label, never the
@@ -593,6 +593,9 @@ func (r *Receiver) publishRejection(ctx context.Context, task *wire.Submission, 
 // publishing starts one PRODUCER span per terminal record the host accepts, the result and the terminal status, failed
 // for any state but completed, and puts each span's own context on its record; the returned func ends them.
 func (run *activeRun) publishing(ctx context.Context, state wire.TaskState, records ...*kgo.Record) func() {
+	if !run.receiver.tracing.Enabled() {
+		return func() {}
+	}
 	spans := make([]trace.Span, 0, len(records))
 	for _, record := range records {
 		sendCtx, send := run.receiver.tracing.Producer(ctx, record.Topic, telemetry.AttrRun.String(run.task.Wherry.Run), telemetry.AttrAttempt.Int64(run.attempt))

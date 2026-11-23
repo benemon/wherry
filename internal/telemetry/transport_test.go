@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"log"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,8 +28,10 @@ import (
 )
 
 const (
-	tenantA, tenantB = "tenant-a", "tenant-b"
-	writer, password = "wherry.rcv.writer", "writer-password"
+	tenantA, tenantB, tenantC = "tenant-a", "tenant-b", "tenant-c"
+	writer, password          = "wherry.rcv.writer", "writer-password"
+	// workTopic stands for a topic of the process's own records, a feed or a task topic.
+	workTopic = "wherry.pool.pool-a.events"
 )
 
 // cluster is kfake with SASL and ACLs, the trace topics created, and a principal granted on the topics the test names:
@@ -49,8 +53,8 @@ func newCluster(t *testing.T) *cluster {
 		t.Fatal(err)
 	}
 	t.Cleanup(root.Close)
-	for _, tenant := range []string{"", tenantA, tenantB} {
-		if err := fake.CreateTopic(telemetry.TraceTopic(tenant), 1, nil); err != nil {
+	for _, topic := range []string{telemetry.TraceTopic(""), telemetry.TraceTopic(tenantA), telemetry.TraceTopic(tenantB), telemetry.TraceTopic(tenantC), workTopic} {
+		if err := fake.CreateTopic(topic, 1, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -60,10 +64,10 @@ func newCluster(t *testing.T) *cluster {
 	return &cluster{Cluster: fake, ctx: ctx, root: root}
 }
 
-// grant gives writer operations on tenant's trace topic.
-func (c *cluster) grant(t *testing.T, tenant string, operations ...kadm.ACLOperation) {
+// grant gives writer operations on topic.
+func (c *cluster) grant(t *testing.T, topic string, operations ...kadm.ACLOperation) {
 	t.Helper()
-	builder := kadm.NewACLs().Allow(writer).AllowHosts("*").Topics(telemetry.TraceTopic(tenant)).ResourcePatternType(kadm.ACLPatternLiteral).Operations(operations...)
+	builder := kadm.NewACLs().Allow(writer).AllowHosts("*").Topics(topic).ResourcePatternType(kadm.ACLPatternLiteral).Operations(operations...)
 	builder.PrefixUser()
 	results, err := kadm.NewClient(c.root).CreateACLs(c.ctx, builder)
 	if err != nil {
@@ -76,10 +80,23 @@ func (c *cluster) grant(t *testing.T, tenant string, operations ...kadm.ACLOpera
 	}
 }
 
-// client is writer's client, the process's own, as a receiver's base client is built.
+// grantTraces gives writer WRITE and DESCRIBE on tenants' trace topics.
+func (c *cluster) grantTraces(t *testing.T, tenants ...string) {
+	t.Helper()
+	for _, tenant := range tenants {
+		c.grant(t, telemetry.TraceTopic(tenant), kadm.OpWrite, kadm.OpDescribe)
+	}
+}
+
+// opts are writer's Kafka options, as a receiver's base client is built from its bundle.
+func (c *cluster) opts() []kgo.Opt {
+	return []kgo.Opt{kgo.SeedBrokers(c.ListenAddrs()...), kgo.SASL(scram.Auth{User: writer, Pass: password}.AsSha512Mechanism()), kgo.DisableClientMetrics()}
+}
+
+// client is writer's client, the process's own.
 func (c *cluster) client(t *testing.T) *kgo.Client {
 	t.Helper()
-	client, err := kgo.NewClient(kgo.SeedBrokers(c.ListenAddrs()...), kgo.SASL(scram.Auth{User: writer, Pass: password}.AsSha512Mechanism()), kgo.DisableClientMetrics())
+	client, err := kgo.NewClient(c.opts()...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,25 +109,41 @@ func (c *cluster) read(t *testing.T, tenant string) []*kgo.Record {
 	return teletest.Read(t, c.ctx, c.root.Opts(), telemetry.TraceTopic(tenant))
 }
 
-// provider is the receiver role's tracing over client, logging to the returned builder.
-func provider(t *testing.T, client *kgo.Client) (*telemetry.Tracing, *strings.Builder) {
+// stall makes every produce to tenant's trace topic fail with NOT_LEADER_OR_FOLLOWER, which the client retries, until
+// the fault is removed: a broker that answers but never acknowledges.
+func (c *cluster) stall(tenant string) *kfake.FaultHandle {
+	return c.Fault(kfake.Fault{Keys: []kmsg.Key{kmsg.Produce}, Topic: telemetry.TraceTopic(tenant), Err: kerr.NotLeaderForPartition, Count: -1})
+}
+
+// provider is the receiver role's tracing over a trace client built from opts, logging to the returned builder.
+func provider(t *testing.T, opts []kgo.Opt) (*telemetry.Tracing, *strings.Builder) {
 	t.Helper()
 	logs := &strings.Builder{}
-	tracing, err := telemetry.New(context.Background(), telemetry.RoleReceiver, telemetry.Names{Pool: "pool-a", Receiver: "writer"}, client, log.New(logs, "", 0))
+	tracing, err := telemetry.New(context.Background(), telemetry.RoleReceiver, telemetry.Names{Pool: "pool-a", Receiver: "writer"}, opts, log.New(logs, "", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return tracing, logs
 }
 
+// span ends one span of tenant under tracing.
+func span(tracing *telemetry.Tracing, tenant, name string) {
+	_, s := tracing.Root(telemetry.WithTenant(context.Background(), tenant), name, trace.SpanKindInternal)
+	s.End()
+}
+
+// resourceSpans is one span of tenant, as the exporter hands it to the transport.
+func resourceSpans(tenant string) []*tracepb.ResourceSpans {
+	return []*tracepb.ResourceSpans{{ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{{TraceId: make([]byte, 16), SpanId: make([]byte, 8), Name: "submit",
+		Attributes: []*commonpb.KeyValue{{Key: string(telemetry.AttrTenant), Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: tenant}}}}}}}}}}
+}
+
 // Brief test 1, transport routing: the spans of two tenants and the spans of none land on their topics, one record per
 // trace keyed by the trace ID, a child in its root's record.
 func TestTransportRoutesSpansByTenantAndTrace(t *testing.T) {
 	c := newCluster(t)
-	for _, tenant := range []string{"", tenantA, tenantB} {
-		c.grant(t, tenant, kadm.OpWrite, kadm.OpDescribe)
-	}
-	tracing, logs := provider(t, c.client(t))
+	c.grantTraces(t, "", tenantA, tenantB)
+	tracing, logs := provider(t, c.opts())
 	roots := map[string][]trace.SpanContext{}
 	for _, tenant := range []string{tenantA, tenantA, tenantB, ""} {
 		ctx, root := tracing.Root(telemetry.WithTenant(context.Background(), tenant), "process wherry.pool.pool-a.tasks", trace.SpanKindConsumer, telemetry.AttrRun.String("run-"+tenant))
@@ -152,61 +185,65 @@ func TestTransportRoutesSpansByTenantAndTrace(t *testing.T) {
 	}
 }
 
-// Brief test 3, transport behaviour: one refused topic in an export still delivers the others and returns the error;
-// the failure is logged once per interval with the topic and the error class, and nothing of the spans.
-func TestTransportDeliversPastARefusedTopic(t *testing.T) {
+// Brief test 3, transport behaviour: refused topics in an export still deliver the others and return the errors; each
+// failure is logged once per interval with the topic and the error class, and nothing of the spans. Two topics are
+// refused in one export, so the handler's walk through the exporter's wrapping of the joined per-topic errors is the
+// production path.
+func TestTransportDeliversPastRefusedTopics(t *testing.T) {
 	c := newCluster(t)
-	c.grant(t, "", kadm.OpWrite, kadm.OpDescribe)
-	c.grant(t, tenantA, kadm.OpWrite, kadm.OpDescribe)
-	c.grant(t, tenantB, kadm.OpDescribe)
-	client := c.client(t)
+	c.grantTraces(t, "", tenantA)
+	c.grant(t, telemetry.TraceTopic(tenantB), kadm.OpDescribe)
 	const sentinel = "s3cr3t-span-name"
-	// The handler is the process's: the second provider's identical failure, within the interval, is not logged again.
-	for i, want := range []string{"tracing: export to wherry.traces.tenant-b failed: TOPIC_AUTHORIZATION_FAILED (expected for a topic not yet created or an ended entitlement)\n", ""} {
-		tracing, logs := provider(t, client)
-		for _, tenant := range []string{tenantB, tenantA, ""} {
+	refusedB := "tracing: export to wherry.traces.tenant-b failed: TOPIC_AUTHORIZATION_FAILED (expected for a topic not yet created or an ended entitlement)\n"
+	refusedC := "tracing: export to wherry.traces.tenant-c failed: TOPIC_AUTHORIZATION_FAILED (expected for a topic not yet created or an ended entitlement)\n"
+	// The handler is the process's: the second provider's identical failures, within the interval, are not logged again.
+	for i, want := range []string{refusedB + refusedC, ""} {
+		tracing, logs := provider(t, c.opts())
+		for _, tenant := range []string{tenantB, tenantA, tenantC, ""} {
 			_, span := tracing.Root(telemetry.WithTenant(context.Background(), tenant), sentinel+" "+tenant, trace.SpanKindInternal, telemetry.AttrRun.String(sentinel))
 			span.End()
 		}
 		if err := tracing.Close(); err != nil {
-			t.Fatalf("close = %v, want the failure reported through the handler", err)
+			t.Fatalf("close = %v, want the failures reported through the handler", err)
 		}
 		if logs.String() != want {
 			t.Fatalf("provider %d logged:\n%s\nwant:\n%s", i, logs, want)
 		}
 	}
-	for tenant, want := range map[string]int{tenantA: 2, "": 2, tenantB: 0} {
+	for tenant, want := range map[string]int{tenantA: 2, "": 2, tenantB: 0, tenantC: 0} {
 		if records := c.read(t, tenant); len(records) != want {
 			t.Fatalf("%s: %d records, want %d", telemetry.TraceTopic(tenant), len(records), want)
 		}
 	}
-	// The error itself, as UploadTraces returns it to a flush: the refused topic's, the others delivered.
-	tracing, _ := provider(t, client)
+	// The error itself, as UploadTraces returns it to a flush: one per refused topic, the others delivered.
+	tracing, _ := provider(t, c.opts())
 	defer func() { _ = tracing.Close() }()
-	for _, tenant := range []string{tenantB, tenantA} {
-		_, span := tracing.Root(telemetry.WithTenant(context.Background(), tenant), "process", trace.SpanKindInternal)
-		span.End()
+	for _, tenant := range []string{tenantB, tenantA, tenantC} {
+		span(tracing, tenant, "process")
 	}
+	err := tracing.Flush(c.ctx)
 	var export *telemetry.ExportError
-	if err := tracing.Flush(c.ctx); !errors.As(err, &export) || export.Topic != telemetry.TraceTopic(tenantB) || export.Class != "TOPIC_AUTHORIZATION_FAILED" || !export.Expected || strings.Contains(err.Error(), sentinel) {
-		t.Fatalf("flush = %v, want the refused topic's export error", err)
+	if !errors.As(err, &export) || export.Topic != telemetry.TraceTopic(tenantB) || export.Class != "TOPIC_AUTHORIZATION_FAILED" || !export.Expected || strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("flush = %v, want the refused topics' export errors", err)
+	}
+	// The provider and the exporter each wrap the transport's joined per-topic errors in one more.
+	if exports := exportErrors(err); len(exports) != 2 || exports[1].Topic != telemetry.TraceTopic(tenantC) {
+		t.Fatalf("flush = %v, want two per-topic errors under the wrappers", err)
 	}
 	if records := c.read(t, tenantA); len(records) != 3 {
 		t.Fatalf("%s: %d records, want 3", telemetry.TraceTopic(tenantA), len(records))
 	}
 }
 
-// Brief test 3, transport behaviour: delivery is acknowledged within the export bound, under ShutdownBound, and an
-// export the broker never acknowledges is dropped with a timeout; Stop during an upload waits for it and refuses the
-// next; Close stays within ShutdownBound; the shared client is left open and produces after Stop.
+// Brief test 3, transport behaviour: an export the broker never acknowledges is dropped with a timeout under the
+// export bound and its records leave the buffer, so the next export is not failed by the earlier deadline; Close
+// stays within ShutdownBound; Stop during an upload waits for it, refuses the next and closes the trace client.
 func TestTransportBoundsDeliveryAndStopWaits(t *testing.T) {
 	c := newCluster(t)
-	c.grant(t, tenantA, kadm.OpWrite, kadm.OpDescribe)
-	client := c.client(t)
-	stalled := c.Fault(kfake.Fault{Keys: []kmsg.Key{kmsg.Produce}, Err: kerr.NotLeaderForPartition, Count: -1})
-	tracing, logs := provider(t, client)
-	_, span := tracing.Root(telemetry.WithTenant(context.Background(), tenantA), "submit", trace.SpanKindInternal)
-	span.End()
+	c.grantTraces(t, tenantA)
+	stalled := c.stall(tenantA)
+	tracing, logs := provider(t, c.opts())
+	span(tracing, tenantA, "submit")
 	began := time.Now()
 	err := tracing.Flush(c.ctx)
 	var export *telemetry.ExportError
@@ -216,8 +253,17 @@ func TestTransportBoundsDeliveryAndStopWaits(t *testing.T) {
 	if took := time.Since(began); took > telemetry.ExportBound+500*time.Millisecond {
 		t.Fatalf("flush took %s, over the %s export bound", took, telemetry.ExportBound)
 	}
-	_, span = tracing.Root(telemetry.WithTenant(context.Background(), tenantA), "submit", trace.SpanKindInternal)
-	span.End()
+	// The broker answers again: the next export is delivered at once, nothing of the timed-out one before it.
+	stalled.Remove()
+	span(tracing, tenantA, "submit")
+	if err := tracing.Flush(c.ctx); err != nil {
+		t.Fatalf("flush after the stall = %v, want delivery", err)
+	}
+	if records := c.read(t, tenantA); len(records) != 1 {
+		t.Fatalf("%s: %d records, want the one export after the stall", telemetry.TraceTopic(tenantA), len(records))
+	}
+	stalled = c.stall(tenantA)
+	span(tracing, tenantA, "submit")
 	began = time.Now()
 	if err := tracing.Close(); err != nil {
 		t.Fatalf("close = %v", err)
@@ -230,20 +276,15 @@ func TestTransportBoundsDeliveryAndStopWaits(t *testing.T) {
 	}
 
 	// Stop during an upload: the transport alone, with an upload bounded as the processor bounds it.
-	transport := telemetry.NewTransport(client)
-	records, err := telemetry.Records([]*tracepb.ResourceSpans{{ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{{TraceId: make([]byte, 16), SpanId: make([]byte, 8), Name: "submit",
-		Attributes: []*commonpb.KeyValue{{Key: string(telemetry.AttrTenant), Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: tenantA}}}}}}}}}})
-	if err != nil || len(records) != 1 {
-		t.Fatal(records, err)
+	transport := telemetry.NewTransport(c.opts())
+	if err := transport.Start(c.ctx); err != nil {
+		t.Fatal(err)
 	}
 	uploadCtx, cancel := context.WithTimeout(c.ctx, 500*time.Millisecond)
 	defer cancel()
 	uploaded := make(chan error, 1)
 	var wg sync.WaitGroup
-	wg.Go(func() {
-		uploaded <- transport.UploadTraces(uploadCtx, []*tracepb.ResourceSpans{{ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{{TraceId: make([]byte, 16), SpanId: make([]byte, 8), Name: "submit",
-			Attributes: []*commonpb.KeyValue{{Key: string(telemetry.AttrTenant), Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: tenantA}}}}}}}}}})
-	})
+	wg.Go(func() { uploaded <- transport.UploadTraces(uploadCtx, resourceSpans(tenantA)) })
 	time.Sleep(100 * time.Millisecond)
 	began = time.Now()
 	if err := transport.Stop(c.ctx); err != nil {
@@ -260,18 +301,130 @@ func TestTransportBoundsDeliveryAndStopWaits(t *testing.T) {
 	if err := transport.UploadTraces(c.ctx, nil); err == nil {
 		t.Fatal("an upload after stop was accepted")
 	}
-	// The client is the process's: open after Stop and Close, producing once the broker answers again. The records
-	// the timed-out exports left in the partition's buffer fail with their expired context, and a record behind them
-	// in the same batch with them; the next produce goes through.
 	stalled.Remove()
-	for {
-		err := client.ProduceSync(c.ctx, &kgo.Record{Topic: telemetry.TraceTopic(tenantA), Value: []byte("after")}).FirstErr()
-		if err == nil {
-			break
+}
+
+// exportErrors are the ExportErrors at the leaves of err, in order.
+func exportErrors(err error) []*telemetry.ExportError {
+	switch wrapped := err.(type) {
+	case nil:
+		return nil
+	case *telemetry.ExportError:
+		return []*telemetry.ExportError{wrapped}
+	case interface{ Unwrap() []error }:
+		var exports []*telemetry.ExportError
+		for _, err := range wrapped.Unwrap() {
+			exports = append(exports, exportErrors(err)...)
 		}
-		if errors.Is(err, kgo.ErrClientClosed) || c.ctx.Err() != nil {
-			t.Fatalf("the shared client after stop: %v", err)
+		return exports
+	case interface{ Unwrap() error }:
+		return exportErrors(wrapped.Unwrap())
+	}
+	return nil
+}
+
+// idempotent reports whether a produce request carries a producer ID in any of its batches.
+func idempotent(request kmsg.Request) bool {
+	for _, topic := range request.(*kmsg.ProduceRequest).Topics {
+		for _, partition := range topic.Partitions {
+			var batch kmsg.RecordBatch
+			if batch.ReadFrom(partition.Records) == nil && batch.ProducerID >= 0 {
+				return true
+			}
 		}
+	}
+	return false
+}
+
+// The transport's client is its own, built from the process's options and not idempotent: the process's client
+// closes and the export still lands, and a broker that refuses idempotent produces on the trace topic, as one refuses
+// a principal without the cluster's IDEMPOTENT_WRITE, refuses nothing of the trace client's.
+func TestTransportOwnsANonIdempotentClient(t *testing.T) {
+	c := newCluster(t)
+	c.grantTraces(t, tenantA)
+	c.Fault(kfake.Fault{Keys: []kmsg.Key{kmsg.Produce}, Topic: telemetry.TraceTopic(tenantA), Err: kerr.ClusterAuthorizationFailed, Count: -1, When: idempotent})
+	own := c.client(t)
+	tracing, logs := provider(t, own.Opts())
+	own.Close()
+	span(tracing, tenantA, "submit")
+	if err := tracing.Flush(c.ctx); err != nil {
+		t.Fatalf("flush = %v, want delivery through the transport's own client", err)
+	}
+	if err := tracing.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if records := c.read(t, tenantA); len(records) != 1 {
+		t.Fatalf("%s: %d records, want 1", telemetry.TraceTopic(tenantA), len(records))
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("logged:\n%s", logs)
+	}
+}
+
+// During a sustained outage of the trace topic the process's own produces complete with unchanged latency: the trace
+// client's stalled records are its own, the process's client has none.
+func TestTransportOutageLeavesTheProcessClientAlone(t *testing.T) {
+	c := newCluster(t)
+	c.grantTraces(t, tenantA)
+	c.grant(t, workTopic, kadm.OpWrite, kadm.OpDescribe)
+	own := c.client(t)
+	tracing, logs := provider(t, own.Opts())
+	defer func() { _ = tracing.Close() }()
+	produce := func() time.Duration {
+		began := time.Now()
+		if err := own.ProduceSync(c.ctx, &kgo.Record{Topic: workTopic, Value: []byte("status")}).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+		return time.Since(began)
+	}
+	median := func(n int) time.Duration {
+		produce()
+		var durations []time.Duration
+		for range n {
+			durations = append(durations, produce())
+		}
+		slices.Sort(durations)
+		return durations[len(durations)/2]
+	}
+	before := median(20)
+	stalled := c.stall(tenantA)
+	defer stalled.Remove()
+	// Exports into the stall, one after another, as the processor would issue them; each times out and is dropped.
+	exporting, stopExporting := context.WithCancel(c.ctx)
+	var exports sync.WaitGroup
+	var timedOut atomic.Int32
+	exports.Go(func() {
+		for exporting.Err() == nil {
+			span(tracing, tenantA, "submit")
+			var export *telemetry.ExportError
+			if err := tracing.Flush(exporting); errors.As(err, &export) && export.Class == telemetry.ClassTimeout {
+				timedOut.Add(1)
+			}
+		}
+	})
+	time.Sleep(200 * time.Millisecond)
+	during := median(20)
+	// The outage is sustained: the first export has timed out and been dropped, and the exports go on.
+	for timedOut.Load() == 0 {
+		if c.ctx.Err() != nil {
+			t.Fatal("no export timed out")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	later := median(20)
+	stopExporting()
+	exports.Wait()
+	t.Logf("the process's own produce, median of 20: %s before the trace outage, %s and %s during it; %d exports timed out", before, during, later, timedOut.Load())
+	for _, got := range []time.Duration{during, later} {
+		if got > 2*before+100*time.Millisecond {
+			t.Fatalf("the process's own produce took %s during the trace outage, %s before it", got, before)
+		}
+	}
+	if own.BufferedProduceRecords() != 0 {
+		t.Fatalf("%d records buffered on the process's client", own.BufferedProduceRecords())
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("logged:\n%s", logs)
 	}
 }
 

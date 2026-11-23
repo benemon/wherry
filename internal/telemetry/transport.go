@@ -1,11 +1,11 @@
 package telemetry
 
 import (
-	"cmp"
 	"context"
 	"encoding/hex"
 	"errors"
 	"log"
+	"slices"
 	"sync"
 	"time"
 
@@ -28,9 +28,35 @@ func TraceTopic(tenant string) string {
 	return traceTopic + "." + tenant
 }
 
-// Transport is the otlptrace.Client that writes spans to the trace topics through the process's own Kafka client,
-// under its principal: one OTLP record per tenant and trace, keyed by the trace ID.
+// The trace client's bounds: a small buffer; every produce request and record delivery ended within ExportBound; a
+// short wait between produce retries and before a metadata refresh a failed produce asks for, since the client
+// re-evaluates a buffered record, and fails one whose export has timed out, only when it is about to retry it.
+const (
+	MaxBufferedRecords = 256
+	MaxBufferedBytes   = 4 << 20
+	retryWait          = 250 * time.Millisecond
+)
+
+// ClientOpts are the options of the trace client built from base, the process's own Kafka options: the same brokers,
+// credentials and trust, with idempotence off (traces are best-effort and a record is failed, never resent, once its
+// export has timed out), the bounds above, and no topic creation.
+func ClientOpts(base []kgo.Opt) []kgo.Opt {
+	return append(slices.Clone(base),
+		kgo.DisableIdempotentWrite(),
+		kgo.ProduceRequestTimeout(ExportBound),
+		kgo.RecordDeliveryTimeout(ExportBound),
+		kgo.RequestTimeoutOverhead(ExportBound),
+		kgo.RetryBackoffFn(func(int) time.Duration { return retryWait }),
+		kgo.MetadataMinAge(retryWait),
+		kgo.MaxBufferedRecords(MaxBufferedRecords),
+		kgo.MaxBufferedBytes(MaxBufferedBytes),
+	)
+}
+
+// Transport is the otlptrace.Client that writes spans to the trace topics through a Kafka client of its own, built
+// from the process's options under its principal: one OTLP record per tenant and trace, keyed by the trace ID.
 type Transport struct {
+	opts    []kgo.Opt
 	kafka   *kgo.Client
 	mu      sync.Mutex
 	stopped bool
@@ -39,17 +65,34 @@ type Transport struct {
 
 var errStopped = errors.New("tracing: transport stopped")
 
-// NewTransport is a transport over kafka, which it never closes.
-func NewTransport(kafka *kgo.Client) *Transport { return &Transport{kafka: kafka} }
+// NewTransport is a transport whose client Start builds from opts, the process's own Kafka options.
+func NewTransport(opts []kgo.Opt) *Transport { return &Transport{opts: opts} }
 
-// Start is nothing: the client is connected already.
-func (c *Transport) Start(context.Context) error { return nil }
+// Start builds the client and connects it in the background, so the first export does not pay the session setup.
+func (c *Transport) Start(context.Context) error {
+	kafka, err := kgo.NewClient(ClientOpts(c.opts)...)
+	if err != nil {
+		return err
+	}
+	c.kafka = kafka
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), ShutdownBound)
+		defer cancel()
+		_ = kafka.Ping(ctx)
+	}()
+	return nil
+}
 
-// Stop refuses later uploads and waits within ctx for the ones in flight. The client stays open.
+// Stop refuses later uploads, waits within ctx for the ones in flight and for the client's buffer to drain, then
+// closes the client, failing whatever is still unacknowledged.
 func (c *Transport) Stop(ctx context.Context) error {
 	c.mu.Lock()
 	c.stopped = true
 	c.mu.Unlock()
+	if c.kafka == nil {
+		return nil
+	}
+	defer c.kafka.Close()
 	done := make(chan struct{})
 	go func() {
 		c.uploads.Wait()
@@ -57,19 +100,19 @@ func (c *Transport) Stop(ctx context.Context) error {
 	}()
 	select {
 	case <-done:
-		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	return c.kafka.Flush(ctx)
 }
 
-// UploadTraces produces spans' records together and returns once every record is acknowledged or ctx ends, with one
-// error per failed topic, the first first: franz-go fails records per partition, so a refused topic fails its own
-// records alone. A record ctx leaves unacknowledged is reported as a timeout; the client completes or fails it with
-// its batch, and nothing is retried here.
+// UploadTraces produces spans' records in one synchronous call and returns once every record is acknowledged or
+// failed, with one error per failed topic, the first first: records are failed per partition, so a refused topic
+// fails its own alone. A record unacknowledged when ctx ends is failed by the client, reported as a timeout and
+// never resent, so the next export starts with an empty buffer.
 func (c *Transport) UploadTraces(ctx context.Context, spans []*tracepb.ResourceSpans) error {
 	c.mu.Lock()
-	if c.stopped {
+	if c.stopped || c.kafka == nil {
 		c.mu.Unlock()
 		return errStopped
 	}
@@ -80,54 +123,17 @@ func (c *Transport) UploadTraces(ctx context.Context, spans []*tracepb.ResourceS
 	if err != nil {
 		return err
 	}
-	var (
-		mu     sync.Mutex
-		wg     sync.WaitGroup
-		failed = map[string]error{}
-		acked  = map[string]int{}
-	)
-	wg.Add(len(records))
-	for _, record := range records {
-		c.kafka.Produce(ctx, record, func(record *kgo.Record, err error) {
-			defer wg.Done()
-			mu.Lock()
-			defer mu.Unlock()
-			switch {
-			case err == nil:
-				acked[record.Topic]++
-			case failed[record.Topic] == nil:
-				failed[record.Topic] = err
-			}
-		})
+	results := map[*kgo.Record]error{}
+	for _, result := range c.kafka.ProduceSync(ctx, records...) {
+		results[result.Record] = result.Err
 	}
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-ctx.Done():
-	}
-	mu.Lock()
-	defer mu.Unlock()
 	var errs []error
-	counts := map[string]int{}
+	failed := map[string]bool{}
 	for _, record := range records {
-		counts[record.Topic]++
-	}
-	for _, record := range records {
-		topic := record.Topic
-		if counts[topic] == 0 {
-			continue
+		if err := results[record]; err != nil && !failed[record.Topic] {
+			failed[record.Topic] = true
+			errs = append(errs, exportError(record.Topic, err))
 		}
-		switch {
-		case failed[topic] != nil:
-			errs = append(errs, exportError(topic, failed[topic]))
-		case acked[topic] < counts[topic]:
-			errs = append(errs, exportError(topic, cmp.Or(ctx.Err(), context.DeadlineExceeded)))
-		}
-		counts[topic] = 0
 	}
 	return errors.Join(errs...)
 }
@@ -216,6 +222,10 @@ const (
 	expectedInterval = time.Hour
 )
 
+// otherFailure is the fixed text of a failure the handler is given that is no export's: never the error's own text,
+// since the handler is the process's and any SDK error reaches it.
+const otherFailure = "tracing: export failed: " + ClassError
+
 // reporter is the SDK's error handler, one per process: the place an export failure is logged, through the logger of
 // the latest provider built.
 type reporter struct {
@@ -237,15 +247,18 @@ func reportTo(logger *log.Logger) {
 	installed.Do(func() { otel.SetErrorHandler(reports) })
 }
 
+// Handle logs each failure at the leaves of err, however it is wrapped: the exporter wraps the joined per-topic errors
+// of an export in one more error.
 func (r *reporter) Handle(err error) {
 	for _, err := range leaves(err) {
-		text, interval := "tracing: "+err.Error(), logInterval
 		var export *ExportError
-		if errors.As(err, &export) {
-			text = export.Error()
-			if export.Expected {
-				text, interval = text+" (expected for a topic not yet created or an ended entitlement)", expectedInterval
-			}
+		if !errors.As(err, &export) {
+			r.log(otherFailure, logInterval)
+			continue
+		}
+		text, interval := export.Error(), logInterval
+		if export.Expected {
+			text, interval = text+" (expected for a topic not yet created or an ended entitlement)", expectedInterval
 		}
 		r.log(text, interval)
 	}
@@ -264,18 +277,22 @@ func (r *reporter) log(text string, interval time.Duration) {
 	}
 }
 
-// leaves are the errors joined into err, or err itself.
+// leaves are the errors at the bottom of err's wrapping, through Unwrap() []error and Unwrap() error alike, or err
+// itself.
 func leaves(err error) []error {
-	if err == nil {
+	switch wrapped := err.(type) {
+	case nil:
 		return nil
+	case interface{ Unwrap() []error }:
+		var errs []error
+		for _, err := range wrapped.Unwrap() {
+			errs = append(errs, leaves(err)...)
+		}
+		return errs
+	case interface{ Unwrap() error }:
+		if inner := wrapped.Unwrap(); inner != nil {
+			return leaves(inner)
+		}
 	}
-	joined, ok := err.(interface{ Unwrap() []error })
-	if !ok {
-		return []error{err}
-	}
-	var errs []error
-	for _, err := range joined.Unwrap() {
-		errs = append(errs, leaves(err)...)
-	}
-	return errs
+	return []error{err}
 }

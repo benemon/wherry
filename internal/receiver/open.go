@@ -406,14 +406,17 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 		// The custodian's CONSUMER span of the request, parented through the request's header, and the PRODUCER span of
 		// its answer, whose context the answer's records carry back. Both carry the run and tenant of the verified task
 		// the decision looked up, neither when the lookup found no task.
-		attrs := []attribute.KeyValue{semconv.MessagingKafkaOffset(int(request.record.Offset))}
-		if check.run != "" {
-			attrs = append(attrs, telemetry.AttrRun.String(check.run))
+		var attrs []attribute.KeyValue
+		if r.custodian.Enabled() {
+			attrs = []attribute.KeyValue{semconv.MessagingKafkaOffset(int(request.record.Offset))}
+			if check.run != "" {
+				attrs = append(attrs, telemetry.AttrRun.String(check.run))
+			}
+			if request.request != nil {
+				attrs = append(attrs, telemetry.AttrAttempt.Int64(request.request.Attempt), telemetry.AttrReceiver.String(request.request.Receiver))
+			}
 		}
-		if request.request != nil {
-			attrs = append(attrs, telemetry.AttrAttempt.Int64(request.request.Attempt), telemetry.AttrReceiver.String(request.request.Receiver))
-		}
-		answerCtx, process := r.custodian.Consumer(telemetry.WithTenant(ctx, check.tenant), request.record, attrs...)
+		answerCtx, process := r.custodian.Consumer(r.custodian.WithTenant(ctx, check.tenant), request.record, attrs...)
 		sendCtx, send := r.custodian.Producer(answerCtx, topic, attrs...)
 		for _, record := range records {
 			r.custodian.Inject(sendCtx, record)

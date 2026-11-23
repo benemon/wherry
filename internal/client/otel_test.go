@@ -5,11 +5,15 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"log"
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,7 +24,10 @@ import (
 	"github.com/benemon/wherry/internal/telemetry/teletest"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -441,15 +448,13 @@ func TestTracedResubmissionFailureFailsTheSpan(t *testing.T) {
 	teletest.Sentinels(t, spans, "suspended")
 }
 
-// Brief test 3, the host clause: Close flushes the host's spans through its own Kafka client before closing it, so the
-// submit's trace is on the tenant's trace topic, keyed by its trace ID, and its records carry no sentinel.
-func TestTracedHostFlushesBeforeClosingItsClient(t *testing.T) {
-	f := newFixture(t)
-	receiver := f.addReceiver(t, "receiver-a", "pool-a")
-	receiver.advertise(t, f.ctx, nil)
-	// The host's own client, which Close closes, and its tenant's trace topic with the grant slice 2's operator makes.
+// tracedHost provisions name in tenant-a with a Kafka client of its own, which Close closes, grants it WRITE and
+// DESCRIBE on its tenant's trace topic as slice 2's operator will, and turns its tracing on, through the Kafka transport
+// and not the test exporter. The host logs to the returned buffer; its bundle is returned for its password.
+func (f *fixture) tracedHost(t *testing.T, name string) (*Host, *syncBuffer, operator.Bundle) {
+	t.Helper()
 	bundlePath := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-t", bundlePath, false); err != nil {
+	if err := f.service.HostAdd(f.ctx, "tenant-a", name, bundlePath, false); err != nil {
 		t.Fatal(err)
 	}
 	encoded, err := os.ReadFile(bundlePath)
@@ -460,16 +465,12 @@ func TestTracedHostFlushesBeforeClosingItsClient(t *testing.T) {
 	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
 		t.Fatal(err)
 	}
-	topic := telemetry.TraceTopic("tenant-a")
-	if err := f.cluster.CreateTopic(topic, 1, nil); err != nil {
-		t.Fatal(err)
-	}
 	root, err := kgo.NewClient(kgo.SeedBrokers(f.cluster.ListenAddrs()...), kgo.SASL(scram.Auth{User: "admin", Pass: "password"}.AsSha512Mechanism()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	builder := kadm.NewACLs().Allow(bundle.Principal).AllowHosts("*").Topics(topic).ResourcePatternType(kadm.ACLPatternLiteral).Operations(kadm.OpWrite, kadm.OpDescribe)
+	builder := kadm.NewACLs().Allow(bundle.Principal).AllowHosts("*").Topics(telemetry.TraceTopic("tenant-a")).ResourcePatternType(kadm.ACLPatternLiteral).Operations(kadm.OpWrite, kadm.OpDescribe)
 	builder.PrefixUser()
 	if _, err := kadm.NewClient(root).CreateACLs(f.ctx, builder); err != nil {
 		t.Fatal(err)
@@ -484,7 +485,7 @@ func TestTracedHostFlushesBeforeClosingItsClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	logs := &syncBuffer{}
-	host, err := NewHost(kafka, key, bundle.Principal, t.TempDir(), map[string]credential.Source{"model": {File: f.secret}}, nil, log.New(logs, "host-t: ", 0))
+	host, err := NewHost(kafka, key, bundle.Principal, t.TempDir(), map[string]credential.Source{"model": {File: f.secret}}, nil, log.New(logs, name+": ", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,6 +495,21 @@ func TestTracedHostFlushesBeforeClosingItsClient(t *testing.T) {
 	if err := host.Trace(); err != nil {
 		t.Fatal(err)
 	}
+	return host, logs, bundle
+}
+
+// Brief test 3, the host clause: Close flushes the host's spans through the trace client and closes it before closing
+// the host's own client, so the submit's trace is on the tenant's trace topic, keyed by its trace ID, and its records
+// carry no sentinel.
+func TestTracedHostFlushesBeforeClosingItsClient(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	topic := telemetry.TraceTopic("tenant-a")
+	if err := f.cluster.CreateTopic(topic, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	host, logs, bundle := f.tracedHost(t, "host-t")
 	const prompt = "s3cr3t-prompt-text"
 	submitted, err := host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: prompt, EndBy: time.Now().Add(30 * time.Minute), StartBy: time.Now().Add(10 * time.Minute)})
 	if err != nil {
@@ -531,5 +547,97 @@ func TestTracedHostFlushesBeforeClosingItsClient(t *testing.T) {
 	teletest.Bytes(t, records, prompt, "model-token", bundle.Password, base64.StdEncoding.EncodeToString(local.RedactionKey), "s3cr3t")
 	if strings.Contains(logs.String(), "tracing:") {
 		t.Fatalf("logs:\n%s", logs.String())
+	}
+}
+
+// During a sustained outage of its tenant's trace topic, a host's submits complete with unchanged latency: the stalled
+// records are the trace client's and the host's own client has none; every export into the stall is dropped with a
+// timeout, logged once, and the submits' records are on the task topic.
+func TestTracedSubmitUnaffectedByATraceOutage(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	topic := telemetry.TraceTopic("tenant-a")
+	if err := f.cluster.CreateTopic(topic, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	traced, logs, _ := f.tracedHost(t, "host-t")
+	stalled := f.cluster.Fault(kfake.Fault{Keys: []kmsg.Key{kmsg.Produce}, Topic: topic, Err: kerr.NotLeaderForPartition, Count: -1})
+	defer stalled.Remove()
+	input := SubmitInput{Selector: defaultSelector(), Prompt: "do the work", EndBy: time.Now().Add(30 * time.Minute), StartBy: time.Now().Add(10 * time.Minute)}
+	median := func(h *Host) time.Duration {
+		if _, err := h.Submit(f.ctx, input); err != nil {
+			t.Fatal(err)
+		}
+		var durations []time.Duration
+		for range 10 {
+			began := time.Now()
+			if _, err := h.Submit(f.ctx, input); err != nil {
+				t.Fatal(err)
+			}
+			durations = append(durations, time.Since(began))
+		}
+		slices.Sort(durations)
+		return durations[len(durations)/2]
+	}
+	off := median(f.host)
+	// Exports into the stall, one after another, as the processor issues them, each timing out and dropped.
+	exporting, stopExporting := context.WithCancel(f.ctx)
+	var exports sync.WaitGroup
+	var timedOut atomic.Int32
+	exports.Go(func() {
+		for exporting.Err() == nil {
+			var export *telemetry.ExportError
+			if err := traced.tracing.Flush(exporting); errors.As(err, &export) && export.Class == telemetry.ClassTimeout {
+				timedOut.Add(1)
+			}
+		}
+	})
+	on := median(traced)
+	for timedOut.Load() == 0 {
+		if f.ctx.Err() != nil {
+			t.Fatal("no export timed out")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	later := median(traced)
+	stopExporting()
+	exports.Wait()
+	t.Logf("submit wall time, median of 10: tracing off %s; on, during a trace outage, %s and %s; %d exports timed out", off, on, later, timedOut.Load())
+	for _, got := range []time.Duration{on, later} {
+		if got > 2*off+100*time.Millisecond {
+			t.Fatalf("submit took %s during the trace outage, %s with tracing off", got, off)
+		}
+	}
+	if buffered := traced.kafka.BufferedProduceRecords(); buffered != 0 {
+		t.Fatalf("%d records buffered on the host's own client", buffered)
+	}
+	traced.Close()
+	if text := logs.String(); strings.Count(text, "tracing: export to "+topic+" failed: timeout") != 1 || strings.Count(text, "tracing:") != 1 {
+		t.Fatalf("logs:\n%s", text)
+	}
+	if records, err := readTopic(f.ctx, f.service.Operator, topic); err != nil || len(records) != 0 {
+		t.Fatalf("%d records on %s during the stall, %v", len(records), topic, err)
+	}
+}
+
+// Tracing off does nothing per wait: the dedup state is neither allocated nor locked, and the terminal spans' walk
+// returns before touching it.
+func TestTracingOffAllocatesNothingPerWait(t *testing.T) {
+	f := newFixture(t)
+	if f.host.tracing.Enabled() {
+		t.Fatal("tracing is on")
+	}
+	r := &runView{h: f.host, run: "run-a", outcome: &AwaitResult{}, accepted: []entry{{record: &kgo.Record{Topic: "wherry.tenant.tenant-a"}}}}
+	for name, call := range map[string]func(){
+		"awaiting":       func() { f.host.awaiting("run-a")() },
+		"traceTerminals": func() { f.host.traceTerminals(f.ctx, r) },
+	} {
+		if allocs := testing.AllocsPerRun(100, call); allocs != 0 {
+			t.Errorf("%s allocates %v times per call with tracing off", name, allocs)
+		}
+	}
+	if len(f.host.awaited) != 0 {
+		t.Fatalf("awaited runs %v with tracing off", f.host.awaited)
 	}
 }

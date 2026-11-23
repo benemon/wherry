@@ -1,9 +1,9 @@
 // Package telemetry is wherry's OpenTelemetry tracing: one tracer provider per role, W3C trace context in Kafka record
 // headers, the attribute allowlist every span keeps to, and the transport that writes spans to the trace topics
-// through the process's own Kafka client.
+// through a small Kafka client of its own, built from the process's options.
 //
 // Tracing is on when a role's configuration says so and the role calls New; a nil Tracing is off, every span under it
-// is the no-op one and no record carries a header.
+// is the no-op one, no record carries a header, and no helper allocates or replaces a context.
 package telemetry
 
 import (
@@ -149,9 +149,9 @@ type Tracing struct {
 	global bool
 }
 
-// New is role's tracing for the process named by names, exporting through kafka, the process's own non-transactional
-// client, which it never closes, and reporting export failures to logger.
-func New(ctx context.Context, role string, names Names, kafka *kgo.Client, logger *log.Logger) (*Tracing, error) {
+// New is role's tracing for the process named by names, exporting through a client of its own built from opts, the
+// process's Kafka options, and reporting export failures to logger.
+func New(ctx context.Context, role string, names Names, opts []kgo.Opt, logger *log.Logger) (*Tracing, error) {
 	tenant := ""
 	if role == RoleHost {
 		tenant = names.Tenant
@@ -162,7 +162,7 @@ func New(ctx context.Context, role string, names Names, kafka *kgo.Client, logge
 	if err != nil {
 		return nil, err
 	}
-	exporter, err := NewExporter(ctx, NewTransport(kafka))
+	exporter, err := NewExporter(ctx, NewTransport(opts))
 	if err != nil {
 		return nil, err
 	}
@@ -254,32 +254,34 @@ func (t *Tracing) Flush(ctx context.Context) error {
 }
 
 // Close is Shutdown within ShutdownBound, for a short process. Each process closes its tracing before the Kafka client
-// the spans go through.
+// its records go through. Off, it does nothing.
 func (t *Tracing) Close() error {
+	if !t.Enabled() {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), ShutdownBound)
 	defer cancel()
 	return t.Shutdown(ctx)
 }
 
-func (t *Tracing) tracer() trace.Tracer {
-	if t == nil {
-		return noop.NewTracerProvider().Tracer("wherry")
-	}
-	return t.Tracer
-}
+// noopSpan is the span every helper returns when tracing is off, with the caller's context as it was.
+var noopSpan trace.Span = noop.Span{}
 
-// attributes are the role's identity and the tenant ctx carries, for a span started under ctx.
-func (t *Tracing) attributes(ctx context.Context) []attribute.KeyValue {
-	if t == nil {
-		return tenantOf(ctx)
+// attributes are the role's identity, the tenant ctx carries and attrs, in a slice of their own, for a span started
+// under ctx.
+func (t *Tracing) attributes(ctx context.Context, attrs []attribute.KeyValue) []attribute.KeyValue {
+	all := make([]attribute.KeyValue, 0, len(t.identity)+1+len(attrs))
+	all = append(all, t.identity...)
+	if tenant := TenantOf(ctx); tenant != "" {
+		all = append(all, AttrTenant.String(tenant))
 	}
-	return append(slices.Clip(t.identity), tenantOf(ctx)...)
+	return append(all, attrs...)
 }
 
 // scope is ctx carrying the role's one tenant when it has one and ctx names none: a host's spans are all its tenant's,
 // and the spans started under one of them inherit it through the context it returns.
 func (t *Tracing) scope(ctx context.Context) context.Context {
-	if t != nil && t.tenant != "" && TenantOf(ctx) == "" {
+	if t.tenant != "" && TenantOf(ctx) == "" {
 		return WithTenant(ctx, t.tenant)
 	}
 	return ctx
@@ -287,28 +289,43 @@ func (t *Tracing) scope(ctx context.Context) context.Context {
 
 // Start starts a span of kind named name under ctx, carrying the role's identity, the tenant ctx carries and attrs.
 func (t *Tracing) Start(ctx context.Context, name string, kind trace.SpanKind, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	if t == nil {
+		return ctx, noopSpan
+	}
 	ctx = t.scope(ctx)
-	return t.tracer().Start(ctx, name, trace.WithSpanKind(kind), trace.WithAttributes(t.attributes(ctx)...), trace.WithAttributes(attrs...))
+	return t.Tracer.Start(ctx, name, trace.WithSpanKind(kind), trace.WithAttributes(t.attributes(ctx, attrs)...))
 }
 
 // Root starts a span with no parent, whatever ctx carries.
 func (t *Tracing) Root(ctx context.Context, name string, kind trace.SpanKind, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	if t == nil {
+		return ctx, noopSpan
+	}
 	ctx = t.scope(ctx)
-	return t.tracer().Start(ctx, name, trace.WithNewRoot(), trace.WithSpanKind(kind), trace.WithAttributes(t.attributes(ctx)...), trace.WithAttributes(attrs...))
+	return t.Tracer.Start(ctx, name, trace.WithNewRoot(), trace.WithSpanKind(kind), trace.WithAttributes(t.attributes(ctx, attrs)...))
 }
 
 // Producer starts the PRODUCER span of a send to topic, as a child of ctx.
 func (t *Tracing) Producer(ctx context.Context, topic string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	if t == nil {
+		return ctx, noopSpan
+	}
 	return t.Start(ctx, "send "+topic, trace.SpanKindProducer, append(messaging("send", semconv.MessagingOperationTypeSend, topic), attrs...)...)
 }
 
 // ProducerLinked is Producer as the root of a new trace, linked to link when it is valid.
 func (t *Tracing) ProducerLinked(ctx context.Context, topic string, link trace.SpanContext, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	if t == nil {
+		return ctx, noopSpan
+	}
 	return t.Linked(ctx, "send "+topic, trace.SpanKindProducer, link, append(messaging("send", semconv.MessagingOperationTypeSend, topic), attrs...)...)
 }
 
 // ProducerUnder is Producer as a child of parent when it is valid, in parent's trace; otherwise a root of its own.
 func (t *Tracing) ProducerUnder(ctx context.Context, topic string, parent trace.SpanContext, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	if t == nil {
+		return ctx, noopSpan
+	}
 	if parent.IsValid() {
 		return t.Producer(trace.ContextWithRemoteSpanContext(ctx, parent), topic, attrs...)
 	}
@@ -317,22 +334,31 @@ func (t *Tracing) ProducerUnder(ctx context.Context, topic string, parent trace.
 
 // Linked starts a span as the root of a new trace, linked to link when it is valid.
 func (t *Tracing) Linked(ctx context.Context, name string, kind trace.SpanKind, link trace.SpanContext, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	if t == nil {
+		return ctx, noopSpan
+	}
 	ctx = t.scope(ctx)
-	opts := []trace.SpanStartOption{trace.WithNewRoot(), trace.WithSpanKind(kind), trace.WithAttributes(t.attributes(ctx)...), trace.WithAttributes(attrs...)}
+	opts := []trace.SpanStartOption{trace.WithNewRoot(), trace.WithSpanKind(kind), trace.WithAttributes(t.attributes(ctx, attrs)...)}
 	if link.IsValid() {
 		opts = append(opts, trace.WithLinks(trace.Link{SpanContext: link}))
 	}
-	return t.tracer().Start(ctx, name, opts...)
+	return t.Tracer.Start(ctx, name, opts...)
 }
 
 // Consumer starts the CONSUMER span of processing record. Its parent is the traceparent in the record's headers;
 // without one, ctx's span.
 func (t *Tracing) Consumer(ctx context.Context, record *kgo.Record, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	if t == nil {
+		return ctx, noopSpan
+	}
 	return t.ConsumerNamed(ctx, record, "process "+record.Topic, attrs...)
 }
 
 // ConsumerNamed is Consumer with the span's name given.
 func (t *Tracing) ConsumerNamed(ctx context.Context, record *kgo.Record, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	if t == nil {
+		return ctx, noopSpan
+	}
 	attrs = append(messaging("process", semconv.MessagingOperationTypeProcess, record.Topic), attrs...)
 	return t.Start(t.Extract(ctx, record), name, trace.SpanKindConsumer, attrs...)
 }
@@ -445,6 +471,14 @@ func WithTenant(ctx context.Context, tenant string) context.Context {
 	return context.WithValue(ctx, tenantKey{}, tenant)
 }
 
+// WithTenant is the package's WithTenant for a role's spans; off, ctx as it is.
+func (t *Tracing) WithTenant(ctx context.Context, tenant string) context.Context {
+	if t == nil {
+		return ctx
+	}
+	return WithTenant(ctx, tenant)
+}
+
 // TenantOf is the tenant ctx carries, or "" outside a run.
 func TenantOf(ctx context.Context) string {
 	tenant, _ := ctx.Value(tenantKey{}).(string)
@@ -460,19 +494,26 @@ func tenantOf(ctx context.Context) []attribute.KeyValue {
 }
 
 // Child starts an INTERNAL span under ctx's span, through that span's provider, so a child needs no tracer of its own.
-// It carries the tenant ctx carries.
+// It carries the tenant ctx carries. Under a ctx with no span, as every ctx is with tracing off, it returns ctx as it
+// is and the no-op span.
 func Child(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
 	return ChildOf(ctx, name, trace.SpanKindInternal, attrs...)
 }
 
 // ChildOf is Child with the span's kind given.
 func ChildOf(ctx context.Context, name string, kind trace.SpanKind, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
-	return trace.SpanFromContext(ctx).TracerProvider().Tracer("wherry").Start(ctx, name, trace.WithSpanKind(kind), trace.WithAttributes(tenantOf(ctx)...), trace.WithAttributes(attrs...))
+	parent := trace.SpanFromContext(ctx)
+	if !parent.SpanContext().IsValid() {
+		return ctx, parent
+	}
+	return parent.TracerProvider().Tracer("wherry").Start(ctx, name, trace.WithSpanKind(kind), trace.WithAttributes(append(tenantOf(ctx), attrs...)...))
 }
 
-// Event adds an event to ctx's span.
+// Event adds an event to ctx's span, when that span records.
 func Event(ctx context.Context, name string, attrs ...attribute.KeyValue) {
-	trace.SpanFromContext(ctx).AddEvent(name, trace.WithAttributes(attrs...))
+	if span := trace.SpanFromContext(ctx); span.IsRecording() {
+		span.AddEvent(name, trace.WithAttributes(slices.Clone(attrs)...))
+	}
 }
 
 // Fail sets span's status to Error with class, a fixed text, as its description.

@@ -434,7 +434,7 @@ func operatorService(dir string) (*operator.Service, error) {
 	}
 	service := &operator.Service{Operator: client, Broker: config.Broker, CA: ca, Storage: func(tenant string) (operator.StorageKeys, error) { return tenantStorageKeys(dir, tenant) }}
 	if config.Tracing {
-		if service.Tracing, err = telemetry.New(context.Background(), telemetry.RoleOperator, telemetry.Names{}, client, log.New(os.Stderr, "wherry: ", 0)); err != nil {
+		if service.Tracing, err = telemetry.New(context.Background(), telemetry.RoleOperator, telemetry.Names{}, client.Opts(), log.New(os.Stderr, "wherry: ", 0)); err != nil {
 			client.Close()
 			return nil, fmt.Errorf("tracing: %w", err)
 		}

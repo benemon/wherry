@@ -157,7 +157,7 @@ func TestTracedRoundTrip(t *testing.T) {
 	root := connectTLS(t, address, ca, "admin", "password")
 	service := &operator.Service{Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
 		Broker: address, CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}
-	operatorTracing, err := telemetry.New(ctx, telemetry.RoleOperator, telemetry.Names{}, service.Operator, log.New(io.Discard, "", 0))
+	operatorTracing, err := telemetry.New(ctx, telemetry.RoleOperator, telemetry.Names{}, service.Operator.Opts(), log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,6 +234,22 @@ func TestTracedRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The second session's cost: a trace client built as the host's is, connected as Trace connects it in the
+	// background: the dial, the TLS handshake, the SCRAM exchange and the first metadata.
+	hostOpts, err := operator.BundleKafkaOpts(hostBundled, []byte(ca))
+	if err != nil {
+		t.Fatal(err)
+	}
+	traceClient, err := kgo.NewClient(telemetry.ClientOpts(hostOpts)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connecting := time.Now()
+	if err := traceClient.Ping(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sessionTook := time.Since(connecting)
+	traceClient.Close()
 	input := busclient.SubmitInput{Agent: "claude", Selector: []wire.Requirement{{Key: "gpu", Operator: wire.OpExists}},
 		Prompt: tracedPrompt, Parts: []wire.Part{{Raw: wire.StdBytes(bytes.Repeat([]byte("dataset "), 250)), Filename: "dataset.bin"}},
 		Credentials: []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}, Outputs: []wire.ExpectedOutput{{Name: "big.bin", Required: true, Storage: wire.StorageS3}},
@@ -422,7 +438,7 @@ func TestTracedRoundTrip(t *testing.T) {
 			runRecords++
 		}
 	}
-	t.Logf("spans per run: map minimum %d, total %d; trace bytes per run %d in %d records; host close %s", minimum, len(run), runBytes, runRecords, closeTook)
+	t.Logf("spans per run: map minimum %d, total %d; trace bytes per run %d in %d records; host close %s; trace client session %s", minimum, len(run), runBytes, runRecords, closeTook, sessionTook)
 	for _, s := range run {
 		t.Logf("  %-9s %-9s %s", teletest.Resource(s, semconv.ServiceNamespaceKey), s.SpanKind, s.Name)
 	}
