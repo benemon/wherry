@@ -92,7 +92,7 @@ broker's: run `init` again with the Kafka super user.
 
 Do not run two operator commands at once. Concurrent operator commands are not supported.
 
-Operator commands do not lock each other. Each one that changes Kafka, except `operator init`, ends
+Operator commands do not lock each other. Each one that changes Kafka ends
 by converging Kafka on the records of `wherry.operator` as read to its end,
 not on the ones it read when it started
 ([Operator convergence](design.md#operator-convergence)). When

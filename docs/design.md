@@ -377,7 +377,8 @@ other grant stays.
 ## Operator convergence
 
 Operator commands do not lock each other. Each one that writes a record to
-`wherry.operator`, and `host add --force` and receiver reissue, ends with
+`wherry.operator`, and each of `operator init`, `host add --force` and
+receiver reissue, ends with
 passes that read `wherry.operator` to its end and make Kafka match those
 records. A pass:
 
