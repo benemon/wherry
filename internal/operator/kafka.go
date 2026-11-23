@@ -889,6 +889,9 @@ func (service *Service) TenantAdd(ctx context.Context, tenant string) (err error
 	if err := service.tenantTopics(ctx, tenant); err != nil {
 		return err
 	}
+	if err := service.traceTopics(ctx, telemetry.TraceTopic(tenant)); err != nil {
+		return err
+	}
 	if _, err := service.appendChecked(ctx, []byte("tenant."+tenant), record); err != nil {
 		return err
 	}
@@ -961,7 +964,88 @@ func (service *Service) Check(ctx context.Context) (err error) {
 	if err := service.checkFeedLimits(ctx, state); err != nil {
 		return err
 	}
+	if err := service.checkTraceTopics(ctx, state); err != nil {
+		return err
+	}
 	return service.verifyACLs(ctx, append(ACLs(state), OperatorACLs...))
+}
+
+// checkTraceTopics refuses a missing trace topic, one with more than one partition and one whose configs differ from
+// traceConfigs, on an install whose operator init predates them or that skipped the re-run.
+func (service *Service) checkTraceTopics(ctx context.Context, state State) error {
+	topics := traceTopics(state)
+	request := kmsg.NewPtrMetadataRequest()
+	for _, topic := range topics {
+		requested := kmsg.NewMetadataRequestTopic()
+		requested.Topic = kmsg.StringPtr(topic)
+		request.Topics = append(request.Topics, requested)
+	}
+	response, err := request.RequestWith(ctx, service.Operator)
+	if err != nil {
+		return err
+	}
+	for _, topic := range response.Topics {
+		if topic.ErrorCode == kerr.UnknownTopicOrPartition.Code {
+			return fmt.Errorf("trace topic %s is missing; operator init creates it", *topic.Topic)
+		}
+	}
+	if err := service.onePartition(ctx, false, topics...); err != nil {
+		return err
+	}
+	for _, name := range slices.Sorted(maps.Keys(traceConfigs)) {
+		values, err := service.topicConfigs(ctx, name, topics...)
+		if err != nil {
+			return err
+		}
+		for _, topic := range topics {
+			if values[topic] != traceConfigs[name] {
+				return fmt.Errorf("topic %s %s is %s, want %s; operator init sets it", topic, name, values[topic], traceConfigs[name])
+			}
+		}
+	}
+	return nil
+}
+
+// EnsureTraceTopics creates wherry.traces and the trace topic of every live tenant where missing and sets traceConfigs
+// on each, new or existing, for operator init: a re-run gives an install that predates the topics every one of them.
+func (service *Service) EnsureTraceTopics(ctx context.Context) error {
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return err
+	}
+	return service.traceTopics(ctx, traceTopics(state)...)
+}
+
+// traceTopics creates topics with traceConfigs, then sets the configs on them, new or existing.
+func (service *Service) traceTopics(ctx context.Context, topics ...string) error {
+	if err := service.createTopicsWith(ctx, traceConfigs, topics...); err != nil {
+		return err
+	}
+	return service.configureTopics(ctx, traceConfigs, topics...)
+}
+
+// traceTopics are wherry.traces and the trace topics of every live tenant. They stay out of tenantFeeds, whose callers
+// apply the feeds' retention and record size.
+func traceTopics(state State) []string {
+	topics := []string{telemetry.TraceTopic("")}
+	for _, tenant := range slices.Sorted(maps.Keys(state.Tenants)) {
+		if !state.Tenants[tenant] {
+			topics = append(topics, telemetry.TraceTopic(tenant))
+		}
+	}
+	return topics
+}
+
+// traceRetentionMS is a trace topic's retention: spans are timing evidence, kept a week, where the feeds keep 30 days.
+const traceRetentionMS = 7 * 24 * 60 * 60 * 1000
+
+// traceConfigs are the trace topics' configs, one partition apart: deletion by time, the broker's timestamp, and the
+// trace client's batch maximum as the record size.
+var traceConfigs = map[string]string{
+	"cleanup.policy":         "delete",
+	"message.timestamp.type": "LogAppendTime",
+	"retention.ms":           strconv.Itoa(traceRetentionMS),
+	"max.message.bytes":      strconv.Itoa(telemetry.TraceBatchMaxBytes),
 }
 
 // checkSignatureTopics refuses a profile of a receiver whose membership has not ended when its signature topic is

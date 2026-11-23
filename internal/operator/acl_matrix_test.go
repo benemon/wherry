@@ -42,7 +42,7 @@ func TestACLMatrix(t *testing.T) {
 	}
 	want := []string{
 		"wherry.operator cluster kafka-cluster ALTER,ALTER_CONFIGS",
-		"wherry.operator group p-* ALTER_CONFIGS",
+		"wherry.operator group p-* ALTER_CONFIGS,DESCRIBE",
 		"wherry.operator topic wherry.* CREATE,ALTER_CONFIGS,READ,WRITE",
 		"wherry.rcv.receiver-a group p-pool-a READ,DESCRIBE,DESCRIBE_CONFIGS",
 		"wherry.rcv.receiver-a group p-pool-a.custodian READ,DESCRIBE",
@@ -62,6 +62,9 @@ func TestACLMatrix(t *testing.T) {
 		"wherry.rcv.receiver-a topic wherry.tenant.tenant-a.transcript WRITE,DESCRIBE",
 		"wherry.rcv.receiver-a topic wherry.tenant.tenant-b WRITE,DESCRIBE",
 		"wherry.rcv.receiver-a topic wherry.tenant.tenant-b.transcript WRITE,DESCRIBE",
+		"wherry.rcv.receiver-a topic wherry.traces WRITE,DESCRIBE",
+		"wherry.rcv.receiver-a topic wherry.traces.tenant-a WRITE,DESCRIBE",
+		"wherry.rcv.receiver-a topic wherry.traces.tenant-b WRITE,DESCRIBE",
 		"wherry.rcv.receiver-a transactional p.pool-a.* WRITE,DESCRIBE",
 		"wherry.rcv.receiver-b group p-pool-a READ,DESCRIBE,DESCRIBE_CONFIGS",
 		"wherry.rcv.receiver-b group p-pool-a.custodian READ,DESCRIBE",
@@ -81,6 +84,9 @@ func TestACLMatrix(t *testing.T) {
 		"wherry.rcv.receiver-b topic wherry.tenant.tenant-a.transcript WRITE,DESCRIBE",
 		"wherry.rcv.receiver-b topic wherry.tenant.tenant-b WRITE,DESCRIBE",
 		"wherry.rcv.receiver-b topic wherry.tenant.tenant-b.transcript WRITE,DESCRIBE",
+		"wherry.rcv.receiver-b topic wherry.traces WRITE,DESCRIBE",
+		"wherry.rcv.receiver-b topic wherry.traces.tenant-a WRITE,DESCRIBE",
+		"wherry.rcv.receiver-b topic wherry.traces.tenant-b WRITE,DESCRIBE",
 		"wherry.rcv.receiver-b transactional p.pool-a.* WRITE,DESCRIBE",
 		"wherry.rcv.receiver-c group p-pool-b READ,DESCRIBE,DESCRIBE_CONFIGS",
 		"wherry.rcv.receiver-c group p-pool-b.custodian READ,DESCRIBE",
@@ -95,6 +101,8 @@ func TestACLMatrix(t *testing.T) {
 		"wherry.rcv.receiver-c topic wherry.receiver.receiver-c.progress READ,WRITE,DESCRIBE",
 		"wherry.rcv.receiver-c topic wherry.tenant.tenant-a WRITE,DESCRIBE",
 		"wherry.rcv.receiver-c topic wherry.tenant.tenant-a.transcript WRITE,DESCRIBE",
+		"wherry.rcv.receiver-c topic wherry.traces WRITE,DESCRIBE",
+		"wherry.rcv.receiver-c topic wherry.traces.tenant-a WRITE,DESCRIBE",
 		"wherry.rcv.receiver-c transactional p.pool-b.* WRITE,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.host.tenant-a.host-a READ,WRITE,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.operator READ,DESCRIBE",
@@ -111,6 +119,7 @@ func TestACLMatrix(t *testing.T) {
 		"wherry.tnt.tenant-a.host-a topic wherry.receiver.receiver-c READ,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.tenant.tenant-a READ,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.tenant.tenant-a.transcript READ,DESCRIBE",
+		"wherry.tnt.tenant-a.host-a topic wherry.traces.tenant-a READ,WRITE,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.host.tenant-b.host-b READ,WRITE,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.operator READ,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.pool.pool-a.custodian READ,DESCRIBE",
@@ -121,6 +130,7 @@ func TestACLMatrix(t *testing.T) {
 		"wherry.tnt.tenant-b.host-b topic wherry.receiver.receiver-b READ,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.tenant.tenant-b READ,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.tenant.tenant-b.transcript READ,DESCRIBE",
+		"wherry.tnt.tenant-b.host-b topic wherry.traces.tenant-b READ,WRITE,DESCRIBE",
 	}
 	slices.Sort(got)
 	if !slices.Equal(got, want) {

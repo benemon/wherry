@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/signed"
+	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
@@ -703,6 +704,10 @@ func kfakeService(t *testing.T) (*kfake.Cluster, *Service, func()) {
 	if err := cluster.CreateTopic(OperatorTopic, 1, map[string]string{"retention.ms": "-1"}); err != nil {
 		t.Fatal(err)
 	}
+	// wherry.traces, as operator init leaves it.
+	if err := cluster.CreateTopic(telemetry.TraceTopic(""), 1, traceConfigs); err != nil {
+		t.Fatal(err)
+	}
 	root, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.SASL(scram.Auth{User: "admin", Pass: "password"}.AsSha512Mechanism()), kgo.FetchMaxWait(10*time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
@@ -753,6 +758,9 @@ func realService(t *testing.T) (*Service, func()) {
 	}
 	root := realRoot(t)
 	if err := Delegate(context.Background(), root, strings.TrimSpace(string(password))); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&Service{Operator: root}).EnsureTraceTopics(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	service := &Service{Operator: root, Broker: os.Getenv("WHERRY_TRUST_BROKER"), CA: ca}

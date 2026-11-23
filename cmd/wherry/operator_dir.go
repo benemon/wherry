@@ -203,6 +203,11 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 		os.Remove(temp.Name())
 		return err
 	}
+	// The trace topics of the install, as the super user: wherry.traces and every live tenant's, created where missing
+	// and converged on their configs, so a re-run gives an install that predates them its topics.
+	if err := (&operator.Service{Operator: superUser}).EnsureTraceTopics(ctx); err != nil {
+		return fmt.Errorf("%w; run operator init again", err)
+	}
 	if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{Broker: answers["broker"], CAFile: caFile, PasswordFile: "operator.password"}); err != nil {
 		return err
 	}
