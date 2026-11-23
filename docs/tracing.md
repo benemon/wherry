@@ -9,8 +9,8 @@ is no collector in the write path and no OTLP endpoint; any trace viewer that
 reads Kafka, or an OpenTelemetry Collector with its Kafka receiver, reads the
 topics.
 
-Tracing is off by default and costs nothing when off: no span is built, no
-record carries a header, no second connection is opened, and the tracing
+Tracing is off by default. When it is off, no span is built, no record
+carries a header, no second connection is opened, and the tracing
 calls on the run path allocate nothing and leave their context as it was.
 
 ## Turning it on
