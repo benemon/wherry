@@ -157,7 +157,7 @@ The names below are fixed; the attributes are listed in the next section.
 | host | `resolve credential`, `seal envelope`, `upload inputs` | INTERNAL, INTERNAL, CLIENT | `submit` |
 | host | `send <task topic>` | PRODUCER | `submit`; its context travels on the task record |
 | host | `send wherry.pool.<pool>.events` | PRODUCER | a cancel, under the run's `submit` when this host submitted it |
-| host | `process wherry.tenant.<tenant>` | CONSUMER | the receiver's send of the result or terminal status, once per record result accepts |
+| host | `process wherry.tenant.<tenant>` | CONSUMER | the receiver's send of the result or terminal status, once per record `result` accepts |
 | receiver | `process <task topic> <profile>` | CONSUMER | the host's send, one per attempt |
 | receiver | `admit` | INTERNAL | the attempt |
 | receiver | `run` | INTERNAL | the attempt; `wherry.retry` counts in-place start retries |

@@ -1366,6 +1366,8 @@ and needs `wherry host init` on a re-provisioned host.
 | `--output NAME[:required][:s3]` | | file the agent is asked to leave in `WHERRY_OUTPUT_DIR`; `:required` fails the run without it, and `:s3` returns it through the pool's bucket, in either order; repeatable |
 | `--start-by` | `10m` | `task_started_by`: an RFC 3339 time, or a Go duration from now, by which the agent's job must start |
 | `--end-by` | `2h` | `task_ended_by`: an RFC 3339 time, or a Go duration from now, by which the run must end |
+| `--wait` | false | collect the result after publishing |
+| `--outputs-dir` | `<state_dir>/runs/<run>/outputs/` | where the run's outputs go; requires `--wait` |
 
 Each bound must fall after now, and travels in whole seconds. `submit`
 refuses, before it publishes, an `--end-by` later than `--start-by` plus

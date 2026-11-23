@@ -208,7 +208,7 @@ func (r *revocation) steps(ctx context.Context, first, last int) RevocationResul
 	}
 	if !run(5, "wait revocation intervals", func() error {
 		if r.progress != nil {
-			r.progress(RevocationStep{Number: 5, Name: "result", Until: time.Now().Add(r.wait)})
+			r.progress(RevocationStep{Number: 5, Name: "wait", Until: time.Now().Add(r.wait)})
 		}
 		timer := time.NewTimer(r.wait)
 		defer timer.Stop()

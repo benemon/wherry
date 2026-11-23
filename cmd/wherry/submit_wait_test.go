@@ -91,7 +91,6 @@ func TestSubmitWaitStates(t *testing.T) {
 	for state, code := range map[wire.TaskState]int{wire.TaskStateFailed: 2, wire.TaskStateCanceled: 3, wire.TaskStateRejected: 4} {
 		t.Run(string(state), func(t *testing.T) {
 			b := newBus(t)
-			b.delayPublish(1200 * time.Millisecond)
 			var stderr bytes.Buffer
 			stdout := &submitWriter{first: func(line string) {
 				id := submittedID(line)
@@ -137,7 +136,14 @@ func TestSubmitWaitBound(t *testing.T) {
 			b := newBus(t)
 			b.delayPublish(1200 * time.Millisecond)
 			var stderr bytes.Buffer
-			stdout := &submitWriter{first: func(line string) { b.claimSubmitted(t, submittedID(line)) }}
+			var deadline time.Time
+			stdout := &submitWriter{first: func(line string) {
+				admitted := b.claimSubmitted(t, submittedID(line))
+				deadline = time.Unix(admitted.submission.Wherry.TaskEndedBy, 0).Add(submitWaitMargin)
+				if floor := time.Now().Add(time.Second); floor.After(deadline) {
+					deadline = floor
+				}
+			}}
 			end := "3s"
 			if absolute {
 				end = time.Now().Add(3 * time.Second).Format(time.RFC3339Nano)
@@ -149,6 +155,9 @@ func TestSubmitWaitBound(t *testing.T) {
 			var exit *exitError
 			if !errors.As(err, &exit) || exit.code != 6 || !strings.Contains(stderr.String(), "collect it later with: wherry result "+submittedID(strings.Split(stdout.String(), "\n")[0])) {
 				t.Fatalf("%v %s", err, stderr.String())
+			}
+			if time.Now().After(deadline.Add(500 * time.Millisecond)) {
+				t.Fatalf("wait exceeded published bound plus slack: %s", time.Since(deadline))
 			}
 			if elapsed := time.Since(started); elapsed < 2*time.Second || elapsed > 4*time.Second {
 				t.Fatalf("bound: %s", elapsed)
@@ -187,16 +196,16 @@ func TestMCPSubmitWait(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			b := newBus(t)
 			old := waitBound
-			waitBound = time.Second
+			waitBound = 2 * time.Second
 			t.Cleanup(func() { waitBound = old })
 			calls := 0
 			connect := func() (*busclient.Host, error) {
 				calls++
 				if calls == 1 && mode == "delayed" {
-					b.delayPublish(700 * time.Millisecond)
+					b.delayPublish(time.Second)
 				}
 				if calls == 1 && mode == "expired" {
-					b.delayPublish(1300 * time.Millisecond)
+					b.delayPublish(3 * time.Second)
 				}
 				if calls == 2 {
 					if mode == "broker" {
@@ -277,10 +286,10 @@ func TestMCPSubmitWait(t *testing.T) {
 				if reply.Result == nil || reply.Result.ID != reply.ID || reply.Result.RetryAfter != retryAfter {
 					t.Fatalf("unfinished: %+v", reply)
 				}
-				if mode == "delayed" && elapsed > 1500*time.Millisecond {
+				if mode == "delayed" && elapsed > 2900*time.Millisecond {
 					t.Fatalf("publish did not reduce wait: %s", elapsed)
 				}
-				if mode == "expired" && elapsed > 1900*time.Millisecond {
+				if mode == "expired" && elapsed > 4500*time.Millisecond {
 					t.Fatalf("expired budget still awaited: %s", elapsed)
 				}
 			}
@@ -308,7 +317,7 @@ func TestSubmitWaitResubmission(t *testing.T) {
 		}
 		b.outputResult(t, next, "report.md", "replacement", hashOf("replacement"))
 	}}
-	err := runSubmit(b.ctx, b.client, []string{"--prompt", "work", "--wait", "--outputs-dir", t.TempDir()}, stdout, &stderr)
+	err := runSubmit(b.ctx, b.client, []string{"--prompt", "work", "--wait", "--start-by", "5s", "--end-by", "10s", "--outputs-dir", t.TempDir()}, stdout, &stderr)
 	if err != nil {
 		t.Fatalf("%v: %s", err, stderr.String())
 	}
@@ -379,4 +388,42 @@ func (b *bus) delayPublish(delay time.Duration) {
 		b.cluster.KeepControl()
 		return nil, nil, false
 	})
+}
+
+func TestSubmitWaitReplacementBound(t *testing.T) {
+	b := newBus(t)
+	old := submitWaitMargin
+	submitWaitMargin = 50 * time.Millisecond
+	t.Cleanup(func() { submitWaitMargin = old })
+	var stderr bytes.Buffer
+	var deadline time.Time
+	claimed := make(chan struct{})
+	stdout := &submitWriter{first: func(line string) {
+		id := submittedID(line)
+		admitted := b.claimSubmitted(t, id)
+		deadline = time.Unix(admitted.submission.Wherry.TaskEndedBy, 0).Add(submitWaitMargin)
+		go func() {
+			defer close(claimed)
+			time.Sleep(900 * time.Millisecond)
+			lost := &wire.RunStatus{StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: id, ContextID: id, Status: now(wire.TaskStateFailed)}, Wherry: wire.StatusBinding{ReceiverBinding: b.binding(admitted), EventID: "lost", Kind: "terminal", Event: wire.EventKeyLost, TaskHash: admitted.hash}}
+			b.feed(t, id, b.sign(t, lost))
+			status, err := b.client.Status(b.ctx, id)
+			if err != nil || status.Replacement == "" {
+				t.Errorf("replacement: %+v %v", status, err)
+				return
+			}
+			b.claimSubmitted(t, status.Replacement)
+		}()
+	}}
+	ctx, cancel := context.WithTimeout(b.ctx, 6*time.Second)
+	defer cancel()
+	err := runSubmit(ctx, b.client, []string{"--prompt", "work", "--wait", "--start-by", "3s", "--end-by", "4s"}, stdout, &stderr)
+	<-claimed
+	var exit *exitError
+	if !errors.As(err, &exit) || exit.code != 6 {
+		t.Fatalf("replacement bound: %v %s", err, stderr.String())
+	}
+	if time.Now().After(deadline.Add(500 * time.Millisecond)) {
+		t.Fatalf("replacement restarted the wait budget: %s late", time.Since(deadline))
+	}
 }

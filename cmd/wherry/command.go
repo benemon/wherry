@@ -509,11 +509,11 @@ func outputFlag(outputs *[]wire.ExpectedOutput) func(string) error {
 // stdin is a variable so tests can give submit a prompt on standard input.
 var stdin io.Reader = os.Stdin
 
-// defaultWaitTimeout covers a run at the default task_started_by and task_ended_by.
 const defaultSubmitWaitMargin = 10 * time.Minute
 
 var submitWaitMargin = defaultSubmitWaitMargin
 
+// defaultWaitTimeout covers a run at the default task_started_by and task_ended_by.
 const defaultWaitTimeout = busclient.DefaultStartBy + busclient.DefaultEndBy
 
 // streamRetry separates a failed read of a run's transcript that logs follows from the next, and bounds each wait for
