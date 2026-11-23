@@ -1702,7 +1702,7 @@ replacements that names a run twice. When the resubmission fails, for
 example on a suspended pool or a pool whose current snapshot is missing or
 not authorised, `result`
 exits with status 1 and
-`wait <id>: run <id> lost its pool key and is resubmittable until <RFC 3339 time>; resubmitting it failed: <error>`.
+`result <id>: run <id> lost its pool key and is resubmittable until <RFC 3339 time>; resubmitting it failed: <error>`.
 
 #### Exit codes
 

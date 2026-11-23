@@ -195,6 +195,16 @@ func TestMCPToolsList(t *testing.T) {
 			t.Errorf("wait output schema lacks %s", field)
 		}
 	}
+	encoded, _ = json.Marshal(schemas["submit"].OutputSchema)
+	if err := json.Unmarshal(encoded, &wait); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"id", "pool", "command", "result", "error"} {
+		if _, ok := wait.Properties[field]; !ok {
+			t.Errorf("submit output schema lacks %s", field)
+		}
+	}
+
 }
 
 func TestBoundsTakeATimeOrADurationAndDefault(t *testing.T) {

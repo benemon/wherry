@@ -28,8 +28,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// waitBound stays below the shortest common harness tool-call timeout, so every model can loop on wait.
-const waitBound = 45 * time.Second
+// waitBound is the waiting budget, less submission time for submit.
+var waitBound = 45 * time.Second
 
 // retryAfter is the pause, in seconds, that wait suggests before the next call while a run is unfinished.
 const retryAfter = 5
@@ -448,7 +448,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "submit",
-		Description: "Sign and publish a task to the task topic of a signature, an agent and all the labels of the profiles that carry it, that live receivers offer matching the selector, preferring the default agent, then the greatest spare capacity, then the lowest topic name. Returns the run id at once; collect the result with result, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR or in environment variables, or, by name alone, the placed agent's own optional credentials the task cannot go without: every agent credential this host can resolve is delivered at its target, required or optional, named or not, and unsupplied lists the optional ones it could not resolve, which the run goes without; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which result writes locally. Submit encrypts the agent's and the task's configured credentials into the task's envelope under the pool's key; the run needs nothing more from this host. Submit refuses with auth required when this host has no source for a credential the agent requires or the task names, when none of a catalog agent's model credentials resolves, and refuses a name that is not one of the placed agent's credentials.",
+		Description: "Sign and publish a task to the task topic of a signature, an agent and all the labels of the profiles that carry it, that live receivers offer matching the selector, preferring the default agent, then the greatest spare capacity, then the lowest topic name. Returns the run id; set wait only for runs expected to finish within 45 seconds, otherwise collect the result with result, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR or in environment variables, or, by name alone, the placed agent's own optional credentials the task cannot go without: every agent credential this host can resolve is delivered at its target, required or optional, named or not, and unsupplied lists the optional ones it could not resolve, which the run goes without; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which result writes locally. Submit encrypts the agent's and the task's configured credentials into the task's envelope under the pool's key; the run needs nothing more from this host. Submit refuses with auth required when this host has no source for a credential the agent requires or the task names, when none of a catalog agent's model credentials resolves, and refuses a name that is not one of the placed agent's credentials.",
 	}, func(ctx context.Context, request *mcp.CallToolRequest, input submitInput) (*mcp.CallToolResult, submitOutput, error) {
 		started := time.Now()
 		submission, err := submitFromInput(input, readInput, openInput)

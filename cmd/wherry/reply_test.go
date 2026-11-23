@@ -70,7 +70,7 @@ func TestMCPWaitWritesTheReply(t *testing.T) {
 	reply := strings.Repeat("m", wire.OutputChunk) + " the end"
 	b, runID := replyRun(t, reply, reply, reply, false)
 	var waited waitReply
-	callTool(t, b.ctx, mcpSession(t, b.connect(t), nil), "wait", map[string]any{"id": runID}, &waited)
+	callTool(t, b.ctx, mcpSession(t, b.connect(t), nil), "result", map[string]any{"id": runID}, &waited)
 	path := filepath.Join(b.stateDir, "runs", runID, "outputs", wire.ReplyFile)
 	if waited.Message != reply[:wire.MaxText] || waited.Reply == nil || waited.Reply.Path != path || waited.Reply.Size != int64(len(reply)) || waited.Reply.Cut {
 		t.Fatalf("wait message of %d bytes, reply %+v; want the preview and %s", len(waited.Message), waited.Reply, path)
@@ -80,13 +80,13 @@ func TestMCPWaitWritesTheReply(t *testing.T) {
 	}
 	b, runID = replyRun(t, reply, reply[:wire.OutputChunk], reply, false)
 	waited = waitReply{}
-	callTool(t, b.ctx, mcpSession(t, b.connect(t), nil), "wait", map[string]any{"id": runID}, &waited)
+	callTool(t, b.ctx, mcpSession(t, b.connect(t), nil), "result", map[string]any{"id": runID}, &waited)
 	if waited.Reply == nil || waited.Reply.Rejected != "size or hash mismatch" || waited.Reply.Path != "" || waited.Message != reply[:wire.MaxText] {
 		t.Fatalf("wait reply %+v; want it rejected with the preview inline", waited.Reply)
 	}
 	b, runID = finishedRun(t)
 	waited = waitReply{}
-	callTool(t, b.ctx, mcpSession(t, b.connect(t), nil), "wait", map[string]any{"id": runID}, &waited)
+	callTool(t, b.ctx, mcpSession(t, b.connect(t), nil), "result", map[string]any{"id": runID}, &waited)
 	if waited.Message != "done" || waited.Reply != nil {
 		t.Fatalf("wait of a short reply %+v, want it inline alone", waited)
 	}

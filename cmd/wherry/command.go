@@ -459,7 +459,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if *wait {
-		bound := max(time.Until(endTime.Add(submitWaitMargin)), time.Second)
+		bound := max(time.Until(time.Unix(endTime.Unix(), 0).Add(submitWaitMargin)), time.Second)
 		err := runWait(ctx, client, []string{result.RunID, "--timeout", bound.String(), "--outputs-dir", *outputsDir}, stdout, stderr)
 		var exit *exitError
 		if errors.As(err, &exit) && exit.code == timeoutCode {
@@ -530,7 +530,7 @@ func (e *exitError) Error() string { return e.err.Error() }
 
 func (e *exitError) Unwrap() error { return e.err }
 
-// stateCodes are wait's exit codes for a run that ends in a state other than COMPLETED, and timeoutCode for its
+// stateCodes are result's exit codes for a run that ends in a state other than COMPLETED, and timeoutCode for its
 // timeout passing with the run still going.
 var stateCodes = map[wire.TaskState]int{
 	wire.TaskStateFailed: 2, wire.TaskStateCanceled: 3, wire.TaskStateRejected: 4,

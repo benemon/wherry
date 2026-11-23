@@ -231,7 +231,7 @@ run before a receiver claims it.
 A run passes through these records from submission to result.
 
 ![A run's lifecycle: submission with the host then free to go offline, claim, open request, attempt
-wrap, re-key wrap or open refusal, dispatch, statuses and transcript, result and wait, with where a
+wrap, re-key wrap or open refusal, dispatch, statuses and transcript, result and collection, with where a
 redelivery and an adoption enter](diagrams/run-lifecycle.svg)
 
 ## Pool keys and the key custodian
