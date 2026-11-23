@@ -136,14 +136,9 @@ func revocationErrorOf(_ bool, err error) error { return err }
 // the Kafka transport, so the records' bytes and the broker's topic names are searched too: a marker of no valid
 // tenant goes to wherry.traces, never to a topic named after the argument.
 func TestTracedCommandsValidateArgumentsBeforeAttributing(t *testing.T) {
-	cluster, service, closeFixture := kfakeService(t)
+	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := t.Context()
-	for _, tenant := range []string{"", "t"} {
-		if err := cluster.CreateTopic(telemetry.TraceTopic(tenant), 1, nil); err != nil {
-			t.Fatal(err)
-		}
-	}
 	logs := &strings.Builder{}
 	tracing, err := telemetry.New(ctx, telemetry.RoleOperator, telemetry.Names{}, service.Operator.Opts(), log.New(logs, "", 0))
 	if err != nil {

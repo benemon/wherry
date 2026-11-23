@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/benemon/wherry/internal/telemetry"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -74,7 +75,7 @@ func TestHostAddRefusesAnExistingFileBeforeCreatingTheRecordTopic(t *testing.T) 
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	responses, err := kadm.NewClient(service.Operator).DeleteTopics(ctx, OperatorTopic)
+	responses, err := kadm.NewClient(service.Operator).DeleteTopics(ctx, OperatorTopic, telemetry.TraceTopic(""))
 	if err == nil {
 		err = responses.Error()
 	}
