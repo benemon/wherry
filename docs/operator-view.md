@@ -42,13 +42,22 @@ The view binds `127.0.0.1` only, on `--port` or a free port. No flag names anoth
 Every record is verified against its writer's key as the signed records are everywhere in wherry, and checked
 against the membership, entitlements and keys in force when the broker appended it, not now: a run completed by a
 receiver since removed is present, a status signed with a receiver's key after its membership ended is not, and a
-status of a run admitted before its tenant's entitlement ended counts once it is joined to that run's echo. Each
-record is verified once; the copy of a status on the tenant feed is the copy on the pool's events, found by digest.
+status, result or start failure of a run admitted before its tenant's entitlement ended counts only when it joins
+that run's echo: the same run under the record's key, the same tenant, pool and task hash, the echo appended while
+the tenant was entitled. Such a record carrying another task hash is refused. Each record is verified once; the copy
+of a status on the tenant feed is the copy on the pool's events, found by digest.
+
+The key topics of every receiver and host, ended or not, are tailed before each batch of records is folded, so a
+rotation is seen within a tick. A rotation retires a key from its append time; a record signed with it and appended
+after that no longer verifies, and when the rotation is read after such records were folded, the facts taken from
+them are retracted and counted as `retracted`.
 
 The model keeps named fields and nothing of what an agent wrote: from a status its kind, state, event ID, attempt,
 receiver, append time, log offset, event and a failure class; from a result the output names and sizes, the reply's
 size and where it ran. The text of a status message, a reply, an artifact or a task never enters the model, so no
-response carries it. The failure class comes from a fixed table, since the records carry no class but a start
+response carries it; nor do a result's labels. A profile or agent a result, start failure or advertisement names is
+shown only when the receiver's configuration or the pool's terms name it, else it is empty or the offer dropped. The
+failure class comes from a fixed table, since the records carry no class but a start
 failure's: `start-failure:dispatch`, `start-failure:platform` and `start-failure:input-too-large` from a start
 failure; `key-lost`, `failed` and `canceled` from a failed or canceled terminal status; `rejected` from a rejection;
 `unclassified` for a terminal status in another state. The reason text in the record is never shown.
@@ -76,9 +85,15 @@ window short.
 The caps apply while reading, not after, and each reports in the model's `bounds` list when hit: a record count and
 byte budget per read, a record over 2 MiB skipped before decoding, 50,000 runs kept with the oldest by last activity
 dropped, 400,000 digests, 10,000 records pending a key or an echo, 10,000 topics, 8 MiB per JSON response with the
-runs list cut by halves to fit, 64 KiB per stream event. The drill-down scans at most 32 MiB, 20,000 records and 5,000
-spans per refresh, builds a forest of at most 5,000 nodes, runs at most 5 seconds and two scans at once, and keeps
-the scan state of 32 runs.
+runs list cut by halves to fit, 64 KiB per stream event. The retained state is bounded as each record is folded: one
+run keeps at most 1,000 events and 512 KiB, its oldest events dropped first from its lowest attempt so its state
+stands, 64 attempts with the lowest dropped, and 64 open requests with the oldest dropped, and a run so cut lists the
+caps in its `truncated` field; the model keeps at most 2,000,000 events and 512 MiB over every run, the oldest runs
+dropped beyond them as under the runs cap, and 200,000 progress records over every receiver. A JSON response is
+encoded into a buffer that stops at the response bound, so no larger encoding is built, and a run detail whose
+element counts alone put it over the bound is refused before encoding. The drill-down scans at most 32 MiB, 20,000
+records and 5,000 spans per refresh, builds a forest of at most 5,000 nodes, runs at most 5 seconds and two scans
+at once, and keeps the scan state of 32 runs.
 
 ## Freshness
 
@@ -105,11 +120,13 @@ two assets and `POST /session`.
 Span facts are advisory: any host of a tenant can write that tenant's trace topic, so the drill-down adds timing
 and never takes a run's state, failure or S3 facts from a span ([Tracing](tracing.md#topics-and-grants)). It tests
 each record for the run ID as bytes before decoding it, skips one over the trace client's record limit before
-decoding, and passes span names, attribute keys and values through an allowlist of what the model knows; anything
-else shows as `[other]` or is dropped and marked.
+decoding, and passes span names, attribute keys and values through an allowlist of what the model knows: a span name
+is rebuilt from validated components, a fixed name, a topic the model follows, a profile a receiver's configuration
+names or an operator command of the fixed set; anything else shows as `[other]` or is dropped and marked.
 
-Errors carry a fixed text. Request bodies, the token and the cookie are never logged; the log holds the method, the
-path and the status.
+Errors carry a fixed text. Request bodies, the token, the cookie and the request path are never logged; the log
+holds the method, a fixed identifier of the route matched (`page`, `asset`, `session`, `model`, `run`, `trace`,
+`stream` or `other`) and the status.
 
 ## Behind a reverse proxy
 
