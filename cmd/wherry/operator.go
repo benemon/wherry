@@ -23,7 +23,7 @@ import (
 
 // operatorUsage is each operator command's usage, under "" the operator's.
 var operatorUsage = map[string]string{
-	"":                    "usage: wherry operator <init|pool apply|tenant add|tenant list|tenant storage|tenant pool add|tenant pool remove|tenant host add|tenant host refresh|tenant host remove|tenant remove|pool suspend|pool resume|pool rotate-key|receiver apply|receiver show|receiver remove|check> [--dir DIR]",
+	"":                    "usage: wherry operator <init|pool apply|tenant add|tenant list|tenant storage|tenant pool add|tenant pool remove|tenant host add|tenant host refresh|tenant host remove|tenant remove|pool suspend|pool resume|pool rotate-key|receiver apply|receiver show|receiver remove|check|view> [--dir DIR]",
 	"init":                "usage: wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] [--super-user NAME --super-user-password-file FILE|-] [--super-user-mechanism SCRAM-SHA-512|SCRAM-SHA-256]",
 	"pool apply":          "usage: wherry operator pool apply NAME [-f PATH] [--dry-run]",
 	"tenant add":          "usage: wherry operator tenant add TENANT",
@@ -42,6 +42,7 @@ var operatorUsage = map[string]string{
 	"tenant host refresh": "usage: wherry operator tenant host refresh TENANT HOST",
 	"tenant host remove":  "usage: wherry operator tenant host remove TENANT HOST [--wait DURATION]",
 	"check":               "usage: wherry operator check",
+	"view":                "usage: wherry operator view [--dir DIR] [--window 24h] [--port N] [--external-url URL]",
 }
 
 func runOperator(args []string, stdout, stderr io.Writer) error {
@@ -409,6 +410,11 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		return writeLeftovers(stdout, leftovers)
+	case "view":
+		if len(pos) != 1 {
+			return errors.New(operatorUsage[command])
+		}
+		return operatorView(ctx, service, options, stdout, stderr)
 	default:
 		return errors.New("unknown operator command")
 	}
@@ -564,7 +570,7 @@ func integral(value any) any {
 func operatorArgs(args []string) ([]string, map[string]string, error) {
 	flags := flag.NewFlagSet("operator", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	for _, name := range []string{"f", "wait", "sha256", "dir", "broker", "ca-file", "super-user", "super-user-password-file", "super-user-mechanism"} {
+	for _, name := range []string{"f", "wait", "sha256", "dir", "broker", "ca-file", "super-user", "super-user-password-file", "super-user-mechanism", "window", "port", "external-url"} {
 		flags.String(name, "", "")
 	}
 	var suspects []string
@@ -604,6 +610,7 @@ func operatorArgs(args []string) ([]string, map[string]string, error) {
 		"tenant host remove":  {"wait": true},
 		"receiver remove":     {"wait": true},
 		"check":               {},
+		"view":                {"window": true, "port": true, "external-url": true},
 	}[command]
 	if allowed != nil {
 		for _, name := range slices.Sorted(maps.Keys(options)) {
@@ -965,7 +972,7 @@ var operatorKafka = func(broker string, ca []byte, user, password string) (*kgo.
 }
 
 func operatorCommand(pos []string) string {
-	if len(pos) > 0 && (pos[0] == "init" || pos[0] == "check") {
+	if len(pos) > 0 && (pos[0] == "init" || pos[0] == "check" || pos[0] == "view") {
 		return pos[0]
 	}
 	length := 2

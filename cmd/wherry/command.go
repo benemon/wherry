@@ -31,7 +31,7 @@ operator:
   wherry operator tenant pool add|remove
   wherry operator tenant host add|refresh|remove
   wherry operator receiver apply|show|remove
-  wherry operator check
+  wherry operator check|view
 receiver:
   wherry receiver run
 host:
