@@ -876,6 +876,9 @@ func TestBrokerPoolPassesOperatorCheck(t *testing.T) {
 	if err := operator.Delegate(ctx, admin, "operator-password"); err != nil {
 		t.Fatal(err)
 	}
+	if err := (&operator.Service{Operator: admin}).EnsureTraceTopics(ctx); err != nil {
+		t.Fatal(err)
+	}
 	b := newBrokerPool(t, ctx, cluster.ListenAddrs()[0])
 	b.configure(t, ctx, brokerProfile(6))
 	b.deliveryLimit(t, ctx, 4)
