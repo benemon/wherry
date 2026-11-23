@@ -257,6 +257,31 @@ func TestEveryCollectionBounded(t *testing.T) {
 			t.Errorf("counts %v", s.Counts)
 		}
 	})
+	t.Run("run bytes", func(t *testing.T) {
+		// A hundred echoes of distinct hashes under a per-run byte cap, the model's cap far above: the run stays with
+		// its joined echo alone, under the cap, marked and counted.
+		f := newFixture(t)
+		at := f.now.Add(-time.Minute)
+		var run string
+		for i := range 100 {
+			run = f.echoWith(at.Add(time.Duration(i)*time.Second), receiverA, tenantA, hostA, poolA, "bytes", hashOf(string(rune('a'+i%26))+string(rune('a'+i/26))))
+		}
+		caps := testCaps()
+		caps.RunBytes = 1024
+		v := f.view(time.Hour, caps)
+		s := v.Snapshot(0)
+		v.mu.RLock()
+		r := v.m.runs[run]
+		var echoes int
+		var bytes int64
+		if r != nil {
+			echoes, bytes = len(r.Echoes), r.me.bytes
+		}
+		v.mu.RUnlock()
+		if r == nil || echoes != 1 || bytes > caps.RunBytes || !slices.Equal(summaryOf(t, s, run).Truncated, []string{capRunBytes}) || s.Counts[capRunBytes] != 99 {
+			t.Errorf("run kept %v with %d echoes and %d bytes, counts %v", r != nil, echoes, bytes, s.Counts)
+		}
+	})
 	t.Run("over every run", func(t *testing.T) {
 		for _, c := range []struct {
 			name    string
