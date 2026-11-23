@@ -73,8 +73,9 @@ func TestDrillDown(t *testing.T) {
 	f.traceRecord(t0.Add(-30*time.Second), hostService,
 		span(t1, submit, nil, "submit", run, t0.Add(-time.Minute), str(string(telemetry.AttrHost), hostA), str(string(telemetry.AttrOutput), "s3cr3t-span-attr")),
 		span(t1, send, submit, "send "+taskTopic, run, t0.Add(-50*time.Second), str("messaging.destination.name", taskTopic)))
-	// Another run's span carrying the selected run's trace ID, and one with a hostile name and key.
-	f.traceRecord(t0.Add(2*time.Second), hostService, span(t1, id(8), submit, "submit", other, t0.Add(time.Second)))
+	// Another run's span carrying the selected run's trace ID, in a record that also holds the run's own span, so the
+	// record passes the byte test and the span check alone excludes it; and a span with a hostile name and key.
+	f.traceRecord(t0.Add(2*time.Second), hostService, span(t1, id(8), submit, "submit", other, t0.Add(time.Second)), span(t1, id(8), submit, "read state", run, t0.Add(time.Second)))
 	f.traceRecord(t0.Add(3*time.Second), receiverService,
 		span(t2, id(8), nil, "process "+taskTopic+" profile-a", run, t0.Add(2*time.Second), str(string(telemetry.AttrReceiver), receiverA)),
 		span(t2, id(8), nil, "s3cr3t-span-name", run, t0.Add(2*time.Second), str("s3cr3t.key", "s3cr3t-span-value")))
@@ -103,8 +104,8 @@ func TestDrillDown(t *testing.T) {
 	if want := []string{hex.EncodeToString(t1), hex.EncodeToString(t2), hex.EncodeToString(t3), hex.EncodeToString(t4)}; !slices.Equal(slices.Sorted(slices.Values(ids)), slices.Sorted(slices.Values(want))) {
 		t.Errorf("traces %v, want the run's four", ids)
 	}
-	if forest.Spans != 7 {
-		t.Errorf("%d spans, want the run's 7", forest.Spans)
+	if forest.Spans != 8 {
+		t.Errorf("%d spans, want the run's 8", forest.Spans)
 	}
 	var got []string
 	for _, trace := range forest.Traces {
@@ -125,7 +126,7 @@ func TestDrillDown(t *testing.T) {
 	}
 	for _, trace := range forest.Traces {
 		if trace.ID == hex.EncodeToString(t1) {
-			if len(trace.Roots) != 1 || trace.Roots[0].Name != "submit" || len(trace.Roots[0].Children) != 1 || trace.Roots[0].Attributes[string(telemetry.AttrHost)] != hostA || trace.Roots[0].Service != hostService {
+			if len(trace.Roots) != 1 || trace.Roots[0].Name != "submit" || len(trace.Roots[0].Children) != 2 || trace.Roots[0].Attributes[string(telemetry.AttrHost)] != hostA || trace.Roots[0].Service != hostService {
 				t.Errorf("trace 1: %+v", trace.Roots)
 			}
 			if _, ok := trace.Roots[0].Attributes[string(telemetry.AttrOutput)]; ok {
@@ -148,7 +149,7 @@ func TestDrillDown(t *testing.T) {
 		}
 	}
 	// The other run's span never appears, under its own run either.
-	if other, err := v.traces.Trace(f.ctx, other); err != nil || other.Spans != 1 || other.Traces[0].ID != hex.EncodeToString(t1) {
+	if other, err := v.traces.Trace(f.ctx, other); err != nil || other.Spans != 1 || other.Traces[0].ID != hex.EncodeToString(t1) || other.Traces[0].Roots[0].Name != "submit" {
 		t.Errorf("other run: %+v %v", other, err)
 	}
 	// Delayed spans appear on refresh, reading the new records alone.
@@ -159,7 +160,7 @@ func TestDrillDown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if forest.Spans != 8 || forest.Read.Records != 1 || forest.Read.Bytes >= first.Bytes {
+	if forest.Spans != 9 || forest.Read.Records != 1 || forest.Read.Bytes >= first.Bytes {
 		t.Errorf("refresh: %d spans, read %+v after %+v; want one more span from one record", forest.Spans, forest.Read, first)
 	}
 	// Cap exhaustion is cut and marked.

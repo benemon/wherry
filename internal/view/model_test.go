@@ -471,10 +471,15 @@ func TestBoundsApplyWhileReadingAndReport(t *testing.T) {
 	for i := range 3 {
 		f.poolOnly(t0.Add(10*time.Minute+time.Duration(i)*time.Second), st{receiver: receiverA, tenant: tenantB, pool: poolA, run: runID(tenantB, hostB, "pending-"+string(rune('a'+i))), kind: "claimed", state: wire.TaskStateWorking})
 	}
+	// Each bounded batch lists the data topics' offsets again; listings counts the listings naming the events topic.
 	var listings atomic.Int32
-	f.cluster.ControlKey(int16(kmsg.ListOffsets), func(kmsg.Request) (kmsg.Response, error, bool) {
+	f.cluster.ControlKey(int16(kmsg.ListOffsets), func(request kmsg.Request) (kmsg.Response, error, bool) {
 		f.cluster.KeepControl()
-		listings.Add(1)
+		for _, topic := range request.(*kmsg.ListOffsetsRequest).Topics {
+			if topic.Topic == operator.PoolEventsTopic(poolA) {
+				listings.Add(1)
+			}
+		}
 		return nil, nil, false
 	})
 	caps := testCaps()
@@ -496,8 +501,8 @@ func TestBoundsApplyWhileReadingAndReport(t *testing.T) {
 	if hits[capRuns] == 0 || hits[capRecordBytes] < 4 || hits[capDigests] == 0 || hits[capPending] < 2 {
 		t.Errorf("bounds reported %v; want runs, record_bytes, digests and pending hit", hits)
 	}
-	if n := listings.Load(); n < 8 {
-		t.Errorf("%d offset listings during the rebuild; want several, one pair per bounded batch", n)
+	if n := listings.Load(); n < 10 {
+		t.Errorf("%d listings of the events topic during the rebuild; want one pair per bounded batch of 3 over 19 records", n)
 	}
 }
 
