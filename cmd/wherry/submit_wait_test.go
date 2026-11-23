@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -14,7 +15,10 @@ import (
 	"time"
 
 	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 type submitWriter struct {
@@ -87,11 +91,14 @@ func TestSubmitWaitStates(t *testing.T) {
 	for state, code := range map[wire.TaskState]int{wire.TaskStateFailed: 2, wire.TaskStateCanceled: 3, wire.TaskStateRejected: 4} {
 		t.Run(string(state), func(t *testing.T) {
 			b := newBus(t)
+			b.delayPublish(1200 * time.Millisecond)
 			var stderr bytes.Buffer
 			stdout := &submitWriter{first: func(line string) {
 				id := submittedID(line)
 				admitted := b.claimSubmitted(t, id)
-				b.feed(t, id, b.status(t, admitted, "terminal-1", "terminal", now(state)))
+				status := now(state)
+				result := &wire.Result{Task: wire.Task{ID: id, ContextID: id, History: []wire.Message{admitted.submission.Message}, Status: status, Artifacts: []wire.Artifact{}}, Wherry: wire.ResultBinding{ReceiverBinding: b.binding(admitted), TaskHash: admitted.hash}}
+				b.feed(t, id, b.sign(t, result), b.status(t, admitted, "terminal-1", "terminal", status))
 			}}
 			err := runSubmit(b.ctx, b.client, []string{"--prompt", "work", "--wait"}, stdout, &stderr)
 			var exit *exitError
@@ -128,8 +135,9 @@ func TestSubmitWaitBound(t *testing.T) {
 	for _, absolute := range []bool{false, true} {
 		t.Run(fmt.Sprint(absolute), func(t *testing.T) {
 			b := newBus(t)
+			b.delayPublish(1200 * time.Millisecond)
 			var stderr bytes.Buffer
-			stdout := &submitWriter{first: func(line string) { b.claimSubmitted(t, submittedID(line)); time.Sleep(1200 * time.Millisecond) }}
+			stdout := &submitWriter{first: func(line string) { b.claimSubmitted(t, submittedID(line)) }}
 			end := "3s"
 			if absolute {
 				end = time.Now().Add(3 * time.Second).Format(time.RFC3339Nano)
@@ -150,11 +158,12 @@ func TestSubmitWaitBound(t *testing.T) {
 }
 func TestSubmitWaitExpiredBudget(t *testing.T) {
 	b := newBus(t)
+	b.delayPublish(1200 * time.Millisecond)
 	old := submitWaitMargin
 	submitWaitMargin = time.Millisecond
 	t.Cleanup(func() { submitWaitMargin = old })
 	var stderr bytes.Buffer
-	stdout := &submitWriter{first: func(line string) { b.claimSubmitted(t, submittedID(line)); time.Sleep(1200 * time.Millisecond) }}
+	stdout := &submitWriter{first: func(line string) { b.claimSubmitted(t, submittedID(line)) }}
 	err := runSubmit(b.ctx, b.client, []string{"--prompt", "work", "--wait", "--start-by", "100ms", "--end-by", "200ms"}, stdout, &stderr)
 	var exit *exitError
 	if !errors.As(err, &exit) || exit.code != 6 || !strings.Contains(stderr.String(), "collect it later with:") {
@@ -178,16 +187,16 @@ func TestMCPSubmitWait(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			b := newBus(t)
 			old := waitBound
-			waitBound = 500 * time.Millisecond
+			waitBound = time.Second
 			t.Cleanup(func() { waitBound = old })
 			calls := 0
 			connect := func() (*busclient.Host, error) {
 				calls++
 				if calls == 1 && mode == "delayed" {
-					time.Sleep(300 * time.Millisecond)
+					b.delayPublish(700 * time.Millisecond)
 				}
 				if calls == 1 && mode == "expired" {
-					time.Sleep(650 * time.Millisecond)
+					b.delayPublish(1300 * time.Millisecond)
 				}
 				if calls == 2 {
 					if mode == "broker" {
@@ -221,7 +230,25 @@ func TestMCPSubmitWait(t *testing.T) {
 			}
 			var reply submitOutput
 			started := time.Now()
-			callTool(t, b.ctx, session, "submit", args, &reply)
+			var raw map[string]any
+			callTool(t, b.ctx, session, "submit", args, &raw)
+			encoded, err := json.Marshal(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(encoded, &reply); err != nil {
+				t.Fatal(err)
+			}
+			if mode != "omitted" && mode != "false" && mode != "broker" && mode != "collection" {
+				if raw["result"] == nil || raw["state"] != nil {
+					t.Fatalf("result is not nested: %s", encoded)
+				}
+			}
+			if mode == "omitted" || mode == "false" {
+				if _, ok := raw["result"]; ok {
+					t.Fatalf("unrequested result member: %s", encoded)
+				}
+			}
 			elapsed := time.Since(started)
 			if reply.ID == "" || reply.Pool != "pool-a" || reply.Command != "wherry result "+reply.ID {
 				t.Fatalf("identity: %+v", reply)
@@ -250,10 +277,10 @@ func TestMCPSubmitWait(t *testing.T) {
 				if reply.Result == nil || reply.Result.ID != reply.ID || reply.Result.RetryAfter != retryAfter {
 					t.Fatalf("unfinished: %+v", reply)
 				}
-				if mode == "delayed" && elapsed > 700*time.Millisecond {
+				if mode == "delayed" && elapsed > 1500*time.Millisecond {
 					t.Fatalf("publish did not reduce wait: %s", elapsed)
 				}
-				if mode == "expired" && elapsed > 850*time.Millisecond {
+				if mode == "expired" && elapsed > 1900*time.Millisecond {
 					t.Fatalf("expired budget still awaited: %s", elapsed)
 				}
 			}
@@ -339,4 +366,17 @@ func TestMCPSubmitWaitProgress(t *testing.T) {
 			}
 		})
 	}
+}
+
+func (b *bus) delayPublish(delay time.Duration) {
+	b.cluster.ControlKey(int16(kmsg.Produce), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		for _, topic := range request.(*kmsg.ProduceRequest).Topics {
+			if strings.HasPrefix(topic.Topic, operator.PoolTasksPrefix("pool-a")) {
+				b.cluster.SleepControl(func() { time.Sleep(delay) })
+				return nil, nil, false
+			}
+		}
+		b.cluster.KeepControl()
+		return nil, nil, false
+	})
 }

@@ -92,7 +92,7 @@ clones itself.
 
 Where the `wherry` MCP server (`wherry host mcp`) is configured, its tools do the
 same: `receivers`, `submit`, `status`, `result`, `cancel`, `events`
-and `logs`. Its `submit` returns `result`,
+and `logs`. Its `submit` returns `command`,
 the `wherry result` command to start in the background. Its `result` tool
 waits up to 45 seconds; call it again while the reply carries `retry_after`. Its `logs`
 returns a page of lines; call it again with `next_offset` while it is set.

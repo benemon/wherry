@@ -614,6 +614,11 @@ func fallbackS3(t *testing.T) *s3Store {
 			fmt.Fprint(w, "<LocationConstraint></LocationConstraint>")
 			return
 		}
+		if r.Method == http.MethodGet && r.URL.Query().Has("list-type") {
+			w.Header().Set("Content-Type", "application/xml")
+			fmt.Fprint(w, "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>")
+			return
+		}
 		mu.Lock()
 		defer mu.Unlock()
 		switch r.Method {

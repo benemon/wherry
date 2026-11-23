@@ -77,6 +77,7 @@ const credentialText = "s3cr3t-model-credential"
 // bus is a kfake cluster provisioned through operator.Service: pool-a with receiver-a live in it, and host-a of
 // tenant-a entitled to it with its key registered.
 type bus struct {
+	cluster     *kfake.Cluster
 	ca          string
 	keyFile     string
 	ctx         context.Context
@@ -128,7 +129,7 @@ func newBusStorage(t *testing.T, storage *s3Store) *bus {
 	t.Cleanup(operatorClient.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
-	b := &bus{ca: ca, ctx: ctx, service: &operator.Service{Operator: operatorClient, Broker: cluster.ListenAddrs()[0], CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}, stateDir: t.TempDir(), logs: &syncBuffer{}}
+	b := &bus{cluster: cluster, ca: ca, ctx: ctx, service: &operator.Service{Operator: operatorClient, Broker: cluster.ListenAddrs()[0], CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}, stateDir: t.TempDir(), logs: &syncBuffer{}}
 	optional := false
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{
 		{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}},

@@ -11,7 +11,7 @@ The defaults are `10m` and `2h`.
 | Tool | Input | Output |
 | --- | --- | --- |
 | `receivers` | none | `receivers`, the objects `wherry host receivers --json` prints |
-| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `continue`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by` | `id`, `pool`, `result`, `unsupplied` |
+| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `continue`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by`, `wait` | `id`, `pool`, `command`, `unsupplied`, `result`, `error` |
 | `status` | `id`, optional | `runs`, `skipped` |
 | `result` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `reply`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped`, `runs` |
 | `cancel` | `id` | `id`, `cancel`, `skipped` |

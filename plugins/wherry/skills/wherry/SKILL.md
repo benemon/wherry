@@ -76,7 +76,7 @@ Call `submit` with `prompt`, and `agent`, `selector` and `git` when you
 need them. For a long brief, write it to a file and pass its path as
 `prompt_file` instead of `prompt`; the server reads it as it reads `inputs`,
 and refuses an empty one.
-It returns `id`, `pool` and `result` straight away. `result` is a shell
+It returns `id`, `pool` and `command` straight away. `command` is a shell
 command, `wherry result <id>`. Where your harness runs shell
 commands in the background and tells you when they finish, start that command
 in the background now, before anything else. The command:
