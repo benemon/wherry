@@ -914,10 +914,12 @@ Runs a receiver as the principal of the bundle its [local
 configuration](configuration-receiver.md#receiver-local-configuration) names,
 trusting the broker through the configuration's `ca_file`, else the
 bundle's `ca`, else the system roots. A bundle whose `ca` holds no
-certificate is refused. When the broker's certificate chains to a CA the
-connection does not trust, the failure says that a bundle written before
-the operator trusted the broker through a CA file carries none, and names
-`wherry operator receiver apply RECEIVER`, which rewrites it.
+certificate is refused. When the broker's certificate does not chain to the
+CA the connection trusts, the failure names that CA and one remedy: a
+`ca_file`, by its path in the configuration, to point at the broker's CA or
+to remove; the bundle's `ca`, or no `ca` and the system roots, with
+`wherry operator receiver apply RECEIVER`, which rewrites the bundle to
+install and restart with. Go's x509 error ends the message.
 `--config-file` defaults to `/etc/wherry/config.yaml`. It creates the
 configuration's `state_dir` with mode 0700 and keeps `signing.key`, a
 private JWK with mode 0600, in it, and in `pool-keys/` one file with mode
@@ -1185,10 +1187,13 @@ is entitled to:
    bundle whose `ca` holds no certificate is refused. When the
    configuration keeps a `ca_file` and `BUNDLE` carries a `ca`, it warns
    that the file overrides the bundle, since a stale file hides a refreshed
-   CA. When the broker's certificate chains to a CA the connection does not
-   trust, the failure says that a bundle written before the operator
-   trusted the broker through a CA file carries none, and names
-   `wherry operator tenant host refresh TENANT HOST`, which rewrites it.
+   CA. When the broker's certificate does not chain to the CA the
+   connection trusts, the failure names that CA and one remedy: a
+   `ca_file`, by its path, to point at the broker's CA or to remove; the
+   bundle's `ca`, or no `ca` and the system roots, with
+   `wherry operator tenant host refresh TENANT HOST`, which rewrites the
+   bundle for `wherry host init` to install. Go's x509 error ends the
+   message, and every host command fails so.
    When the file is new or step 1 changed it, init writes the
    configuration now, before it connects.
 3. It creates the host key at `host_key`, by default `host.key` in the
@@ -1883,6 +1888,10 @@ Serves the [MCP tools](mcp.md) over stdio, logging to standard error.
 The packaged MCP launch uses `["host", "mcp"]` and the default configuration path.
 A server that runs `wherry host mcp --config-file PATH` uses another, as
 [Harness integration](operations-hosts.md#harness-integration) shows.
+A broker certificate the connection does not trust fails each tool call
+with `UNAVAILABLE` and logs the explanation [`wherry host init`](#wherry-host-init)
+gives, naming the CA used. A certificate rotated after the server connected
+logs Go's x509 error alone; a restart rereads the bundle.
 
 ## Version command
 

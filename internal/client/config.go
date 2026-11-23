@@ -280,6 +280,13 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 		kafka.Close()
 		return nil, err
 	}
+	// The first exchange with the broker, so a certificate the connection does not trust fails here, where the CA it
+	// was checked against is known.
+	if err := kafka.Ping(context.Background()); err != nil {
+		kafka.Close()
+		source := operator.TrustSource{CAFile: config.CAFile, Config: "your host configuration", BundleCA: bundle.CA != ""}
+		return nil, operator.ExplainUnknownAuthority(err, source, hostRefresh(host.tenant, host.host))
+	}
 	if host.key, err = operator.RecoverKey(context.Background(), kafka, signed.HostOwner(host.tenant, host.host), operator.HostTopic(host.tenant, host.host), config.HostKey); err != nil {
 		kafka.Close()
 		return nil, fmt.Errorf("load host key: %w", err)
@@ -292,6 +299,11 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 		}
 	}
 	return host, nil
+}
+
+// hostRefresh is the operator command that rewrites the bundle of host in tenant, and how the host installs it.
+func hostRefresh(tenant, host string) operator.BundleRefresh {
+	return operator.BundleRefresh{Command: "wherry operator tenant host refresh " + tenant + " " + host, Install: "install it with wherry host init"}
 }
 
 // RotateKey replaces the host key with a new one and returns the old and new key IDs. It refuses while a run this host

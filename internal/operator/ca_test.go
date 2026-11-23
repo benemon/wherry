@@ -207,3 +207,14 @@ func TestHostRefresh(t *testing.T) {
 		t.Fatalf("a refused refresh wrote the missing bundle: %v", err)
 	}
 }
+
+// ExplainUnknownAuthority returns an error that is no unknown authority as it is, whatever the source.
+func TestExplainUnknownAuthorityPassesOtherErrorsThrough(t *testing.T) {
+	sentinel := errors.New("unable to dial: connection refused")
+	refresh := BundleRefresh{Command: "wherry operator tenant host refresh tenant-a host-a", Install: "install it with wherry host init"}
+	for _, source := range []TrustSource{{CAFile: "/etc/wherry/ca.pem", Config: "your host configuration", BundleCA: true}, {BundleCA: true}, {}} {
+		if got := ExplainUnknownAuthority(sentinel, source, refresh); got != sentinel {
+			t.Fatalf("ExplainUnknownAuthority(sentinel, %+v) = %v; want the sentinel itself", source, got)
+		}
+	}
+}

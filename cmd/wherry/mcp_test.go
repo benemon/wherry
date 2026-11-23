@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
@@ -1120,14 +1119,21 @@ func TestMCPUnavailableLogsItsCause(t *testing.T) {
 	}
 }
 
-// A connection the broker's certificate fails for want of a trusted CA is explained in the server's log, as the CLI
-// explains it: the refresh that rewrites the bundle is named there. The model still sees UNAVAILABLE alone.
+// A connection the broker's certificate fails for want of a trusted CA is explained in the server's log as Connect
+// explains it to the CLI: the CA used and the refresh that rewrites the bundle, by the host's real names. The model
+// still sees UNAVAILABLE alone.
 func TestMCPUnavailableLogNamesTheRefreshOnAnUnknownAuthority(t *testing.T) {
+	h := newInitHost(t, nil)
+	noTerminal(t)
+	h.init(t, h.bundle)
+	editBundle(t, filepath.Join(h.dir, "bundle.yaml"), func(bundle *operator.Bundle) { bundle.CA = otherCA(t) })
+	config, err := busclient.LoadConfig(h.config)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	var logged bytes.Buffer
-	connect := func() (*busclient.Host, error) {
-		return nil, fmt.Errorf("dial broker.example:9093: %w", x509.UnknownAuthorityError{})
-	}
+	connect := func() (*busclient.Host, error) { return busclient.Connect(config, log.New(io.Discard, "", 0)) }
 	open := inputOpener(t.TempDir(), busclient.Config{})
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	serverSession, err := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry result " + id }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
@@ -1143,10 +1149,9 @@ func TestMCPUnavailableLogNamesTheRefreshOnAnUnknownAuthority(t *testing.T) {
 	if failure := callToolError(t, ctx, session, "receivers", map[string]any{}); failure != (toolError{Code: "UNAVAILABLE", Message: "the wherry bus could not complete the request; the wherry CLI reports the cause"}) {
 		t.Fatalf("tool error %#v; want UNAVAILABLE alone", failure)
 	}
-	for _, want := range []string{"tool failed: dial broker.example:9093: x509: certificate signed by unknown authority; ", hostRefreshCommand, "ca_file"} {
-		if !strings.Contains(logged.String(), want) {
-			t.Fatalf("server log %q; want %q", logged.String(), want)
-		}
+	want := "tool failed: cannot verify the broker's certificate: it does not chain to the CA in your bundle; ask the operator for a new bundle (wherry operator tenant host refresh tenant-a host-a) and install it with wherry host init ("
+	if text := logged.String(); !strings.HasPrefix(text, want) || !strings.Contains(text, "x509: certificate signed by unknown authority") {
+		t.Fatalf("server log %q; want %q with the x509 error", text, want)
 	}
 }
 

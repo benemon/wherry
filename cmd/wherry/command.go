@@ -18,7 +18,6 @@ import (
 	"time"
 
 	busclient "github.com/benemon/wherry/internal/client"
-	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 )
 
@@ -45,10 +44,6 @@ developer:
 wherry version
 `
 
-// hostRefreshCommand is the operator command that rewrites a host's bundle, named when a connection fails on a CA the
-// bundle does not carry.
-const hostRefreshCommand = "wherry operator tenant host refresh TENANT HOST"
-
 // dayToDay are the host's day-to-day commands, which wherry also runs without the host word.
 var dayToDay = map[string]func(context.Context, *busclient.Host, []string, io.Writer, io.Writer) error{
 	"submit": runSubmit, "cancel": runCancel, "result": runWait, "status": runStatus, "events": runEvents, "logs": runLogs,
@@ -67,7 +62,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	case "operator":
 		return runOperator(args[1:], stdout, stderr)
 	case "host":
-		return operator.ExplainUnknownAuthority(runHost(args[1:], stdout, stderr), hostRefreshCommand)
+		return runHost(args[1:], stdout, stderr)
 	case "dev":
 		return runDev(args[1:], stdout, stderr)
 	case "version":
