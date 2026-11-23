@@ -479,13 +479,13 @@ type allowlist struct {
 	state                                operator.State
 	topics                               map[string]bool
 	outputs, credentials, models, agents map[string]bool
-	endpoints, buckets                   map[string]bool
+	endpoints, buckets, profiles         map[string]bool
 }
 
 // allowlist is the allowlist for run id; the caller holds v.mu.
 func (t *traces) allowlist(id string) allowlist {
 	m := t.v.m
-	a := allowlist{run: id, state: m.history.State, topics: map[string]bool{}, outputs: map[string]bool{}, credentials: map[string]bool{}, models: map[string]bool{}, agents: map[string]bool{}, endpoints: map[string]bool{}, buckets: map[string]bool{}}
+	a := allowlist{run: id, state: m.history.State, topics: map[string]bool{}, outputs: map[string]bool{}, credentials: map[string]bool{}, models: map[string]bool{}, agents: map[string]bool{}, endpoints: map[string]bool{}, buckets: map[string]bool{}, profiles: map[string]bool{}}
 	for topic := range followed(m.history.State) {
 		a.topics[topic] = true
 	}
@@ -515,8 +515,11 @@ func (t *traces) allowlist(id string) allowlist {
 	for _, host := range m.history.State.Hosts {
 		a.topics[operator.HostTopic(host.Tenant, host.Name)] = true
 	}
-	for receiver := range m.history.State.Receivers {
+	for receiver, config := range m.history.State.Receivers {
 		a.topics[operator.ReceiverTopic(receiver)] = true
+		for _, profile := range config.Profiles {
+			a.profiles[profile.Name] = true
+		}
 	}
 	if r := m.runs[id]; r != nil && r.Result != nil {
 		for _, list := range [][]outputFact{r.Result.Outputs, r.Result.S3Outputs} {
@@ -542,25 +545,32 @@ var spanNames = map[string]bool{
 
 const nameOther = "[other]"
 
+// name is the span's name rebuilt from validated components: a fixed name, "send" or "process" with a topic the
+// model knows and a configured profile, "operator" with one of the fixed commands, or a revocation step's number.
+// Anything else is the fixed placeholder, never the record's text.
 func (a allowlist) name(name string) string {
 	if spanNames[name] {
 		return name
 	}
 	if topic, ok := strings.CutPrefix(name, "send "); ok && a.topic(topic) {
-		return name
+		return "send " + topic
 	}
 	if rest, ok := strings.CutPrefix(name, "process "); ok {
 		topic, profile, _ := strings.Cut(rest, " ")
-		if a.topic(topic) && (profile == "" || wire.ValidName(profile)) {
-			return name
+		switch {
+		case !a.topic(topic):
+		case profile == "":
+			return "process " + topic
+		case a.profiles[profile]:
+			return "process " + topic + " " + profile
 		}
 	}
-	if command, ok := strings.CutPrefix(name, "operator "); ok && !strings.ContainsFunc(command, func(r rune) bool { return !(r >= 'a' && r <= 'z' || r == ' ' || r == '-') }) && len(command) <= 32 {
-		return name
+	if command, ok := strings.CutPrefix(name, "operator "); ok && slices.Contains(operator.SpanCommands, command) {
+		return "operator " + command
 	}
 	if step, ok := strings.CutPrefix(name, "revocation step "); ok {
 		if n, err := strconv.Atoi(step); err == nil && n > 0 && n < 10 {
-			return name
+			return "revocation step " + strconv.Itoa(n)
 		}
 	}
 	return nameOther
@@ -619,9 +629,7 @@ func (a allowlist) value(key attribute.Key, value *commonpb.AnyValue) (string, b
 		case telemetry.AttrReceiver:
 			_, ok = a.state.Receivers[s]
 		case telemetry.AttrProfile:
-			for _, config := range a.state.Receivers {
-				ok = ok || slices.ContainsFunc(config.Profiles, func(profile operator.ProfileSettings) bool { return profile.Name == s })
-			}
+			ok = a.profiles[s]
 		case telemetry.AttrAgent:
 			ok = a.agents[s]
 		case telemetry.AttrModel:

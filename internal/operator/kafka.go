@@ -64,6 +64,11 @@ type StorageKeys struct {
 	SecretKey string `yaml:"secret_key"`
 }
 
+// SpanCommands are the commands marker names a root span after, "operator <command>": the fixed set a reader of
+// the trace topics matches span names against.
+var SpanCommands = []string{"check", "pool apply", "receiver provision", "receiver reconfigure", "receiver reissue", "receiver remove",
+	"tenant add", "tenant host add", "tenant host refresh", "tenant host remove", "tenant pool add", "tenant pool remove", "tenant remove"}
+
 // marker is the root span of an operator command. names are the command's arguments as identity attributes; each is
 // attached only once it passes validateNames, the check every command applies, so an invalid argument the command
 // refuses reaches no span, on the failure path or any other.

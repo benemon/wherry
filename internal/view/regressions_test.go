@@ -119,3 +119,19 @@ func TestReviewLabelsProjection(t *testing.T) {
 		t.Errorf("the configured profile is not shown: %+v", d.Result)
 	}
 }
+
+// A span name is rebuilt from validated components: a profile the configuration names, an operator command of the
+// fixed set; any other text becomes the placeholder.
+func TestReviewSpanNameAllowlist(t *testing.T) {
+	a := allowlist{topics: map[string]bool{"known-topic": true}, profiles: map[string]bool{"profile-a": true}}
+	for _, name := range []string{"process known-topic s3cr3t-prompt", "operator reveal secret prompt", "operator pool apply ", "operator pool-apply", "process other-topic profile-a", "send other-topic", "revocation step 12", "s3cr3t"} {
+		if got := a.name(name); got != nameOther {
+			t.Errorf("untrusted span name %q passed as %q", name, got)
+		}
+	}
+	for _, name := range []string{"process known-topic profile-a", "process known-topic", "send known-topic", "operator pool apply", "operator check", "revocation step 3", "submit"} {
+		if got := a.name(name); got != name {
+			t.Errorf("valid span name %q became %q", name, got)
+		}
+	}
+}
