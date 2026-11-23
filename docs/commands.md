@@ -872,9 +872,35 @@ Loads `wherry.operator` and checks, in order:
   grants of hosts and receivers included, with `wherry.operator`'s own
   [grants](security.md#the-operator-principal).
 
-It prints nothing when every check passes, and fails naming the first that
-does not. It does not report ACLs beyond those, and does not check a
-plugin profile's plugin or `config` section.
+It fails naming the first check that does not pass. Once every check passes,
+it lists what removal left on the broker, one line per topic, and exits 0:
+
+```
+leftover <topic> tenant=<tenant> offsets=<n>
+leftover <topic> tenant=<tenant> host=<host> offsets=<n>
+leftover <topic> receiver=<receiver> offsets=<n>[ kept: holds keys]
+leftover <topic> pool=<pool> unattributed offsets=<n>
+leftovers: <topics> topics, <offsets> offsets
+```
+
+The topics are, in this order: an ended tenant's `wherry.tenant.<tenant>`,
+`wherry.tenant.<tenant>.transcript`, `wherry.traces.<tenant>` and each of its
+`wherry.host.<tenant>.<host>`; an ended host of a live tenant's
+`wherry.host.<tenant>.<host>`; an ended receiver's
+`wherry.receiver.<receiver>` and `wherry.receiver.<receiver>.progress`; then
+each pool's signature task topics that no profile of a receiver whose
+membership has not ended records, which a relabelled or removed profile, an
+ended receiver or a failed apply leaves and which belong to the pool, not to
+one actor. `offsets` is the end offset less the start offset summed over the
+topic's partitions, an upper bound on the records retained: transaction
+markers and compacted records take offsets too. `kept: holds keys` marks an
+ended receiver's key topic, which readers of its pool's records still verify
+against. A topic deleted outside wherry is not listed; a pool's custodian,
+receivers and events topics and `wherry.traces` are shared and never listed.
+It prints nothing when there are none. It deletes nothing:
+[Check a deployment](operations-operator.md#check-a-deployment) says what may
+be deleted. It does not report ACLs beyond those, and does not check a plugin
+profile's plugin or `config` section.
 
 ## Receiver command
 
