@@ -3002,6 +3002,10 @@ func Preamble(directories pluginsdk.Directories, inputs []string, credentials []
 // its environment variable expands. A credential is read from its file by a credential helper or ssh, so its value
 // reaches no command line.
 //
+// The bundle is asked for after every commit, so a run that ends early returns the commits exported so far: git bundle
+// create replaces the file only once it is complete. The patch is asked for once at the end, as format-patch rewrites
+// its file in place.
+//
 // The clone's --config settings persist for later fetches and pushes and complement pluginsdk.AgentEnvironment, which
 // stops system, global and environment configuration being read. They guard a cooperative agent against ambient
 // configuration, not a hostile one, which can override them.
@@ -3063,7 +3067,8 @@ func gitPreamble(git *wire.GitInput, run, inputDir, credentialDir, outputDir str
 		case wire.GitPatch:
 			lines = append(lines, "Commit your changes, then write them as a patch series with:", "    git -C "+checkout+` format-patch --output="`+outputDir+"/"+wire.GitPatch+`" refs/wherry/start..HEAD`)
 		case wire.GitBundle:
-			lines = append(lines, "Commit your changes, then write them as a bundle with:", "    git -C "+checkout+` bundle create "`+outputDir+"/"+wire.GitBundle+`" refs/wherry/start..HEAD`)
+			lines = append(lines, "Commit your changes, and after every commit and once more before you finish, write them as a bundle with:",
+				"    git -C "+checkout+` bundle create "`+outputDir+"/"+wire.GitBundle+`" refs/wherry/start..HEAD`)
 		}
 	}
 	return append(lines, "Push only if the request asks you to, and then only to the branch wherry/"+run+":", "    git -C "+checkout+" push origin HEAD:refs/heads/wherry/"+run)
