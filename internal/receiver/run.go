@@ -1909,6 +1909,8 @@ func (run *activeRun) abandon(err error) kgo.AckStatus {
 }
 
 // stopAndFail and stopAndCancel write nothing once ctx has ended during the Stop: the task is released, or on a halt left.
+// After a Stop that succeeds, both collect the outputs the job leaves, as conclude does, and end the run with the status
+// their name says, whatever the collection or the outcome file reports.
 func (run *activeRun) stopAndFail(ctx context.Context, handle pluginsdk.Handle, reason string, pending []pluginsdk.Line) kgo.AckStatus {
 	if !run.claimHeld(ctx) {
 		return kgo.AckRelease
@@ -1922,6 +1924,7 @@ func (run *activeRun) stopAndFail(ctx context.Context, handle pluginsdk.Handle, 
 		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		return run.returnTask(ctx, pending)
 	}
+	run.collect(ctx, handle, true, run.terms())
 	return run.fail(ctx, reason, pending)
 }
 
@@ -1938,6 +1941,7 @@ func (run *activeRun) stopAndCancel(ctx context.Context, handle pluginsdk.Handle
 		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		return run.returnTask(ctx, pending)
 	}
+	run.collect(ctx, handle, true, run.terms())
 	return run.cancel(ctx, pending)
 }
 
