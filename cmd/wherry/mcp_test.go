@@ -195,6 +195,7 @@ func TestMCPToolsList(t *testing.T) {
 			t.Errorf("wait output schema lacks %s", field)
 		}
 	}
+	wait.Properties = nil
 	encoded, _ = json.Marshal(schemas["submit"].OutputSchema)
 	if err := json.Unmarshal(encoded, &wait); err != nil {
 		t.Fatal(err)

@@ -15,7 +15,6 @@ import (
 	"time"
 
 	busclient "github.com/benemon/wherry/internal/client"
-	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -134,7 +133,7 @@ func TestSubmitWaitBound(t *testing.T) {
 	for _, absolute := range []bool{false, true} {
 		t.Run(fmt.Sprint(absolute), func(t *testing.T) {
 			b := newBus(t)
-			b.delayPublish(1200 * time.Millisecond)
+			delayed := b.delayPublish(1200 * time.Millisecond)
 			var stderr bytes.Buffer
 			var deadline time.Time
 			stdout := &submitWriter{first: func(line string) {
@@ -152,6 +151,9 @@ func TestSubmitWaitBound(t *testing.T) {
 			ctx, cancel := context.WithTimeout(b.ctx, 5*time.Second)
 			defer cancel()
 			err := runSubmit(ctx, b.client, []string{"--prompt", "work", "--wait", "--start-by", "1s", "--end-by", end}, stdout, &stderr)
+			if !delayed.Load() {
+				t.Fatal("publish delay was not applied")
+			}
 			var exit *exitError
 			if !errors.As(err, &exit) || exit.code != 6 || !strings.Contains(stderr.String(), "collect it later with: wherry result "+submittedID(strings.Split(stdout.String(), "\n")[0])) {
 				t.Fatalf("%v %s", err, stderr.String())
@@ -167,13 +169,16 @@ func TestSubmitWaitBound(t *testing.T) {
 }
 func TestSubmitWaitExpiredBudget(t *testing.T) {
 	b := newBus(t)
-	b.delayPublish(1200 * time.Millisecond)
+	delayed := b.delayPublish(1200 * time.Millisecond)
 	old := submitWaitMargin
 	submitWaitMargin = time.Millisecond
 	t.Cleanup(func() { submitWaitMargin = old })
 	var stderr bytes.Buffer
 	stdout := &submitWriter{first: func(line string) { b.claimSubmitted(t, submittedID(line)) }}
 	err := runSubmit(b.ctx, b.client, []string{"--prompt", "work", "--wait", "--start-by", "100ms", "--end-by", "200ms"}, stdout, &stderr)
+	if !delayed.Load() {
+		t.Fatal("publish delay was not applied")
+	}
 	var exit *exitError
 	if !errors.As(err, &exit) || exit.code != 6 || !strings.Contains(stderr.String(), "collect it later with:") {
 		t.Fatalf("expired: %v %s", err, stderr.String())
@@ -199,13 +204,14 @@ func TestMCPSubmitWait(t *testing.T) {
 			waitBound = 2 * time.Second
 			t.Cleanup(func() { waitBound = old })
 			calls := 0
+			var delayed *atomic.Bool
 			connect := func() (*busclient.Host, error) {
 				calls++
 				if calls == 1 && mode == "delayed" {
-					b.delayPublish(time.Second)
+					delayed = b.delayPublish(time.Second)
 				}
 				if calls == 1 && mode == "expired" {
-					b.delayPublish(3 * time.Second)
+					delayed = b.delayPublish(3 * time.Second)
 				}
 				if calls == 2 {
 					if mode == "broker" {
@@ -259,6 +265,9 @@ func TestMCPSubmitWait(t *testing.T) {
 				}
 			}
 			elapsed := time.Since(started)
+			if (mode == "delayed" || mode == "expired") && (delayed == nil || !delayed.Load()) {
+				t.Fatal("publish delay was not applied")
+			}
 			if reply.ID == "" || reply.Pool != "pool-a" || reply.Command != "wherry result "+reply.ID {
 				t.Fatalf("identity: %+v", reply)
 			}
@@ -377,17 +386,15 @@ func TestMCPSubmitWaitProgress(t *testing.T) {
 	}
 }
 
-func (b *bus) delayPublish(delay time.Duration) {
-	b.cluster.ControlKey(int16(kmsg.Produce), func(request kmsg.Request) (kmsg.Response, error, bool) {
-		for _, topic := range request.(*kmsg.ProduceRequest).Topics {
-			if strings.HasPrefix(topic.Topic, operator.PoolTasksPrefix("pool-a")) {
-				b.cluster.SleepControl(func() { time.Sleep(delay) })
-				return nil, nil, false
-			}
-		}
-		b.cluster.KeepControl()
+func (b *bus) delayPublish(delay time.Duration) *atomic.Bool {
+	delayed := new(atomic.Bool)
+	b.cluster.ControlKey(int16(kmsg.Produce), func(kmsg.Request) (kmsg.Response, error, bool) {
+		b.cluster.SleepControl(func() { time.Sleep(delay) })
+		delayed.Store(true)
+		b.cluster.DropControl()
 		return nil, nil, false
 	})
+	return delayed
 }
 
 func TestSubmitWaitReplacementBound(t *testing.T) {
