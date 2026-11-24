@@ -473,20 +473,21 @@ func TestSubmitGitCurrentRepo(t *testing.T) {
 	}
 	calls := shim.calls(t)
 	var subs []string
-	for _, c := range calls {
+	for i, c := range calls {
+		if strings.Contains(strings.Join(c.argv, "\n"), shimToken) {
+			t.Fatalf("call %d: the token is on the command line", i)
+		}
 		subs = append(subs, strings.Join(c.sub(), " "))
 	}
 	wantSubs := []string{"config --get remote.origin.url", "rev-parse --verify --quiet HEAD^{commit}", "rev-parse --abbrev-ref HEAD", "version", "ls-remote --heads --tags " + shimOrigin}
 	if !slices.Equal(subs, wantSubs) {
 		t.Fatalf("git calls %q, want %q", subs, wantSubs)
 	}
-	allowed := slices.Concat(gitInherited, []string{"GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"})
+	allowed := []string{"PATH", "TMPDIR", "LANG", "LC_ALL", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy",
+		"GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"}
 	for i, c := range calls {
-		if strings.Contains(strings.Join(c.argv, "\n"), shimToken) {
-			t.Fatalf("call %d: the token is on the command line", i)
-		}
 		settings := c.settings()
-		for _, setting := range gitSettings {
+		for _, setting := range []string{"core.hooksPath=/dev/null", "core.fsmonitor=false", "gc.auto=0", "credential.helper="} {
 			if !slices.Contains(settings, setting) {
 				t.Errorf("call %d %q lacks -c %s", i, c.sub(), setting)
 			}
