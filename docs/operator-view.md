@@ -39,33 +39,44 @@ The view binds `127.0.0.1` only, on `--port` or a free port. No flag names anoth
 
 ## What the model holds
 
-Every record is verified against its writer's key as the signed records are everywhere in wherry, and checked
-against the membership, entitlements and keys in force when the broker appended it, not now: a run completed by a
-receiver since removed is present, a status signed with a receiver's key after its membership ended is not, and a
-status, result or start failure of a run admitted before its tenant's entitlement ended counts only when it joins
-that run's echo: the same run under the record's key, the same tenant, pool and task hash, the echo appended while
-the tenant was entitled. Such a record carrying another task hash is refused. Each record is verified once; the copy
-of a status on the tenant feed is the copy on the pool's events, found by digest.
+Every signed record is verified against its writer's key as the signed records are everywhere in wherry, with the
+key history: a key verifies the records appended before its retirement, so a record signed before a rotation is
+present and one signed with the retired key after it is not. A host cannot sign a status, nor a receiver a cancel: a
+record whose text names another principal than the one whose key verified it is refused. A record is also checked
+against the topic it was read from: a status, start failure or result names the pool whose events, or the tenant
+whose feed, it was read from, an echo names the tenant whose feed holds it, a cancel the pool and tenant of its run.
+Each record is verified once; the copy of a status on the tenant feed is the copy on the pool's events, found by
+digest.
+
+Membership and entitlement over time are not re-derived: who may write a topic, and when, is decided by the Kafka
+ACLs at write time, and by the hosts and receivers that act on the records. A run completed by a receiver since
+removed is present, and so is a status a still-credentialed receiver wrote during a closed membership or entitlement
+interval; that is the accepted residual, and each such fact is shown with its signer. Every fact from a signed record
+carries `signer`, the principal of the key that verified it, `wherry.rcv.<receiver>` or `wherry.tnt.<tenant>.<host>`,
+built from the configuration, never from the record's text: a wrap the custodian signed naming another receiver is
+labelled with the custodian. Operator, progress and trace records are unsigned; they are authenticated by their topic,
+written under `wherry.operator`'s or the receiver's ACL, so a run a receiver holds carries `source`, the progress
+topic it was read from, not a signer.
 
 The key topics of every receiver and host, ended or not, are tailed before each batch of records is folded, so a
 rotation is seen within a tick. A rotation retires a key from its append time; a record signed with it and appended
 after that no longer verifies, and when the rotation is read after such records were folded, the facts taken from
-them are retracted and counted as `retracted`. An echo so retracted takes with it every status, result and start
-failure that was admitted only through it, that is, appended after the tenant's entitlement ended and joined to that
-echo, whatever receiver signed them; a fact admitted while the tenant was entitled stays. The same recheck runs when
-a bound drops an echo.
+them are retracted and counted as `retracted`. Facts under other keys stand, an echo's dependents included.
 
 The model keeps named fields and nothing of what an agent wrote: from a status its kind, state, event ID, attempt,
-receiver, append time, log offset, event and a failure class; from a result the output sizes and hashes, the reply's
-size and where it ran. The text of a status message, a reply, an artifact or a task never enters the model, so no
-response carries it; nor do a result's labels, its job name or its output names. No string a record or span carries
-reaches a response, the stream or the log unless it is rebuilt from the operator's configuration or a fixed set: a
-tenant, pool, receiver, host, agent, model, profile or topic is shown when the configuration, the pool's terms over
-the window or the topic names wherry derives from them name it, and as `unknown` otherwise; a status kind, task
-state, start failure class, claim or refusal reason, advertisement gate, share-group state and HTTP method come from
-their fixed sets, anything else showing as `other`; a run ID, event ID, task hash, key ID or SHA-256 is shown when it
-follows the grammar wherry issues, an event ID outside it being replaced by one derived from the record's digest and
-a record keyed by anything but a run ID refused. The failure class comes from a fixed table, since the records carry
+receiver, append time, log offset, event and a failure class; from a result the output names, sizes and hashes, the
+reply's size and where it ran. The text of a status message, a reply, an artifact or a task never enters the model,
+so no response carries it; nor do a result's labels or its job name. No string a record or span carries reaches a
+response, the stream or the log unless it is rebuilt from the operator's configuration or a fixed set, with one
+exception, a result's output names: a tenant, pool, receiver, host, agent, model, profile or topic is shown when the
+configuration, the pool's terms over the window or the topic names wherry derives from them name it, and as `unknown`
+otherwise; a status kind, task state, start failure class, claim or refusal reason, advertisement gate, share-group
+state and HTTP method come from their fixed sets, anything else showing as `other`; a run ID, event ID, task hash,
+key ID or SHA-256 is shown when it follows the grammar wherry issues, an event ID outside it being replaced by one
+derived from the record's digest and a record keyed by anything but a run ID refused. Output names are the tenant's
+own: a result shows each name when it is slash-separated segments of letters, digits, `.`, `_` and `-`, the grammar
+receivers and hosts enforce, and `(invalid name)` otherwise; that alphabet needs no escaping on any surface, and the
+page renders it as text like everything else. The failure class comes from a fixed table, since the records carry
 no class but a start failure's: `start-failure:dispatch`, `start-failure:platform` and `start-failure:input-too-large`
 from a start failure; `key-lost`, `failed` and `canceled` from a failed or canceled terminal status; `rejected` from
 a rejection; `unclassified` for a terminal status in another state. The reason text in the record is never shown.
@@ -125,7 +136,7 @@ two assets and `POST /session`.
 | Endpoint | Returns |
 | --- | --- |
 | `GET /api/model` | the model: nodes of every kind, idle ones included, the runs of the window newest first, the topics followed, counters and the bounds hit |
-| `GET /api/runs/{id}` | one run: its echo, attempts and events, open requests and answers, claim decisions, cancels, result references and path |
+| `GET /api/runs/{id}` | one run: its echo, attempts and events, open requests and answers, claim decisions, cancels, result references and path, each signed fact with its signer |
 | `GET /api/runs/{id}/trace` | the run's spans from its tenant's trace topic as a forest per trace ID, with markers for what was cut; a second call resumes where the first stopped |
 | `GET /api/stream` | Server-Sent Events: one `model` event per change of the model, with its version |
 | `POST /session` | takes `token` in a form or JSON body, compared in constant time and rate-limited, and sets the session cookie |
@@ -136,14 +147,22 @@ each record for the run ID as bytes before decoding it, skips one over the trace
 decoding, and passes span names, attribute keys and values through an allowlist of what the configuration yields: a
 span name is rebuilt from validated components, a fixed name, a topic the configuration derives, the signature task
 topics of the receivers' profiles included, a profile a receiver's configuration names or an operator command of the
-fixed set; a destination or group attribute passes the same test, an output attribute never, since no output name is
-kept; anything else shows as `[other]` or is dropped and marked. A span whose IDs are not their fixed length is
-skipped as malformed.
+fixed set; a destination or group attribute passes the same test, an output attribute never: the output-name
+exception is a result's alone, and a span's attribute is not a result's; anything else shows as `[other]` or is
+dropped and marked. A span whose IDs are not their fixed length is skipped as malformed.
+
+Every request passes one guard before the router sees it, in this order: the `Host`, the `Origin` when present, the
+path, then the session cookie on the routes that need one. A path with an empty segment (`//`), a `.` or `..`
+segment, or an encoded dot or slash (`%2e`, `%2f`) gets a fixed 404 rather than the router's redirect to a cleaned
+path, which would reflect the request; `CONNECT` gets 405 and `OPTIONS *` 400. Every response the guard or a handler
+writes carries the fixed headers. A request Go's server cannot read, a malformed line, a header over the bound or
+one too slow to arrive, is answered 400, 431 or 408 by the server itself and passes through no handler.
 
 Errors carry a fixed text. Request bodies, the token, the cookie and the request path are never logged; the log
-holds the method as one of the fixed set (`GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS` or `other`), a
-fixed identifier of the route matched (`page`, `asset`, `session`, `model`, `run`, `trace`, `stream` or `other`) and
-the status. A failed tick logs its error class alone, a Kafka error's name, `timeout`, `canceled` or `error`.
+holds one line per request, the method as one of the fixed set (`GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`,
+`OPTIONS` or `other`), a fixed identifier of the route matched (`page`, `asset`, `session`, `model`, `run`, `trace`,
+`stream` or `other`) and the status, written when the response is complete, so a stream is logged when it ends. A
+failed tick logs its error class alone, a Kafka error's name, `timeout`, `canceled` or `error`.
 
 ## Behind a reverse proxy
 
@@ -157,9 +176,10 @@ wherry operator view --dir /srv/wherry/operator --port 8440 --external-url https
 The command prints `https://wherry-view.example.com/#t=...`. The view then accepts `wherry-view.example.com` as the
 request's `Host` and `https://wherry-view.example.com` as its `Origin`, next to `127.0.0.1:8440` and
 `localhost:8440`; any other `Host`, any other `Origin` when one is present, and a request with no or a wrong cookie
-get 403. The proxy must pass the client's `Host` through, as HAProxy does by default; forwarded headers such as
-`X-Forwarded-Host` are ignored. An `--external-url` with a path, query or fragment is refused: the view serves at
-the origin's root.
+get 403. The proxy must pass the client's `Host` through, as HAProxy does by default, and send it exactly as the
+authority of `--external-url`: the comparison is of the header as sent, so `wherry-view.example.com:443` is another
+host and gets 403 when the flag named the bare name. Forwarded headers such as `X-Forwarded-Host` are ignored. An
+`--external-url` with a path, query or fragment is refused: the view serves at the origin's root.
 
 The stream is a long request, so raise the proxy's tunnel and server timeouts above the view's 15-second keep-alive,
 for example in HAProxy:
@@ -190,6 +210,7 @@ and no framing, and every response is `Cache-Control: no-store` with `Referrer-P
 
 ## The placeholder page
 
-The page renders the model as plain tables, every name as text. Click a run for its path, attempts, open exchange,
-cancels, result references and storage, and load its spans from there. It is the surface slices 1 to 3 are accepted
+The page renders the model as plain tables, every name as text, output names included. Click a run for its path,
+echo, attempts, open exchange, cancels, result references and storage, each signed fact with its signer, and load its
+spans from there. It is the surface slices 1 to 3 are accepted
 on; the designed interface follows against the same API.
