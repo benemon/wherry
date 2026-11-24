@@ -218,3 +218,15 @@ func TestExplainUnknownAuthorityPassesOtherErrorsThrough(t *testing.T) {
 		}
 	}
 }
+
+// A relative ca_file is named by its absolute path, resolved as it was read.
+func TestExplainUnknownAuthorityNamesAnAbsoluteCAFile(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = ExplainUnknownAuthority(x509.UnknownAuthorityError{}, TrustSource{CAFile: "certs/broker.pem", Config: "your host configuration"}, BundleRefresh{})
+	if want := "ca_file " + filepath.Join(wd, "certs/broker.pem") + " in"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("explanation %q; want it to name %q", err, want)
+	}
+}

@@ -260,7 +260,11 @@ func ExplainUnknownAuthority(err error, source TrustSource, refresh BundleRefres
 		if source.BundleCA {
 			remedy += ", or remove it to use the bundle's"
 		}
-		return fmt.Errorf("cannot verify the broker's certificate: it does not chain to a CA in ca_file %s in %s; %s (%w)", source.CAFile, source.Config, remedy, err)
+		path := source.CAFile
+		if abs, absErr := filepath.Abs(path); absErr == nil {
+			path = abs
+		}
+		return fmt.Errorf("cannot verify the broker's certificate: it does not chain to a CA in ca_file %s in %s; %s (%w)", path, source.Config, remedy, err)
 	case source.BundleCA:
 		return fmt.Errorf("cannot verify the broker's certificate: it does not chain to the CA in your bundle; ask the operator for a new bundle (%s) and %s (%w)", refresh.Command, refresh.Install, err)
 	}
