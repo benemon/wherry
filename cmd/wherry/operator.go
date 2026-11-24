@@ -408,8 +408,7 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		writeLeftovers(stdout, leftovers)
-		return nil
+		return writeLeftovers(stdout, leftovers)
 	default:
 		return errors.New("unknown operator command")
 	}
@@ -430,8 +429,9 @@ func receiverBundleNext(out io.Writer, did, bundle, then string) error {
 
 // writeLeftovers prints one line per leftover topic with its owner and retained offsets, marking the topics readers
 // still need, then a summary, or nothing when there are none.
-func writeLeftovers(out io.Writer, leftovers []operator.Leftover) {
+func writeLeftovers(out io.Writer, leftovers []operator.Leftover) error {
 	var offsets int64
+	var b strings.Builder
 	for _, leftover := range leftovers {
 		owner := "tenant=" + leftover.Tenant
 		switch {
@@ -442,16 +442,18 @@ func writeLeftovers(out io.Writer, leftovers []operator.Leftover) {
 		case leftover.Host != "":
 			owner += " host=" + leftover.Host
 		}
-		fmt.Fprintf(out, "leftover %s %s offsets=%d", leftover.Topic, owner, leftover.Offsets)
+		fmt.Fprintf(&b, "leftover %s %s offsets=%d", leftover.Topic, owner, leftover.Offsets)
 		if leftover.Kept {
-			fmt.Fprint(out, " kept: holds keys")
+			fmt.Fprint(&b, " kept: holds keys")
 		}
-		fmt.Fprintln(out)
+		fmt.Fprintln(&b)
 		offsets += leftover.Offsets
 	}
 	if len(leftovers) > 0 {
-		fmt.Fprintf(out, "leftovers: %d topics, %d offsets\n", len(leftovers), offsets)
+		fmt.Fprintf(&b, "leftovers: %d topics, %d offsets\n", len(leftovers), offsets)
 	}
+	_, err := io.WriteString(out, b.String())
+	return err
 }
 
 // revocationProbe is the probe a remove runs: the service's, which asks every broker as the principal. A variable so

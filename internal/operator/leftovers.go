@@ -29,13 +29,15 @@ type Leftover struct {
 // then each pool's signature task topics that no live receiver's recorded profile uses, with the offsets each retains.
 // A pool's custodian, receivers and events topics and the trace topics are shared, so never listed. It deletes nothing.
 func (service *Service) Leftovers(ctx context.Context) ([]Leftover, error) {
-	state, err := service.LoadState(ctx)
+	admin := kadm.NewClient(service.Operator)
+	// Asking for authorized operations is what makes kadm bypass its metadata cache, which can list a deleted topic.
+	// Topics are listed before the state is read, so a topic an apply created before its record is attributed when
+	// the record landed in between.
+	listed, err := admin.ListTopics(kadm.WithAuthorizedOps(ctx))
 	if err != nil {
 		return nil, err
 	}
-	admin := kadm.NewClient(service.Operator)
-	// Asking for authorized operations is what makes kadm bypass its metadata cache, which can list a deleted topic.
-	listed, err := admin.ListTopics(kadm.WithAuthorizedOps(ctx))
+	state, err := service.LoadState(ctx)
 	if err != nil {
 		return nil, err
 	}

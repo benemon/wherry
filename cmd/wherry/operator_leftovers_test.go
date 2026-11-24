@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"path/filepath"
 	"strconv"
@@ -139,5 +140,11 @@ func TestCheckReportsLeftovers(t *testing.T) {
 	}
 	if out, err := check(); err == nil || out != "" {
 		t.Fatalf("check with a missing trace topic printed %q, %v; want nothing and the failure", out, err)
+	}
+}
+
+func TestLeftoversWriteErrorIsReturned(t *testing.T) {
+	if err := writeLeftovers(errorWriter{}, []operator.Leftover{{Topic: "wherry.host.t.h", Tenant: "t", Host: "h"}}); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("write to a closed pipe = %v, want it returned", err)
 	}
 }

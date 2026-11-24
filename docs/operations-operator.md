@@ -792,6 +792,8 @@ other listed topic a Kafka admin may delete with the Admin API once no
 retained work needs it, as
 [Removal and retained data](security.md#removal-and-retained-data) lists; a
 deleted topic drops from the report. Nothing in the report fails the check.
+The report is read while no other operator command runs: run `check` again
+with none running before you delete a topic it lists.
 
 ## Reset a deployment
 
