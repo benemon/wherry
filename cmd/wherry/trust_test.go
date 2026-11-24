@@ -296,6 +296,23 @@ func TestUnknownAuthorityGetsTheOneHint(t *testing.T) {
 	})
 }
 
+// The revocation probe dials as the revoked principal through the service's pool, operator.yaml's: with it, a probe of
+// a principal still authorised logs in and says so; without it, the dial fails on the certificate.
+func TestRevocationProbeUsesThePool(t *testing.T) {
+	ctx := context.Background()
+	cluster, ca := tlsCluster(t)
+	address := cluster.ListenAddrs()[0]
+	root := connectTLS(t, address, ca, "admin", "password")
+	with := &operator.Service{Operator: root, Broker: address, Roots: testRoots(t)}
+	if err := with.Probe("wherry.operator")(ctx, "admin", "password"); !errors.Is(err, operator.ErrStillAuthorised) {
+		t.Fatalf("probe through the pool = %v; want a login finding the principal still authorised", err)
+	}
+	without := &operator.Service{Operator: root, Broker: address}
+	if err := without.Probe("wherry.operator")(ctx, "admin", "password"); err == nil || !unknownAuthority(err) {
+		t.Fatalf("probe without the pool = %v; want the certificate refused", err)
+	}
+}
+
 // trustHelper re-runs this binary as a host command in environment env, with no SSL_CERT_FILE or SSL_CERT_DIR but those
 // env sets, and returns what it printed: OK, or ERR: and the error. Go reads the roots once per process, so each case is
 // its own process.
