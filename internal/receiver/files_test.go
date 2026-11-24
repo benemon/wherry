@@ -884,11 +884,11 @@ func TestOutputsOfAJobThatWouldNotStopAreNotCollected(t *testing.T) {
 	f.plugin.outputs = []pluginsdk.Output{file("report.md", "r")}
 	run := testActiveRun(t, f, "run-unstopped", int64(testTerms().DeliveryLimit)-1)
 	run.expected = []wire.ExpectedOutput{{Name: "report.md"}, {Name: "notes.md"}}
-	if status := run.conclude(f.ctx, f.plugin.handle(testRun("run-unstopped")), nil, pluginsdk.Terminal{Started: true}); status != kgo.AckAccept {
-		t.Fatalf("status %v, want the run completed", status)
+	if status := run.conclude(f.ctx, f.plugin.handle(testRun("run-unstopped")), nil, pluginsdk.Terminal{Started: true}); status != kgo.AckReject {
+		t.Fatalf("status %v, want the run failed for its uncollected outputs", status)
 	}
-	if task := f.lastTask(t); task.Status.State != wire.TaskStateCompleted || task.Status.Message.Parts[0].Text != "done" {
-		t.Fatalf("task %s %+v, want COMPLETED with done", task.Status.State, task.Status.Message)
+	if task := f.lastTask(t); task.Status.State != wire.TaskStateFailed || task.Status.Message.Parts[0].Text != "required output report.md not returned: not collected" {
+		t.Fatalf("task %s %+v, want FAILED with report.md not collected", task.Status.State, task.Status.Message)
 	}
 	want := []wire.UnreturnedOutput{{Name: "report.md", Reason: "not collected"}, {Name: "notes.md", Reason: "not collected"}}
 	if listed := manifest(t, f.lastTask(t)); len(listed.Outputs) != 0 || !slices.Equal(listed.NotReturned, want) {
