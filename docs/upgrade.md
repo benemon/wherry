@@ -407,10 +407,26 @@ compatibility path remains.
 - `--input FILE:s3` and the MCP input member `storage` are refused with
   `inputs move to S3 by size; drop :s3`; an input over the inline limits
   goes through the pool's bucket by itself, as it did already.
-- An S3 output's PUT URL lasts ten minutes past `task_ended_by`, so a run
+- An output's route is chosen by size: within the pool's `output_limit` it
+  returns on the feed, over it through the pool's bucket, under one S3 POST
+  policy per run that the host puts in the envelope. `--output NAME:s3` and
+  the MCP output member `storage` are refused with `outputs move to S3 by
+  size; drop :s3`; drop the suffix and the member, and a wire `outputs[]`
+  entry with `storage` no longer decodes. The envelope's `s3_outputs` is
+  gone and `s3_policy` takes its place, so a host and its receivers upgrade
+  together, and a run submitted before the upgrade is collected by the old
+  release or resubmitted. Every submit on a pool with storage now resolves
+  the host's storage credential; one that fails stops the submit. The host's
+  local run records drop `s3_outputs` for `policy`: `result` on a run this
+  host submitted before the upgrade that declared an `:s3` output fails to
+  read its record, so collect such runs first.
+- The upload policy lasts ten minutes past `task_ended_by`, so a run
   stopped at the bound or by a cancel still uploads. `pool apply` now
   refuses a `start_by_limit` that with six hours and ten minutes added
   exceeds seven days; a pool at the old bound needs ten minutes less.
+- The policy covers the run's whole output prefix, so set a quota and a
+  lifecycle rule on each pool bucket
+  ([Operations](operations-operator.md#add-tenants-and-hosts)).
 
 Upgrade hosts and receivers together. A host of this release against an
 older receiver gets its bundle, since the receiver reads the same expected

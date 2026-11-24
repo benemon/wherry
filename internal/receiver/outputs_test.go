@@ -191,46 +191,55 @@ func continuedTask(outputs ...wire.ExpectedOutput) func(*wire.Submission) {
 	}
 }
 
-// A continuation's bundle returns through S3 whatever its size, and a round that commits nothing completes without one.
-func TestAContinuationReturnsItsBundleThroughS3(t *testing.T) {
+// A continuation's bundle is a plain expected output: over the pool's output limit it goes through the bucket under the
+// run's policy, within it on the feed, and a round that commits nothing completes without one.
+func TestAContinuationReturnsItsBundleBySize(t *testing.T) {
 	bundle := bytes.Repeat([]byte("b"), 1000)
 	for name, test := range map[string]struct {
 		outputs []pluginsdk.Output
 		missing bool
+		inline  bool
 	}{
-		"over output_limit": {[]pluginsdk.Output{{Name: wire.GitBundle, Size: int64(len(bundle)), Body: io.NopCloser(bytes.NewReader(bundle))}}, false},
-		"no new commit":     {nil, true},
+		"over output_limit":   {[]pluginsdk.Output{{Name: wire.GitBundle, Size: int64(len(bundle)), Data: bundle}}, false, false},
+		"within output_limit": {[]pluginsdk.Output{{Name: wire.GitBundle, Size: 60, Data: bundle[:60]}}, false, true},
+		"no new commit":       {nil, true, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := newStore(t)
 			terms := s3Terms(s.endpoint())
 			terms.VCS, terms.OutputLimit = []string{"git.example.test"}, 100
 			f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, outputs: test.outputs}})
-			status := f.execute(t, f.submit(t, f.host, continuedTask(wire.ExpectedOutput{Name: wire.GitBundle, Storage: wire.StorageS3})), 1)
+			status := f.execute(t, f.submit(t, f.host, continuedTask(wire.ExpectedOutput{Name: wire.GitBundle})), 1)
 			task := f.lastTask(t)
 			if status != kgo.AckAccept || task.Status.State != wire.TaskStateCompleted {
 				t.Fatalf("ended %v %s %+v, want COMPLETED; logs:\n%s", status, task.Status.State, task.Status.Message, f.logs.String())
 			}
 			listed := manifest(t, task)
 			key := wire.S3OutputKey(testTenant, testRun("run-a"), wire.GitBundle)
-			if test.missing {
+			switch {
+			case test.missing:
 				if len(listed.S3Outputs) != 0 || !slices.Equal(listed.NotReturned, []wire.UnreturnedOutput{{Name: wire.GitBundle, Reason: "missing"}}) {
 					t.Fatalf("S3 outputs %+v, not returned %+v; want the bundle missing", listed.S3Outputs, listed.NotReturned)
 				}
-				return
-			}
-			if data, ok := s.put("/" + s3Bucket + "/" + key); !ok || !bytes.Equal(data, bundle) {
-				t.Fatalf("store holds %d bytes, %v; want the bundle", len(data), ok)
-			}
-			if !slices.Equal(listed.S3Outputs, []wire.ReturnedOutput{{Name: wire.GitBundle, SHA256: sha(bundle), Size: int64(len(bundle)), Key: key}}) || len(listed.NotReturned) != 0 {
-				t.Fatalf("S3 outputs %+v, not returned %+v; want the bundle through S3", listed.S3Outputs, listed.NotReturned)
+			case test.inline:
+				if _, held := s.put("/" + s3Bucket + "/" + key); held || len(listed.Outputs) != 1 || listed.Outputs[0].Name != wire.GitBundle || listed.Outputs[0].Size != 60 {
+					t.Fatalf("store holds the bundle: %v; outputs %+v; want the bundle on the feed", held, listed.Outputs)
+				}
+			default:
+				if data, ok := s.put("/" + s3Bucket + "/" + key); !ok || !bytes.Equal(data, bundle) {
+					t.Fatalf("store holds %d bytes, %v; want the bundle", len(data), ok)
+				}
+				if !slices.Equal(listed.S3Outputs, []wire.ReturnedOutput{{Name: wire.GitBundle, SHA256: sha(bundle), Size: int64(len(bundle)), Key: key}}) || len(listed.NotReturned) != 0 {
+					t.Fatalf("S3 outputs %+v, not returned %+v; want the bundle through S3", listed.S3Outputs, listed.NotReturned)
+				}
 			}
 		})
 	}
 }
 
-// A run stopped at task_ended_by collects until the bound plus the upload grace, when its PUT URLs expire, so its S3
-// output uploads; the store refuses an upload past the grace.
+// A run stopped at task_ended_by collects its over-limit outputs in a second pass that lasts until the bound plus the
+// upload grace, when its policy expires, so they upload; the store refuses an upload past the grace. The first pass
+// gets collectTimeout alone.
 func TestATimedOutRunUploadsWithinTheGrace(t *testing.T) {
 	for name, test := range map[string]struct {
 		after    time.Duration
@@ -240,12 +249,11 @@ func TestATimedOutRunUploadsWithinTheGrace(t *testing.T) {
 			s := newStore(t)
 			endBy := time.Now().Add(2 * time.Second).Truncate(time.Second)
 			s.clock = func() time.Time { return endBy.Add(test.after) }
-			fake := &fakePlugin{stream: noResultStream, endDelay: 30 * time.Second, outputs: []pluginsdk.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}}}
+			fake := &fakePlugin{stream: noResultStream, endDelay: 30 * time.Second, outputs: []pluginsdk.Output{reportOutput()}}
 			f := newFixtureWith(t, noResultStream, s3Terms(s.endpoint()), testConfig(testReceiver), map[string]*fakePlugin{"nomad": fake})
 			signedAt := time.Now()
-			f.envelope = withURLs(func(input, output string) (string, string) {
-				return presignedUntil(s.endpoint(), wire.S3InputKey(testTenant, testRun("run-a"), input), signedAt, 15*time.Minute),
-					presignedUntil(s.endpoint(), wire.S3OutputKey(testTenant, testRun("run-a"), output), signedAt, endBy.Sub(signedAt)+operator.UploadGrace)
+			f.envelope = withURLs(func(input string) string {
+				return presignedUntil(s.endpoint(), wire.S3InputKey(testTenant, testRun("run-a"), input), signedAt, 15*time.Minute)
 			})
 			record := f.submit(t, f.host, func(task *wire.Submission) {
 				withS3(task)
@@ -258,19 +266,22 @@ func TestATimedOutRunUploadsWithinTheGrace(t *testing.T) {
 				t.Fatalf("ended %v %s %+v, want FAILED at task_ended_by; logs:\n%s", status, task.Status.State, task.Status.Message, f.logs.String())
 			}
 			listed := manifest(t, task)
-			key := wire.S3OutputKey(testTenant, testRun("run-a"), "report.pdf")
-			_, held := s.put("/" + s3Bucket + "/" + key)
+			_, held := s.put("/" + s3Bucket + "/" + reportKey())
 			switch {
-			case test.uploaded && (!held || !slices.Equal(listed.S3Outputs, []wire.ReturnedOutput{{Name: "report.pdf", SHA256: sha([]byte("report")), Size: 6, Key: key}})):
+			case test.uploaded && (!held || !slices.Equal(listed.S3Outputs, []wire.ReturnedOutput{{Name: "report.pdf", SHA256: sha(report), Size: int64(len(report)), Key: reportKey()}})):
 				t.Fatalf("store holds the output: %v; S3 outputs %+v, not returned %+v; want the output uploaded", held, listed.S3Outputs, listed.NotReturned)
-			case !test.uploaded && (held || !slices.Equal(listed.NotReturned, []wire.UnreturnedOutput{{Name: "report.pdf", Size: 6, Reason: "not uploaded: status 403"}})):
+			case !test.uploaded && (held || !slices.Equal(listed.NotReturned, []wire.UnreturnedOutput{{Name: "report.pdf", Size: int64(len(report)), Reason: "not uploaded: status 403"}})):
 				t.Fatalf("store holds the output: %v; not returned %+v; want the upload refused", held, listed.NotReturned)
 			}
 			fake.mu.Lock()
-			deadline := fake.collectDeadline
+			deadlines := fake.collectDeadlines
 			fake.mu.Unlock()
-			if want := endBy.Add(operator.UploadGrace); deadline.Before(want.Add(-time.Second)) || deadline.After(want.Add(time.Second)) {
-				t.Fatalf("collect deadline %v, want task_ended_by plus the grace, %v; logs:\n%s", deadline, want, f.logs.String())
+			want := endBy.Add(operator.UploadGrace)
+			if len(deadlines) != 2 || deadlines[1].Before(want.Add(-time.Second)) || deadlines[1].After(want.Add(time.Second)) {
+				t.Fatalf("collect deadlines %v, want a second pass ending at task_ended_by plus the grace, %v; logs:\n%s", deadlines, want, f.logs.String())
+			}
+			if deadlines[0].After(time.Now().Add(collectTimeout)) {
+				t.Fatalf("first pass deadline %v, want collectTimeout at most, not the grace", deadlines[0])
 			}
 		})
 	}

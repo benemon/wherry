@@ -1224,12 +1224,12 @@ func TestParseAnywhere(t *testing.T) {
 func TestOutputSuffixes(t *testing.T) {
 	for value, want := range map[string]string{
 		"big.bin":             "",
-		"big.bin:s3":          "s3",
+		"big.bin:s3":          "outputs move to S3 by size; drop :s3",
 		"big.bin:required":    "outputs are always required; drop :required",
 		"big.bin:s3:required": "outputs are always required; drop :required",
 		"big.bin:required:s3": "outputs are always required; drop :required",
-		"big.bin:needed":      `want NAME[:s3], not "big.bin:needed"`,
-		"big.bin:s3:s3":       `want NAME[:s3], not "big.bin:s3:s3"`,
+		"big.bin:needed":      `want NAME, not "big.bin:needed"`,
+		"big.bin:s3:s3":       "outputs move to S3 by size; drop :s3",
 	} {
 		flags := flag.NewFlagSet("submit", flag.ContinueOnError)
 		flags.SetOutput(io.Discard)
@@ -1241,7 +1241,7 @@ func TestOutputSuffixes(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("%s: %v, want %q", value, err, want)
 			}
-		case err != nil || len(outputs) != 1 || outputs[0] != (wire.ExpectedOutput{Name: "big.bin", Storage: want}):
+		case err != nil || len(outputs) != 1 || outputs[0] != (wire.ExpectedOutput{Name: "big.bin"}):
 			t.Fatalf("%s: outputs %+v, %v", value, outputs, err)
 		}
 	}

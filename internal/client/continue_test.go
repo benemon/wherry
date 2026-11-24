@@ -80,7 +80,7 @@ func collectBundle(t *testing.T, f *fixture, runs []string, data []byte) string 
 }
 
 // A continuation clones the previous run's repository at its base with the current configuration's credential, carries
-// the collected bundle as base.bundle through S3 and asks for its own through S3, and joins the previous run's context.
+// the collected bundle as base.bundle through S3 and asks for its own, and joins the previous run's context.
 func TestSubmitContinuesARun(t *testing.T) {
 	f, o, receiver := continueFixture(t)
 	first := firstRun(t, f, testBundle)
@@ -102,8 +102,8 @@ func TestSubmitContinuesARun(t *testing.T) {
 	if got := o.object("/" + testBucket + "/" + wire.S3InputKey("tenant-a", submitted.RunID, "base.bundle")); !bytes.Equal(got, testBundle) {
 		t.Fatalf("uploaded %q, want the collected bundle", got)
 	}
-	if !slices.Equal(task.Wherry.Outputs, []wire.ExpectedOutput{{Name: wire.GitBundle, Storage: wire.StorageS3}}) {
-		t.Fatalf("outputs %+v, want changes.bundle through S3, not required", task.Wherry.Outputs)
+	if !slices.Equal(task.Wherry.Outputs, []wire.ExpectedOutput{{Name: wire.GitBundle}}) {
+		t.Fatalf("outputs %+v, want changes.bundle expected, not required", task.Wherry.Outputs)
 	}
 	if message := task.Message; message.TaskID != submitted.RunID || message.ContextID != first || !slices.Equal(message.ReferenceTaskIDs, []string{first}) {
 		t.Fatalf("message task %s, context %s, references %v; want the first run's context and a reference to it", message.TaskID, message.ContextID, message.ReferenceTaskIDs)
@@ -303,7 +303,7 @@ func TestSubmitRefusesAContinuationBeforeUploadOrPublish(t *testing.T) {
 		}, "base.bundle and changes.bundle are reserved"},
 		"an output named changes.bundle": {func(t *testing.T, f *fixture, first string) SubmitInput {
 			input := continueInput(first)
-			input.Outputs = []wire.ExpectedOutput{{Name: wire.GitBundle, Storage: wire.StorageS3}}
+			input.Outputs = []wire.ExpectedOutput{{Name: wire.GitBundle}}
 			return input
 		}, "base.bundle and changes.bundle are reserved"},
 		"a host without a storage credential": {func(t *testing.T, f *fixture, first string) SubmitInput {
@@ -342,16 +342,6 @@ func TestSubmitRefusesAnExplicitChangesOutputWithAGitInput(t *testing.T) {
 			refused(t, f, o, input, "the changes file comes back by default with --git; drop --output "+test.output)
 		})
 	}
-	t.Run("git and an S3 changes.bundle", func(t *testing.T) {
-		f, _, receiver := continueFixture(t)
-		submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Git: git, Outputs: []wire.ExpectedOutput{{Name: wire.GitBundle, Storage: wire.StorageS3}}, EndBy: time.Now().Add(30 * time.Minute), StartBy: time.Now().Add(10 * time.Minute)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if task := receiver.claim(t, f.ctx, submitted.RunID)[0].submission; !slices.Equal(task.Wherry.Outputs, []wire.ExpectedOutput{{Name: wire.GitBundle, Storage: wire.StorageS3}}) {
-			t.Fatalf("outputs %+v, want the bundle through S3 alone", task.Wherry.Outputs)
-		}
-	})
 	t.Run("no git input", func(t *testing.T) {
 		f, _, receiver := continueFixture(t)
 		for _, output := range []string{wire.GitBundle, wire.GitPatch} {

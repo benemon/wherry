@@ -81,7 +81,9 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
 
 1. Create one long-lived bucket with the store's default server-side
    encryption, store-managed or KMS. Every run's objects live under
-   `wherry/<tenant>/<run>/` in it.
+   `wherry/<tenant>/<run>/` in it. Set a quota and a lifecycle rule on it
+   ([Tenants](operations-operator.md#add-tenants-and-hosts)): a receiver's upload policy
+   is scoped to a run's output prefix, not to named objects.
 
 2. Name it in the pool's [terms](configuration-operator.md#pool-terms). The endpoint is
    `https://` and the host, with `:port` when it is not 443, and no path.
@@ -150,9 +152,9 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
        secret_key: s3-secret-key
    ```
 
-   Receivers and agents never hold the S3 credential; they get presigned URLs, a GET per input
-   until the run's `task_started_by` plus 15 minutes and a PUT per output until
-   its `task_ended_by` plus 10 minutes, 7 days at most.
+   Receivers and agents never hold the S3 credential; receivers get a presigned GET per input
+   until the run's `task_started_by` plus 15 minutes, 7 days at most, and one POST policy per run for
+   its output prefix until its `task_ended_by` plus 10 minutes.
 
 4. Set a lifecycle rule that expires `wherry/` after a period longer than
    any run: the host deletes a run's objects when it sees the run end with
@@ -332,12 +334,12 @@ changes file and completes all the same:
 apply with: git am /home/me/.local/state/wherry/runs/run-.../outputs/changes.patch
 ```
 
-On a pool with storage, `--output changes.bundle:s3` returns the bundle
-through the pool's bucket. To
+On a pool with storage, a bundle over the pool's output limit returns
+through the pool's bucket by itself. To
 build on a run's commits in a new run, `wherry host submit --continue RUN_ID`
 reuses its repository and continues from the `changes.bundle` that `result`
-collected; each round returns its bundle through the pool's bucket, so the
-pool needs storage and the host a storage credential for it
+collected; each round carries the base bundle through the pool's bucket, so
+the pool needs storage and the host a storage credential for it
 ([`submit`](commands.md#wherry-host-submit)).
 
 The agent pushes only when the prompt asks it to and the credential allows
@@ -367,7 +369,7 @@ policy bounds where its agent connects. Give agent jobs a policy that:
 
 wherry gives the agent no storage URL: none reaches its prompt, its
 environment or its files. On Nomad the client fetches S3 inputs before the
-task starts, and the receiver uploads S3 outputs after the task stops. The
+task starts, and the receiver uploads the outputs over the limit after the task stops. The
 Nomad clients and the receiver hosts need the storage endpoint; agent jobs
 do not. The presigned GET is the source of an `artifact` in the agent job,
 so an agent that can read its own job can read the URL: keep the Nomad API

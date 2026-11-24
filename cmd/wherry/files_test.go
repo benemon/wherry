@@ -53,7 +53,8 @@ func TestSubmitFileFlags(t *testing.T) {
 		"output escaping":            {[]string{"--output", "../report.md"}, "expected outputs must be unique relative paths of portable file names"},
 		"output in the outcome dir":  {[]string{"--output", ".wherry/outcome.json"}, "expected outputs must be unique relative paths of portable file names"},
 		"credential file escaping":   {[]string{"--credential", "deploy-key:file=../id"}, "credential deploy-key: file must be a portable file name"},
-		"unknown output suffix":      {[]string{"--output", "report.md:needed"}, "want NAME[:s3]"},
+		"unknown output suffix":      {[]string{"--output", "report.md:needed"}, "want NAME, not"},
+		"s3 output suffix":           {[]string{"--output", "report.md:s3"}, "outputs move to S3 by size; drop :s3"},
 		"required output suffix":     {[]string{"--output", "report.md:required"}, "outputs are always required; drop :required"},
 		"s3 input suffix":            {[]string{"--input", input + ":s3"}, "inputs move to S3 by size; drop :s3"},
 	} {
@@ -506,29 +507,26 @@ func TestGitHostKeyReadIsBounded(t *testing.T) {
 	}
 }
 
-// The S3 lane is chosen by size for inputs and by :s3 for outputs; the suffixes this version dropped are refused with
-// a hint, on the command line and in MCP, before anything is read or published.
-func TestSubmitTakesS3OutputsAndRefusesDroppedSuffixes(t *testing.T) {
+// The S3 lane is chosen by size for inputs and outputs alike; the suffixes earlier versions took are refused with a
+// hint, on the command line and in MCP, before anything is read or published.
+func TestSubmitRefusesDroppedSuffixes(t *testing.T) {
 	b := newBus(t)
 	work := t.TempDir()
 	data := filepath.Join(work, "dataset.bin")
 	if err := os.WriteFile(data, []byte("data"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	const rule = "this host's configuration has no storage credential for pool pool-a's S3 inputs and outputs"
 	var stdout, stderr bytes.Buffer
-	if err := runSubmit(b.ctx, b.client, []string{"--prompt", "x", "--output", "report.pdf:s3"}, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), rule) {
-		t.Fatalf("submit --output report.pdf:s3 = %v; want the S3 lane refused for want of storage", err)
-	}
 	for _, test := range []struct {
 		args []string
 		want string
 	}{
 		{[]string{"--input", data + ":s3"}, "inputs move to S3 by size; drop :s3"},
+		{[]string{"--output", "report.pdf:s3"}, "outputs move to S3 by size; drop :s3"},
 		{[]string{"--output", "report.pdf:required"}, "outputs are always required; drop :required"},
 		{[]string{"--output", "report.pdf:required:s3"}, "outputs are always required; drop :required"},
 		{[]string{"--output", "report.pdf:s3:required"}, "outputs are always required; drop :required"},
-		{[]string{"--output", "report.pdf:S3"}, "want NAME[:s3]"},
+		{[]string{"--output", "report.pdf:S3"}, "want NAME, not"},
 		{[]string{"--input", data + ":S3"}, "no such file"},
 	} {
 		if err := runSubmit(b.ctx, b.client, append([]string{"--prompt", "x"}, test.args...), &stdout, &stderr); err == nil || !strings.Contains(err.Error(), test.want) {
@@ -542,15 +540,14 @@ func TestSubmitTakesS3OutputsAndRefusesDroppedSuffixes(t *testing.T) {
 		t.Fatalf("submit --s3-input = %v; want an unknown flag", err)
 	}
 	session := mcpSessionReading(t, b.connect(t), nil, inputOpener(work, busclient.Config{}))
-	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "outputs": []map[string]any{{"name": "report.pdf", "storage": "s3"}}}); failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, rule) {
-		t.Fatalf("MCP submit of an S3 output = %+v", failure)
-	}
 	for _, test := range []struct {
 		arguments map[string]any
 		want      string
 	}{
 		{map[string]any{"prompt": "x", "inputs": []map[string]any{{"path": "dataset.bin", "storage": "s3"}}}, "inputs move to S3 by size; drop :s3"},
 		{map[string]any{"prompt": "x", "inputs": []map[string]any{{"path": "dataset.bin", "storage": "feed"}}}, "inputs move to S3 by size; drop :s3"},
+		{map[string]any{"prompt": "x", "outputs": []map[string]any{{"name": "report.pdf", "storage": "s3"}}}, "outputs move to S3 by size; drop :s3"},
+		{map[string]any{"prompt": "x", "outputs": []map[string]any{{"name": "report.pdf", "storage": "feed"}}}, "outputs move to S3 by size; drop :s3"},
 		{map[string]any{"prompt": "x", "outputs": []map[string]any{{"name": "report.pdf", "required": true}}}, "outputs are always required; drop :required"},
 		{map[string]any{"prompt": "x", "outputs": []map[string]any{{"name": "report.pdf", "required": false}}}, "outputs are always required; drop :required"},
 	} {

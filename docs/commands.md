@@ -314,8 +314,8 @@ catalog agent listing a credential the catalog derives for it, and a
 refuses a `start_by_limit` that with six hours and ten minutes added
 exceeds 7 days, the longest an S3 SigV4 presigned URL lasts, with
 `start_by_limit plus the 6h run cap and the 10m upload grace exceeds 7
-days, the longest an S3 SigV4 presigned URL lasts`: a run's upload URLs
-last ten minutes past its `task_ended_by`. It
+days, the longest an S3 SigV4 presigned URL lasts`: a run's upload policy
+lasts ten minutes past its `task_ended_by`. It
 refuses a delivery limit above the lowest
 `group.share.max.delivery.count.limit` across the brokers, and terms whose
 [records do not fit the broker](configuration-operator.md#record-limit). Before it
@@ -1407,11 +1407,11 @@ and needs `wherry host init` on a re-provisioned host.
 | `--git REMOTE[@REF]` or `--git .` | | repository the agent clones: an `https` or `ssh` URL, or `user@host:path`, at a branch, tag or commit, or without `@REF` at its default branch's commit; `.` is the working directory's repository, its origin at the commit checked out |
 | `--git-path` | the repository name | checkout directory, relative to the agent's working directory |
 | `--git-changes bundle\|patch\|none` | `bundle` | how the agent's commits come back: as the output `changes.bundle`, as `changes.patch`, or not at all |
-| `--continue RUN_ID` | | continue from the `changes.bundle` `result` collected for a run of this host, in that run's repository, and return the next bundle through the pool's bucket |
+| `--continue RUN_ID` | | continue from the `changes.bundle` `result` collected for a run of this host, in that run's repository, and return the next bundle |
 | `--input FILE` | | file the agent gets in `WHERRY_INPUT_DIR` under its base name; one over the inline limits goes through the pool's bucket, at most 5 GiB; repeatable |
 | `--credential NAME` | | name an optional credential of the placed agent the task cannot go without, at the target the pool's terms give it: the submit fails when this host cannot resolve it; one the host resolves is delivered without being named; repeatable |
 | `--credential NAME:file=FILE` or `--credential NAME:env=VAR` | | credential `NAME` from `credentials` in the client configuration, which the agent gets as the file `FILE` in `WHERRY_CREDENTIALS_DIR` or in the environment variable `VAR`; repeatable |
-| `--output NAME[:s3]` | | file the agent must leave in `WHERRY_OUTPUT_DIR`: the run fails without it; `:s3` returns it through the pool's bucket; repeatable |
+| `--output NAME` | | file the agent must leave in `WHERRY_OUTPUT_DIR`: the run fails without it; one over the pool's output limit returns through the pool's bucket, at most 5 GiB; repeatable |
 | `--start-by` | `10m` | `task_started_by`: an RFC 3339 time, or a Go duration from now, by which the agent's job must start |
 | `--end-by` | `2h` | `task_ended_by`: an RFC 3339 time, or a Go duration from now, by which the run must end |
 | `--wait` | false | collect the result after publishing |
@@ -1516,22 +1516,22 @@ With a host key, no input may be named `known_hosts`.
 adds `changes.patch` instead, and `--git-changes none` adds nothing. Beside
 `--git`, `--output changes.bundle` and `--output changes.patch` are refused
 with `the changes file comes back by default with --git; drop --output
-changes.bundle`, as is `--output changes.patch` beside `--continue`; the
-`:s3` form below stays. A receiver never requires a git input's
+changes.bundle`, as is `--output changes.patch` beside `--continue`. A
+receiver never requires a git input's
 changes file, since a run that commits nothing leaves none, and charges it
 against the pool's `output_limit` after every other output, so a large
 bundle is the output that exceeds the limit, never a declared one. On a pool
-with storage, `--output changes.bundle:s3` returns the bundle through the
-pool's bucket, outside the limit: the route for a first run that later runs
-continue. `--output` refuses `:required`, since every declared output is
-required, with `outputs are always required; drop :required`.
+with storage, a bundle over the limit returns through the pool's bucket like
+any output ([S3 lane](#the-s3-lane)). `--output` refuses `:required`, since
+every declared output is required, with `outputs are always required; drop
+:required`, and `:s3` with `outputs move to S3 by size; drop :s3`.
 
 The prompt asks the agent to write the bundle after every commit and once
 more before it finishes, so a run that ends early after committing, by an
 exit, a timeout or a cancel, returns the bundle of its commits so far, best
-effort, when the agent followed the instruction. An S3 output's upload URL
+effort, when the agent followed the instruction. The run's upload policy
 lasts ten minutes past the run's end-by time, and a run stopped at that
-bound or by a cancel is collected within those ten minutes, so this holds
+bound or by a cancel uploads within those ten minutes, so this holds
 for a bundle sent through the bucket too. A patch is written once, at
 the end, and a run that ends before then returns none. A collected bundle is
 checked as bytes, by size and SHA-256; git checks its pack when the bundle is
@@ -1646,18 +1646,34 @@ resolves the same source for it, as for every agent credential;
 `--credential github-token` makes the agent's one the task cannot go
 without.
 
-`--output NAME:s3`, and an `--input` over the inline limits, use the pool's
-[S3 lane](a2a-extension-v1.md#s3-inputs-and-outputs). `--input` refuses a
-`:s3` suffix with `inputs move to S3 by size; drop :s3`.
-`submit` refuses the lane, before it uploads or publishes anything, when the
-host has no storage keys for the pool, neither the pair its bundle carries
-nor a [`storage`](configuration-host.md#client-configuration) mapping in
-its configuration, or the pool's terms no
+### The S3 lane
+
+An `--input` over the inline limits, and an output over the pool's
+`output_limit`, use the pool's
+[S3 lane](a2a-extension-v1.md#s3-inputs-and-outputs); the route is chosen
+by size, so `--input` refuses a `:s3` suffix with `inputs move to S3 by
+size; drop :s3` and `--output` one with `outputs move to S3 by size; drop
+:s3`. `submit` refuses an input over the limits, before it uploads or
+publishes anything, when the host has no storage keys for the pool, neither
+the pair its bundle carries nor a
+[`storage`](configuration-host.md#client-configuration) mapping in its
+configuration, or the pool's terms no
 [`storage`](configuration-operator.md#pool-terms):
 
 ```
 invalid input: pool build has no storage for S3 inputs and outputs
 ```
+
+An output over the limit on such a run is listed `exceeds output limit`.
+
+On a pool with storage and a host with a storage credential for it, every
+`submit` resolves the credential and presigns one S3 POST policy for the
+run's output prefix, `wherry/<tenant>/<run>/outputs/`, valid until the
+run's end-by time plus ten minutes, which the task's envelope carries; a
+credential that fails to resolve, or a store that refuses to sign, fails
+the submit whatever the inputs. The receiver returns each output within the
+limit on the feed and uploads each one over it under the policy, so a run
+need not declare which outputs are large.
 
 It uploads each S3 input to `wherry/<tenant>/<run>/inputs/<name>` in the pool's
 bucket with one PUT, then publishes the task with each input's name, size and
@@ -1667,7 +1683,7 @@ inputs count against neither limit. When publishing fails, `submit`
 deletes what it uploaded.
 
 `submit` resolves the agent's credentials the host supplies and the task's
-credentials, presigns the S3 inputs and outputs, and encrypts them in the task's
+credentials, presigns the S3 inputs and the policy, and encrypts them in the task's
 envelope under the pool's key; the host can go offline once it returns
 ([credential envelopes](security.md#credential-envelopes)). It refuses a run
 whose envelope would pass 64 KiB, naming the envelope's size, and a run
@@ -1777,15 +1793,21 @@ output the result lists as not returned and each one that fails
 verification. A write never leaves the outputs directory, whatever links
 it holds.
 
-`result` downloads each S3 output the result lists with the host's storage
+`result` first checks the result's output lists as a whole, before it writes
+anything: at most 256 names, each returned name valid, unreserved and listed
+once, none an ancestor of another, and each S3 output at its key with a
+lowercase hash and a size within 5 GiB. A result that fails this is refused
+whole, with `output result not returned: rejected by this host: <reason>`.
+It then downloads each S3 output the result lists with the host's storage
 credential, to the same place, and prints it as it prints any output. It
-downloads only an S3 output the run declares, at its key
-`wherry/<tenant>/<run>/outputs/<name>`, and writes it only when its bytes
-match the listed size and SHA-256; a file already there that matches is
-kept. Once the run is terminal and every listed S3 output has verified,
-`result` deletes every object under `wherry/<tenant>/<run>/` in the pool's
-bucket, inputs included. A run that ends while no `result` runs keeps them
-until a `result` on it or the bucket's lifecycle rule removes them.
+downloads only at the key `wherry/<tenant>/<run>/outputs/<name>`, and writes
+the file only when its bytes match the listed size and SHA-256; a file
+already there that matches is kept. Once the run is terminal and every
+listed S3 output has verified, `result` deletes every object under
+`wherry/<tenant>/<run>/` in the pool's bucket, inputs included and whether
+or not the result listed it, for every run the host issued a policy for. A
+run that ends while no `result` runs keeps them until a `result` on it or
+the bucket's lifecycle rule removes them.
 
 A run this host submitted whose `task_started_by` passes with no status from
 a receiver can never start. `result` then collects nothing, prints nothing on

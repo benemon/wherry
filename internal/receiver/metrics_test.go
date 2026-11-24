@@ -866,7 +866,7 @@ func TestFixedMetricDomains(t *testing.T) {
 			}, ""},
 			{"git remote host outside the pool's vcs hosts", withGit(wire.GitInput{Remote: "https://git.example.test/repo.git", Ref: "main"}), ""},
 			{"pool has no storage", func(task *wire.Submission) {
-				task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "out", Storage: wire.StorageS3}}
+				task.Wherry.S3Inputs = []wire.S3Input{{Name: "dataset.bin", SHA256: sha(nil)}}
 			}, ""},
 			{"unsupported message part", func(task *wire.Submission) { task.Message.Parts = []wire.Part{{URL: "https://example.test/input"}} }, ""},
 			{"the task carries no envelope", nil, "envelope"},
@@ -1016,7 +1016,7 @@ func TestFixedMetricDomains(t *testing.T) {
 				case "failed":
 					f.plugin.collectErr = errors.New("collection failed")
 				case "over_limits":
-					f.plugin.outputs = []pluginsdk.Output{file("large", "123")}
+					f.plugin.outputs, f.plugin.ignoresLimits = []pluginsdk.Output{file("large", "123")}, true
 				case "timeout":
 					f.plugin.collectErr = context.DeadlineExceeded
 				}

@@ -180,7 +180,7 @@ With storage, `storage`, `s3-user` and `bucket` run after `kafka`. ceph-aio
 serves S3 on `http://127.0.0.1:18080`. `s3-user` has `radosgw-admin`
 generate the user's keys and writes them to `env/host/credentials/`. Pool
 `dev` takes the endpoint as its [storage](configuration-operator.md#pool-terms), and
-the smoke run sends an S3 input and returns its output through the bucket.
+the smoke run sends an S3 input and the host's envelope carries the run's upload policy.
 The ceph-aio job reserves 2048 MB of memory, and its data lives in the
 container, so `down` removes it.
 

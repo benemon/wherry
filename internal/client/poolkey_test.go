@@ -524,8 +524,8 @@ func TestAReplacementReadsTheRootRunsInputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	if replacement.Wherry.S3InputRun != root || !strings.Contains(values.S3Inputs["dataset.bin"], "/"+testBucket+"/"+wire.S3InputKey("tenant-a", root, "dataset.bin")+"?") ||
-		!strings.Contains(values.S3Outputs["report.pdf"], "/"+testBucket+"/"+wire.S3OutputKey("tenant-a", replacementID, "report.pdf")+"?") {
-		t.Fatalf("replacement inputs from %q at %q, outputs at %q", replacement.Wherry.S3InputRun, values.S3Inputs, values.S3Outputs)
+		values.S3Policy == nil || values.S3Policy.Fields["key"] != wire.S3OutputKey("tenant-a", replacementID, "") {
+		t.Fatalf("replacement inputs from %q at %q, policy %+v; want the root's inputs and the replacement's own output prefix", replacement.Wherry.S3InputRun, values.S3Inputs, values.S3Policy)
 	}
 	input := "/" + testBucket + "/" + wire.S3InputKey("tenant-a", root, "dataset.bin")
 	if err := f.host.Cleanup(f.ctx, root); !errors.Is(err, ErrInvalidInput) || o.object(input) == nil {
@@ -558,7 +558,7 @@ func keyLostS3Run(t *testing.T) (*uploadOracle, *fixture, *testReceiver, claimed
 	receiver.advertise(t, f.ctx, nil)
 	file, _ := randomFile(t, "dataset.bin", 1024)
 	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}},
-		Outputs: []wire.ExpectedOutput{{Name: "report.pdf", Storage: wire.StorageS3}}, EndBy: time.Now().Add(time.Hour), StartBy: time.Now().Add(time.Minute)})
+		Outputs: []wire.ExpectedOutput{{Name: "report.pdf"}}, EndBy: time.Now().Add(time.Hour), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}

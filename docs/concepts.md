@@ -171,15 +171,16 @@ A pool can also carry files through an S3-compatible bucket its operator
 names, up to 5 GiB each. The host uploads an S3 input with its own
 credential before it publishes the task, and the task carries only the
 input's name, size and SHA-256. At submit, the host presigns a short-lived
-GET per input and a PUT per expected S3 output, and encrypts them with the
-credentials in the task's envelope, so the URLs never sit on the broker in
-the clear. The receiver checks each URL against the pool's
+GET per input and one POST policy for the run's output prefix, and encrypts
+them with the credentials in the task's envelope, so neither sits on the
+broker in the clear. The receiver checks each against the pool's
 endpoint and bucket; the plugin fetches the inputs into the input
-directory and verifies them; the receiver streams each S3 output to its
-PUT URL, hashing what it sends, and lists it in the result. The host then
-downloads and verifies the outputs and deletes the run's objects. The
-host's storage credential never leaves the host, and S3 outputs, which go
-to the host's own bucket, are not redacted either.
+directory and verifies them; the receiver returns each output within the
+pool's output limit on the feed and streams each larger one to the bucket
+under the policy, hashing what it sends, and lists it in the result. The
+host then downloads and verifies the outputs and deletes the run's objects.
+The host's storage credential never leaves the host, and S3 outputs, which
+go to the host's own bucket, are not redacted either.
 
 A task can also name a git repository: a remote and a ref. The host's
 `git` configuration gives the clone its credential and, for `ssh`, its host

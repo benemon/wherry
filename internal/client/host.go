@@ -650,9 +650,9 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	}
 	storage := v.state.Pools[pool].Storage
 	// Every storable run gets a POST policy for its outputs, so its storage credential resolves whether or not an input
-	// goes through the bucket.
+	// goes through the bucket; an input that needs the bucket on a run that is not storable is refused here.
 	var store *store
-	if storable {
+	if storable || stored {
 		if store, err = h.bucket(ctx, pool, storage, resolver); err != nil {
 			return SubmitResult{}, err
 		}

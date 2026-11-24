@@ -382,6 +382,17 @@ Prerequisites: the working directory
    wherry operator tenant storage acme
    ```
 
+   Set a quota and a lifecycle rule on each pool's bucket. A run's receiver
+   holds a policy that lets it create any number of objects of up to 5 GiB
+   under the run's output prefix until the run's `task_ended_by` plus ten
+   minutes ([Security](security.md#credential-envelopes)); the host deletes
+   the prefix when it collects the run, and the bucket's quota bounds what
+   a receiver can create before then, while the lifecycle rule removes
+   what no host collects. On Ceph RGW, `radosgw-admin quota set
+   --quota-scope=bucket --bucket=wherry --max-size=...` then `radosgw-admin
+   quota enable --quota-scope=bucket --bucket=wherry`; an S3 lifecycle rule
+   expiring `wherry/` after a few days serves every store.
+
 3. Add each host the tenant submits from:
 
    ```sh

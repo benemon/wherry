@@ -30,7 +30,7 @@ func envelopeValues() EnvelopeValues {
 		Credentials:  map[string][]byte{"model": []byte(testSecret), "empty-ish": {0xfb, 0xff}},
 		Binding:      EnvelopeBinding{Run: "run-a", Tenant: "tenant-a", Pool: "pool-a", TaskStartedBy: 1_800_000_000, TaskEndedBy: 1_800_003_600},
 		S3Inputs:     map[string]string{"repo": "https://bucket.s3.example.com/wherry/tenant-a/run-a/inputs/repo"},
-		S3Outputs:    map[string]string{"report": "https://bucket.s3.example.com/wherry/tenant-a/run-a/outputs/report"},
+		S3Policy:     &S3Policy{URL: "https://bucket.s3.example.com/bucket/", Fields: map[string]string{"key": "wherry/tenant-a/run-a/outputs/", "policy": "eyJ9", "x-amz-signature": "sig"}},
 		RedactionKey: testRedactionKey,
 	}
 }
@@ -97,7 +97,7 @@ func craftEnvelope(t *testing.T, key []byte, claims map[jose.HeaderKey]any, comp
 	return compact(t, craft(t, jose.DIRECT, jose.A256GCM, key, claims, compression, []byte(plaintext)))
 }
 
-const validPlaintext = `{"binding":{"run":"run-a","tenant":"tenant-a","pool":"pool-a","task_started_by":1800000000,"task_ended_by":1800003600},"credentials":{"model":"c2VjcmV0"},"s3_inputs":{},"s3_outputs":{},"redaction_key":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}`
+const validPlaintext = `{"binding":{"run":"run-a","tenant":"tenant-a","pool":"pool-a","task_started_by":1800000000,"task_ended_by":1800003600},"credentials":{"model":"c2VjcmV0"},"s3_inputs":{},"redaction_key":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}`
 
 func TestOpenEnvelopeRefusesHeader(t *testing.T) {
 	key := contentKey(t)

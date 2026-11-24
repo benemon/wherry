@@ -156,7 +156,7 @@ func TestCheckBindingRefusesEachOtherTask(t *testing.T) {
 	task := validSubmission()
 	contentKey := make([]byte, 32)
 	envelope, err := signed.BuildEnvelope(signed.EnvelopeValues{Binding: task.Wherry.EnvelopeBinding(), Credentials: map[string][]byte{},
-		S3Inputs: map[string]string{}, S3Outputs: map[string]string{}, RedactionKey: make([]byte, 32)}, contentKey)
+		S3Inputs: map[string]string{}, RedactionKey: make([]byte, 32)}, contentKey)
 	if err != nil {
 		t.Fatal(err)
 	}

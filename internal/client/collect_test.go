@@ -40,7 +40,7 @@ func s3Run(t *testing.T, tampered string) (*fixture, *uploadOracle, string, Awai
 	t.Helper()
 	f, o, receiver := fakeStorageFixture(t)
 	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute),
-		Outputs: []wire.ExpectedOutput{{Name: "a.bin", Storage: wire.StorageS3}, {Name: "b.bin", Storage: wire.StorageS3}}})
+		Outputs: []wire.ExpectedOutput{{Name: "a.bin"}, {Name: "b.bin"}}})
 	if err != nil {
 		t.Fatal(err)
 	}

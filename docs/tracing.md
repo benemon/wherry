@@ -210,8 +210,8 @@ A resource carries `service.name` (`wherry-host.<tenant>.<host>`,
   commands; the platform credential; the pool key and the envelope; the
   redaction key.
 - The prompt, the transcript, outputs, replies and any part of a task.
-- Presigned URLs and their signatures, object keys, the storage keys, the
-  store's answers.
+- Presigned URLs and their signatures, the upload policy and its fields,
+  object keys, the storage keys, the store's answers.
 - Error text, plugin error messages, rejection reasons quoting the task,
   bundle passwords, the broker CA.
 - Exception events: no span records one.

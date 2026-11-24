@@ -752,7 +752,7 @@ func TestS3InputsAndOutputsValidation(t *testing.T) {
 	sha := strings.Repeat("a", 64)
 	accepted := validSubmission()
 	accepted.Wherry.S3Inputs = []S3Input{{Name: "dataset.bin", Size: MaxS3Object, SHA256: sha}, {Name: "empty", SHA256: sha}}
-	accepted.Wherry.Outputs = []ExpectedOutput{{Name: "report.pdf", Storage: StorageS3}, {Name: "notes.md"}}
+	accepted.Wherry.Outputs = []ExpectedOutput{{Name: "report.pdf"}, {Name: "notes.md"}}
 	if err := accepted.validate(); err != nil {
 		t.Fatalf("valid S3 inputs and outputs: %v", err)
 	}
@@ -765,7 +765,6 @@ func TestS3InputsAndOutputsValidation(t *testing.T) {
 		"over 5 GiB":       func(s *Submission) { s.Wherry.S3Inputs[0].Size = MaxS3Object + 1 },
 		"negative size":    func(s *Submission) { s.Wherry.S3Inputs[0].Size = -1 },
 		"uppercase hash":   func(s *Submission) { s.Wherry.S3Inputs[0].SHA256 = strings.Repeat("A", 64) },
-		"other storage":    func(s *Submission) { s.Wherry.Outputs[0].Storage = "gcs" },
 		"over 256 entries": func(s *Submission) { s.Wherry.S3Inputs = slices.Repeat(s.Wherry.S3Inputs[:1], MaxParts) },
 	} {
 		submission := validSubmission()
@@ -867,7 +866,7 @@ func TestGitBaseNamesAnInputAndContinuesAnotherContext(t *testing.T) {
 		submission.Message.ContextID = "run-0"
 		submission.Message.Parts = append(submission.Message.Parts, Part{Raw: StdBytes("x"), Filename: "inline.bundle"})
 		submission.Wherry.S3Inputs = []S3Input{{Name: "base.bundle", Size: 1, SHA256: wireHash}}
-		submission.Wherry.Outputs = []ExpectedOutput{{Name: "changes.bundle", Storage: StorageS3}}
+		submission.Wherry.Outputs = []ExpectedOutput{{Name: "changes.bundle"}}
 		submission.Wherry.Git = &GitInput{Remote: "https://git.example.test/org/repo.git", Ref: "main", Base: &GitBase{Bundle: "base.bundle", Commit: commit}}
 		mutate(submission)
 		return submission

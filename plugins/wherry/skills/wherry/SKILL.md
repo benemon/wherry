@@ -124,9 +124,9 @@ Pick the route by what this host can reach:
 To build on a finished run's commits, submit with `continue` set to its run
 id, without `git`, once `result` has collected its `changes.bundle`. The new run
 clones the same repository, continues from that bundle and returns its own
-`changes.bundle`, holding every round's commits, through the pool's bucket:
-it needs a pool with storage and a host storage credential, or `submit`
-returns `INVALID_ARGUMENT`. No input or output may then be named
+`changes.bundle`, holding every round's commits; the base bundle travels
+through the pool's bucket, so it needs a pool with storage and a host storage
+credential, or `submit` returns `INVALID_ARGUMENT`. No input or output may then be named
 `base.bundle` or `changes.bundle`.
 
 Get commits back with `changes` or a bundle output and push from this host.
@@ -168,11 +168,12 @@ To get files back, add
 `WHERRY_OUTPUT_DIR`; the run fails without it. The prompt the agent receives
 names all of them, and every completed run ends with a reply.
 
-A large input, up to 5 GiB, goes through S3 by its size alone; an input's
-`storage` is refused. Add `storage: "s3"` to an output to
-return it through the bucket. Both need a pool with storage and a storage
-credential for that pool in the user's wherry configuration; without them `submit`
-returns `INVALID_ARGUMENT` saying which is missing. `result` downloads S3
+A large input, up to 5 GiB, goes through S3 by its size alone, and so does an
+output over the pool's output limit; an input's or an output's `storage` is
+refused. A large input needs a pool with storage and a storage credential for
+that pool in the user's wherry configuration; without them `submit` returns
+`INVALID_ARGUMENT` saying which is missing, and a run without them lists an
+output over the limit as `exceeds output limit`. `result` downloads S3
 outputs like any output, and deletes the run's objects from the bucket
 once the run has ended and every one has verified. A run that ended while
 nothing waited for it keeps them until a `result` on it, or the bucket's
