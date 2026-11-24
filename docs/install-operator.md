@@ -16,7 +16,8 @@ On the operator machine:
 ## 1. Create the working directory
 
 Your broker's certificate chains to a CA this machine trusts: a public one, or a private one installed in the
-machine's trust store as [Broker trust](security.md#broker-trust) describes.
+machine's trust store or given to `operator init` as `--ca-cert @ca.pem`, as
+[Broker and S3 trust](security.md#broker-and-s3-trust) describes.
 
 Initialise the working directory `wherry-prod`; `operator init` creates it. It asks for the super user's password and
 masks what you type:
@@ -67,7 +68,8 @@ Apply the terms:
 wherry operator pool apply build
 ```
 
-[Pool terms](configuration-operator.md#pool-terms) explains every field.
+[Pool terms](configuration-operator.md#pool-terms) explains every field. Re-applying a pool file that leaves out
+`producer_byte_rate` and `request_percentage` resets them to the defaults.
 
 ## 3. Add the tenant and give it the pool
 

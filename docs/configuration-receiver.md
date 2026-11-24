@@ -70,9 +70,8 @@ Replace `<version>` with the version you installed.
 | Credentials | none; workload identity supplies `NOMAD_TOKEN` | none; workload identity supplies `NOMAD_TOKEN` | none; service account | none |
 
 Each example sets `drain_timeout: 20s`.
-Each example's receiver trusts the broker through its machine's trust store: the injected trusted-CA bundle on
-OpenShift, the node's trust store on systemd, or `SSL_CERT_FILE` in the job's environment on Nomad
-([Broker trust](security.md#broker-trust)). No example names a CA file.
+A receiver verifies the broker and its pool's bucket against its machine's trust store plus the `ca_cert` of this file
+([Broker and S3 trust](security.md#broker-and-s3-trust)); on OpenShift the CA goes in this file as `ca_cert`.
 
 ### Where wherry looks for the file
 
@@ -88,13 +87,14 @@ A leading `~/` expands in the flag and configuration paths.
 | `bundle` | path | required | Read the receiver's bundle from this file. |
 | `state_dir` | path | `state` beside the bundle | Store the signing key and retained pool keys here. |
 | `plugin_dir` | path | `/usr/local/libexec/wherry/plugins` | Find the `wherry-plugin-<type>` binaries here. |
+| `ca_cert` | string | none | Trust this CA's PEM, or several concatenated, beside the machine's trust store for the receiver's Kafka and S3 connections ([Broker and S3 trust](security.md#broker-and-s3-trust)). |
 | `metrics_addr` | string | none | Serve `/metrics` at this `HOST:PORT`. |
 | `drain_timeout` | duration | `0s` | Let held runs continue for this long after a stop signal. |
 | `credentials` | mapping | none | Map platform credential names to [sources](security.md#credential-sources). |
 | `tracing` | bool | `false` | Write the receiver's and its custodian's spans to the trace topics through the receiver's Kafka connection ([Tracing](tracing.md)). |
 
-The receiver trusts the broker through the system roots, its machine's trust store, which `SSL_CERT_FILE` replaces; a
-CA setting of earlier releases is refused naming the key.
+The receiver verifies the broker and its pool's bucket against its machine's trust store plus `ca_cert`; a
+configuration keeping the CA file setting of earlier releases is refused naming `ca_cert`.
 Pool keys live under `state_dir/pool-keys/`.
 Keep the state directory across restarts.
 Plugin binaries can be symbolic links.
@@ -155,6 +155,18 @@ example](#receiver-configuration-example) names:
 bundle: /etc/wherry/receiver.bundle
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
+# The CA that signed the broker's and the bucket's certificates, when the machine's trust store lacks it.
+ca_cert: |
+  -----BEGIN CERTIFICATE-----
+  MIIBaDCCAQ2gAwIBAgIBATAKBggqhkjOPQQDAjAbMRkwFwYDVQQDExBFeGFtcGxl
+  IEthZmthIENBMB4XDTI2MDEwMTAwMDAwMFoXDTM2MDEwMTAwMDAwMFowGzEZMBcG
+  A1UEAxMQRXhhbXBsZSBLYWZrYSBDQTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IA
+  BFEgy9TOBEc4a9mgnw+3d4qvgVIU0/Fmc8rYHJV3j6w5mDh+2RhsPMfPemvvalyk
+  NjkTrsV9YHdVrC23oTKT1+ujQjBAMA4GA1UdDwEB/wQEAwICBDAPBgNVHRMBAf8E
+  BTADAQH/MB0GA1UdDgQWBBTk2lyUabR4G7GnUkG5jMjgRppaBDAKBggqhkjOPQQD
+  AgNJADBGAiEAhzRsT5hv5IVb4PPTDkywm8ODz0YaOKKW6TVKAqny25ACIQCOs0pI
+  XTLjEqjdY8QInPTKgfhfGCVcW/VdIWyidLG0yQ==
+  -----END CERTIFICATE-----
 metrics_addr: ":9464"
 drain_timeout: 20s
 credentials:

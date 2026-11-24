@@ -30,14 +30,15 @@ The host's paths are the same on every OS, macOS included:
 | `bundle` | path | required; `host init BUNDLE` writes the [default bundle path](#a-configuration-away-from-the-default-path) when the configuration names none | Read the host's bundle from this file; `host init BUNDLE` copies the bundle here. |
 | `host_key` | path | `host.key` in the configuration directory, or `<path>.host.key` beside a configuration [away from the default path](#a-configuration-away-from-the-default-path) | Read the host's private Ed25519 JWK. |
 | `state_dir` | path | the host state directory, or `<path>.state/` beside a configuration [away from the default path](#a-configuration-away-from-the-default-path) | Store local run records here. |
+| `ca_cert` | string | none | Trust this CA's PEM, or several concatenated, beside the machine's trust store for the host's Kafka and S3 connections; `host init --ca-cert` writes it ([Broker and S3 trust](security.md#broker-and-s3-trust)). |
 | `credentials` | mapping | none | Map credential names to [sources](security.md#credential-sources). |
 | `git` | list | none | Map URL prefixes to credential names and SSH known-hosts files. |
 | `storage` | mapping | none | Map pool names to S3 `access_key` and `secret_key` credential names, which win over the `storage` pair the bundle carries for that pool. |
 | `input_roots` | list of paths | MCP server working directory | Allow the MCP server to send inputs from these directories. |
 | `tracing` | bool | `false` | Write the host's spans to its tenant's trace topic through the host's Kafka connection ([Tracing](tracing.md)). |
 
-The host trusts the broker through the system roots, the machine's trust store, which `SSL_CERT_FILE` replaces
-([Environment variables](#environment-variables)); a CA setting of earlier releases is refused naming the key.
+The host verifies the broker and each pool's bucket against the machine's trust store plus `ca_cert`; a configuration
+keeping the CA file setting of earlier releases is refused naming `ca_cert`.
 Each credential source uses exactly one of `file`, `env` and `command`.
 
 ### A configuration away from the default path
@@ -136,6 +137,18 @@ The configuration of host `laptop`, setting every field:
 bundle: ~/.config/wherry/laptop.bundle
 host_key: ~/.config/wherry/laptop.key
 state_dir: ~/.local/state/wherry/laptop
+# The CA that signed the broker's and the bucket's certificates, when the machine's trust store lacks it.
+ca_cert: |
+  -----BEGIN CERTIFICATE-----
+  MIIBaDCCAQ2gAwIBAgIBATAKBggqhkjOPQQDAjAbMRkwFwYDVQQDExBFeGFtcGxl
+  IEthZmthIENBMB4XDTI2MDEwMTAwMDAwMFoXDTM2MDEwMTAwMDAwMFowGzEZMBcG
+  A1UEAxMQRXhhbXBsZSBLYWZrYSBDQTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IA
+  BFEgy9TOBEc4a9mgnw+3d4qvgVIU0/Fmc8rYHJV3j6w5mDh+2RhsPMfPemvvalyk
+  NjkTrsV9YHdVrC23oTKT1+ujQjBAMA4GA1UdDwEB/wQEAwICBDAPBgNVHRMBAf8E
+  BTADAQH/MB0GA1UdDgQWBBTk2lyUabR4G7GnUkG5jMjgRppaBDAKBggqhkjOPQQD
+  AgNJADBGAiEAhzRsT5hv5IVb4PPTDkywm8ODz0YaOKKW6TVKAqny25ACIQCOs0pI
+  XTLjEqjdY8QInPTKgfhfGCVcW/VdIWyidLG0yQ==
+  -----END CERTIFICATE-----
 credentials:
   claude-oauth-token:
     file: ~/.config/wherry/credentials/claude-oauth-token
@@ -275,10 +288,10 @@ of nothing else is refused. A `storage` block holds both keys or is refused.
 | `storage` | mapping | none | the tenant's S3 `access_key` and `secret_key`, plain strings, written when [`tenant storage`](commands.md#wherry-operator-tenant-storage-tenant) recorded them; used for every pool with storage that `storage` in the configuration does not map |
 
 The Kafka platform owns and renews its CA. The host trusts it through the
-machine's trust store, Go's system roots, which `SSL_CERT_FILE` replaces;
-wherry carries no CA, and a bundle keeping the CA earlier operators wrote is
-refused naming the key ([Upgrade](upgrade.md#no-ca-in-wherry)).
-[Broker trust](security.md#broker-trust) says how to install a private CA.
+machine's trust store plus the configuration's `ca_cert`; a bundle carries
+no CA, and one keeping the CA earlier operators wrote is refused naming the
+key ([Upgrade](upgrade.md#broker-trust)).
+[Broker and S3 trust](security.md#broker-and-s3-trust) says how to install a private CA.
 
 ## Environment variables
 
@@ -290,16 +303,10 @@ refused naming the key ([Upgrade](upgrade.md#no-ca-in-wherry)).
  `wherry operator`'s connection is
 [`operator.yaml`](configuration-operator.md#operator-working-directory).
 
-Go's TLS stack reads `SSL_CERT_FILE` as its
-[crypto/x509](https://pkg.go.dev/crypto/x509#SystemCertPool) package
-documents: since Go 1.27, on every OS, macOS and Windows included, a set
-`SSL_CERT_FILE` replaces the system roots for the process, the platform
-verifier included, so the file must hold every CA the process is to trust.
-Every broker connection, the host's, a receiver's and the operator's,
-trusts the system roots, so `SSL_CERT_FILE` is the standard override for a
-CA the machine's trust store lacks. The host's S3 client adds the
-certificates in `SSL_CERT_FILE` to the system roots for a pool's storage
-endpoint on every OS.
+Go's TLS stack reads its own `SSL_CERT_FILE` and `SSL_CERT_DIR`, no wherry
+setting, as [Broker and S3 trust](security.md#broker-and-s3-trust) notes; a
+CA the machine's trust store lacks goes in `ca_cert`, for wherry's Kafka and
+S3 connections alone.
 
 A plugin reads its own variables from the receiver's environment; the
 [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#credentials)

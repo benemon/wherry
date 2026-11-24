@@ -128,9 +128,10 @@ returns once a run of the mock agent completes. Its steps:
 8. `bootstrap` makes the operator's calls through that directory: pool
    `dev`, tenant `dev`, host `dev` and receiver `dev-1` with a plugin
    profile per agent, their bundles under `env/operator/bundles/`. The
-   receiver's `config.yaml` names its bundle, state and plugin directories;
-   the receiver job trusts the instance CA through `SSL_CERT_FILE`, as `up`
-   itself does from the `kafka` step on. Pool `dev`'s
+   receiver's `config.yaml` names its bundle, state and plugin directories
+   and holds the instance CA as `ca_cert`, as every configuration `up`
+   writes does, `operator.yaml` and the host's included; `up`'s own dials
+   trust it the same way. Pool `dev`'s
    terms list each agent by its catalog id with no credential of its own,
    and `pool apply` expands them as it does for any pool: `claude-code`,
    `anthropic` and `codex` each take their one variable, required, and
@@ -163,12 +164,8 @@ returns once a run of the mock agent completes. Its steps:
 11. `smoke` runs the mock agent and checks the output it returns. `ready`
     writes `env/up.json` and prints the summary, an `agents:` line naming
     pool `dev`'s agents with its default marked, a `submit:` line and an
-    `mcp add` line for each harness. It prints
-    `export SSL_CERT_FILE=<instance>/env/tls/ca.pem` first, for the shell
-    whose host commands reach the instance broker, and each `mcp add` line
-    passes `SSL_CERT_FILE` to the server; `SSL_CERT_FILE` replaces the
-    system roots for a process, so a shell that must also reach a real
-    broker does not export it. When the config is in `env/host/`, it prints
+    `mcp add` line for each harness. The instance CA is in the instance's
+    configurations, so nothing is exported for trust. When the config is in `env/host/`, it prints
     `export WHERRY_CONFIG=<path>` too, and each `mcp add` line passes
     `WHERRY_CONFIG` to the server; otherwise neither names the config.
 

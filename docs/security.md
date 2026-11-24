@@ -563,43 +563,57 @@ in git without them. Hand each bundle to its host or receiver over a channel
 you trust. A host bundle holds the host's Kafka password and its tenant's
 storage pair.
 
-### Broker trust
+### Broker and S3 trust
 
 A bundle carries the broker address, the principal and its password; a host
-bundle carries the tenant's storage pair as `storage` too. wherry carries
-no CA: the operator, each host and each receiver verify the broker's
-certificate against the machine's trust store, Go's system roots, which
-`SSL_CERT_FILE` replaces for the process, the platform verifier included,
-on macOS and Windows as on Linux since Go 1.27. A machine that trusts the
-system roots trusts every CA they hold for the broker's address. A bundle
-or configuration keeping a CA setting of earlier releases is refused naming
-the key ([Upgrade](upgrade.md#no-ca-in-wherry)).
+bundle carries the tenant's storage pair as `storage` too. wherry distributes
+no CA. The operator, each host and each receiver verify the broker's
+certificate, and a host and a receiver a pool's bucket, against the machine's
+trust store, Go's system roots. A CA the trust store lacks goes in the
+configuration of the role that needs it as `ca_cert`, the PEM text itself:
+`ca_cert` in the host's `config.yaml`, in the receiver's local configuration
+and in `operator.yaml`, which `host init --ca-cert` and `operator init
+--ca-cert` write. The value adds to the machine's trust store and replaces
+none of it, for wherry's Kafka and S3 connections alone; no other process is
+affected. One value may hold several certificates, a Kafka CA and an S3 CA
+concatenated (`--ca-cert "$(cat broker-ca.pem s3-ca.pem)"`): one pool trusts
+them all on both. A plugin fetches a task's S3 inputs itself, under the
+trust of the receiver's environment, so `ca_cert` does not reach those
+fetches. wherry hands the value to Go and does not validate it; a value from
+which Go reads no certificate is refused as `ca_cert in <file> holds no
+certificate`. A renewed CA is a new value in the configuration and a
+restart. A bundle or configuration keeping a CA setting of earlier releases
+is refused naming the key ([Upgrade](upgrade.md#broker-trust)).
 
 A failure to verify the broker's certificate says so once and names the one
 remedy: install the CA that signed it in the machine's trust store, or set
-`SSL_CERT_FILE`, which then must hold every CA the process is to trust.
-Go's x509 error ends the message.
+`ca_cert` in the configuration, which the message names. Go's x509 error
+ends the message.
+
+Go's own `SSL_CERT_FILE` and `SSL_CERT_DIR`, no wherry setting, reach every
+Go program the shell that sets them starts: with either set, Go on macOS and
+Windows skips the platform verifier and trusts the named files alone, and on
+Linux the file stands in for the default bundle files while the default
+directories are still read unless `SSL_CERT_DIR` is set.
 
 ### Install a private CA
 
-The Kafka platform issues and renews its CA. Install its certificate, in
-PEM, where each party runs. A renewal means installing the new certificate
-the same way while the brokers still present a chain the old one signs; no
-bundle and no password changes.
+The Kafka platform issues and renews its CA. Either install its certificate,
+in PEM, in the trust store of each machine wherry runs on, or give it to
+wherry alone as `ca_cert`. A renewal means the new certificate the same way
+while the brokers still present a chain the old one signs; no bundle and no
+password changes.
 
-- macOS: add it to the System keychain and trust it for SSL, through
-  Keychain Access or with
+- The machine's trust store, for every program on it. macOS: add it to the
+  System keychain and trust it for SSL, through Keychain Access or with
   `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain broker-ca.pem`.
-- RHEL and its derivatives: copy it to `/etc/pki/ca-trust/source/anchors/`
+  RHEL and its derivatives: copy it to `/etc/pki/ca-trust/source/anchors/`
   and run `sudo update-ca-trust`.
-- OpenShift: the cluster's injected trusted-CA bundle holds it once a
-  cluster-admin adds it to the ConfigMap the cluster `Proxy`'s `trustedCA`
-  names, and again at each renewal; a receiver mounts a ConfigMap labelled
-  `config.openshift.io/inject-trusted-cabundle: "true"` at
-  `/etc/pki/ca-trust/extracted/pem`, where Go finds it. Without the `Proxy`
-  route, mount a ConfigMap of the system roots plus the CA at that path.
-- Any process: `SSL_CERT_FILE=/path/to/ca-bundle.pem` names a file of every
-  CA the process trusts, in place of the system roots.
+- `ca_cert`, for wherry's Kafka and S3 connections alone: `wherry host init
+  BUNDLE --ca-cert @broker-ca.pem` on a host and `wherry operator init
+  --ca-cert @broker-ca.pem` on the operator's machine write it; a receiver's
+  local configuration holds it as a block scalar. On OpenShift, the CA goes
+  in the receiver's local configuration as `ca_cert`.
 
 ## Trace topics
 

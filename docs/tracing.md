@@ -213,7 +213,7 @@ A resource carries `service.name` (`wherry-host.<tenant>.<host>`,
 - Presigned URLs and their signatures, the upload policy and its fields,
   object keys, the storage keys, the store's answers.
 - Error text, plugin error messages, rejection reasons quoting the task,
-  bundle passwords, the broker CA.
+  bundle passwords.
 - Exception events: no span records one.
 
 The tests of each role submit sentinel values through every path and fail on

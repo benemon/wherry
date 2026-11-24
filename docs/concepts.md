@@ -48,7 +48,8 @@ Identity is a Kafka principal authenticated with
 over TLS. `wherry operator` creates each host and receiver principal, sets a
 generated password, and writes a **bundle**: a file, mode 0600, holding the
 broker address, the principal and its password; each machine trusts the
-broker's certificate through its own trust store. A host's bundle also
+broker's certificate through its own trust store, plus a CA its wherry
+configuration adds as `ca_cert`. A host's bundle also
 carries its tenant's S3 key pair when the
 operator recorded one. The operator hands the bundle to the host or
 receiver. It never travels over Kafka.

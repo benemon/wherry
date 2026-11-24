@@ -172,7 +172,7 @@ Ctrl-C during those questions writes nothing.
 `bundles/receivers/<receiver>.bundle`, mode 0600, in directories mode 0700. A
 bundle holds the broker address, the principal and its password; its holder
 trusts the broker's certificate through its machine's trust store
-([Broker trust](security.md#broker-trust)). A host bundle also
+([Broker and S3 trust](security.md#broker-and-s3-trust)). A host bundle also
 holds the tenant's S3 key pair as `storage` once
 [`tenant storage`](#wherry-operator-tenant-storage-tenant) recorded it; a
 receiver bundle never does. Each command that writes or rewrites a bundle
@@ -204,7 +204,8 @@ one.
 ```sh
 wherry operator init [--dir DIR] [--broker ADDR] \
   [--super-user NAME --super-user-password-file FILE|-] \
-  [--super-user-mechanism SCRAM-SHA-512|SCRAM-SHA-256]
+  [--super-user-mechanism SCRAM-SHA-512|SCRAM-SHA-256] \
+  [--ca-cert PEM|@FILE|@-]
 ```
 
 `operator init` delegates provisioning from the Kafka super user to `wherry.operator`.
@@ -233,6 +234,15 @@ refused when standard input is a terminal; there the prompt is the route.
 Errors about `-` say standard input and never treat it as a path. The
 password is written nowhere, whichever way it arrives.
 
+`--ca-cert` gives a CA the machine's trust store lacks, which the super-user
+dial and every later command verify the broker against: the PEM text, `@FILE`
+for a file's contents or `@-` for standard input, as every flag that takes a
+value reads it. A value from which Go reads no certificate, a bare path among
+them, is refused, and `--super-user-password-file -` and `--ca-cert @-`
+cannot both read standard input. The value goes into `operator.yaml` as
+`ca_cert`, with CRLF line ends normalised to LF, and the file is read back
+before success is reported ([Broker and S3 trust](security.md#broker-and-s3-trust)).
+
 The super user logs in with SCRAM-SHA-512 unless `--super-user-mechanism SCRAM-SHA-256` says its credential is
 SCRAM-SHA-256; the mechanism is never prompted for, and any other value is refused before a prompt. Kafka answers a
 wrong password and a missing credential for the mechanism alike, so a refused login names the super user, the
@@ -249,8 +259,8 @@ Connected as the super user, once, it:
    replacing its password;
 5. renames the temporary file over `operator.password`.
 
-It then writes `operator.yaml`: `broker` and `password_file: operator.password`, and
-appends `operator.password` and `bundles/` to `.gitignore`, creating it if
+It then writes `operator.yaml`: `broker`, `password_file: operator.password` and
+`ca_cert` when `--ca-cert` was given, and appends `operator.password` and `bundles/` to `.gitignore`, creating it if
 absent and adding only lines it lacks. It closes the super-user connection;
 nothing it writes names the super user, which no later command uses. It ends
 by printing `wherry.operator can provision; its password is in <dir>/operator.password`
@@ -607,7 +617,7 @@ was. Its user runs `wherry host init BUNDLE`, which replaces the host's
 copy. It appends no record and changes nothing in Kafka. It refuses a
 tenant or host that does not exist, is revoking or has ended; a missing
 bundle, or a kept one carrying the CA earlier operators wrote
-([Upgrade](upgrade.md#no-ca-in-wherry)), naming
+([Upgrade](upgrade.md#broker-trust)), naming
 `tenant host add TENANT HOST --force`, which reissues the host with a new
 password; and a bundle that is another principal's.
 
@@ -699,7 +709,7 @@ restart the receiver. Without that bundle it records nothing and fails, naming t
 missing bundle and that `--force` gives the receiver a new password and
 bundle; a kept bundle carrying the CA earlier operators wrote is refused
 the same way, naming the key and `--force`
-([Upgrade](upgrade.md#no-ca-in-wherry)), and one whose principal is
+([Upgrade](upgrade.md#broker-trust)), and one whose principal is
 another receiver's is refused before anything is recorded or rewritten,
 naming both principals.
 When the receiver reads a record that differs
@@ -922,14 +932,15 @@ wherry receiver run [--config-file FILE] [--rotate-key]
 
 Runs a receiver as the principal of the bundle its [local
 configuration](configuration-receiver.md#receiver-local-configuration) names,
-trusting the broker through the machine's trust store, Go's system roots,
-which `SSL_CERT_FILE` replaces. A configuration or bundle keeping a CA
-setting of earlier releases is refused naming the key
-([Upgrade](upgrade.md#no-ca-in-wherry)). When the system
-roots do not trust the broker's certificate, the failure says so with the
-one remedy: install the CA that signed it in the machine's trust store, or
-set `SSL_CERT_FILE` ([Broker trust](security.md#broker-trust)). Go's x509
-error ends the message.
+verifying the broker's certificate, and its pool's bucket, against the
+machine's trust store plus the configuration's `ca_cert`. A configuration or
+bundle keeping a CA setting of earlier releases is refused naming the key
+([Upgrade](upgrade.md#broker-trust)). When neither the trust store nor
+`ca_cert` trusts the broker's certificate, the failure says so with the one
+remedy: install the CA that signed it in the machine's trust store, or set
+`ca_cert` in the configuration, which it names
+([Broker and S3 trust](security.md#broker-and-s3-trust)). Go's x509 error
+ends the message.
 `--config-file` defaults to `/etc/wherry/config.yaml`. It creates the
 configuration's `state_dir` with mode 0700 and keeps `signing.key`, a
 private JWK with mode 0600, in it, and in `pool-keys/` one file with mode
@@ -1166,7 +1177,7 @@ flags. No other command has a shortcut.
 ### `wherry host init`
 
 ```sh
-wherry host init [BUNDLE] [--config-file FILE]
+wherry host init [BUNDLE] [--config-file FILE] [--ca-cert PEM|@FILE|@-]
 ```
 
 Sets the host up from its bundle, and configures it for every pool its tenant
@@ -1192,14 +1203,20 @@ is entitled to:
    the configuration directory's files are not checked. Without `BUNDLE`,
    it uses the bundle the configuration names, and refuses when it names
    none.
-2. It trusts the broker through the machine's trust store, Go's system
-   roots, which `SSL_CERT_FILE` replaces, and asks nothing about the CA. A
+2. It verifies the broker's certificate against the machine's trust store
+   plus the configuration's `ca_cert`, which `--ca-cert` writes: the PEM
+   text, `@FILE` for a file's contents or `@-` for standard input, as every
+   flag that takes a value reads it, with CRLF line ends normalised to LF. A
+   value from which Go reads no certificate, a bare path among them, is
+   refused before anything is written; init dials nothing with the value
+   itself, and reads the configuration back before it connects. A
    configuration or `BUNDLE` keeping a CA setting of earlier releases is
-   refused naming the key ([Upgrade](upgrade.md#no-ca-in-wherry)). When the
-   system roots do not trust the broker's certificate, the failure says so
-   with the one remedy: install the CA that signed it in this machine's
-   trust store, or set `SSL_CERT_FILE` ([Broker trust](security.md#broker-trust)).
-   Go's x509 error ends the message, and every host command fails so.
+   refused naming the key ([Upgrade](upgrade.md#broker-trust)). When neither the
+   trust store nor `ca_cert` trusts the broker's certificate, the failure
+   says so with the one remedy: install the CA that signed it in this
+   machine's trust store, or set `ca_cert` in the configuration, which it
+   names ([Broker and S3 trust](security.md#broker-and-s3-trust)). Go's
+   x509 error ends the message, and every host command fails so.
    When the file is new or step 1 changed it, init writes the
    configuration now, before it connects.
 3. It creates the host key at `host_key`, by default `host.key` in the
@@ -1390,8 +1407,7 @@ and needs `wherry host init` on a re-provisioned host.
 | `--agent` | the pool's default, then the signature with the most spare capacity: the free replicas of its ready profiles on live receivers that are claiming | agent to run |
 | `--model` | the agent's `default_model` | model the agent runs, one of its `models` in the pool's terms |
 | `--selector` | empty | [selector](#selectors) over plugin profile labels |
-| `--prompt` | | prompt text |
-| `--prompt-file` | | file holding the prompt; `-` reads standard input |
+| `--prompt` | | the prompt: its text, `@FILE` for a file's contents, or `@-` for standard input |
 | `--git REMOTE[@REF]` or `--git .` | | repository the agent clones: an `https` or `ssh` URL, or `user@host:path`, at a branch, tag or commit, or without `@REF` at its default branch's commit; `.` is the working directory's repository, its origin at the commit checked out |
 | `--git-path` | the repository name | checkout directory, relative to the agent's working directory |
 | `--git-changes bundle\|patch\|none` | `bundle` | how the agent's commits come back: as the output `changes.bundle`, as `changes.patch`, or not at all |
@@ -1428,10 +1444,12 @@ the model, and refuses a model no agent of the pool holds. wherry does not
 interpret a model name; the profile's plugin passes it to the agent as
 `WHERRY_MODEL`.
 
-Exactly one of `--prompt` and `--prompt-file` is required, and an empty
-prompt file fails with `--prompt-file is empty`. `--prompt-file -` reads the
-prompt from standard input, as in `generate-brief | wherry submit
---prompt-file -`. The other `--git-` flags
+`--prompt` is required and takes its value as every flag with a value does:
+the text as given, `@FILE` for the contents of a file, `~` expanded, or `@-`
+for standard input, as in `generate-brief | wherry submit --prompt @-`. `@-`
+is refused when standard input is a terminal, `@` alone is refused, and a
+value starting with `@` always names a file, which an error names. An empty
+prompt, however given, fails with `--prompt is empty`. The other `--git-` flags
 need `--git`, which takes three forms. `.` is the working directory's
 repository. Otherwise, when the text before the value's last `@` is a remote,
 it is the remote and the rest the ref, so `https://host/a@b` clones `a` at
@@ -1847,7 +1865,7 @@ exits with status 1 and
 | 2 | the run ended `TASK_STATE_FAILED` |
 | 3 | the run ended `TASK_STATE_CANCELED` |
 | 4 | the run ended `TASK_STATE_REJECTED` |
-| 6 | `--timeout`, or the default bound `submit --wait` shares, passed with the run still going |
+| 6 | `--timeout`, or the default bound `submit --wait` shares, passed with the run still going; without `--timeout` the error names the bound, the run's `task_ended_by` plus the upload grace |
 
 For codes 2 to 4 the error is `run ended in <state>`. A run that ends in
 any other state but `TASK_STATE_COMPLETED` exits 1 with the same error.
@@ -1990,7 +2008,7 @@ A server that runs `wherry host mcp --config-file PATH` uses another, as
 [Harness integration](operations-hosts.md#harness-integration) shows.
 A broker certificate the connection does not trust fails each tool call
 with `UNAVAILABLE` and logs the explanation [`wherry host init`](#wherry-host-init)
-gives, naming the trust store and `SSL_CERT_FILE`. A certificate rotated after the server connected
+gives, naming the trust store and `ca_cert` in the configuration. A certificate rotated after the server connected
 logs Go's x509 error alone; a restart rereads the bundle.
 
 ## Version command

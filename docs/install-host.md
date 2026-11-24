@@ -40,7 +40,8 @@ rm laptop.bundle
 ```
 
 `host init` copies the bundle into `~/.config/wherry/`, so you can delete the hand-off copy.
-It trusts the broker through the CA the bundle carries.
+It verifies the broker's certificate against your machine's trust store; a CA the store lacks goes in
+`--ca-cert @ca.pem` ([Broker and S3 trust](security.md#broker-and-s3-trust)).
 It creates your laptop's signing key and registers it.
 On a terminal, it asks by topic: Credentials, Git, Storage, then Summary.
 Only topics with missing settings get questions.

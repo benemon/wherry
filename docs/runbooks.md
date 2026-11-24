@@ -405,13 +405,13 @@ Then:
 
 - Restore the route from the receiver host to the broker's TLS listener,
   or the brokers themselves.
-- For a TLS or SCRAM error, check the receiver machine's trust store, which
-  `SSL_CERT_FILE` replaces, against the listener's certificate chain, and
-  the bundle's principal and password against the cluster's SCRAM
-  credentials. A failure to verify the broker's certificate says the system
-  roots do not trust it and names the remedy: install the CA that signed it
-  in the machine's trust store, or set `SSL_CERT_FILE`
-  ([Broker trust](security.md#broker-trust)).
+- For a TLS or SCRAM error, check the receiver machine's trust store and
+  the `ca_cert` of its local configuration against the listener's
+  certificate chain, and the bundle's principal and password against the
+  cluster's SCRAM credentials. A failure to verify the broker's certificate
+  says so and names the remedy: install the CA that signed it in the
+  machine's trust store, or set `ca_cert` in the configuration it names
+  ([Broker and S3 trust](security.md#broker-and-s3-trust)).
 - For `denied <op>`, run `wherry operator check` to confirm the ACLs the state
   calls for exist, and fix the bundle's credentials; until then the
   receiver restarts and exits again.

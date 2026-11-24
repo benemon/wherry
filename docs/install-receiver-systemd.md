@@ -18,8 +18,8 @@ Choose a systemd plugin release that pairs with your wherry release.
 - The record uses pool `build` from Set up the operator.
   A pool is one trust and tenancy boundary; the platform is a label.
   `build` is that boundary here.
-- This guide's broker uses a private CA. Install it where the receiver runs, as
-  [Broker trust](security.md#broker-trust) describes.
+- This guide's broker uses a private CA. Install it where the receiver runs, or put its PEM in the receiver's
+  local configuration as `ca_cert`, as [Broker and S3 trust](security.md#broker-and-s3-trust) describes.
 - The steps install files from the operator machine on the receiver host: the receiver's bundle and its local
   configuration.
   Copy them over a channel you trust.

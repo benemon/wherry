@@ -22,8 +22,8 @@ Choose a Kubernetes plugin release that pairs with your wherry release.
   `build` is that boundary here.
 - The record's `broker:` line names a Kafka inside the cluster.
   Set it to the address you gave `wherry operator init`, or remove the line to use that address.
-- This guide's broker uses a private CA. Install it where the receiver runs, as
-  [Broker trust](security.md#broker-trust) describes.
+- This guide's broker uses a private CA. Install it where the receiver runs, or put its PEM in the receiver's
+  local configuration as `ca_cert`, as [Broker and S3 trust](security.md#broker-and-s3-trust) describes.
 - The last step runs `wherry host receivers` from a host.
   You set up your laptop as a host on a later page.
   Run the check at the end of this page from the operator machine instead.

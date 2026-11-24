@@ -13,8 +13,8 @@ principals and group configurations; the cluster itself is prepared once.
   `wherry operator init` uses may log in with SCRAM-SHA-256
   (`--super-user-mechanism`). Its address goes into every bundle. The
   operator, each host and each receiver trust its certificate through their
-  machine's trust store, Go's system roots, which `SSL_CERT_FILE` replaces
-  ([Broker trust](security.md#broker-trust)).
+  machine's trust store plus the `ca_cert` of their configuration
+  ([Broker and S3 trust](security.md#broker-and-s3-trust)).
 - **An authoriser** denies anything no ACL allows, and `super.users` names
   the Kafka super user, which `wherry operator init` uses once. See
   [Authorization and ACLs](https://kafka.apache.org/documentation/#security_authz).
@@ -51,11 +51,11 @@ The pattern matches `wherry.operator`, every host principal
 `wherry.rcv.<receiver>`.
 
 Strimzi issues and renews the cluster CA. Install its certificate in the
-trust store of every machine that reaches the broker; on OpenShift a
-receiver reads it from the injected trusted-CA bundle once it is in the
-cluster `Proxy`'s `trustedCA`, as [Broker trust](security.md#broker-trust)
+trust store of every machine that reaches the broker, or give it to each
+party as `ca_cert`; on OpenShift the CA goes in the receiver's local
+configuration as `ca_cert`, as [Broker and S3 trust](security.md#broker-and-s3-trust)
 describes. When Strimzi replaces the CA certificate, install the new one the
-same way.
+same way, with a restart where `ca_cert` holds it.
 [Certificate renewal](https://strimzi.io/docs/operators/latest/deploying.html#con-certificate-renewal-str)
 gives Strimzi's timing.
 
@@ -71,8 +71,8 @@ wherry operator init --broker kafka.example.com:9093 \
   --super-user kafka-admin --super-user-password-file /etc/wherry/admin-password
 ```
 
-The listener's certificate chains to a CA in this machine's trust store
-([Broker trust](security.md#broker-trust)). `init` creates `wherry.operator` with a new password, grants it the
+The listener's certificate chains to a CA in this machine's trust store, or
+to one given as `--ca-cert` ([Broker and S3 trust](security.md#broker-and-s3-trust)). `init` creates `wherry.operator` with a new password, grants it the
 [ACLs provisioning needs](security.md#the-operator-principal), creates the
 `wherry.operator` topic, and writes `operator.yaml` and
 `operator.password`. The broker address is what host bundles name, so use
@@ -556,6 +556,18 @@ host that meets [Run a receiver](operations-receivers.md#run-a-receiver).
    bundle: /etc/wherry/receiver.bundle
    state_dir: /var/lib/wherry/state
    plugin_dir: /usr/local/libexec/wherry/plugins
+   # The CA that signed the broker's and the bucket's certificates, when the machine's trust store lacks it.
+   ca_cert: |
+     -----BEGIN CERTIFICATE-----
+     MIIBaDCCAQ2gAwIBAgIBATAKBggqhkjOPQQDAjAbMRkwFwYDVQQDExBFeGFtcGxl
+     IEthZmthIENBMB4XDTI2MDEwMTAwMDAwMFoXDTM2MDEwMTAwMDAwMFowGzEZMBcG
+     A1UEAxMQRXhhbXBsZSBLYWZrYSBDQTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IA
+     BFEgy9TOBEc4a9mgnw+3d4qvgVIU0/Fmc8rYHJV3j6w5mDh+2RhsPMfPemvvalyk
+     NjkTrsV9YHdVrC23oTKT1+ujQjBAMA4GA1UdDwEB/wQEAwICBDAPBgNVHRMBAf8E
+     BTADAQH/MB0GA1UdDgQWBBTk2lyUabR4G7GnUkG5jMjgRppaBDAKBggqhkjOPQQD
+     AgNJADBGAiEAhzRsT5hv5IVb4PPTDkywm8ODz0YaOKKW6TVKAqny25ACIQCOs0pI
+     XTLjEqjdY8QInPTKgfhfGCVcW/VdIWyidLG0yQ==
+     -----END CERTIFICATE-----
    metrics_addr: ":9464"
    drain_timeout: 20s
    credentials:

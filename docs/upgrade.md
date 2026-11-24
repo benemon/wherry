@@ -47,36 +47,29 @@ compatibility path remains.
   refuses such a task without publishing a rejection, so the run waits until
   its `task_started_by` passes unclaimed.
 
-## No CA in wherry
+## Broker trust
 
 A clean break, as every pre-1.0 change ([ADR-0032](design.md)); no
-compatibility path remains. wherry manages no CAs: bundles carry no `ca`,
-and no `ca_file` is read in a host, receiver or operator configuration.
-Every party verifies the broker's certificate against its machine's trust
-store, Go's system roots, with `SSL_CERT_FILE` as the standard override
-([Broker trust](security.md#broker-trust)). The new binary refuses a
-bundle carrying `ca` and a configuration keeping `ca_file`, naming the key,
-so every bundle an operator with a `ca_file` wrote is reissued, with a new
-password:
+compatibility path remains. wherry distributes no CA: bundles carry no `ca`,
+and the `ca_file` of a host, receiver or operator configuration is now
+`ca_cert`, holding the CA's PEM text itself, beside the machine's
+trust store ([Broker and S3 trust](security.md#broker-and-s3-trust)). The new
+binary refuses a bundle carrying `ca` and a configuration keeping `ca_file`,
+naming the key. Upgrade the operator first: an older operator with a
+`ca_file` writes `ca` back into every bundle it issues.
 
-1. Install the broker's CA in every trust store: the operator's machine,
-   each host and each receiver's platform, as
-   [Install a private CA](security.md#install-a-private-ca) describes.
-2. Install the operator's binary and remove `ca_file` from `operator.yaml`.
-3. Reissue each bundle: `wherry operator tenant host add TENANT HOST --force`
-   for each host and `wherry operator receiver apply RECEIVER --force` for
-   each receiver. The old kept bundles carry `ca`, so
-   `tenant host refresh` and `receiver apply` refuse them naming `--force`;
-   the reissue writes a bundle without `ca` and a new password.
-4. Hand each new bundle over as the first was.
-5. On each host, install the binary, remove the `ca_file` line from the
-   configuration and run `wherry host init BUNDLE` with the new bundle.
-   Restart the harness sessions that run `wherry host mcp`.
-6. On each receiver, install the binary and the new bundle together, remove
-   `ca_file` from its local configuration and restart the receiver.
+1. On the operator's machine, install the binary and replace `ca_file` in
+   `operator.yaml` with `ca_cert` holding the PEM.
+2. Reissue every bundle with `--force`: `wherry operator tenant host add
+   TENANT HOST --force` for each host and `wherry operator receiver apply
+   RECEIVER --force` for each receiver. Each holder is locked out from its
+   reissue until it installs its new bundle.
+3. For each holder: stop it, install the binary and the new bundle, replace
+   `ca_file` in its configuration with `ca_cert` holding the PEM, start it.
+   A host runs `wherry host init BUNDLE --ca-cert @ca.pem` and restarts the
+   harness sessions that run `wherry host mcp`.
 
-Until a host or receiver takes the new binary and bundle, it keeps the old
-ones, which still work. Or reset the deployment and provision it again.
+Or reset the deployment and provision it again.
 
 ## Optional credentials the host resolves
 
