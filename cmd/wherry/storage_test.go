@@ -150,7 +150,7 @@ func TestTenantStorageCommand(t *testing.T) {
 		t.Fatalf("refresh printed %q; want %q", stdout.String(), want)
 	}
 	after, err := operator.ReadBundle(hostA)
-	if err != nil || after != (operator.Bundle{Broker: before.Broker, Principal: before.Principal, Password: before.Password, CA: before.CA, Storage: keys}) {
+	if err != nil || after != (operator.Bundle{Broker: before.Broker, Principal: before.Principal, Password: before.Password, Storage: keys}) {
 		t.Fatalf("refreshed bundle %+v, %v; want the pair with the password of %+v", after, err, before)
 	}
 	stdout.Reset()

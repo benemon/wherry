@@ -170,10 +170,9 @@ Ctrl-C during those questions writes nothing.
 `tenant host add` and `receiver apply` write bundles under the working directory's
 `bundles/`: `bundles/hosts/<tenant>/<host>.bundle` and
 `bundles/receivers/<receiver>.bundle`, mode 0600, in directories mode 0700. A
-bundle holds the broker address, the principal and its password, and, when
-`operator.yaml` names a `ca_file` and the bundle's broker is the operator's,
-that file's certificates as `ca`, so a host or receiver needs no CA file of
-its own ([Broker trust](security.md#broker-trust)). A host bundle also
+bundle holds the broker address, the principal and its password; its holder
+trusts the broker's certificate through its machine's trust store
+([Broker trust](security.md#broker-trust)). A host bundle also
 holds the tenant's S3 key pair as `storage` once
 [`tenant storage`](#wherry-operator-tenant-storage-tenant) recorded it; a
 receiver bundle never does. Each command that writes or rewrites a bundle
@@ -181,7 +180,7 @@ prints its path and the next step:
 `wherry host init <file>` for a host, and the platform's bundle step for a receiver.
 `tenant host add` refuses a host that exists unless given `--force`. `receiver apply` of a receiver that exists
 updates its configuration, and replaces its bundle only when the broker
-address or the CA changed, keeping the password; `tenant host refresh` does
+address changed, keeping the password; `tenant host refresh` does
 the same for a host's bundle, the storage keys included. Without `--force`, `tenant host add` and
 `receiver apply` of a new receiver never replace a bundle: before they change
 anything in Kafka they create the bundle file, failing when a file is there,
@@ -203,7 +202,7 @@ one.
 ### `wherry operator init`
 
 ```sh
-wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] \
+wherry operator init [--dir DIR] [--broker ADDR] \
   [--super-user NAME --super-user-password-file FILE|-] \
   [--super-user-mechanism SCRAM-SHA-512|SCRAM-SHA-256]
 ```
@@ -218,16 +217,13 @@ You see one question per page.
 Enter the broker address.
 An address without a port uses the Kafka client's default port, 9092
 ([`kgo.SeedBrokers`](https://pkg.go.dev/github.com/twmb/franz-go/pkg/kgo#SeedBrokers)).
-Choose a CA certificate from the PEM files in the current directory,
-System roots or Other file...
 Enter the super user's name.
 Enter the super user's password. The prompt masks it, never prints it back,
 and takes it as typed: leading and trailing spaces are part of the password,
 and only a trailing CR or LF is trimmed, as from a file.
-Press Tab to complete the CA file path.
 Press Ctrl-C to stop before any files are written.
 If stderr is redirected, or prompts are otherwise unavailable, give every
-required flag. An omitted `--ca-file` uses the system roots.
+required flag.
 Missing flags are named in the error:
 `operator init has no terminal to prompt on; give --broker, --super-user, --super-user-password-file`.
 
@@ -253,8 +249,7 @@ Connected as the super user, once, it:
    replacing its password;
 5. renames the temporary file over `operator.password`.
 
-It then writes `operator.yaml`: `broker`, `ca_file` as an absolute path
-(omitted for the system roots) and `password_file: operator.password`, and
+It then writes `operator.yaml`: `broker` and `password_file: operator.password`, and
 appends `operator.password` and `bundles/` to `.gitignore`, creating it if
 absent and adding only lines it lacks. It closes the super-user connection;
 nothing it writes names the super user, which no later command uses. It ends
@@ -581,8 +576,7 @@ wherry operator tenant host add TENANT HOST [--force]
 
 Records a host of an existing live tenant, creates its principal and key topic, grants its ACLs, applies its quotas, and writes
 its bundle to `bundles/hosts/<tenant>/<host>.bundle`, naming the broker in
-`operator.yaml`, carrying its `ca_file`'s certificates as `ca` when it
-names one, and the tenant's S3 key pair as `storage` when
+`operator.yaml` and carrying the tenant's S3 key pair as `storage` when
 [`tenant storage`](#wherry-operator-tenant-storage-tenant) recorded one. It
 prints
 `wrote <bundle>; hand it to the host, where wherry host init <file> installs it`.
@@ -603,20 +597,19 @@ wherry operator tenant host refresh TENANT HOST
 ```
 
 Rewrites the kept bundle, `bundles/hosts/<tenant>/<host>.bundle`, of a live
-host with the broker in `operator.yaml`, its `ca_file`'s certificates as
-`ca` and the tenant's S3 key pair as `storage`, keeping the principal and
-password. A renewed CA, a new broker address or a rotated pair so reaches
-the host without a new password. It prints `refreshed <bundle>` with the
+host with the broker in `operator.yaml` and the tenant's S3 key pair as
+`storage`, keeping the principal and password. A new broker address or a
+rotated pair so reaches the host without a new password. It prints `refreshed <bundle>` with the
 next step when the bundle changed, or `<bundle> is current`. A rerun
 changes nothing, so a refresh interrupted between a tenant's hosts is run
 again for each of them. Hand the refreshed bundle to the host as the first
 was. Its user runs `wherry host init BUNDLE`, which replaces the host's
-copy and warns when a `ca_file` in the configuration overrides the bundle's
-`ca`. It appends no record and changes nothing in Kafka. It refuses a
+copy. It appends no record and changes nothing in Kafka. It refuses a
 tenant or host that does not exist, is revoking or has ended; a missing
-bundle, naming `tenant host add TENANT HOST --force`, which reissues the
-host with a new password; and a bundle that is another principal's.
-[Renew the broker CA](security.md#renew-the-broker-ca) gives the renewal procedure.
+bundle, or a kept one carrying the CA earlier operators wrote
+([Upgrade](upgrade.md#no-ca-in-wherry)), naming
+`tenant host add TENANT HOST --force`, which reissues the host with a new
+password; and a bundle that is another principal's.
 
 ### `wherry operator receiver apply RECEIVER`
 
@@ -684,12 +677,10 @@ it appends the record, so a create that fails leaves no record. The file must na
 `pool`. It creates the progress topic of every other live receiver in the
 pool that lacks one, and sets the
 [progress topic configuration](design.md#topics-1) on each existing one, never lowering its `retention.ms`.
-The bundle holds the receiver's Kafka identity and, when the receiver uses
-the operator's broker and `operator.yaml` names a `ca_file`, that file's
-certificates as `ca`; a receiver on another address gets none. The receiver's [local
+The bundle holds the receiver's Kafka identity alone; the receiver's machine
+trusts the broker's certificate through its trust store. The receiver's [local
 configuration](configuration-receiver.md#receiver-local-configuration) gives the
-sources of its [platform credentials](configuration-receiver.md#platform-credentials),
-and a `ca_file` there overrides the bundle's `ca`.
+sources of its [platform credentials](configuration-receiver.md#platform-credentials).
 With `--dry-run`, it makes the same checks and prints each plugin profile as
 the record would hold it, with the pins, in the format of `receiver show`, and creates and
 writes nothing.
@@ -700,15 +691,17 @@ new configuration in the receiver's pool. The file's `pool` may be empty and
 otherwise must name that pool. Tasks on a signature the new configuration no
 longer has wait unless another member shares it. The record holds only the pins the file gives, so give one for every
 plugin type. The principal and password stay as they are. When the file's
-broker address, or the `ca` the bundle should carry, differs from the
-receiver's bundle in `bundles/receivers/`, each compared on its own, it
-rewrites the bundle with the new address and CA and the same password, so a
-renewed CA reaches the receiver without a new password, and prints
+broker address differs from the receiver's bundle in `bundles/receivers/`,
+it rewrites the bundle with the new address and the same password, so a new
+address reaches the receiver without a new password, and prints
 `refreshed <bundle>` with the next step: install it on the platform and
 restart the receiver. Without that bundle it records nothing and fails, naming the
 missing bundle and that `--force` gives the receiver a new password and
-bundle; a kept bundle whose principal is another receiver's is refused the
-same way, before anything is recorded or rewritten, naming both principals.
+bundle; a kept bundle carrying the CA earlier operators wrote is refused
+the same way, naming the key and `--force`
+([Upgrade](upgrade.md#no-ca-in-wherry)), and one whose principal is
+another receiver's is refused before anything is recorded or rewritten,
+naming both principals.
 When the receiver reads a record that differs
 from the configuration it runs, it stops claiming, lets each run it holds
 end and commit with no time limit, then exits, and its platform restarts it.
@@ -929,14 +922,14 @@ wherry receiver run [--config-file FILE] [--rotate-key]
 
 Runs a receiver as the principal of the bundle its [local
 configuration](configuration-receiver.md#receiver-local-configuration) names,
-trusting the broker through the configuration's `ca_file`, else the
-bundle's `ca`, else the system roots. A bundle whose `ca` holds no
-certificate is refused. When the broker's certificate does not chain to the
-CA the connection trusts, the failure names that CA and one remedy: a
-`ca_file`, by its path in the configuration, to point at the broker's CA or
-to remove; the bundle's `ca`, or no `ca` and the system roots, with
-`wherry operator receiver apply RECEIVER`, which rewrites the bundle to
-install and restart with. Go's x509 error ends the message.
+trusting the broker through the machine's trust store, Go's system roots,
+which `SSL_CERT_FILE` replaces. A configuration or bundle keeping a CA
+setting of earlier releases is refused naming the key
+([Upgrade](upgrade.md#no-ca-in-wherry)). When the system
+roots do not trust the broker's certificate, the failure says so with the
+one remedy: install the CA that signed it in the machine's trust store, or
+set `SSL_CERT_FILE` ([Broker trust](security.md#broker-trust)). Go's x509
+error ends the message.
 `--config-file` defaults to `/etc/wherry/config.yaml`. It creates the
 configuration's `state_dir` with mode 0700 and keeps `signing.key`, a
 private JWK with mode 0600, in it, and in `pool-keys/` one file with mode
@@ -1199,18 +1192,14 @@ is entitled to:
    the configuration directory's files are not checked. Without `BUNDLE`,
    it uses the bundle the configuration names, and refuses when it names
    none.
-2. It trusts the broker through the configuration's `ca_file`, else the
-   bundle's `ca`, else the system roots, and asks nothing about the CA. A
-   bundle whose `ca` holds no certificate is refused. When the
-   configuration keeps a `ca_file` and `BUNDLE` carries a `ca`, it warns
-   that the file overrides the bundle, since a stale file hides a refreshed
-   CA. When the broker's certificate does not chain to the CA the
-   connection trusts, the failure names that CA and one remedy: a
-   `ca_file`, by its path, to point at the broker's CA or to remove; the
-   bundle's `ca`, or no `ca` and the system roots, with
-   `wherry operator tenant host refresh TENANT HOST`, which rewrites the
-   bundle for `wherry host init` to install. Go's x509 error ends the
-   message, and every host command fails so.
+2. It trusts the broker through the machine's trust store, Go's system
+   roots, which `SSL_CERT_FILE` replaces, and asks nothing about the CA. A
+   configuration or `BUNDLE` keeping a CA setting of earlier releases is
+   refused naming the key ([Upgrade](upgrade.md#no-ca-in-wherry)). When the
+   system roots do not trust the broker's certificate, the failure says so
+   with the one remedy: install the CA that signed it in this machine's
+   trust store, or set `SSL_CERT_FILE` ([Broker trust](security.md#broker-trust)).
+   Go's x509 error ends the message, and every host command fails so.
    When the file is new or step 1 changed it, init writes the
    configuration now, before it connects.
 3. It creates the host key at `host_key`, by default `host.key` in the
@@ -1269,7 +1258,6 @@ Blank Variable, File, Command or known_hosts returns; blank SSH prefix uses
 whitespace-only input counts as blank. Tab accepts completion for paths,
 command words and variable names; Up/Down and ctrl+n/p cycle suggestions.
 Hidden paths can be typed explicitly.
-CA symlinks to regular files are accepted; certificates are limited to 1 MiB.
 
 Each question owns its input. Type after it appears: bytes typed before the
 next form starts may be lost. Ctrl-C ends init with `interrupted`, losing
@@ -2002,7 +1990,7 @@ A server that runs `wherry host mcp --config-file PATH` uses another, as
 [Harness integration](operations-hosts.md#harness-integration) shows.
 A broker certificate the connection does not trust fails each tool call
 with `UNAVAILABLE` and logs the explanation [`wherry host init`](#wherry-host-init)
-gives, naming the CA used. A certificate rotated after the server connected
+gives, naming the trust store and `SSL_CERT_FILE`. A certificate rotated after the server connected
 logs Go's x509 error alone; a restart rereads the bundle.
 
 ## Version command

@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
@@ -211,4 +212,25 @@ func TestConfigurationDocumentedFields(t *testing.T) {
 		})
 	}
 	docEqual(t, "environment variables", variables, slices.Compact(slices.Sorted(slices.Values(reads))))
+}
+
+// No page describes a ca_file of wherry's own or a bundle ca: trust is the machine's. The Nomad plugin's own tls.ca_file
+// stays, and upgrade.md names the removed keys as such. No install page names renaming agent: claude or mkdir.
+func TestDocsNameNoCA(t *testing.T) {
+	pages, err := filepath.Glob("../../docs/*.md")
+	if err != nil || len(pages) == 0 {
+		t.Fatal("no docs", err)
+	}
+	removed := regexp.MustCompile("`ca_file`|`ca`|^\\s*ca_file:|^\\s*ca:|--ca-file|kafka-ca")
+	for _, page := range pages {
+		name := filepath.Base(page)
+		for i, line := range strings.Split(docRead(t, page), "\n") {
+			if name != "upgrade.md" && !strings.Contains(line, "nomad-ca.pem") && removed.MatchString(line) {
+				t.Errorf("%s:%d names a CA wherry no longer carries: %s", name, i+1, strings.TrimSpace(line))
+			}
+			if strings.HasPrefix(name, "install") && (strings.Contains(line, "`agent: claude`") || strings.Contains(line, "mkdir")) {
+				t.Errorf("%s:%d: %s", name, i+1, strings.TrimSpace(line))
+			}
+		}
+	}
 }

@@ -3,5 +3,3 @@ agents:
 default_agent: claude-code
 delivery_limit: 5
 lock_duration: 15s
-producer_byte_rate: 1048576
-request_percentage: 10

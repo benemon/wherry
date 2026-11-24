@@ -12,6 +12,8 @@ root=${XDG_DATA_HOME:-$HOME/.local/share}/wherry/dev/default
 # up writes the default instance's host config at the standard path, which every host command reads.
 config=${XDG_CONFIG_HOME:-$HOME/.config}/wherry/config.yaml
 state=${XDG_STATE_HOME:-$HOME/.local/state}/wherry
+# Every wherry process of the lane trusts the instance CA as its system roots, as up tells the user's shell to.
+export SSL_CERT_FILE=$root/env/tls/ca.pem
 mkdir -p "$work"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -48,6 +50,7 @@ up)
   grep -q '^ready: instance default (' "$work/up.txt" || fail "no ready line"
   grep -qx 'submit: wherry submit --prompt "..."' "$work/up.txt" || fail "no submit line without a config"
   if grep -q -e --config-file -e WHERRY_CONFIG "$work/up.txt"; then fail "the ready output names a config"; fi
+  grep -qx "export SSL_CERT_FILE=$SSL_CERT_FILE" "$work/up.txt" || fail "no SSL_CERT_FILE line for the instance CA"
   [ -f "$config" ] || fail "no host config at $config"
   for file in operator.yaml operator.password .gitignore; do
     [ -f "$root/env/operator/$file" ] || fail "env/operator has no $file"

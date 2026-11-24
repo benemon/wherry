@@ -27,7 +27,6 @@ names only its line numbers, and no `~` is expanded:
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `broker` | string | required | Kafka bootstrap address, `host:port`; host bundles name it, and receiver bundles unless the receiver's file names another |
-| `ca_file` | string | none | path of the PEM CA certificates the operator trusts the broker with, which `operator init` writes absolute and every bundle for its broker carries as `ca`; a relative path is in the working directory; absent for the system's trusted roots |
 | `password_file` | string | required | `wherry.operator`'s password file, `operator.password`; a relative path is in the working directory |
 | `tracing` | bool | `false` | write a span per operator command to the trace topics through the operator's Kafka connection ([Tracing](tracing.md)) |
 

@@ -24,12 +24,10 @@ import (
 // Config is the on-disk wherry host configuration. Credentials maps a
 // credential name to the source of its value. Git names the credential and
 // host key a task cloning under each URL prefix takes. InputRoots are the
-// directories the MCP server sends inputs from. CAFile holds the PEM certificates the host trusts the broker with; without
-// it, the bundle's ca, and without that the system roots. Storage maps a pool to the credentials of its bucket.
-// Tracing writes the host's spans to its tenant's trace topic; off by default.
+// directories the MCP server sends inputs from. Storage maps a pool to the credentials of its bucket. Tracing writes
+// the host's spans to its tenant's trace topic; off by default. The broker is trusted through the system roots.
 type Config struct {
 	Bundle      string                       `yaml:"bundle"`
-	CAFile      string                       `yaml:"ca_file,omitempty"`
 	HostKey     string                       `yaml:"host_key,omitempty"`
 	StateDir    string                       `yaml:"state_dir,omitempty"`
 	Credentials map[string]credential.Source `yaml:"credentials,omitempty"`
@@ -147,6 +145,9 @@ func LoadConfig(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if err := operator.RefuseCAFile(path, encoded); err != nil {
+		return Config{}, err
+	}
 	var config Config
 	if err := operator.DecodeYAML(encoded, &config); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
@@ -166,7 +167,7 @@ func LoadConfig(path string) (Config, error) {
 			config.StateDir = paths.StateDir
 		}
 	}
-	for _, path := range []*string{&config.Bundle, &config.HostKey, &config.StateDir, &config.CAFile} {
+	for _, path := range []*string{&config.Bundle, &config.HostKey, &config.StateDir} {
 		if *path, err = ExpandHome(*path); err != nil {
 			return Config{}, err
 		}
@@ -258,19 +259,13 @@ func Init(ctx context.Context, config Config) (string, map[string]operator.Terms
 const pingTimeout = 30 * time.Second
 
 // Connect opens the bundle's TLS and SCRAM-SHA-512 Kafka connection as its host principal, trusting the broker through
-// the configuration's ca_file, else the bundle's ca, else the system roots; the host logs to logger.
+// the system roots; the host logs to logger.
 func Connect(config Config, logger *log.Logger) (*Host, error) {
 	bundle, err := operator.ReadBundle(config.Bundle)
 	if err != nil {
 		return nil, err
 	}
-	var ca []byte
-	if config.CAFile != "" {
-		if ca, err = os.ReadFile(config.CAFile); err != nil {
-			return nil, fmt.Errorf("ca_file: %w", err)
-		}
-	}
-	opts, err := operator.BundleKafkaOpts(bundle, ca)
+	opts, err := operator.BundleKafkaOpts(bundle)
 	if err != nil {
 		return nil, fmt.Errorf("bundle: %w", err)
 	}
@@ -284,14 +279,12 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 		kafka.Close()
 		return nil, err
 	}
-	// The first exchange with the broker, so a certificate the connection does not trust fails here, where the CA it
-	// was checked against is known.
+	// The first exchange with the broker, so a certificate the connection does not trust fails here.
 	ping, cancel := context.WithTimeout(context.Background(), pingTimeout)
 	defer cancel()
 	if err := kafka.Ping(ping); err != nil {
 		kafka.Close()
-		source := operator.TrustSource{CAFile: config.CAFile, Config: "your host configuration", BundleCA: bundle.CA != ""}
-		return nil, operator.ExplainUnknownAuthority(err, source, hostRefresh(host.tenant, host.host))
+		return nil, operator.ExplainUnknownAuthority(err)
 	}
 	if host.key, err = operator.RecoverKey(context.Background(), kafka, signed.HostOwner(host.tenant, host.host), operator.HostTopic(host.tenant, host.host), config.HostKey); err != nil {
 		kafka.Close()
@@ -305,11 +298,6 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 		}
 	}
 	return host, nil
-}
-
-// hostRefresh is the operator command that rewrites the bundle of host in tenant, and how the host installs it.
-func hostRefresh(tenant, host string) operator.BundleRefresh {
-	return operator.BundleRefresh{Command: "wherry operator tenant host refresh " + tenant + " " + host, Install: "install it with wherry host init"}
 }
 
 // RotateKey replaces the host key with a new one and returns the old and new key IDs. It refuses while a run this host

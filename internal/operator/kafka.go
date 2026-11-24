@@ -37,7 +37,6 @@ import (
 type Service struct {
 	Operator *kgo.Client // connected as wherry.operator
 	Broker   string      // the broker address host bundles carry
-	CA       []byte      // PEM the operator trusts the broker with; nil for the system roots
 	// Tracing is the operator role's tracer provider, nil for none: each command is a root marker span under it.
 	Tracing *telemetry.Tracing
 	// Storage is the storage keys the operator recorded for a tenant, zero for a tenant without any, which every host
@@ -47,13 +46,12 @@ type Service struct {
 	LockCeilingMS   int64
 }
 
-// Bundle is a host's or receiver's Kafka identity, as the operator writes it, with CA as PEM in a string, since yaml
-// marshals a []byte as !!binary, and Storage the tenant's S3 key pair, which only a host bundle carries.
+// Bundle is a host's or receiver's Kafka identity, as the operator writes it, and Storage the tenant's S3 key pair,
+// which only a host bundle carries. The broker is trusted through the holder's system roots: a bundle carries no CA.
 type Bundle struct {
 	Broker    string      `yaml:"broker"`
 	Principal string      `yaml:"principal"`
 	Password  string      `yaml:"password"`
-	CA        string      `yaml:"ca,omitempty"`
 	Storage   StorageKeys `yaml:"storage,omitempty"`
 }
 
@@ -118,14 +116,9 @@ func commandClass(err error) string {
 	return telemetry.ClassError
 }
 
-// Bundle is the bundle service writes for principal with password at broker, carrying the operator's CA only when broker
-// is the operator's own: the operator knows nothing of another address's CA.
+// Bundle is the bundle service writes for principal with password at broker.
 func (service *Service) Bundle(broker, principal, password string) Bundle {
-	bundle := Bundle{Broker: broker, Principal: principal, Password: password}
-	if broker == service.Broker && len(service.CA) > 0 {
-		bundle.CA = string(service.CA)
-	}
-	return bundle
+	return Bundle{Broker: broker, Principal: principal, Password: password}
 }
 
 // tenantStorage is the storage keys the operator recorded for tenant: zero without any, or without a record of them.
@@ -136,8 +129,8 @@ func (service *Service) tenantStorage(tenant string) (StorageKeys, error) {
 	return service.Storage(tenant)
 }
 
-// hostBundle is the bundle a host of tenant holds now: the operator's broker and CA, the principal and password, and
-// the tenant's storage keys.
+// hostBundle is the bundle a host of tenant holds now: the operator's broker, the principal and password, and the
+// tenant's storage keys.
 func (service *Service) hostBundle(principal, password string, storage StorageKeys) Bundle {
 	bundle := service.Bundle(service.Broker, principal, password)
 	bundle.Storage = storage
@@ -159,12 +152,19 @@ func DecodeYAML(encoded []byte, value any) error {
 	return nil
 }
 
-// ReadBundle reads the bundle at path, refusing unknown fields, a missing broker, principal or password, a ca that holds
-// no PEM certificate, rather than fall back to the system roots, and a storage block missing either key.
+// ErrBundleCA is a bundle that carries the ca earlier operators wrote: no release reads it, and the operator reissues
+// the bundle.
+var ErrBundleCA = errors.New("ca is no longer read; reissue this bundle")
+
+// ReadBundle reads the bundle at path, refusing a ca, by name, unknown fields, a missing broker, principal or password,
+// and a storage block missing either key.
 func ReadBundle(path string) (Bundle, error) {
 	encoded, err := os.ReadFile(path)
 	if err != nil {
 		return Bundle{}, fmt.Errorf("read bundle: %w", err)
+	}
+	if RemovedKey(encoded, "ca") {
+		return Bundle{}, fmt.Errorf("%s: %w", path, ErrBundleCA)
 	}
 	var bundle Bundle
 	if err := DecodeYAML(encoded, &bundle); err != nil {
@@ -172,9 +172,6 @@ func ReadBundle(path string) (Bundle, error) {
 	}
 	if bundle.Broker == "" || bundle.Principal == "" || bundle.Password == "" {
 		return Bundle{}, errors.New("bundle requires broker, principal and password")
-	}
-	if bundle.CA != "" && !x509.NewCertPool().AppendCertsFromPEM([]byte(bundle.CA)) {
-		return Bundle{}, errors.New("bundle ca holds no PEM certificate")
 	}
 	if err := bundle.Storage.check(); bundle.Storage != (StorageKeys{}) && err != nil {
 		return Bundle{}, fmt.Errorf("bundle %w", err)
@@ -225,14 +222,29 @@ func ReplaceStorageKeys(path string, keys StorageKeys) (err error) {
 	return err
 }
 
-// BundleKafkaOpts are KafkaOpts for bundle's principal, trusting the broker through local, the holder's own ca_file, else
-// the bundle's ca, else the system roots; a stale local file hides a refreshed CA.
-func BundleKafkaOpts(bundle Bundle, local []byte) ([]kgo.Opt, error) {
-	ca := local
-	if ca == nil && bundle.CA != "" {
-		ca = []byte(bundle.CA)
+// BundleKafkaOpts are KafkaOpts for bundle's principal.
+func BundleKafkaOpts(bundle Bundle) ([]kgo.Opt, error) {
+	return KafkaOpts(bundle.Broker, bundle.Principal, bundle.Password)
+}
+
+// RemovedKey reports whether encoded, a YAML mapping, names key at its top level: a field no release reads, which a
+// strict decode would otherwise report as an unknown field at a line. Text that is no mapping names nothing.
+func RemovedKey(encoded []byte, key string) bool {
+	var mapping map[string]any
+	if yaml.Unmarshal(encoded, &mapping) != nil {
+		return false
 	}
-	return KafkaOpts(bundle.Broker, ca, bundle.Principal, bundle.Password)
+	_, found := mapping[key]
+	return found
+}
+
+// RefuseCAFile is why the configuration at path, encoded, is refused when it keeps the ca_file earlier releases read:
+// the broker's CA belongs in the machine's trust store. Nil when it names none.
+func RefuseCAFile(path string, encoded []byte) error {
+	if !RemovedKey(encoded, "ca_file") {
+		return nil
+	}
+	return fmt.Errorf("%s: ca_file is no longer read; remove the line and install the broker's CA in this machine's trust store", path)
 }
 
 // unknownAuthority reports whether err is a connection the broker's certificate failed because it chains to no CA the
@@ -242,38 +254,13 @@ func unknownAuthority(err error) bool {
 	return errors.As(err, &unknown)
 }
 
-// TrustSource is the CA a connection trusts the broker through, as BundleKafkaOpts chose it: CAFile is the
-// configuration's ca_file, absolute, when it is the CA, and Config what an explanation calls the configuration naming
-// it; BundleCA reports whether the bundle carries a ca.
-type TrustSource struct {
-	CAFile, Config string
-	BundleCA       bool
-}
-
-// BundleRefresh is the operator command that rewrites a bundle, and how its holder installs the new one.
-type BundleRefresh struct{ Command, Install string }
-
-// ExplainUnknownAuthority replaces err, when unknownAuthority, with what failed, why in terms of the CA source names
-// and the one remedy for that CA, keeping err at the end; any other err is returned as it is.
-func ExplainUnknownAuthority(err error, source TrustSource, refresh BundleRefresh) error {
+// ExplainUnknownAuthority replaces err, when unknownAuthority, with what failed and the one remedy, keeping err at the
+// end; any other err is returned as it is.
+func ExplainUnknownAuthority(err error) error {
 	if !unknownAuthority(err) {
 		return err
 	}
-	switch {
-	case source.CAFile != "":
-		remedy := "point ca_file at the broker's CA"
-		if source.BundleCA {
-			remedy += ", or remove it to use the bundle's"
-		}
-		path := source.CAFile
-		if abs, absErr := filepath.Abs(path); absErr == nil {
-			path = abs
-		}
-		return fmt.Errorf("cannot verify the broker's certificate: it does not chain to a CA in ca_file %s in %s; %s (%w)", path, source.Config, remedy, err)
-	case source.BundleCA:
-		return fmt.Errorf("cannot verify the broker's certificate: it does not chain to the CA in your bundle; ask the operator for a new bundle (%s) and %s (%w)", refresh.Command, refresh.Install, err)
-	}
-	return fmt.Errorf("cannot verify the broker's certificate: your bundle carries no CA and the system roots do not trust it; ask the operator for a new bundle (%s) and %s (%w)", refresh.Command, refresh.Install, err)
+	return fmt.Errorf("cannot verify the broker's certificate: install the CA that signed it in this machine's trust store, or set SSL_CERT_FILE, which replaces the system roots (%w)", err)
 }
 
 var yamlLine = regexp.MustCompile(`line \d+`)
@@ -285,42 +272,35 @@ const (
 	ScramSHA256 = "SCRAM-SHA-256"
 )
 
-// KafkaOpts are the options of a TLS and SCRAM-SHA-512 connection to broker as user, trusting the PEM certificates in
-// ca, or the system roots when ca is nil. A trailing line break, as a password file ends with, is not part of password,
-// and nothing else is no password.
-func KafkaOpts(broker string, ca []byte, user, password string) ([]kgo.Opt, error) {
-	return kafkaOpts(broker, ca, user, password, scram.Auth.AsSha512Mechanism)
+// KafkaOpts are the options of a TLS and SCRAM-SHA-512 connection to broker as user, trusting the system roots, which
+// SSL_CERT_FILE replaces. A trailing line break, as a password file ends with, is not part of password, and nothing
+// else is no password.
+func KafkaOpts(broker, user, password string) ([]kgo.Opt, error) {
+	return kafkaOpts(broker, user, password, scram.Auth.AsSha512Mechanism)
 }
 
 // SuperUserKafkaOpts is KafkaOpts for a Kafka super user that logs in with mechanism, ScramSHA512 or ScramSHA256.
-func SuperUserKafkaOpts(broker string, ca []byte, user, password, mechanism string) ([]kgo.Opt, error) {
+func SuperUserKafkaOpts(broker, user, password, mechanism string) ([]kgo.Opt, error) {
 	switch mechanism {
 	case ScramSHA512:
-		return kafkaOpts(broker, ca, user, password, scram.Auth.AsSha512Mechanism)
+		return kafkaOpts(broker, user, password, scram.Auth.AsSha512Mechanism)
 	case ScramSHA256:
-		return kafkaOpts(broker, ca, user, password, scram.Auth.AsSha256Mechanism)
+		return kafkaOpts(broker, user, password, scram.Auth.AsSha256Mechanism)
 	}
 	return nil, fmt.Errorf("the super user's mechanism is %s or %s", ScramSHA512, ScramSHA256)
 }
 
-func kafkaOpts(broker string, ca []byte, user, password string, mechanism func(scram.Auth) sasl.Mechanism) ([]kgo.Opt, error) {
+func kafkaOpts(broker, user, password string, mechanism func(scram.Auth) sasl.Mechanism) ([]kgo.Opt, error) {
 	password = strings.TrimRight(password, "\r\n")
 	if password == "" {
 		return nil, errors.New("password is empty")
-	}
-	var roots *x509.CertPool
-	if ca != nil {
-		roots = x509.NewCertPool()
-		if !roots.AppendCertsFromPEM(ca) {
-			return nil, errors.New("CA contains no certificates")
-		}
 	}
 	// Brokers that answer ApiVersions at v4 at most refuse v5, the default, at a round trip per broker per client.
 	versions := kversion.Stable()
 	versions.SetMaxKeyVersion(18, 4)
 	return []kgo.Opt{
 		kgo.SeedBrokers(broker),
-		kgo.DialTLSConfig(&tls.Config{RootCAs: roots}),
+		kgo.DialTLSConfig(&tls.Config{}),
 		kgo.SASL(mechanism(scram.Auth{User: user, Pass: password})),
 		kgo.DisableClientMetrics(),
 		kgo.MaxVersions(versions),
@@ -828,10 +808,10 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	return writeBundle(bundle, service.hostBundle(principal, password, storage))
 }
 
-// HostRefresh rewrites the kept bundle at bundlePath of host in tenant with the operator's broker and CA and the tenant's
+// HostRefresh rewrites the kept bundle at bundlePath of host in tenant with the operator's broker and the tenant's
 // storage keys, keeping the principal and password, and reports whether it changed, a current bundle being left so a
-// refresh reruns; it refuses an absent, revoking or ended host, a missing bundle, which --force reissues, and another
-// principal's bundle.
+// refresh reruns; it refuses an absent, revoking or ended host, a missing bundle or one carrying a ca, which --force
+// reissues, and another principal's bundle.
 func (service *Service) HostRefresh(ctx context.Context, tenant, host, bundlePath string) (changed bool, err error) {
 	ctx, span := service.marker(ctx, "tenant host refresh", telemetry.AttrTenant.String(tenant), telemetry.AttrHost.String(host))
 	defer ended(span, &err)
@@ -855,6 +835,8 @@ func (service *Service) HostRefresh(ctx context.Context, tenant, host, bundlePat
 	kept, err := ReadBundle(bundlePath)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, fmt.Errorf("%s does not exist; tenant host add %s %s --force gives the host a new password and bundle", bundlePath, tenant, host)
+	} else if errors.Is(err, ErrBundleCA) {
+		return false, fmt.Errorf("%w; tenant host add %s %s --force gives the host a new password and bundle", err, tenant, host)
 	} else if err != nil {
 		return false, err
 	}

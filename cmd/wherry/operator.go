@@ -24,7 +24,7 @@ import (
 // operatorUsage is each operator command's usage, under "" the operator's.
 var operatorUsage = map[string]string{
 	"":                    "usage: wherry operator <init|pool apply|tenant add|tenant list|tenant storage|tenant pool add|tenant pool remove|tenant host add|tenant host refresh|tenant host remove|tenant remove|pool suspend|pool resume|pool rotate-key|receiver apply|receiver show|receiver remove|check|view> [--dir DIR]",
-	"init":                "usage: wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] [--super-user NAME --super-user-password-file FILE|-] [--super-user-mechanism SCRAM-SHA-512|SCRAM-SHA-256]",
+	"init":                "usage: wherry operator init [--dir DIR] [--broker ADDR] [--super-user NAME --super-user-password-file FILE|-] [--super-user-mechanism SCRAM-SHA-512|SCRAM-SHA-256]",
 	"pool apply":          "usage: wherry operator pool apply NAME [-f PATH] [--dry-run]",
 	"tenant add":          "usage: wherry operator tenant add TENANT",
 	"tenant list":         "usage: wherry operator tenant list",
@@ -180,6 +180,8 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 			kept, err := operator.ReadBundle(bundle)
 			if errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("%s does not exist, so a new broker could not reach the receiver; --force gives the receiver a new password and bundle", bundle)
+			} else if errors.Is(err, operator.ErrBundleCA) {
+				return fmt.Errorf("%w; --force gives the receiver a new password and bundle", err)
 			} else if err != nil {
 				return err
 			}
@@ -570,7 +572,7 @@ func integral(value any) any {
 func operatorArgs(args []string) ([]string, map[string]string, error) {
 	flags := flag.NewFlagSet("operator", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	for _, name := range []string{"f", "wait", "sha256", "dir", "broker", "ca-file", "super-user", "super-user-password-file", "super-user-mechanism", "window", "port", "external-url"} {
+	for _, name := range []string{"f", "wait", "sha256", "dir", "broker", "super-user", "super-user-password-file", "super-user-mechanism", "window", "port", "external-url"} {
 		flags.String(name, "", "")
 	}
 	var suspects []string
@@ -597,7 +599,7 @@ func operatorArgs(args []string) ([]string, map[string]string, error) {
 	}
 	command := operatorCommand(positional)
 	allowed := map[string]map[string]bool{
-		"init":           {"broker": true, "ca-file": true, "super-user": true, "super-user-password-file": true, "super-user-mechanism": true},
+		"init":           {"broker": true, "super-user": true, "super-user-password-file": true, "super-user-mechanism": true},
 		"pool apply":     {"f": true, "dry-run": true},
 		"receiver apply": {"f": true, "dry-run": true, "force": true},
 		"receiver show":  {},
@@ -952,19 +954,18 @@ func yamlFiles(dir string) ([]string, error) {
 	return files, nil
 }
 
-// superUserKafka connects to broker as the Kafka super user with password and mechanism, trusting ca or, when ca is nil,
-// the system roots.
-var superUserKafka = func(broker string, ca []byte, user, password, mechanism string) (*kgo.Client, error) {
-	opts, err := operator.SuperUserKafkaOpts(broker, ca, user, password, mechanism)
+// superUserKafka connects to broker as the Kafka super user with password and mechanism, trusting the system roots.
+var superUserKafka = func(broker, user, password, mechanism string) (*kgo.Client, error) {
+	opts, err := operator.SuperUserKafkaOpts(broker, user, password, mechanism)
 	if err != nil {
 		return nil, fmt.Errorf("broker %w", err)
 	}
 	return kgo.NewClient(append(opts, kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
 }
 
-// operatorKafka connects to broker as user with password, trusting ca or, when ca is nil, the system roots.
-var operatorKafka = func(broker string, ca []byte, user, password string) (*kgo.Client, error) {
-	opts, err := operator.KafkaOpts(broker, ca, user, password)
+// operatorKafka connects to broker as user with password, trusting the system roots.
+var operatorKafka = func(broker, user, password string) (*kgo.Client, error) {
+	opts, err := operator.KafkaOpts(broker, user, password)
 	if err != nil {
 		return nil, fmt.Errorf("broker %w", err)
 	}

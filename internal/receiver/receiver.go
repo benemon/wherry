@@ -123,15 +123,15 @@ type Receiver struct {
 	custodian *telemetry.Tracing
 }
 
-// New builds the receiver's Kafka client from bundle, trusting the broker through ca, the receiver's own ca_file, else
-// the bundle's ca, else the system roots, loads or creates its signing key in stateDir, settling a rotation an earlier
-// start left, rotates it in Run with rotateKey, and registers its metric families on registry.
-func New(bundle operator.Bundle, ca []byte, stateDir string, rotateKey bool, drainTimeout time.Duration, factory ProfileFactory, logger *log.Logger, registry *prometheus.Registry) (*Receiver, error) {
+// New builds the receiver's Kafka client from bundle, trusting the broker through the system roots, loads or creates its
+// signing key in stateDir, settling a rotation an earlier start left, rotates it in Run with rotateKey, and registers
+// its metric families on registry.
+func New(bundle operator.Bundle, stateDir string, rotateKey bool, drainTimeout time.Duration, factory ProfileFactory, logger *log.Logger, registry *prometheus.Registry) (*Receiver, error) {
 	id, ok := strings.CutPrefix(bundle.Principal, operator.ReceiverPrincipal(""))
 	if !ok || !wire.ValidName(id) {
 		return nil, errors.New("bundle principal is not a receiver principal")
 	}
-	opts, err := operator.BundleKafkaOpts(bundle, ca)
+	opts, err := operator.BundleKafkaOpts(bundle)
 	if err != nil {
 		return nil, fmt.Errorf("bundle: %w", err)
 	}

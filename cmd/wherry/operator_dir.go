@@ -28,12 +28,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// operatorConfig is a working directory's operator.yaml: how its commands connect as wherry.operator. CAFile is empty
-// for the system roots; a relative PasswordFile or CAFile is in the working directory. Tracing writes each command's
-// span to the trace topics; off by default.
+// operatorConfig is a working directory's operator.yaml: how its commands connect as wherry.operator, through the system
+// roots; a relative PasswordFile is in the working directory. Tracing writes each command's span to the trace topics;
+// off by default.
 type operatorConfig struct {
 	Broker       string `yaml:"broker"`
-	CAFile       string `yaml:"ca_file,omitempty"`
 	PasswordFile string `yaml:"password_file"`
 	Tracing      bool   `yaml:"tracing,omitempty"`
 }
@@ -81,7 +80,6 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 	var superPassword []byte
 	for _, question := range [][2]string{
 		{"broker", "Kafka broker address"},
-		{"ca-file", "CA certificate"},
 		{"super-user", "Kafka super user"},
 		{"super-user-password-file", "Kafka super user's password"},
 	} {
@@ -95,8 +93,6 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 			}
 			var err error
 			switch question[0] {
-			case "ca-file":
-				value, err = q.ca()
 			case "super-user-password-file":
 				// The password itself, masked and never printed back; it is kept as typed, so a password with spaces at
 				// either end is still that password.
@@ -133,17 +129,6 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 	if err := checkOperatorBroker(answers["broker"]); err != nil {
 		return err
 	}
-	var ca []byte
-	caFile := answers["ca-file"]
-	if caFile != "" {
-		var err error
-		if caFile, err = filepath.Abs(caFile); err != nil {
-			return err
-		}
-		if ca, err = loadCA(caFile); err != nil {
-			return err
-		}
-	}
 	if superPassword == nil {
 		var err error
 		if answers["super-user-password-file"] == "-" {
@@ -155,13 +140,14 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 			return err
 		}
 	}
-	superUser, err := superUserKafka(answers["broker"], ca, answers["super-user"], string(superPassword), mechanism)
+	superUser, err := superUserKafka(answers["broker"], answers["super-user"], string(superPassword), mechanism)
 	if err != nil {
 		return err
 	}
 	defer superUser.Close()
 	// Kafka answers a missing credential for the mechanism as it answers a wrong password; checked before Delegate, whose
-	// first error would name wherry.operator.
+	// first error would name wherry.operator. The first dial, so a broker certificate the system roots do not trust
+	// fails here.
 	if _, err := kadm.NewClient(superUser).ListBrokers(ctx); errors.Is(err, kerr.SaslAuthenticationFailed) {
 		hint := ""
 		if mechanism == operator.ScramSHA512 {
@@ -169,7 +155,7 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 		}
 		return fmt.Errorf("super user %s's %s login refused: Kafka answers a wrong password and no %s credential alike%s", answers["super-user"], mechanism, mechanism, hint)
 	} else if err != nil {
-		return fmt.Errorf("super user %s: %w", answers["super-user"], err)
+		return operator.ExplainUnknownAuthority(fmt.Errorf("super user %s: %w", answers["super-user"], err))
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -192,7 +178,7 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 		err = operator.Delegate(ctx, superUser, password)
 	}
 	if err == nil {
-		if err = (&operator.Service{Operator: superUser, Broker: answers["broker"], CA: ca}).WaitOperatorCredential(ctx, password); err != nil {
+		if err = (&operator.Service{Operator: superUser, Broker: answers["broker"]}).WaitOperatorCredential(ctx, password); err != nil {
 			err = fmt.Errorf("%w; run operator init again", err)
 		}
 	}
@@ -208,7 +194,7 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 	if err := (&operator.Service{Operator: superUser}).EnsureTraceTopics(ctx); err != nil {
 		return fmt.Errorf("%w; run operator init again", err)
 	}
-	if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{Broker: answers["broker"], CAFile: caFile, PasswordFile: "operator.password"}); err != nil {
+	if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{Broker: answers["broker"], PasswordFile: "operator.password"}); err != nil {
 		return err
 	}
 	if err := ignore(filepath.Join(dir, ".gitignore"), "operator.password", "bundles/", "storage/"); err != nil {
@@ -410,34 +396,41 @@ func ignore(path string, lines ...string) error {
 	return err
 }
 
-// operatorService connects as wherry.operator through dir's operator.yaml.
+// operatorService connects as wherry.operator through dir's operator.yaml, trusting the broker through the system roots.
 func operatorService(dir string) (*operator.Service, error) {
 	path := filepath.Join(dir, "operator.yaml")
-	var config operatorConfig
-	if err := readYAML(path, &config); errors.Is(err, os.ErrNotExist) {
+	encoded, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("%s does not exist; run wherry operator init", path)
 	} else if err != nil {
+		return nil, err
+	}
+	if err := operator.RefuseCAFile(path, encoded); err != nil {
+		return nil, err
+	}
+	var config operatorConfig
+	if err := operator.DecodeYAML(encoded, &config); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if config.Broker == "" || config.PasswordFile == "" {
 		return nil, fmt.Errorf("%s requires broker and password_file", path)
 	}
-	var ca []byte
-	if config.CAFile != "" {
-		var err error
-		if ca, err = os.ReadFile(inDir(dir, config.CAFile)); err != nil {
-			return nil, err
-		}
-	}
 	password, err := os.ReadFile(inDir(dir, config.PasswordFile))
 	if err != nil {
 		return nil, err
 	}
-	client, err := operatorKafka(config.Broker, ca, operator.OperatorPrincipal, string(password))
+	client, err := operatorKafka(config.Broker, operator.OperatorPrincipal, string(password))
 	if err != nil {
 		return nil, err
 	}
-	service := &operator.Service{Operator: client, Broker: config.Broker, CA: ca, Storage: func(tenant string) (operator.StorageKeys, error) { return tenantStorageKeys(dir, tenant) }}
+	// The first exchange with the broker, so a certificate the system roots do not trust fails here, explained.
+	ping, cancel := context.WithTimeout(context.Background(), operatorPingTimeout)
+	defer cancel()
+	if err := client.Ping(ping); err != nil {
+		client.Close()
+		return nil, operator.ExplainUnknownAuthority(err)
+	}
+	service := &operator.Service{Operator: client, Broker: config.Broker, Storage: func(tenant string) (operator.StorageKeys, error) { return tenantStorageKeys(dir, tenant) }}
 	if config.Tracing {
 		if service.Tracing, err = telemetry.New(context.Background(), telemetry.RoleOperator, telemetry.Names{}, client.Opts(), log.New(os.Stderr, "wherry: ", 0)); err != nil {
 			client.Close()
@@ -446,6 +439,10 @@ func operatorService(dir string) (*operator.Service, error) {
 	}
 	return service, nil
 }
+
+// operatorPingTimeout bounds operatorService's first exchange with the broker; franz-go bounds each dial and request at
+// 10 s.
+const operatorPingTimeout = 30 * time.Second
 
 func inDir(dir, path string) string {
 	if filepath.IsAbs(path) {

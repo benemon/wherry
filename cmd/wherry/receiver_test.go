@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -28,12 +30,28 @@ import (
 var pluginDir, fakeSHA256 string
 
 func TestMain(m *testing.M) {
+	// A trust helper is this binary re-run with the SSL_CERT_FILE its test chose, which it keeps.
+	if os.Getenv(trustHelperVariable) != "" {
+		os.Exit(m.Run())
+	}
 	dir, err := os.MkdirTemp("", "wherry-plugins")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	pluginDir = dir
+	// The process trusts testCA as its system roots, as a machine trusts the broker's CA through its trust store; Go
+	// reads SSL_CERT_FILE once, at the first verification, so the roots are loaded here, before any test sets the
+	// variable for an S3 client of its own.
+	if err := newTestCA(filepath.Join(dir, "ca.pem")); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Setenv("SSL_CERT_FILE", testCA.file)
+	if _, err := x509.SystemCertPool(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	if output, err := exec.Command("go", "build", "-o", filepath.Join(dir, "wherry-plugin-fake"), "github.com/benemon/wherry/pluginsdk/internal/testplugin").CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "build test plugin: %v\n%s", err, output)
 		os.Exit(1)
@@ -248,41 +266,13 @@ func TestReadBundleIsStrict(t *testing.T) {
 	if _, err := operator.ReadBundle(path); err == nil {
 		t.Fatal("accepted a bundle carrying platform credentials")
 	}
-	// A bundle's ca is the PEM certificates its holder trusts the broker with; one that holds no certificate fails closed
-	// rather than fall back to the system roots.
-	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nca: c\n"), 0o600); err != nil {
+	// A bundle carrying the ca earlier operators wrote is refused naming the key and the reissue, not as an unknown field
+	// at a line.
+	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nca: |\n  -----BEGIN CERTIFICATE-----\n  AAAA\n  -----END CERTIFICATE-----\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := operator.ReadBundle(path); err == nil || err.Error() != "bundle ca holds no PEM certificate" {
-		t.Fatalf("a bundle whose ca holds no certificate: %v; want it refused", err)
-	}
-	// A bundle's storage is the tenant's S3 key pair: both keys or none, and nothing else.
-	for _, storage := range []string{"storage: {access_key: a}\n", "storage: {secret_key: b}\n", "storage: {access_key: a, secret_key: b, token: c}\n", "storage: a\n"} {
-		if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\n"+storage), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := operator.ReadBundle(path); err == nil {
-			t.Fatalf("accepted a bundle with %q", storage)
-		}
-	}
-	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nstorage: {access_key: a, secret_key: b}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if bundle, err := operator.ReadBundle(path); err != nil || bundle.Storage != (operator.StorageKeys{AccessKey: "a", SecretKey: "b"}) {
-		t.Fatalf("bundle %#v err %v; want the storage pair", bundle, err)
-	}
-	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	bundle, err := operator.ReadBundle(path)
-	if err != nil || bundle.Principal != "wherry.rcv.r" {
-		t.Fatalf("bundle %#v err %v", bundle, err)
-	}
-	if err := os.WriteFile(path, []byte("broker: b\npassword: p\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := operator.ReadBundle(path); err == nil {
-		t.Fatal("accepted a bundle without a principal")
+	if _, err := operator.ReadBundle(path); err == nil || err.Error() != path+": ca is no longer read; reissue this bundle" || !errors.Is(err, operator.ErrBundleCA) {
+		t.Fatalf("a bundle carrying a ca: %v; want it refused naming the key", err)
 	}
 }
 
@@ -340,7 +330,7 @@ func writeLocalConfig(t *testing.T, content string) string {
 
 func TestReceiverLocalConfigExampleParses(t *testing.T) {
 	config, err := loadReceiverLocalConfig(filepath.Join("testdata", "example-receiver-config.yaml"))
-	want := receiverLocalConfig{Bundle: "/etc/wherry/receiver.bundle", CAFile: "/etc/wherry/kafka-ca.pem", StateDir: "/var/lib/wherry/state", PluginDir: defaultPluginDir, MetricsAddr: ":9464", DrainTimeout: 20 * time.Second,
+	want := receiverLocalConfig{Bundle: "/etc/wherry/receiver.bundle", StateDir: "/var/lib/wherry/state", PluginDir: defaultPluginDir, MetricsAddr: ":9464", DrainTimeout: 20 * time.Second,
 		Credentials: map[string]credential.Source{"nomad-token": {File: "/etc/wherry/nomad-token"}}, Tracing: true}
 	if err != nil || !reflect.DeepEqual(config, want) {
 		t.Fatalf("example = %+v, %v; want %+v", config, err, want)

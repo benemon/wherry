@@ -565,51 +565,41 @@ storage pair.
 
 ### Broker trust
 
-A bundle carries the broker address, the principal and its password, and,
-when `operator.yaml` names a `ca_file` and the bundle's broker is the
-operator's, that file's certificates as `ca`; a host bundle carries the
-tenant's storage pair as `storage` too. The operator trusts the broker
-through `operator.yaml`. A host or receiver trusts it through the `ca_file`
-its own configuration names, else the bundle's `ca`, else the system's
-trusted roots. A `ca` that holds no certificate is refused. The host or
-receiver does not fall back to the system roots. A `ca_file` overrides the
-bundle, so a stale one hides a refreshed CA: `wherry host init BUNDLE` warns
-when the configuration keeps a `ca_file` and the bundle carries a `ca`, and
-the renewal below removes the line. A machine that trusts the system roots
-trusts every CA they hold for the broker's address.
+A bundle carries the broker address, the principal and its password; a host
+bundle carries the tenant's storage pair as `storage` too. wherry carries
+no CA: the operator, each host and each receiver verify the broker's
+certificate against the machine's trust store, Go's system roots, which
+`SSL_CERT_FILE` replaces for the process, the platform verifier included,
+on macOS and Windows as on Linux since Go 1.27. A machine that trusts the
+system roots trusts every CA they hold for the broker's address. A bundle
+or configuration keeping a CA setting of earlier releases is refused naming
+the key ([Upgrade](upgrade.md#no-ca-in-wherry)).
 
-A failure to verify the broker's certificate names the CA the connection
-used, a `ca_file` by its path, and one remedy for it. A bundle written
-before the operator trusted the broker through a CA file carries no `ca`. A
-host or receiver running it with no `ca_file` fails against a private-CA
-broker, and the failure says the system roots do not trust the certificate
-and names the refresh.
+A failure to verify the broker's certificate says so once and names the one
+remedy: install the CA that signed it in the machine's trust store, or set
+`SSL_CERT_FILE`, which then must hold every CA the process is to trust.
+Go's x509 error ends the message.
 
-### Renew the broker CA
+### Install a private CA
 
-The Kafka platform issues and renews its CA. A renewal means refreshing and
-redistributing bundles. No password changes.
+The Kafka platform issues and renews its CA. Install its certificate, in
+PEM, where each party runs. A renewal means installing the new certificate
+the same way while the brokers still present a chain the old one signs; no
+bundle and no password changes.
 
-Before you start, have:
-
-- the new CA certificate in PEM;
-- the operator's working directory, whose `operator.yaml` names a `ca_file`;
-- the channel you trust to each host's user and each receiver's platform.
-
-1. Put the new CA in the file `operator.yaml` names as `ca_file`. Keep the
-   old certificate beside it while the brokers still present the old chain.
-2. Run `wherry operator tenant host refresh TENANT HOST` for each host and
-   `wherry operator receiver apply RECEIVER` for each receiver on the
-   operator's broker. Each rewrites its kept bundle with the new `ca` and
-   the same password. A rerun changes nothing.
-3. Hand each refreshed bundle over as you handed the first. Ask each host's
-   user to run `wherry host init BUNDLE`, which replaces the host's copy, to
-   remove any `ca_file` line from the host configuration, and to restart a
-   long-lived MCP server so that it rereads the bundle. Ask each receiver's
-   platform owner to replace the bundle and restart the receiver, and to
-   remove a `ca_file` from its local configuration or replace its file.
-4. Once every bundle is refreshed, remove the old certificate from the
-   operator's file. The next refresh of each bundle drops it there.
+- macOS: add it to the System keychain and trust it for SSL, through
+  Keychain Access or with
+  `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain broker-ca.pem`.
+- RHEL and its derivatives: copy it to `/etc/pki/ca-trust/source/anchors/`
+  and run `sudo update-ca-trust`.
+- OpenShift: the cluster's injected trusted-CA bundle holds it once a
+  cluster-admin adds it to the ConfigMap the cluster `Proxy`'s `trustedCA`
+  names, and again at each renewal; a receiver mounts a ConfigMap labelled
+  `config.openshift.io/inject-trusted-cabundle: "true"` at
+  `/etc/pki/ca-trust/extracted/pem`, where Go finds it. Without the `Proxy`
+  route, mount a ConfigMap of the system roots plus the CA at that path.
+- Any process: `SSL_CERT_FILE=/path/to/ca-bundle.pem` names a file of every
+  CA the process trusts, in place of the system roots.
 
 ## Trace topics
 

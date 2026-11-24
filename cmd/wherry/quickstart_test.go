@@ -68,8 +68,8 @@ func TestQuickstartFiles(t *testing.T) {
 	if len(host.Credentials) != 0 {
 		t.Errorf("host configuration names %+v; want no credential, the agent's being a catalog variable", host.Credentials)
 	}
-	if local.Bundle == "" || local.CAFile == "" || local.DrainTimeout <= 0 {
-		t.Fatalf("local configuration %+v; want the example's bundle, CA and drain timeout", local)
+	if local.Bundle == "" || local.DrainTimeout <= 0 {
+		t.Fatalf("local configuration %+v; want the example's bundle and drain timeout", local)
 	}
 	documented(t, "install-operator.md", "quickstart/build-terms.yaml")
 	documented(t, "install-host.md", "quickstart/host-config.yaml")

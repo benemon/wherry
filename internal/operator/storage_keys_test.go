@@ -56,7 +56,7 @@ func TestHostBundlesCarryTheTenantsStorageKeys(t *testing.T) {
 	if changed, err := service.HostRefresh(ctx, "tenant-a", "host-b", path); err != nil || !changed {
 		t.Fatalf("refresh after the pair changed: %t, %v; want the bundle rewritten", changed, err)
 	}
-	if refreshed, err := ReadBundle(path); err != nil || refreshed != (Bundle{Broker: reissued.Broker, Principal: reissued.Principal, Password: reissued.Password, CA: reissued.CA, Storage: next}) {
+	if refreshed, err := ReadBundle(path); err != nil || refreshed != (Bundle{Broker: reissued.Broker, Principal: reissued.Principal, Password: reissued.Password, Storage: next}) {
 		t.Fatalf("refreshed bundle %+v, %v; want the new pair with the password of %+v", refreshed, err, reissued)
 	}
 	if changed, err := service.HostRefresh(ctx, "tenant-a", "host-b", path); err != nil || changed {

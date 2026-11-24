@@ -139,7 +139,8 @@ func TestDevUpWritesTheStandardHostPaths(t *testing.T) {
 			if loaded, err := busclient.LoadConfig(config); err != nil || loaded.StateDir != instance.env("host", "state") {
 				t.Errorf("state_dir %q, %v; want the instance's %s", loaded.StateDir, err, instance.env("host", "state"))
 			}
-			for _, want := range []string{"submit: wherry submit --prompt \"...\"\n", "claude: claude mcp add wherry-default -- wherry host mcp\n"} {
+			ca := shellQuote(instance.env("tls", "ca.pem"))
+			for _, want := range []string{"export SSL_CERT_FILE=" + ca + "\n", "submit: wherry submit --prompt \"...\"\n", "claude: claude mcp add wherry-default --env SSL_CERT_FILE=" + ca + " -- wherry host mcp\n"} {
 				if !strings.Contains(ready, want) {
 					t.Errorf("ready output\n%s\nlacks %q", ready, want)
 				}
@@ -211,7 +212,8 @@ func TestDevUpLeavesAnotherHostConfig(t *testing.T) {
 			t.Errorf("up wrote %s beside a config it did not write", path)
 		}
 	}
-	for _, want := range []string{"export WHERRY_CONFIG=" + shellQuote(config) + "\n", "claude mcp add wherry-default --env WHERRY_CONFIG=" + shellQuote(config) + " -- wherry host mcp\n"} {
+	ca := shellQuote(instance.env("tls", "ca.pem"))
+	for _, want := range []string{"export SSL_CERT_FILE=" + ca + "\n", "export WHERRY_CONFIG=" + shellQuote(config) + "\n", "claude mcp add wherry-default --env SSL_CERT_FILE=" + ca + " --env WHERRY_CONFIG=" + shellQuote(config) + " -- wherry host mcp\n"} {
 		if !strings.Contains(ready, want) {
 			t.Errorf("ready output\n%s\nlacks %q", ready, want)
 		}
@@ -433,6 +435,7 @@ func TestDevReadyLines(t *testing.T) {
 	manifest := writeCache(t, instance, []byte("snapshot"))
 	manifest.Agents = []string{"claude", "codex", "gemini"}
 	config := "/x/it's/config.yaml"
+	ca := shellQuote(instance.env("tls", "ca.pem"))
 	agents := devAgents(manifest, nil)
 	for _, c := range []struct {
 		files *devHostFiles
@@ -440,15 +443,17 @@ func TestDevReadyLines(t *testing.T) {
 	}{
 		{&devHostFiles{}, []string{
 			"agents: claude-code, anthropic (default), codex, google, mock\n",
-			"claude: claude mcp add wherry-default -- wherry host mcp\n",
-			"codex:  codex mcp add wherry-default -- wherry host mcp\n",
-			"gemini: gemini mcp add wherry-default wherry host mcp\n",
+			"export SSL_CERT_FILE=" + ca + "\n",
+			"claude: claude mcp add wherry-default --env SSL_CERT_FILE=" + ca + " -- wherry host mcp\n",
+			"codex:  codex mcp add wherry-default --env SSL_CERT_FILE=" + ca + " -- wherry host mcp\n",
+			"gemini: gemini mcp add --env SSL_CERT_FILE=" + ca + " wherry-default wherry host mcp\n",
 		}},
 		{nil, []string{
+			"export SSL_CERT_FILE=" + ca + "\n",
 			`export WHERRY_CONFIG='/x/it'\''s/config.yaml'` + "\n",
-			`claude: claude mcp add wherry-default --env WHERRY_CONFIG='/x/it'\''s/config.yaml' -- wherry host mcp` + "\n",
-			`codex:  codex mcp add wherry-default --env WHERRY_CONFIG='/x/it'\''s/config.yaml' -- wherry host mcp` + "\n",
-			`gemini: gemini mcp add --env WHERRY_CONFIG='/x/it'\''s/config.yaml' wherry-default wherry host mcp` + "\n",
+			"claude: claude mcp add wherry-default --env SSL_CERT_FILE=" + ca + ` --env WHERRY_CONFIG='/x/it'\''s/config.yaml' -- wherry host mcp` + "\n",
+			"codex:  codex mcp add wherry-default --env SSL_CERT_FILE=" + ca + ` --env WHERRY_CONFIG='/x/it'\''s/config.yaml' -- wherry host mcp` + "\n",
+			"gemini: gemini mcp add --env SSL_CERT_FILE=" + ca + ` --env WHERRY_CONFIG='/x/it'\''s/config.yaml' wherry-default wherry host mcp` + "\n",
 		}},
 	} {
 		manifest.HostFiles = c.files

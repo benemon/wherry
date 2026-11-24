@@ -1128,13 +1128,13 @@ func TestMCPUnavailableLogsItsCause(t *testing.T) {
 }
 
 // A connection the broker's certificate fails for want of a trusted CA is explained in the server's log as Connect
-// explains it to the CLI: the CA used and the refresh that rewrites the bundle, by the host's real names. The model
-// still sees UNAVAILABLE alone.
-func TestMCPUnavailableLogNamesTheRefreshOnAnUnknownAuthority(t *testing.T) {
+// explains it to the CLI: the trust store and SSL_CERT_FILE. The model still sees UNAVAILABLE alone.
+func TestMCPUnavailableLogExplainsAnUnknownAuthority(t *testing.T) {
 	h := newInitHost(t, nil)
 	noTerminal(t)
 	h.init(t, h.bundle)
-	editBundle(t, filepath.Join(h.dir, "bundle.yaml"), func(bundle *operator.Bundle) { bundle.CA = otherCA(t) })
+	untrusted := untrustedBroker(t).ListenAddrs()[0]
+	editBundle(t, filepath.Join(h.dir, "bundle.yaml"), func(bundle *operator.Bundle) { bundle.Broker = untrusted })
 	config, err := busclient.LoadConfig(h.config)
 	if err != nil {
 		t.Fatal(err)
@@ -1157,8 +1157,8 @@ func TestMCPUnavailableLogNamesTheRefreshOnAnUnknownAuthority(t *testing.T) {
 	if failure := callToolError(t, ctx, session, "receivers", map[string]any{}); failure != (toolError{Code: "UNAVAILABLE", Message: "the wherry bus could not complete the request; the wherry CLI reports the cause"}) {
 		t.Fatalf("tool error %#v; want UNAVAILABLE alone", failure)
 	}
-	want := "tool failed: cannot verify the broker's certificate: it does not chain to the CA in your bundle; ask the operator for a new bundle (wherry operator tenant host refresh tenant-a host-a) and install it with wherry host init ("
-	if text := logged.String(); !strings.HasPrefix(text, want) || !strings.Contains(text, "x509: certificate signed by unknown authority") {
+	want := "tool failed: " + unknownAuthorityHint
+	if text := logged.String(); !strings.HasPrefix(text, want) || !strings.Contains(text, unknownAuthorityText) {
 		t.Fatalf("server log %q; want %q with the x509 error", text, want)
 	}
 }

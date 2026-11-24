@@ -38,7 +38,7 @@ func localReceiver() operator.ReceiverConfig {
 }
 
 // localForms accept every default: a metrics address, and each variable as derived. No question asks for the broker's
-// CA: the bundle carries it.
+// CA: the receiver's machine trusts it through its system roots.
 func localForms(variables ...string) []receiverForm {
 	forms := []receiverForm{inputForm("/etc/wherry/receiver.bundle", "\r"), inputForm("/var/lib/wherry/state", "\r"), inputForm(defaultPluginDir, "\r"), inputForm("30s", "\r"), pickForm("listen", "\r"), inputForm(":9464", "\r")}
 	for _, variable := range variables {
@@ -96,7 +96,7 @@ func TestReceiverLocalPrompts(t *testing.T) {
 			if local.DrainTimeout != test.drain || local.Bundle != "/etc/wherry/receiver.bundle" || local.StateDir != "/var/lib/wherry/state" || local.PluginDir != defaultPluginDir || local.Credentials["nomad-token"].Env != "NOMAD_TOKEN" {
 				t.Fatalf("config = %+v", local)
 			}
-			if local.CAFile != "" || local.MetricsAddr != test.metrics {
+			if local.MetricsAddr != test.metrics {
 				t.Fatalf("config = %+v", local)
 			}
 			path := filepath.Join(t.TempDir(), "config.yaml")
@@ -127,7 +127,7 @@ func TestReceiverLocalPrompts(t *testing.T) {
 }
 
 // The full flow writes the exact YAML for each Metrics choice, with one credential from a variable and one from a file,
-// and never a ca_file: the bundle carries the broker's CA.
+// and never a ca_file: the receiver's machine trusts the broker's CA through its system roots.
 func TestReceiverLocalFullFlow(t *testing.T) {
 	config := localReceiver()
 	config.Profiles = append(config.Profiles, operator.ProfileSettings{Name: "b", Plugin: "kubernetes", Config: map[string]any{"credential": "kube-token"}})

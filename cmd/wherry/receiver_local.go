@@ -36,7 +36,7 @@ func receiverCredentials(config operator.ReceiverConfig) []string {
 const receiverLocalFields = "bundle, state_dir, plugin_dir, metrics_addr, drain_timeout and credentials"
 
 // receiverLocalFile finds, or asks for and writes, the receiver's local configuration and checks it against config. The
-// broker's CA is not asked for: the bundle carries it, and a ca_file in the file overrides the bundle.
+// broker's CA is not asked for: the receiver's machine trusts it through its system roots.
 func receiverLocalFile(ctx context.Context, dir, name, receiverPath string, directory, dryRun bool, out io.Writer, config operator.ReceiverConfig) error {
 	path := filepath.Join(dir, "receivers", name+".config.yaml")
 	if directory {

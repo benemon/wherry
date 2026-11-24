@@ -158,7 +158,7 @@ func TestTracedRoundTrip(t *testing.T) {
 	}
 	root := connectTLS(t, address, ca, "admin", "password")
 	service := &operator.Service{Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}
+		Broker: address, DeliveryCeiling: 10, LockCeilingMS: 60000}
 	operatorTracing, err := telemetry.New(ctx, telemetry.RoleOperator, telemetry.Names{}, service.Operator.Opts(), log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatal(err)
@@ -202,7 +202,7 @@ func TestTracedRoundTrip(t *testing.T) {
 	plugins := &plugins{dir: pluginDir, credentials: map[string]credential.Source{"fake-token": {Env: "WHERRY_TRACED_PLATFORM"}}, logger: log.New(io.Discard, "", 0), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	logs := &syncBuffer{}
-	r, err := receiver.New(receiverBundled, []byte(ca), filepath.Join(dir, "receiver-state"), false, 0, plugins.profile, log.New(logs, "receiver: ", 0), prometheus.NewRegistry())
+	r, err := receiver.New(receiverBundled, filepath.Join(dir, "receiver-state"), false, 0, plugins.profile, log.New(logs, "receiver: ", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,11 +222,7 @@ func TestTracedRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("ANTHROPIC_API_KEY", credentialText)
-	caFile := filepath.Join(dir, "ca.pem")
-	if err := os.WriteFile(caFile, []byte(ca), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	hostConfig := busclient.Config{Bundle: hostBundle, CAFile: caFile, HostKey: filepath.Join(dir, "host.key"), StateDir: filepath.Join(dir, "host-state"),
+	hostConfig := busclient.Config{Bundle: hostBundle, HostKey: filepath.Join(dir, "host.key"), StateDir: filepath.Join(dir, "host-state"),
 		Credentials: map[string]credential.Source{"deploy-key": {Command: []string{"cat", deployPath}}}, Tracing: true}
 	if _, _, err := busclient.Init(ctx, hostConfig); err != nil {
 		t.Fatal(err)
@@ -238,7 +234,7 @@ func TestTracedRoundTrip(t *testing.T) {
 	}
 	// The second session's cost: a trace client built as the host's is, connected as Trace connects it in the
 	// background: the dial, the TLS handshake, the SCRAM exchange and the first metadata.
-	hostOpts, err := operator.BundleKafkaOpts(hostBundled, []byte(ca))
+	hostOpts, err := operator.BundleKafkaOpts(hostBundled)
 	if err != nil {
 		t.Fatal(err)
 	}

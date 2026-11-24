@@ -4,7 +4,7 @@
 
 1. Ask your operator to create your tenant and entitle it to a pool.
 2. Ask for a host bundle from `wherry operator tenant host add TENANT HOST`.
-   It carries the broker's CA when the operator trusts the broker through a `ca_file`.
+   Your machine trusts the broker's certificate through its trust store ([Broker trust](security.md#broker-trust)).
 3. Run `wherry host init HOST.bundle`.
 4. Set the catalog variables its agent lines name where submits run, and
    configure a source for each credential it asks about.

@@ -242,7 +242,7 @@ func (service *Service) Probe(topic string) func(context.Context, string, string
 		if err != nil {
 			return err
 		}
-		opts, err := KafkaOpts(service.Broker, service.CA, user, password)
+		opts, err := KafkaOpts(service.Broker, user, password)
 		if err != nil {
 			return fmt.Errorf("service %w", err)
 		}
@@ -291,7 +291,7 @@ func (service *Service) WaitOperatorCredential(ctx context.Context, password str
 	if len(ids) == 0 {
 		return errors.New("list brokers: none listed")
 	}
-	opts, err := KafkaOpts(service.Broker, service.CA, OperatorPrincipal, password)
+	opts, err := KafkaOpts(service.Broker, OperatorPrincipal, password)
 	if err != nil {
 		return err
 	}

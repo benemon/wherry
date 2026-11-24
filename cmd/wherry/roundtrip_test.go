@@ -85,18 +85,51 @@ func tlsCluster(t *testing.T, opts ...kfake.Opt) (*kfake.Cluster, string) {
 	return tlsBroker(t, append([]kfake.Opt{kfake.Superuser("SCRAM-SHA-512", "admin", "password"), kfake.Superuser("SCRAM-SHA-512", "wherry.operator", "operator-password")}, opts...)...)
 }
 
-// tlsBroker is kfake behind TLS with a throwaway CA, which it returns, enforcing ACLs on principals that log in over
-// TLS.
+// testCA is the CA every tlsBroker's certificate chains to, one per test process, which TestMain installs as the
+// process's system roots through SSL_CERT_FILE: its certificate, key, PEM and the PEM's file.
+var testCA struct {
+	cert *x509.Certificate
+	key  *ecdsa.PrivateKey
+	pem  string
+	file string
+}
+
+// newTestCA makes testCA and writes its PEM to file.
+func newTestCA(file string) error {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return err
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "wherry-test-ca"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		return err
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		return err
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	if err := os.WriteFile(file, certPEM, 0o600); err != nil {
+		return err
+	}
+	testCA.cert, testCA.key, testCA.pem, testCA.file = cert, key, string(certPEM), file
+	return nil
+}
+
+// tlsBroker is kfake behind TLS with a certificate testCA signed, whose PEM it returns, enforcing ACLs on principals
+// that log in over TLS.
 func tlsBroker(t *testing.T, opts ...kfake.Opt) (*kfake.Cluster, string) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "roundtrip"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
-		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	template := &x509.Certificate{SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: "roundtrip"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")}}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	der, err := x509.CreateCertificate(rand.Reader, template, testCA.cert, &key.PublicKey, testCA.key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +144,7 @@ func tlsBroker(t *testing.T, opts ...kfake.Opt) (*kfake.Cluster, string) {
 	}
 	cluster := kfake.MustCluster(append([]kfake.Opt{kfake.TLS(&tls.Config{Certificates: []tls.Certificate{pair}}), kfake.EnableSASL(), kfake.EnableACLs()}, opts...)...)
 	t.Cleanup(cluster.Close)
-	return cluster, string(certPEM)
+	return cluster, testCA.pem
 }
 
 func connectTLS(t *testing.T, address, ca, user, password string) *kgo.Client {
@@ -141,7 +174,7 @@ func TestPasswordLineBreakIsNotThePassword(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err := operatorKafka(address, []byte(ca), "admin", string(password))
+	client, err := operatorKafka(address, "admin", string(password))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +182,7 @@ func TestPasswordLineBreakIsNotThePassword(t *testing.T) {
 	if err := client.Ping(ctx); err != nil {
 		t.Fatalf("super-user client with a password file ending in a line break: %v", err)
 	}
-	service := &operator.Service{Operator: connectTLS(t, address, ca, "admin", "password"), Broker: address, CA: []byte(ca)}
+	service := &operator.Service{Operator: connectTLS(t, address, ca, "admin", "password"), Broker: address}
 	// The superuser is authorised, so a probe that logs in finds it still authorised.
 	if err := service.Probe("wherry.operator")(ctx, "admin", "password\n"); !errors.Is(err, operator.ErrStillAuthorised) {
 		t.Fatalf("probe with a password ending in a line break = %v; want a login", err)
@@ -180,8 +213,8 @@ func TestKafkaOptsAskApiVersionsOncePerConnection(t *testing.T) {
 	ctx := context.Background()
 	brokerVersions := kversion.Stable()
 	brokerVersions.SetMaxKeyVersion(int16(kmsg.ApiVersions), 4)
-	cluster, ca := tlsCluster(t, kfake.MaxVersions(brokerVersions))
-	opts, err := operator.KafkaOpts(cluster.ListenAddrs()[0], []byte(ca), "admin", "password")
+	cluster, _ := tlsCluster(t, kfake.MaxVersions(brokerVersions))
+	opts, err := operator.KafkaOpts(cluster.ListenAddrs()[0], "admin", "password")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +269,7 @@ func TestRoundTrip(t *testing.T) {
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
 	service := &operator.Service{Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}
+		Broker: address, DeliveryCeiling: 10, LockCeilingMS: 60000}
 	dir := t.TempDir()
 	optional := false
 	// The agent's model credential targets a catalog variable, which the host reads with no configuration entry; the
@@ -290,7 +323,7 @@ func TestRoundTrip(t *testing.T) {
 	logger := log.New(logs, "receiver: ", 0)
 	newReceiver := func(plugins *plugins) *receiver.Receiver {
 		t.Helper()
-		r, err := receiver.New(bundle, []byte(ca), stateDir, false, 0, plugins.profile, logger, prometheus.NewRegistry())
+		r, err := receiver.New(bundle, stateDir, false, 0, plugins.profile, logger, prometheus.NewRegistry())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -328,11 +361,7 @@ func TestRoundTrip(t *testing.T) {
 	// variable is set but, being in no catalog entry, is not read.
 	t.Setenv("ANTHROPIC_API_KEY", credentialText)
 	t.Setenv("GH_TOKEN", "github-token-never-read")
-	caFile := filepath.Join(dir, "ca.pem")
-	if err := os.WriteFile(caFile, []byte(ca), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	hostConfig := busclient.Config{Bundle: hostBundle, CAFile: caFile, HostKey: filepath.Join(dir, "host.key"), StateDir: filepath.Join(dir, "host-state"),
+	hostConfig := busclient.Config{Bundle: hostBundle, HostKey: filepath.Join(dir, "host.key"), StateDir: filepath.Join(dir, "host-state"),
 		Credentials: map[string]credential.Source{"deploy-key": {Command: []string{"cat", deployPath}}}}
 	if _, _, err := busclient.Init(ctx, hostConfig); err != nil {
 		t.Fatal(err)
@@ -386,7 +415,7 @@ func TestRoundTrip(t *testing.T) {
 		len(awaited.NotReturned) != 1 || awaited.NotReturned[0] != (wire.UnreturnedOutput{Name: "link", Size: 4, Reason: "rejected: symlink"}) {
 		t.Fatalf("outputs %d, not returned %+v, rejected %+v; want big.bin and empty verified and the link refused", len(awaited.Outputs), awaited.NotReturned, awaited.Rejected)
 	}
-	otherConfig := busclient.Config{Bundle: otherBundle, CAFile: caFile, HostKey: filepath.Join(dir, "other.key"), StateDir: filepath.Join(dir, "other-state")}
+	otherConfig := busclient.Config{Bundle: otherBundle, HostKey: filepath.Join(dir, "other.key"), StateDir: filepath.Join(dir, "other-state")}
 	if _, _, err := busclient.Init(ctx, otherConfig); err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +464,7 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatal("placed a task no plugin's labels satisfy")
 	}
 	inlineCapRoundTrip(t, ctx, bucket, host, read, logs, hostLogs)
-	plainConfig := busclient.Config{Bundle: plainBundle, CAFile: caFile, HostKey: filepath.Join(dir, "plain.key"), StateDir: filepath.Join(dir, "plain-state")}
+	plainConfig := busclient.Config{Bundle: plainBundle, HostKey: filepath.Join(dir, "plain.key"), StateDir: filepath.Join(dir, "plain-state")}
 	if _, _, err := busclient.Init(ctx, plainConfig); err != nil {
 		t.Fatal(err)
 	}
@@ -771,7 +800,7 @@ func TestPlatformCredentialIsRedactedFromTheReceiverLog(t *testing.T) {
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
 	service := &operator.Service{Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}
+		Broker: address, DeliveryCeiling: 10, LockCeilingMS: 60000}
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{
 		{Name: "fake", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": "fake-token", "log_credential": true}},
@@ -793,7 +822,7 @@ func TestPlatformCredentialIsRedactedFromTheReceiverLog(t *testing.T) {
 		running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	logs := &syncBuffer{}
-	r, err := receiver.New(bundle, []byte(ca), filepath.Join(dir, "state"), false, 0, plugins.profile, log.New(logs, "receiver: ", 0), prometheus.NewRegistry())
+	r, err := receiver.New(bundle, filepath.Join(dir, "state"), false, 0, plugins.profile, log.New(logs, "receiver: ", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}

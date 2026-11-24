@@ -28,7 +28,6 @@ The host's paths are the same on every OS, macOS included:
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `bundle` | path | required; `host init BUNDLE` writes the [default bundle path](#a-configuration-away-from-the-default-path) when the configuration names none | Read the host's bundle from this file; `host init BUNDLE` copies the bundle here. |
-| `ca_file` | path | none | Trust these PEM CA certificates for the broker connection, in place of the `ca` the bundle carries. |
 | `host_key` | path | `host.key` in the configuration directory, or `<path>.host.key` beside a configuration [away from the default path](#a-configuration-away-from-the-default-path) | Read the host's private Ed25519 JWK. |
 | `state_dir` | path | the host state directory, or `<path>.state/` beside a configuration [away from the default path](#a-configuration-away-from-the-default-path) | Store local run records here. |
 | `credentials` | mapping | none | Map credential names to [sources](security.md#credential-sources). |
@@ -37,7 +36,8 @@ The host's paths are the same on every OS, macOS included:
 | `input_roots` | list of paths | MCP server working directory | Allow the MCP server to send inputs from these directories. |
 | `tracing` | bool | `false` | Write the host's spans to its tenant's trace topic through the host's Kafka connection ([Tracing](tracing.md)). |
 
-Without a `ca_file`, the host trusts the broker through the bundle's `ca`, and without that through the system roots.
+The host trusts the broker through the system roots, the machine's trust store, which `SSL_CERT_FILE` replaces
+([Environment variables](#environment-variables)); a CA setting of earlier releases is refused naming the key.
 Each credential source uses exactly one of `file`, `env` and `command`.
 
 ### A configuration away from the default path
@@ -110,11 +110,7 @@ no entry for a credential whose target is a
 host reads the variable where submits run. Without a terminal it asks
 nothing, prints one line per entitled agent, ready or not, and lists what
 else still has no source. It asks
-nothing about the broker's CA: a bundle for the operator's broker carries
-it when `operator.yaml` names a `ca_file`. A `ca_file` the
-configuration keeps overrides the bundle's `ca`, so a stale one hides a
-refreshed CA; `host init BUNDLE` warns when the configuration keeps one and
-the bundle carries a `ca`.
+nothing about the broker's CA: the machine's trust store holds it.
 
 `state_dir` holds:
 
@@ -138,9 +134,6 @@ The configuration of host `laptop`, setting every field:
 
 ```yaml
 bundle: ~/.config/wherry/laptop.bundle
-# A private CA the broker's certificate chains to, overriding the ca the bundle carries; without ca_file, the bundle's
-# ca, else the system roots.
-ca_file: ~/.config/wherry/kafka-ca.pem
 host_key: ~/.config/wherry/laptop.key
 state_dir: ~/.local/state/wherry/laptop
 credentials:
@@ -279,18 +272,13 @@ of nothing else is refused. A `storage` block holds both keys or is refused.
 | `broker` | string | required | Kafka bootstrap address, `host:port` |
 | `principal` | string | required | SCRAM-SHA-512 user name |
 | `password` | string | required | SCRAM password |
-| `ca` | string | none | PEM CA certificates the host trusts the broker with, written when `operator.yaml` names a `ca_file` |
 | `storage` | mapping | none | the tenant's S3 `access_key` and `secret_key`, plain strings, written when [`tenant storage`](commands.md#wherry-operator-tenant-storage-tenant) recorded them; used for every pool with storage that `storage` in the configuration does not map |
 
-The Kafka platform owns and renews its CA. The operator trusts it through
-`operator.yaml`'s `ca_file`, and every bundle it writes for its broker
-carries that file's certificates as `ca`, so the host needs no CA file of
-its own; a bundle with no `ca` leaves the host on the system roots. A `ca`
-that holds no certificate is refused, and the host does not fall back to
-the system roots. A `ca_file` in the configuration overrides the bundle's
-`ca`; one with no certificate fails with `CA contains no certificates`. When
-the platform renews its CA, the operator refreshes and redistributes each
-bundle, as [Broker trust](security.md#broker-trust) describes.
+The Kafka platform owns and renews its CA. The host trusts it through the
+machine's trust store, Go's system roots, which `SSL_CERT_FILE` replaces;
+wherry carries no CA, and a bundle keeping the CA earlier operators wrote is
+refused naming the key ([Upgrade](upgrade.md#no-ca-in-wherry)).
+[Broker trust](security.md#broker-trust) says how to install a private CA.
 
 ## Environment variables
 
@@ -304,14 +292,14 @@ bundle, as [Broker trust](security.md#broker-trust) describes.
 
 Go's TLS stack reads `SSL_CERT_FILE` as its
 [crypto/x509](https://pkg.go.dev/crypto/x509#SystemCertPool) package
-documents. On Linux, a broker connection that falls back to the system
-roots, with neither a `ca_file` nor a bundle `ca` for a host or receiver and
-no `ca_file` for the operator, trusts the roots it names; a `ca_file` or a
-bundle `ca` replaces the system roots, so `SSL_CERT_FILE` then has no
-effect on that connection. macOS ignores it for the broker connection: use
-`ca_file` there. The host's S3 client adds the certificates in
-`SSL_CERT_FILE` to the system roots for a pool's storage endpoint on every
-OS.
+documents: since Go 1.27, on every OS, macOS and Windows included, a set
+`SSL_CERT_FILE` replaces the system roots for the process, the platform
+verifier included, so the file must hold every CA the process is to trust.
+Every broker connection, the host's, a receiver's and the operator's,
+trusts the system roots, so `SSL_CERT_FILE` is the standard override for a
+CA the machine's trust store lacks. The host's S3 client adds the
+certificates in `SSL_CERT_FILE` to the system roots for a pool's storage
+endpoint on every OS.
 
 A plugin reads its own variables from the receiver's environment; the
 [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#credentials)

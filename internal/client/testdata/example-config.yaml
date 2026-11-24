@@ -1,7 +1,4 @@
 bundle: ~/.config/wherry/laptop.bundle
-# A private CA the broker's certificate chains to, overriding the ca the bundle carries; without ca_file, the bundle's
-# ca, else the system roots.
-ca_file: ~/.config/wherry/kafka-ca.pem
 host_key: ~/.config/wherry/laptop.key
 state_dir: ~/.local/state/wherry/laptop
 credentials:

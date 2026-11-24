@@ -62,7 +62,7 @@ func TestSubmitStorageErrorAndLogShowMarkersForTheStorageKeys(t *testing.T) {
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
 	service := &operator.Service{Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}
+		Broker: address, DeliveryCeiling: 10, LockCeilingMS: 60000}
 	bundled := operator.StorageKeys{AccessKey: "AKIABUNDLEDACCESSKEY", SecretKey: "bundled-secret-key-value-sentinel"}
 	mapped := operator.StorageKeys{AccessKey: "AKIAMAPPEDACCESSKEY", SecretKey: "mapped-secret-key-value-sentinel"}
 	service.Storage = func(string) (operator.StorageKeys, error) { return bundled, nil }
@@ -110,10 +110,6 @@ func TestSubmitStorageErrorAndLogShowMarkersForTheStorageKeys(t *testing.T) {
 	}
 	publishSnapshot(t, ctx, kafka, "pool-a", "receiver-a", receiverKey)
 
-	caFile := filepath.Join(dir, "ca.pem")
-	if err := os.WriteFile(caFile, []byte(ca), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	for name, value := range map[string]string{"s3-access": mapped.AccessKey, "s3-secret": mapped.SecretKey} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(value+"\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -136,7 +132,7 @@ func TestSubmitStorageErrorAndLogShowMarkersForTheStorageKeys(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hostDir := t.TempDir()
-			hostConfig := busclient.Config{Bundle: tc.bundle, CAFile: caFile, HostKey: filepath.Join(hostDir, "host.key"), StateDir: filepath.Join(hostDir, "state"), Storage: tc.storage,
+			hostConfig := busclient.Config{Bundle: tc.bundle, HostKey: filepath.Join(hostDir, "host.key"), StateDir: filepath.Join(hostDir, "state"), Storage: tc.storage,
 				Credentials: map[string]credential.Source{"s3-access": {File: filepath.Join(dir, "s3-access")}, "s3-secret": {File: filepath.Join(dir, "s3-secret")}}}
 			if _, _, err := busclient.Init(ctx, hostConfig); err != nil {
 				t.Fatal(err)

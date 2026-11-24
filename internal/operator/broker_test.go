@@ -386,8 +386,12 @@ func (f *fixture) connect(t *testing.T, principal string, opts ...kgo.Opt) *kgo.
 	if !ok {
 		t.Fatalf("no bundle for %s", principal)
 	}
+	ca, err := os.ReadFile(os.Getenv("SSL_CERT_FILE"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(f.service.CA) {
+	if !roots.AppendCertsFromPEM(ca) {
 		t.Fatal("the broker's CA holds no certificate")
 	}
 	client, err := kgo.NewClient(append([]kgo.Opt{kgo.SeedBrokers(bundle.Broker), kgo.DialTLSConfig(&tls.Config{RootCAs: roots}), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()), kgo.RequestRetries(1)}, opts...)...)

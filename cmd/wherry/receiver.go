@@ -40,14 +40,12 @@ const (
 	defaultPluginDir      = "/usr/local/libexec/wherry/plugins"
 )
 
-// receiverLocalConfig is the receiver's local configuration file. CAFile holds the PEM certificates the receiver trusts
-// the broker with; without it, the bundle's ca, else the system roots. Credentials maps the name a profile's config gives
+// receiverLocalConfig is the receiver's local configuration file. Credentials maps the name a profile's config gives
 // its platform credential to the source of its value. DrainTimeout bounds how long held runs may finish after a stop
 // signal; it stays below the platform's stop window, which the receiver cannot read. Tracing writes the receiver's
-// spans to the trace topics; off by default.
+// spans to the trace topics; off by default. The broker is trusted through the system roots.
 type receiverLocalConfig struct {
 	Bundle       string                       `yaml:"bundle"`
-	CAFile       string                       `yaml:"ca_file,omitempty"`
 	StateDir     string                       `yaml:"state_dir"`
 	PluginDir    string                       `yaml:"plugin_dir"`
 	MetricsAddr  string                       `yaml:"metrics_addr"`
@@ -66,6 +64,9 @@ func loadReceiverLocalConfig(path string) (receiverLocalConfig, error) {
 	if err != nil {
 		return receiverLocalConfig{}, err
 	}
+	if err := operator.RefuseCAFile(path, encoded); err != nil {
+		return receiverLocalConfig{}, err
+	}
 	var config receiverLocalConfig
 	if err := operator.DecodeYAML(encoded, &config); err != nil {
 		return receiverLocalConfig{}, fmt.Errorf("decode config: %w", err)
@@ -76,7 +77,7 @@ func loadReceiverLocalConfig(path string) (receiverLocalConfig, error) {
 	if config.DrainTimeout < 0 {
 		return receiverLocalConfig{}, errors.New("config drain_timeout must not be negative")
 	}
-	for _, path := range []*string{&config.Bundle, &config.CAFile, &config.StateDir, &config.PluginDir} {
+	for _, path := range []*string{&config.Bundle, &config.StateDir, &config.PluginDir} {
 		if *path, err = client.ExpandHome(*path); err != nil {
 			return receiverLocalConfig{}, err
 		}
@@ -126,12 +127,6 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	var ca []byte
-	if config.CAFile != "" {
-		if ca, err = os.ReadFile(config.CAFile); err != nil {
-			return fmt.Errorf("ca_file: %w", err)
-		}
-	}
 	logger := log.New(stdout, "receiver: ", log.LstdFlags|log.LUTC)
 	registry := newRegistry()
 	if config.MetricsAddr != "" {
@@ -143,12 +138,9 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	}
 	plugins := &plugins{dir: config.PluginDir, credentials: config.Credentials, logger: logger, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
-	source := operator.TrustSource{CAFile: config.CAFile, Config: *configPath, BundleCA: bundle.CA != ""}
-	refresh := operator.BundleRefresh{Command: "wherry operator receiver apply " + strings.TrimPrefix(bundle.Principal, operator.ReceiverPrincipal("")),
-		Install: "install the new bundle by your receiver platform's procedure and restart the receiver"}
-	r, err := receiver.New(bundle, ca, config.StateDir, *rotateKey, config.DrainTimeout, plugins.profile, logger, registry)
+	r, err := receiver.New(bundle, config.StateDir, *rotateKey, config.DrainTimeout, plugins.profile, logger, registry)
 	if err != nil {
-		return operator.ExplainUnknownAuthority(err, source, refresh)
+		return operator.ExplainUnknownAuthority(err)
 	}
 	plugins.logs, plugins.hold = r.PluginLogs(stdout), r.HoldPlatformCredential
 	if config.Tracing {
@@ -157,7 +149,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := r.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		return operator.ExplainUnknownAuthority(err, source, refresh)
+		return operator.ExplainUnknownAuthority(err)
 	}
 	return nil
 }

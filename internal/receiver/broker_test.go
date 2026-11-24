@@ -891,10 +891,6 @@ func TestBrokerPoolPassesOperatorCheck(t *testing.T) {
 // tenantEndReceiver authenticates as a receiver, so broker authorization is exercised.
 func tenantEndReceiver(t *testing.T, ctx context.Context, b brokerPool) *Receiver {
 	t.Helper()
-	ca, err := os.ReadFile(os.Getenv("WHERRY_TRUST_CA"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	config := testConfig("auth-" + strings.TrimPrefix(b.receiver, "receiver-"))
 	config.Pool = b.pool
 	path := filepath.Join(t.TempDir(), "receiver.bundle")
@@ -909,7 +905,7 @@ func tenantEndReceiver(t *testing.T, ctx context.Context, b brokerPool) *Receive
 	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
 		t.Fatal(err)
 	}
-	r, err := New(bundle, ca, t.TempDir(), false, time.Second, nil, log.New(&syncBuffer{}, "", 0), prometheus.NewRegistry())
+	r, err := New(bundle, t.TempDir(), false, time.Second, nil, log.New(&syncBuffer{}, "", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}

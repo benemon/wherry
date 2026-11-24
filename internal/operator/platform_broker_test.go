@@ -230,7 +230,7 @@ func (s shareTest) member(t *testing.T, results chan<- kgo.ShareAckResults) *kgo
 // subscriber is member subscribed to topics.
 func (s shareTest) subscriber(t *testing.T, results chan<- kgo.ShareAckResults, topics ...string) *kgo.Client {
 	t.Helper()
-	ca, err := os.ReadFile(os.Getenv("WHERRY_TRUST_CA"))
+	ca, err := os.ReadFile(os.Getenv("SSL_CERT_FILE"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -748,10 +748,6 @@ func grantOperator(t *testing.T, root *kgo.Client) {
 // realService connects to the disposable broker as wherry.operator once it is delegated the provisioning ACLs, as
 // wherry operator init delegates them, with the password WHERRY_TRUST_OPERATOR_PASSWORD_FILE holds.
 func realService(t *testing.T) (*Service, func()) {
-	ca, err := os.ReadFile(os.Getenv("WHERRY_TRUST_CA"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	password, err := os.ReadFile(os.Getenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE"))
 	if err != nil {
 		t.Fatal(err)
@@ -763,12 +759,12 @@ func realService(t *testing.T) (*Service, func()) {
 	if err := (&Service{Operator: root}).EnsureTraceTopics(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	service := &Service{Operator: root, Broker: os.Getenv("WHERRY_TRUST_BROKER"), CA: ca}
+	service := &Service{Operator: root, Broker: os.Getenv("WHERRY_TRUST_BROKER")}
 	if err := service.WaitOperatorCredential(context.Background(), strings.TrimSpace(string(password))); err != nil {
 		t.Fatal(err)
 	}
 	operator := realClient(t, OperatorPrincipal, os.Getenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE"))
-	return &Service{Operator: operator, Broker: os.Getenv("WHERRY_TRUST_BROKER"), CA: ca}, operator.Close
+	return &Service{Operator: operator, Broker: os.Getenv("WHERRY_TRUST_BROKER")}, operator.Close
 }
 
 // realRoot connects to the disposable broker as the Kafka super user, for what a test does beyond provisioning.
@@ -782,7 +778,7 @@ func realRoot(t *testing.T) *kgo.Client {
 }
 
 func realClient(t *testing.T, user, passwordFile string) *kgo.Client {
-	ca, err := os.ReadFile(os.Getenv("WHERRY_TRUST_CA"))
+	ca, err := os.ReadFile(os.Getenv("SSL_CERT_FILE"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1081,14 +1077,8 @@ func TestNameGrammarIsOneOnBothSides(t *testing.T) {
 	}
 }
 
-func TestKafkaOptsRefuseACAWithoutCertificates(t *testing.T) {
-	if _, err := KafkaOpts("127.0.0.1:1", []byte("not a certificate"), "user", "password"); err == nil {
-		t.Fatal("built options trusting no certificate")
-	}
-}
-
 func TestKafkaOptsRefuseAPasswordOfALineBreak(t *testing.T) {
-	if _, err := KafkaOpts("127.0.0.1:1", nil, "user", "\r\n"); err == nil || err.Error() != "password is empty" {
+	if _, err := KafkaOpts("127.0.0.1:1", "user", "\r\n"); err == nil || err.Error() != "password is empty" {
 		t.Fatalf("options for a password of a line break: %v; want it refused as empty", err)
 	}
 }

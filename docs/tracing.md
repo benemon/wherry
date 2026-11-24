@@ -239,8 +239,7 @@ receivers:
     traces:
       topics: [wherry.traces.acme]
       encoding: otlp_proto
-    tls:
-      ca_file: /etc/wherry/kafka-ca.pem
+    tls: {}
     auth:
       sasl:
         mechanism: SCRAM-SHA-512
