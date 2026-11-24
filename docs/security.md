@@ -73,7 +73,7 @@ unsetting the variable alone leaves a configured source in force.
 :::
 
 A host resolves each credential's [source](#credential-sources) and
-presigns the run's S3 links when it submits, and encrypts them, with the run's
+presigns the run's S3 links and upload policy when it submits, and encrypts them, with the run's
 redaction key, in the task's **envelope**: a compact JWE (`dir` with
 `A256GCM`, through [go-jose](https://github.com/go-jose/go-jose)) of at most
 64 KiB under a fresh content key, bound to the task's run, tenant, pool,
@@ -201,16 +201,29 @@ admission: a malformed first task can win its run and then fail at open with
   Attempt wraps, re-key wraps and refusals live on the events topic and
   expire with it. The snapshot topic is compacted and kept forever, and holds
   public keys only.
-- **Presigned links.** A host presigns an S3 input's GET until
-  `task_started_by` plus 15 minutes and an S3 output's PUT until
-  `task_ended_by` plus 10 minutes, each at most 7 days, the longest an
+- **Presigned links and the upload policy.** A host presigns an S3 input's
+  GET until `task_started_by` plus 15 minutes, at most 7 days, the longest an
   [S3 SigV4](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html)
-  presigned URL lasts. The 10 minutes let a run stopped at `task_ended_by`
-  upload the outputs its job left; a leaked PUT URL works that much longer,
-  for its one object key, PUT only. For a pool with storage,
+  presigned URL lasts, and one S3 POST policy per run, for any key under
+  `wherry/<tenant>/<run>/outputs/` of at most 5 GiB, until `task_ended_by`
+  plus 10 minutes. The 10 minutes let a run stopped at `task_ended_by`
+  upload the outputs its job left. For a pool with storage,
   `start_by_limit` plus six hours and ten minutes must not exceed 7 days.
   The host signs with its static storage credential, so the 7-day ceiling
-  and those deadlines are the only bounds on a link.
+  and those deadlines are the only bounds on a link or a policy.
+- **Accepted residual: the policy.** The policy is scoped to the run's output
+  prefix, not to named objects, so a receiver that holds it, compromised or
+  not, can create any number of objects of up to 5 GiB under that prefix, or
+  overwrite the run's own outputs, until `task_ended_by` plus 10 minutes. It
+  cannot read, list or delete, nor reach another run's prefix. The host
+  downloads only what the result lists, at the key of its name, and only
+  when the bytes match the listed hash and size; it refuses a result whose
+  lists it cannot write from before writing anything, and deletes the
+  prefix, listed objects or not, once the run is collected with no output
+  rejected; a rejected output leaves the prefix for the bucket's lifecycle rule. What a receiver
+  creates and no host collects is bounded by the bucket's quota and removed
+  by its lifecycle rule, which the operator sets per pool bucket
+  ([Operations](operations-operator.md#add-tenants-and-hosts)).
 
 ## What the pool key protects
 
@@ -486,9 +499,9 @@ request, as `InvalidAccessKeyId` does. Every error that leaves the host's
 storage layer and every line it logs has both key values replaced by their
 markers, `[redacted:...]`, whatever the keys' length, and keeps the store's
 response code. Both values are also held for the host's general redaction
-before the first storage call. The keys never leave the host: receivers and
-agents get only the URLs it presigns, and neither key is a credential a
-pool's terms can request. Scope the pair to `wherry/<tenant>/` in each
+before the first storage call. The keys never leave the host: receivers get
+only the URLs and the policy it presigns, agents nothing of either, and
+neither key is a credential a pool's terms can request. Scope the pair to `wherry/<tenant>/` in each
 pool's bucket ([Operations](operations-hosts.md#s3-storage)).
 
 ## The Kafka super user

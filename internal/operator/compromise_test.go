@@ -157,7 +157,7 @@ func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
 		binding := wire.SubmissionBinding{Tenant: "tenant-a", Host: "host-a", Pool: "pool-a", Run: run, Placement: wire.Placement{Agent: "agent-a", Selector: []wire.Requirement{}},
 			TaskStartedBy: time.Now().Add(time.Hour).Unix(), TaskEndedBy: time.Now().Add(time.Hour).Unix(), Credentials: []wire.TaskCredential{{Name: "deploy", Env: "DEPLOY_TOKEN"}}}
 		values := signed.EnvelopeValues{Binding: binding.EnvelopeBinding(), Credentials: map[string][]byte{"model": []byte("model-secret-value"), "deploy": []byte("deploy-secret-value")},
-			S3Inputs: map[string]string{}, S3Outputs: map[string]string{}, RedactionKey: make([]byte, 32)}
+			S3Inputs: map[string]string{}, RedactionKey: make([]byte, 32)}
 		binding.Envelope = string(mustBytes(t)(signed.BuildEnvelope(values, contentKey)))
 		binding.Wrap = string(mustBytes(t)(signed.WrapContentKey(contentKey, &poolKey.PublicKey)))
 		tasks[run] = binding.Envelope + binding.Wrap

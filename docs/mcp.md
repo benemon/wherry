@@ -41,10 +41,11 @@ The defaults are `10m` and `2h`.
   `INVALID_ARGUMENT` without it, or naming the step that failed. `continue`
   is a run ID, as `--continue` takes it, and is refused with `git`. `inputs` is
   an array of `{path}`, `credentials` an array of `{name}`,
-  `{name, file}` or `{name, env}` and `outputs` an array of `{name, storage}`,
+  `{name, file}` or `{name, env}` and `outputs` an array of `{name}`,
   as `--input`, `--credential` and `--output` take them; every output is
-  required, and an output's `storage` is `s3` or absent, as `:s3`. An input's
-  `storage` is refused with `inputs move to S3 by size; drop :s3`, and an
+  required, and one over the pool's output limit returns through the pool's
+  bucket. An input's or an output's `storage` is refused with `inputs move to
+  S3 by size; drop :s3` or `outputs move to S3 by size; drop :s3`, and an
   output's `required` with `outputs are always required; drop :required`.
   An input's delivered name, like an output's, is a relative path of file
   names joined by `/`, no name a directory of another; a `{path}` input is

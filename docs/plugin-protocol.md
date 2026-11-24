@@ -71,8 +71,10 @@ A plugin gives each agent the `git` environment that
 
 Once the job ends the receiver stops it and asks the plugin to collect its
 outputs, which arrive over the link in pieces of at most 1 MiB. The plugin
-streams the outputs the receiver names for streaming, its S3 outputs and the
-changes file of a git input, as the receiver reads them.
+streams the outputs the receiver names for streaming, as the receiver reads
+them: the changes file of a git input in the first pass, and in a second
+pass, when the first found files over the pool's output limit, exactly those
+files, with `FileBytes` and `TotalBytes` zero so it reads no other.
 
 A plugin may report, with a job that never started, the platform's reason
 in `Terminal.Reason`. The receiver redacts it and writes it to its log only.

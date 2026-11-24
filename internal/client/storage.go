@@ -12,7 +12,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -32,8 +31,8 @@ type S3File struct {
 	Body io.ReadSeeker
 }
 
-// getLifetime is how long a presigned GET for an S3 input lives; a PUT for an S3 output lives until its run's
-// task_ended_by.
+// getLifetime is how long a presigned GET for an S3 input lives; a run's POST policy for its S3 outputs lives until its
+// task_ended_by plus the upload grace.
 const getLifetime = 15 * time.Minute
 
 // storageTransport carries the client's S3 requests, nil for Go's default. A variable so tests can trust their TLS
@@ -145,13 +144,20 @@ func (s *store) presignGet(ctx context.Context, bucket, key string, lifetime tim
 	return get.String(), nil
 }
 
-// presignPut is a PUT URL for key in bucket that lives for lifetime.
-func (s *store) presignPut(ctx context.Context, bucket, key string, lifetime time.Duration) (string, error) {
-	put, err := s.client.PresignedPutObject(ctx, bucket, key, lifetime)
-	if err != nil {
-		return "", s.wrap(err)
+// postPolicy is a POST policy for bucket that lets any object whose key starts with prefix be created, of at most
+// maxSize bytes, until expires: the bucket's URL and the form fields, key among them set to prefix.
+func (s *store) postPolicy(ctx context.Context, bucket, prefix string, maxSize int64, expires time.Time) (*signed.S3Policy, error) {
+	policy := minio.NewPostPolicy()
+	for _, err := range []error{policy.SetBucket(bucket), policy.SetKeyStartsWith(prefix), policy.SetContentLengthRange(0, maxSize), policy.SetExpires(expires.UTC())} {
+		if err != nil {
+			return nil, err
+		}
 	}
-	return put.String(), nil
+	target, fields, err := s.client.PresignedPostPolicy(ctx, policy)
+	if err != nil {
+		return nil, s.wrap(err)
+	}
+	return &signed.S3Policy{URL: target.String(), Fields: fields}, nil
 }
 
 // get opens the object at key in bucket for reading through a reader that wraps its errors as the store's other calls do
@@ -233,47 +239,40 @@ func putInputs(ctx context.Context, store *store, bucket, tenant, run string, fi
 	return inputs, nil
 }
 
-// presign returns the URLs of a run's S3 inputs, under inputRun's prefix, and outputs, under run's: GET URLs that
-// expire at getDeadline and PUT URLs at deadline plus the upload grace, so a run stopped at deadline still uploads.
-// A deadline that has passed is refused all the same.
-func presign(ctx context.Context, store *store, bucket, tenant, inputRun, run string, inputs, outputs []string, getDeadline, deadline time.Time) (map[string][]byte, error) {
-	values := map[string][]byte{}
+// presign returns the GET URLs of a run's S3 inputs, under inputRun's prefix, which expire at getDeadline, and the
+// run's POST policy for every object under its output prefix, which expires at deadline plus the upload grace, so a
+// run stopped at deadline still uploads. A deadline that has passed is refused all the same.
+func presign(ctx context.Context, store *store, bucket, tenant, inputRun, run string, inputs []string, getDeadline, deadline time.Time) (map[string]string, *signed.S3Policy, error) {
+	urls := map[string]string{}
 	if len(inputs) > 0 {
 		lifetime := min(time.Until(getDeadline).Truncate(time.Second)+time.Second, operator.MaxPresign)
 		if lifetime < 2*time.Second {
-			return nil, errors.New("task_started_by has passed")
+			return nil, nil, errors.New("task_started_by has passed")
 		}
 		for _, input := range inputs {
 			get, err := store.presignGet(ctx, bucket, wire.S3InputKey(tenant, inputRun, input), lifetime)
 			if err != nil {
-				return nil, fmt.Errorf("presign S3 input %s: %w", input, err)
+				return nil, nil, fmt.Errorf("presign S3 input %s: %w", input, err)
 			}
-			values[signed.S3InputValue(input)] = []byte(get)
+			urls[input] = get
 		}
 	}
-	if len(outputs) == 0 {
-		return values, nil
+	if time.Until(deadline) < time.Second {
+		return nil, nil, errors.New("task_ended_by has passed")
 	}
-	remaining := time.Until(deadline).Truncate(time.Second) + time.Second
-	if remaining < 2*time.Second {
-		return nil, errors.New("task_ended_by has passed")
+	policy, err := store.postPolicy(ctx, bucket, wire.S3OutputKey(tenant, run, ""), wire.MaxS3Object, deadline.Add(operator.UploadGrace))
+	if err != nil {
+		return nil, nil, fmt.Errorf("presign the S3 outputs' policy: %w", err)
 	}
-	lifetime := min(remaining+operator.UploadGrace, operator.MaxPresign)
-	for _, output := range outputs {
-		put, err := store.presignPut(ctx, bucket, wire.S3OutputKey(tenant, run, output), lifetime)
-		if err != nil {
-			return nil, fmt.Errorf("presign S3 output %s: %w", output, err)
-		}
-		values[signed.S3OutputValue(output)] = []byte(put)
-	}
-	return values, nil
+	return urls, policy, nil
 }
 
 // DownloadOutputs downloads a run's S3 outputs beneath dir and verifies each against its result's size and SHA-256;
-// once the run is terminal and every output verified, it deletes the run's prefix.
+// once the run is terminal and every output verified, it deletes the run's prefix, which holds whatever the policy let
+// a receiver create there, listed or not.
 func (h *Host) DownloadOutputs(ctx context.Context, runID string, result AwaitResult, dir string) ([]Output, []wire.UnreturnedOutput, error) {
 	local, err := h.localRun(runID)
-	if err != nil || local == nil || len(local.S3Inputs)+len(local.S3Outputs) == 0 {
+	if err != nil || local == nil || len(local.S3Inputs) == 0 && !local.Policy {
 		return nil, nil, err
 	}
 	if dir == "" {
@@ -302,8 +301,8 @@ func (h *Host) DownloadOutputs(ctx context.Context, runID string, result AwaitRe
 		for _, listed := range result.Stored {
 			reason := ""
 			switch {
-			case !slices.Contains(local.S3Outputs, listed.Name):
-				reason = "not an S3 output the run declares"
+			case !local.Policy:
+				reason = "the run was issued no upload policy"
 			case listed.Key != wire.S3OutputKey(h.tenant, runID, listed.Name):
 				reason = "listed at a key outside the run's prefix"
 			default:

@@ -72,6 +72,8 @@ func tracedS3(t *testing.T) *s3Store {
 		case r.Method == http.MethodPut:
 			objects[r.URL.Path], _ = io.ReadAll(r.Body)
 			w.Header().Set("ETag", `"test"`)
+		case r.Method == http.MethodPost:
+			storePost(objects, w, r)
 		case r.Method == http.MethodGet:
 			data, ok := objects[r.URL.Path]
 			if !ok {
@@ -175,7 +177,7 @@ func TestTracedRoundTrip(t *testing.T) {
 	labels := map[string]string{"gpu": "yes"}
 	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a",
 		Profiles: []operator.ProfileSettings{{Name: "fake", Plugin: "fake", Agent: "claude", Labels: labels,
-			Config: map[string]any{"outputs": true, "finish": true, "inline_limit": 1000, "credential": "fake-token", "note": tracedSetting}}},
+			Config: map[string]any{"outputs": true, "finish": true, "inline_limit": 1000, "credential": "fake-token", "note": tracedSetting, "large_input": largeInput}}},
 		PluginSHA256: map[string]string{"fake": fakeSHA256}}
 	for _, step := range []func() error{
 		func() error { return service.PoolApply(ctx, "pool-a", terms, false) },
@@ -251,8 +253,8 @@ func TestTracedRoundTrip(t *testing.T) {
 	sessionTook := time.Since(connecting)
 	traceClient.Close()
 	input := busclient.SubmitInput{Agent: "claude", Selector: []wire.Requirement{{Key: "gpu", Operator: wire.OpExists}},
-		Prompt: tracedPrompt, Parts: []wire.Part{{Raw: wire.StdBytes(bytes.Repeat([]byte("dataset "), 250)), Filename: "dataset.bin"}},
-		Credentials: []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}, Outputs: []wire.ExpectedOutput{{Name: "big.bin", Storage: wire.StorageS3}},
+		Prompt: tracedPrompt, Parts: []wire.Part{{Raw: wire.StdBytes(bytes.Repeat([]byte("dataset "), 250)), Filename: largeInput}},
+		Credentials: []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}, Outputs: []wire.ExpectedOutput{{Name: "large.bin"}},
 		EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)}
 	var submitted busclient.SubmitResult
 	for ctx.Err() == nil {
@@ -265,7 +267,7 @@ func TestTracedRoundTrip(t *testing.T) {
 		t.Fatalf("submit never placed: %v", err)
 	}
 	awaited, err := host.Await(ctx, submitted.RunID, 30*time.Second)
-	if err != nil || awaited.Status.State != wire.TaskStateCompleted || len(awaited.Stored) != 1 {
+	if err != nil || awaited.Status.State != wire.TaskStateCompleted || len(awaited.Stored) != 1 || awaited.Stored[0].Name != "large.bin" {
 		t.Fatalf("await = %+v, %v; want the completed result with its S3 output; logs:\n%s", awaited, err, logs.String())
 	}
 	// A refused upload: the store's answer names the access key, which store.wrap redacts and no span records.
@@ -523,7 +525,7 @@ func TestTracedRoundTrip(t *testing.T) {
 		t.Fatalf("local record has no redaction key: %s", local)
 	}
 	sentinels = append(sentinels, credentialText, platformText, deployText, deployPath, tracedPathPart, tracedPrompt, tracedAccess, tracedSecret, tracedSetting,
-		hostBundled.Password, receiverBundled.Password, strings.TrimSpace(ca), "X-Amz-Signature", "X-Amz", wire.S3OutputKey("tenant-a", submitted.RunID, "big.bin"),
+		hostBundled.Password, receiverBundled.Password, strings.TrimSpace(ca), "X-Amz-Signature", "X-Amz", wire.S3OutputKey("tenant-a", submitted.RunID, "large.bin"),
 		wire.S3InputKey("tenant-a", submitted.RunID, "dataset.bin"), redactionKey, "s3cr3t")
 	teletest.Sentinels(t, spans, sentinels...)
 	teletest.Bytes(t, append(slices.Clone(tenantRecords), untenantedRecords...), sentinels...)

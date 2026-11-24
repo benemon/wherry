@@ -1253,7 +1253,7 @@ func startReceiver(ctx context.Context, nomad *api.Client, env devEnv, hostConfi
 	})
 }
 
-// smoke runs the mock once, through the bucket with storage, and checks that echo.txt holds the prompt.
+// smoke runs the mock once, with an S3 input where there is storage, and checks that echo.txt holds the prompt.
 func smoke(ctx context.Context, env devEnv, hostConfig busclient.Config) error {
 	host, err := busclient.Connect(hostConfig, log.New(io.Discard, "", 0))
 	if err != nil {
@@ -1267,7 +1267,6 @@ func smoke(ctx context.Context, env devEnv, hostConfig busclient.Config) error {
 	}
 	if env.storage() {
 		input.S3Inputs = []busclient.S3File{{Name: devSmokeInput, Body: strings.NewReader("smoke input\n")}}
-		input.Outputs[0].Storage = wire.StorageS3
 	}
 	// The receiver publishes the pool's first custodian snapshot shortly after it starts.
 	var submitted busclient.SubmitResult

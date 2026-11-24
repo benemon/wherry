@@ -374,17 +374,17 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		previous := continued.last.Task.Wherry.Git
 		input.Git = &wire.GitInput{Remote: previous.Remote, Ref: previous.Ref, Path: previous.Path}
 		input.S3Inputs = append(slices.Clone(input.S3Inputs), S3File{Name: baseBundle, Body: continued.bundle})
-		// Through S3, so the bundle returns whatever its size; a receiver never requires a git input's changes file.
-		input.Outputs = append(slices.Clone(input.Outputs), wire.ExpectedOutput{Name: wire.GitBundle, Storage: wire.StorageS3})
+		// A plain expected output: over the inline budget it goes through the pool's bucket, and a receiver never
+		// requires a git input's changes file.
+		input.Outputs = append(slices.Clone(input.Outputs), wire.ExpectedOutput{Name: wire.GitBundle})
 	}
 	outputs := input.Outputs
 	// One resolver: the bytes that decide what is supplied are the bytes the envelope carries, the storage keys sign
 	// with and ls-remote authenticates with.
 	resolver := newResolver(ctx, wire.RFC3339(input.EndBy.Unix()))
 	if input.Git != nil {
-		// An S3 changes file stays: it is the route for a bundle over output_limit.
 		for _, output := range asked {
-			if output.Storage == "" && (output.Name == wire.GitBundle || output.Name == wire.GitPatch) {
+			if output.Name == wire.GitBundle || output.Name == wire.GitPatch {
 				return SubmitResult{}, fmt.Errorf("%w: the changes file comes back by default with --git; drop --output %s", ErrInvalidInput, output.Name)
 			}
 		}
@@ -489,7 +489,7 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if limit := input.StartBy.Add(time.Duration(operator.MaxRunDurationMS) * time.Millisecond); input.EndBy.After(limit) {
 		return SubmitResult{}, fmt.Errorf("%w: task_ended_by (%s) is past task_started_by plus the 6h run cap (%s)", ErrInvalidInput, wire.RFC3339(input.EndBy.Unix()), wire.RFC3339(limit.Unix()))
 	}
-	stored := len(input.S3Inputs)+len(s3OutputNames(outputs)) > 0
+	stored := len(input.S3Inputs) > 0
 	// Connect folds the key topic only when <host_key>.next exists, and receivers refuse a task under any key but the
 	// current one without writing a status.
 	owner := signed.HostOwner(h.tenant, h.host)
@@ -649,11 +649,15 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		}
 	}
 	storage := v.state.Pools[pool].Storage
+	// Every storable run gets a POST policy for its outputs, so its storage credential resolves whether or not an input
+	// goes through the bucket; an input that needs the bucket on a run that is not storable is refused here.
 	var store *store
-	if stored {
+	if storable || stored {
 		if store, err = h.bucket(ctx, pool, storage, resolver); err != nil {
 			return SubmitResult{}, err
 		}
+	}
+	if stored {
 		submission.Wherry.S3Inputs, err = uploadInputs(ctx, store, storage, h.tenant, runID, input.S3Inputs)
 	}
 	if err == nil && continued.last != nil {
@@ -675,7 +679,7 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		err = fmt.Errorf("%w: with its envelope the submission is a %d-byte record, over pool %s's %d-byte record limit", ErrInvalidInput, len(encoded), pool, limit)
 	}
 	if err == nil {
-		err = h.publish(ctx, submission, topic, encoded, now, redactionKey)
+		err = h.publish(ctx, submission, topic, encoded, now, redactionKey, store != nil)
 	}
 	if err != nil {
 		if stored {
@@ -724,10 +728,10 @@ func (h *Host) poolKey(ctx context.Context, v view, pool string) (*ecdsa.PublicK
 // enveloped signs submission with an envelope of its credentials, its S3 links and redactionKey, under a fresh content
 // key wrapped to poolKey. The credentials' values come through resolver, which supplied filled for the agent's
 // credentials, so no source runs again here; a task credential's source is the configuration's. GET links last until
-// task_started_by plus getLifetime and PUT links until task_ended_by plus the upload grace.
+// task_started_by plus getLifetime; with a store, the run's POST policy lasts until task_ended_by plus the upload grace.
 func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms operator.Terms, poolKey *ecdsa.PublicKey, store *store, redactionKey []byte, resolver *resolver) ([]byte, error) {
 	binding := submission.Wherry
-	values := signed.EnvelopeValues{Binding: binding.EnvelopeBinding(), Credentials: map[string][]byte{}, S3Inputs: map[string]string{}, S3Outputs: map[string]string{}, RedactionKey: redactionKey}
+	values := signed.EnvelopeValues{Binding: binding.EnvelopeBinding(), Credentials: map[string][]byte{}, S3Inputs: map[string]string{}, RedactionKey: redactionKey}
 	sources := map[string]credential.Source{}
 	if i := slices.IndexFunc(terms.Agents, func(agent operator.AgentTerms) bool { return agent.Name == binding.Placement.Agent }); i >= 0 {
 		for _, s := range h.sources(terms.Agents[i]) {
@@ -767,17 +771,10 @@ func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms
 		for _, input := range binding.S3Inputs {
 			inputs = append(inputs, input.Name)
 		}
-		outputs := s3OutputNames(binding.Outputs)
-		urls, err := presign(ctx, store, terms.Storage.Bucket, h.tenant, binding.InputRun(), binding.Run, inputs, outputs,
-			time.Unix(binding.TaskStartedBy, 0).Add(getLifetime), time.Unix(binding.TaskEndedBy, 0))
-		if err != nil {
+		var err error
+		if values.S3Inputs, values.S3Policy, err = presign(ctx, store, terms.Storage.Bucket, h.tenant, binding.InputRun(), binding.Run, inputs,
+			time.Unix(binding.TaskStartedBy, 0).Add(getLifetime), time.Unix(binding.TaskEndedBy, 0)); err != nil {
 			return nil, err
-		}
-		for _, input := range inputs {
-			values.S3Inputs[input] = string(urls[signed.S3InputValue(input)])
-		}
-		for _, output := range outputs {
-			values.S3Outputs[output] = string(urls[signed.S3OutputValue(output)])
 		}
 	}
 	_, seal := telemetry.Child(ctx, "seal envelope")
@@ -864,17 +861,6 @@ func sourceKind(source credential.Source) string {
 		return SourceCommand
 	}
 	return SourceFile
-}
-
-// s3OutputNames names the outputs returned through the pool's bucket.
-func s3OutputNames(outputs []wire.ExpectedOutput) []string {
-	var names []string
-	for _, output := range outputs {
-		if output.Storage == wire.StorageS3 {
-			names = append(names, output.Name)
-		}
-	}
-	return names
 }
 
 // scpRemote is git's scp-like remote syntax, [user@]host:path, which has no slash before its colon.
@@ -973,8 +959,8 @@ func (h *Host) submission(runID, nonce, pool string, placement wire.Placement, p
 
 // publish records the run locally, then writes encoded, the signed submission, to topic, its signature's task topic. A
 // failed write removes the record.
-func (h *Host) publish(ctx context.Context, submission *wire.Submission, topic string, encoded []byte, now time.Time, redactionKey []byte) error {
-	record, err := h.newRecord(ctx, submission, topic, encoded, now, redactionKey)
+func (h *Host) publish(ctx context.Context, submission *wire.Submission, topic string, encoded []byte, now time.Time, redactionKey []byte, policy bool) error {
+	record, err := h.newRecord(ctx, submission, topic, encoded, now, redactionKey, policy)
 	if err != nil {
 		return err
 	}
@@ -991,14 +977,15 @@ func (h *Host) publish(ctx context.Context, submission *wire.Submission, topic s
 }
 
 // newRecord is the local record of a run whose signed submission is encoded, bound for topic, holding redactionKey, the
-// envelope's, and the submission without its envelope as the run's resubmission template.
-func (h *Host) newRecord(ctx context.Context, submission *wire.Submission, topic string, encoded []byte, now time.Time, redactionKey []byte) (runRecord, error) {
+// envelope's, whether the envelope carries a POST policy, and the submission without its envelope as the run's
+// resubmission template.
+func (h *Host) newRecord(ctx context.Context, submission *wire.Submission, topic string, encoded []byte, now time.Time, redactionKey []byte, policy bool) (runRecord, error) {
 	binding := submission.Wherry
 	template := *submission
 	template.Wherry.Envelope, template.Wherry.Wrap = "", ""
 	record := runRecord{
 		Run: binding.Run, Pool: binding.Pool, Topic: topic, Placement: binding.Placement, TaskHash: wire.TaskHash(encoded), SubmittedMS: now.UnixMilli(), TaskStartedBy: binding.TaskStartedBy,
-		TaskEndedBy: binding.TaskEndedBy, RedactionKey: redactionKey, Task: &template, TraceParent: h.tracing.TraceParent(ctx),
+		TaskEndedBy: binding.TaskEndedBy, RedactionKey: redactionKey, Task: &template, TraceParent: h.tracing.TraceParent(ctx), Policy: policy,
 	}
 	for _, credential := range binding.Credentials {
 		record.TaskCredentials = append(record.TaskCredentials, credential.Name)
@@ -1009,7 +996,6 @@ func (h *Host) newRecord(ctx context.Context, submission *wire.Submission, topic
 	for _, input := range binding.S3Inputs {
 		record.S3Inputs = append(record.S3Inputs, input.Name)
 	}
-	record.S3Outputs = s3OutputNames(binding.Outputs)
 	// Listed before the write: a receiver that claims at once writes the run's first records after the submission.
 	ends, err := operator.ListOffsets(ctx, kadm.NewClient(h.kafka).ListCommittedOffsets, operator.TenantTopic(h.tenant))
 	if err != nil {
@@ -1121,11 +1107,13 @@ type runRecord struct {
 	TaskCredentials []string `json:"task_credentials,omitzero"`
 	// VCSHost is the host of the git input the run declares.
 	VCSHost string `json:"vcs_host,omitzero"`
-	// S3Inputs and S3Outputs name the S3 inputs and outputs the run declares.
-	S3Inputs  []string `json:"s3_inputs,omitzero"`
-	S3Outputs []string `json:"s3_outputs,omitzero"`
-	// TaskStartedBy and TaskEndedBy are the submission's bounds, in whole seconds; a PUT URL for its S3 outputs expires
-	// operator.UploadGrace after TaskEndedBy.
+	// S3Inputs name the S3 inputs the run declares.
+	S3Inputs []string `json:"s3_inputs,omitzero"`
+	// Policy marks a run whose envelope carries a POST policy for its output prefix, under which objects may land
+	// whether or not the result lists them.
+	Policy bool `json:"policy,omitzero"`
+	// TaskStartedBy and TaskEndedBy are the submission's bounds, in whole seconds; the POST policy for its S3 outputs
+	// expires operator.UploadGrace after TaskEndedBy.
 	TaskStartedBy int64 `json:"task_started_by,omitzero"`
 	TaskEndedBy   int64 `json:"task_ended_by,omitzero"`
 	// FeedOffset is the tenant feed's committed end before the submission was published. Every record about the run

@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -255,8 +256,10 @@ func TestRoundTrip(t *testing.T) {
 	hostBundle, otherBundle, receiverBundle := filepath.Join(dir, "host.yaml"), filepath.Join(dir, "other.yaml"), filepath.Join(dir, "receiver.yaml")
 	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a",
 		Profiles: []operator.ProfileSettings{{Name: "fake", Plugin: "fake", Agent: "claude", Labels: map[string]string{"gpu": "yes"},
-			Config: map[string]any{"outputs": true, "finish": true, "inline_limit": 1000, "credential": "fake-token"}}},
+			Config: map[string]any{"outputs": true, "finish": true, "inline_limit": 1000, "credential": "fake-token", "large_input": largeInput}}},
 		PluginSHA256: map[string]string{"fake": fakeSHA256}}
+	// host-c's bundle is written after the operator forgets the keys: a host without a storage credential.
+	plainBundle := filepath.Join(dir, "plain.yaml")
 	for _, step := range []func() error{
 		func() error { return service.PoolApply(ctx, "pool-a", terms, false) },
 		func() error { return service.TenantAdd(ctx, "tenant-a") },
@@ -264,6 +267,10 @@ func TestRoundTrip(t *testing.T) {
 		func() error { return service.HostAdd(ctx, "tenant-a", "host-a", hostBundle, false) },
 		func() error { return service.HostAdd(ctx, "tenant-a", "host-b", otherBundle, false) },
 		func() error { return service.ReceiverAdd(ctx, config, service.Broker, receiverBundle) },
+		func() error {
+			service.Storage = nil
+			return service.HostAdd(ctx, "tenant-a", "host-c", plainBundle, false)
+		},
 	} {
 		if err := step(); err != nil {
 			t.Fatal(err)
@@ -428,9 +435,16 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatal("placed a task no plugin's labels satisfy")
 	}
 	inlineCapRoundTrip(t, ctx, bucket, host, read, logs, hostLogs)
-	if bucket.store != nil {
-		s3RoundTrip(t, ctx, bucket, host, read, logs, hostLogs)
+	plainConfig := busclient.Config{Bundle: plainBundle, CAFile: caFile, HostKey: filepath.Join(dir, "plain.key"), StateDir: filepath.Join(dir, "plain-state")}
+	if _, _, err := busclient.Init(ctx, plainConfig); err != nil {
+		t.Fatal(err)
 	}
+	plain, err := busclient.Connect(plainConfig, log.New(hostLogs, "plain: ", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Close()
+	s3RoundTrip(t, ctx, bucket, host, plain, logs, hostLogs)
 	// A plugin crash stops the receiver, which starts no other plugin process.
 	crashed := read()[0].PID
 	if err := syscall.Kill(crashed, syscall.SIGKILL); err != nil {
@@ -486,10 +500,16 @@ func inlineCapRoundTrip(t *testing.T, ctx context.Context, bucket *s3Store, host
 	}
 }
 
-// s3RoundTrip runs a turn with a 5 MiB S3 input and the plugin's 2 MiB output returned through the bucket.
-func s3RoundTrip(t *testing.T, ctx context.Context, bucket *s3Store, host *busclient.Host, read func() []pluginRecord, logs, hostLogs *syncBuffer) {
+// largeInput is the input whose presence makes the test plugin leave large.bin, over the pool's output limit.
+const largeInput = "large-dataset.bin"
+
+// s3RoundTrip runs a turn with a 5 MiB S3 input, whose presence makes the plugin leave large.bin, over the pool's output
+// limit: the receiver uploads it under the run's policy, result downloads it with a matching hash and cleans the run's
+// prefix, and the small undeclared outputs return inline. From a host without a storage credential the same run has
+// no policy, and large.bin exceeds the output limit.
+func s3RoundTrip(t *testing.T, ctx context.Context, bucket *s3Store, host, plain *busclient.Host, logs, hostLogs *syncBuffer) {
 	input := bytes.Repeat([]byte("dataset "), 5<<20/8)
-	path := filepath.Join(t.TempDir(), "dataset.bin")
+	path := filepath.Join(t.TempDir(), largeInput)
 	if err := os.WriteFile(path, input, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -498,8 +518,9 @@ func s3RoundTrip(t *testing.T, ctx context.Context, bucket *s3Store, host *buscl
 		t.Fatal(err)
 	}
 	defer file.Close()
+	large := bytes.Repeat([]byte("L"), operator.DefaultOutputLimit+1)
 	submitted, err := host.Submit(ctx, busclient.SubmitInput{Agent: "claude", Selector: []wire.Requirement{{Key: "gpu", Operator: wire.OpExists}}, Prompt: "use the dataset",
-		S3Inputs: []busclient.S3File{{Name: "dataset.bin", Body: file}}, Outputs: []wire.ExpectedOutput{{Name: "big.bin", Storage: wire.StorageS3}},
+		S3Inputs: []busclient.S3File{{Name: largeInput, Body: file}}, Outputs: []wire.ExpectedOutput{{Name: "large.bin"}},
 		EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
@@ -508,24 +529,47 @@ func s3RoundTrip(t *testing.T, ctx context.Context, bucket *s3Store, host *buscl
 	if err != nil {
 		t.Fatal(err)
 	}
-	if awaited.Status.State != wire.TaskStateCompleted || len(awaited.Stored) != 1 || awaited.Stored[0].Key != wire.S3OutputKey("tenant-a", submitted.RunID, "big.bin") {
-		t.Fatalf("await = %+v; want the S3 output listed; logs:\n%s\n%s", awaited, logs.String(), hostLogs.String())
+	key := wire.S3OutputKey("tenant-a", submitted.RunID, "large.bin")
+	if awaited.Status.State != wire.TaskStateCompleted || !slices.Equal(awaited.Stored, []wire.ReturnedOutput{{Name: "large.bin", SHA256: hexSHA(large), Size: int64(len(large)), Key: key}}) {
+		t.Fatalf("await = %+v; want the large output listed through the bucket; logs:\n%s\n%s", awaited, logs.String(), hostLogs.String())
+	}
+	var inline []string
+	for _, output := range awaited.Outputs {
+		inline = append(inline, output.Name)
+	}
+	if !slices.Equal(inline, []string{"big.bin", "empty"}) {
+		t.Fatalf("inline outputs %v; want the undeclared files within the limit", inline)
 	}
 	dir := t.TempDir()
 	downloaded, rejected, err := host.DownloadOutputs(ctx, submitted.RunID, awaited, dir)
-	if err != nil || len(rejected) != 0 || len(downloaded) != 1 {
+	if err != nil || len(rejected) != 0 || len(downloaded) != 1 || downloaded[0].SHA256 != hexSHA(large) {
 		t.Fatalf("downloaded %+v, rejected %+v, %v", downloaded, rejected, err)
 	}
-	if written, err := os.ReadFile(filepath.Join(dir, "big.bin")); err != nil || !bytes.Equal(written, bytes.Repeat([]byte("b"), 2<<20+1)) {
+	if written, err := os.ReadFile(filepath.Join(dir, "large.bin")); err != nil || !bytes.Equal(written, large) {
 		t.Fatalf("downloaded %d bytes, %v", len(written), err)
 	}
-	for object := range bucket.store.ListObjects(ctx, s3Bucket, minio.ListObjectsOptions{Prefix: wire.S3Prefix("tenant-a", submitted.RunID), Recursive: true}) {
-		t.Fatalf("%s survived the run's cleanup", object.Key)
+	if bucket.store != nil {
+		for object := range bucket.store.ListObjects(ctx, s3Bucket, minio.ListObjectsOptions{Prefix: wire.S3Prefix("tenant-a", submitted.RunID), Recursive: true}) {
+			t.Fatalf("%s survived the run's cleanup", object.Key)
+		}
 	}
 	for _, text := range []string{logs.String(), hostLogs.String()} {
 		if strings.Contains(text, "X-Amz-Signature") {
 			t.Fatalf("logs hold a presigned URL:\n%s", text)
 		}
+	}
+	// Without storage: the same input inline, no policy, and the large file over the limit.
+	submitted, err = plain.Submit(ctx, busclient.SubmitInput{Agent: "claude", Selector: []wire.Requirement{{Key: "gpu", Operator: wire.OpExists}}, Prompt: "use the dataset",
+		Parts: []wire.Part{{Raw: wire.StdBytes("a,b\n"), Filename: largeInput}}, Outputs: []wire.ExpectedOutput{{Name: "large.bin"}},
+		EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if awaited, err = plain.Await(ctx, submitted.RunID, 30*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if awaited.Status.State != wire.TaskStateFailed || len(awaited.Stored) != 0 || !slices.Contains(awaited.NotReturned, wire.UnreturnedOutput{Name: "large.bin", Size: int64(len(large)), Reason: "exceeds output limit"}) {
+		t.Fatalf("await without storage = %+v; want large.bin over the output limit; logs:\n%s\n%s", awaited, logs.String(), hostLogs.String())
 	}
 }
 
@@ -622,6 +666,10 @@ func fallbackS3(t *testing.T) *s3Store {
 			objects[r.URL.Path], _ = io.ReadAll(r.Body)
 			w.Header().Set("ETag", `"test"`)
 		case http.MethodPost:
+			if !r.URL.Query().Has("delete") {
+				storePost(objects, w, r)
+				return
+			}
 			var request struct {
 				Objects []struct{ Key string } `xml:"Object"`
 			}
@@ -655,6 +703,9 @@ func fallbackS3(t *testing.T) *s3Store {
 				http.NotFound(w, r)
 				return
 			}
+			w.Header().Set("ETag", `"test"`)
+			w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
+			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 			w.Write(data)
 		default:
 			http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -671,6 +722,40 @@ func fallbackS3(t *testing.T) *s3Store {
 	}
 	t.Setenv("SSL_CERT_FILE", ca)
 	return &s3Store{endpoint: server.URL, keys: operator.StorageKeys{AccessKey: "AKIAROUNDTRIPACCESS", SecretKey: "roundtrip-secret-key-value"}, client: server.Client()}
+}
+
+// storePost handles a policy upload for an in-process store: the form's key names the object under the bucket path and
+// file, last, holds its bytes.
+func storePost(objects map[string][]byte, w http.ResponseWriter, r *http.Request) {
+	reader, err := r.MultipartReader()
+	if err != nil {
+		http.Error(w, "form", http.StatusBadRequest)
+		return
+	}
+	key, data := "", []byte(nil)
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil || data != nil {
+			http.Error(w, "form", http.StatusBadRequest)
+			return
+		}
+		value, _ := io.ReadAll(part)
+		switch part.FormName() {
+		case "file":
+			data = value
+		case "key":
+			key = string(value)
+		}
+	}
+	if key == "" || data == nil {
+		http.Error(w, "form", http.StatusBadRequest)
+		return
+	}
+	objects[r.URL.Path+key] = data
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func hexSHA(data []byte) string {

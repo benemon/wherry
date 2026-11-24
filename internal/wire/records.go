@@ -192,11 +192,10 @@ func ValidateCredentials(credentials []TaskCredential) error {
 }
 
 // ExpectedOutput is a file the agent is asked to leave in its outputs directory; a run that does not return it
-// fails, unless it is the changes file of a git input. Storage StorageS3 returns it through the pool's bucket
-// instead of the feed.
+// fails, unless it is the changes file of a git input. Its route, the feed or the pool's bucket, is chosen by size
+// when it is collected.
 type ExpectedOutput struct {
-	Name    string `json:"name"`
-	Storage string `json:"storage,omitzero"`
+	Name string `json:"name"`
 }
 
 // Submission is a host's task on its pool's task topic.
@@ -629,9 +628,6 @@ func (value *Submission) validate() error {
 		}
 		if ReservedArtifact(output.Name) {
 			return errors.New("expected output " + output.Name + " is reserved: the run's result takes it as an artifact ID")
-		}
-		if output.Storage != "" && output.Storage != StorageS3 {
-			return errors.New("an expected output's storage is s3 or absent")
 		}
 		outputs[output.Name] = true
 	}

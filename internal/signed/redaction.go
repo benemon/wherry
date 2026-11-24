@@ -16,7 +16,10 @@ func RedactionMarker(key []byte, name string) string {
 	return "[redacted:" + base64.RawURLEncoding.EncodeToString(digest.Sum(nil)[:12]) + "]"
 }
 
-// S3InputValue and S3OutputValue name the presigned URLs of an S3 input and output among a run's redacted values; the
-// slash keeps them apart from credential names.
-func S3InputValue(name string) string  { return "s3-inputs/" + name }
-func S3OutputValue(name string) string { return "s3-outputs/" + name }
+// S3InputValue names the presigned URL of an S3 input among a run's redacted values; the slash keeps it apart from
+// credential names.
+func S3InputValue(name string) string { return "s3-inputs/" + name }
+
+// S3PolicyValue names the signed values of a run's S3 POST policy, its policy, signature and credential, among the
+// run's redacted values.
+const S3PolicyValue = "s3-policy"

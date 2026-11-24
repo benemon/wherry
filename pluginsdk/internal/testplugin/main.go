@@ -33,6 +33,9 @@ var outputs = []pluginsdk.Output{
 	{Name: "link", Size: 4, Mode: fs.ModeSymlink},
 }
 
+// largeOutput is what Collect adds for a run that had the input LargeInput names: a file over the default output limit.
+var largeOutput = pluginsdk.Output{Name: "large.bin", Size: 8<<20 + 1, Data: bytes.Repeat([]byte("L"), 8<<20+1)}
+
 type config struct {
 	Panic   string `json:"panic"`
 	Fail    bool   `json:"fail"`
@@ -67,6 +70,10 @@ type config struct {
 	Hang bool `json:"hang"`
 	// Working is what ReadWorking returns; a kept job reads as working while it runs, and as nothing otherwise.
 	Working string `json:"working"`
+	// LargeInput names an input or fetch whose runs leave large.bin, a file over the default output limit. With it set,
+	// Collect lists a file over FileBytes without reading it, as the platform plugins do; without it, every file is sent
+	// read, so the link's own limit check can be tested.
+	LargeInput string `json:"large_input"`
 }
 
 type record struct {
@@ -101,6 +108,8 @@ type fake struct {
 	config   config
 	jobsMu   sync.Mutex
 	jobs     map[string]*pluginsdk.Job
+	// large holds the runs dispatched with the input LargeInput names.
+	large map[string]bool
 }
 
 // dispatched prefixes the data of Dispatch's handle.
@@ -159,6 +168,15 @@ func (f *fake) Dispatch(_ context.Context, run pluginsdk.Run) (pluginsdk.Outcome
 		return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, &pluginsdk.Error{Op: "fetch " + f.config.FetchFails, Class: pluginsdk.ClassFetch, Err: errors.New("403")}
 	}
 	handle := pluginsdk.Handle{Data: []byte(run.ID), Name: f.settings.Name + "/" + run.ID}
+	if name := f.config.LargeInput; name != "" && (slices.ContainsFunc(run.Inputs, func(input pluginsdk.File) bool { return input.Name == name }) ||
+		slices.ContainsFunc(run.Fetches, func(fetch pluginsdk.Fetch) bool { return fetch.Name == name })) {
+		f.jobsMu.Lock()
+		if f.large == nil {
+			f.large = map[string]bool{}
+		}
+		f.large[run.ID] = true
+		f.jobsMu.Unlock()
+	}
 	if f.config.Jobs {
 		f.jobsMu.Lock()
 		defer f.jobsMu.Unlock()
@@ -252,9 +270,18 @@ func (f *fake) Collect(ctx context.Context, handle pluginsdk.Handle, limits plug
 		outcome := []byte(`{"state":"TASK_STATE_COMPLETED","message":{"role":"ROLE_AGENT","parts":[{"text":"done"}]}}`)
 		collected = append([]pluginsdk.Output{{Name: ".wherry/outcome.json", Size: int64(len(outcome)), Data: outcome}}, outputs...)
 	}
+	f.jobsMu.Lock()
+	large := f.large[strings.TrimPrefix(string(handle.Data), dispatched)]
+	f.jobsMu.Unlock()
+	if large {
+		collected = append(slices.Clone(collected), largeOutput)
+	}
 	for _, output := range collected {
-		if output.Data != nil && slices.Contains(limits.Stream, output.Name) {
+		switch {
+		case output.Data != nil && slices.Contains(limits.Stream, output.Name):
 			output.Body, output.Data = io.NopCloser(bytes.NewReader(output.Data)), nil
+		case output.Data != nil && output.Size > limits.FileBytes && f.config.LargeInput != "":
+			output.Data = nil
 		}
 		select {
 		case out <- output:

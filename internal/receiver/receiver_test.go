@@ -173,11 +173,15 @@ type fakePlugin struct {
 	deadFollows  int
 	// hang makes Sweep and Ready block until their context ends.
 	hang bool
-	// outputs are what Collect streams after the outcome file, unless collectErr fails it, or collectFailures fails that many
-	// Collects; collects counts the calls, stopsBefore the Stops each one followed and limits the last one's limits.
+	// outputs are what Collect streams after the outcome file, each one the limits name for streaming as a fresh Body,
+	// one over FileBytes listed without its Data unless ignoresLimits sends it read, as a plugin that ignores the limits
+	// does; collectErr fails it, collectFailures fails that many Collects and failCollect the numbered one; collects
+	// counts the calls, stopsBefore the Stops each one followed and limits the last one's limits.
 	outputs         []pluginsdk.Output
+	ignoresLimits   bool
 	collectErr      error
 	collectFailures int
+	failCollect     map[int]error
 	// collectHangs makes Collect block until its context ends.
 	collectHangs bool
 	// collecting runs in Collect before it streams anything.
@@ -185,8 +189,9 @@ type fakePlugin struct {
 	collects    int
 	stopsBefore []int
 	limits      pluginsdk.Limits
-	// collectDeadline is the deadline of the last Collect's context.
-	collectDeadline time.Time
+	// collectDeadline is the deadline of the last Collect's context, and collectDeadlines each one's in order.
+	collectDeadline  time.Time
+	collectDeadlines []time.Time
 	// samples are what Metrics reports, unless metricsHang makes it block until its context ends.
 	samples     []pluginsdk.Sample
 	metricsHang bool
@@ -447,10 +452,22 @@ func (f *fakePlugin) Collect(ctx context.Context, handle pluginsdk.Handle, limit
 	f.collects++
 	f.limits = limits
 	f.collectDeadline, _ = ctx.Deadline()
+	f.collectDeadlines = append(f.collectDeadlines, f.collectDeadline)
 	f.stopsBefore = append(f.stopsBefore, f.stops)
 	outputs, err, hangs, collecting := slices.Clone(f.outputs), f.collectErr, f.collectHangs, f.collecting
 	if f.collects <= f.collectFailures {
 		err = errors.New("collect failed")
+	}
+	if failure := f.failCollect[f.collects]; failure != nil {
+		err = failure
+	}
+	for i, output := range outputs {
+		switch {
+		case output.Data != nil && slices.Contains(limits.Stream, output.Name):
+			outputs[i].Body, outputs[i].Data = io.NopCloser(bytes.NewReader(output.Data)), nil
+		case output.Data != nil && output.Size > limits.FileBytes && !f.ignoresLimits:
+			outputs[i].Data = nil
+		}
 	}
 	// The job leaves as its outcome file the last line of its stream that holds a state, as an agent that prints its
 	// outcome too does.
@@ -928,7 +945,7 @@ func sealTask(t *testing.T, submission *wire.Submission, terms operator.Terms, p
 		}
 	}
 	binding := submission.Wherry
-	values := signed.EnvelopeValues{Binding: binding.EnvelopeBinding(), Credentials: map[string][]byte{}, S3Inputs: map[string]string{}, S3Outputs: map[string]string{}, RedactionKey: testRedactionKey}
+	values := signed.EnvelopeValues{Binding: binding.EnvelopeBinding(), Credentials: map[string][]byte{}, S3Inputs: map[string]string{}, RedactionKey: testRedactionKey}
 	for _, name := range binding.Supplied {
 		values.Credentials[name] = []byte(testToken)
 	}
@@ -939,9 +956,8 @@ func sealTask(t *testing.T, submission *wire.Submission, terms operator.Terms, p
 		for _, input := range binding.S3Inputs {
 			values.S3Inputs[input.Name] = presigned(terms.Storage.Endpoint, wire.S3InputKey(binding.Tenant, binding.InputRun(), input.Name))
 		}
-		for _, output := range s3Outputs(binding.Outputs) {
-			values.S3Outputs[output] = presigned(terms.Storage.Endpoint, wire.S3OutputKey(binding.Tenant, binding.Run, output))
-		}
+		policy := testPolicy(terms.Storage.Endpoint, binding.Tenant, binding.Run, time.Now(), time.Unix(binding.TaskEndedBy, 0).Add(operator.UploadGrace))
+		values.S3Policy = &policy
 	}
 	if edit != nil {
 		edit(submission, &values)

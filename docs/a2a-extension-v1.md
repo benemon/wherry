@@ -278,13 +278,14 @@ A submission is the task of one run.
   is unset at resubmit is left out. This field replaces
   `unsupplied_credentials` of earlier versions, which a receiver ignores.
 - `outputs` lists at most 256 files the agent is asked to leave, each
-  `{name, storage}`. `name` is a relative path of file names joined by
+  `{name}`. `name` is a relative path of file names joined by
   `/`, at most 512 bytes, and appears once. Every output is required: a run
   that does not return one fails, except for `changes.bundle` or
   `changes.patch` on a run with a `git` input, the changes file a run that
-  commits nothing leaves unwritten. `storage` `s3` returns the output
-  through the pool's bucket ([S3 inputs and outputs](#s3-inputs-and-outputs));
-  absent, it returns on the transcript topic.
+  commits nothing leaves unwritten. An output's route is chosen by its size
+  when it is collected: within the pool's `output_limit` it returns on the
+  transcript topic, over it through the pool's bucket
+  ([S3 inputs and outputs](#s3-inputs-and-outputs)).
 - `s3_inputs` lists files the host uploaded to the pool's bucket, each
   `{name, size, sha256}`: a relative path as an input file's `filename` is,
   distinct from every input file's and nesting under none, appearing once,
@@ -309,9 +310,11 @@ A submission is the task of one run.
   content key. Its plaintext holds exactly `binding`, the task's `run`,
   `tenant`, `pool`, `task_started_by` and `task_ended_by`; `credentials`,
   each credential the run delivers by name, its value in standard base64;
-  `s3_inputs` and `s3_outputs`, each S3 input and S3 output by name, its
-  presigned URL; and `redaction_key`, the run's 32-byte key in standard
-  base64. `wrap` is a compact JWE carrying the content key to the pool's
+  `s3_inputs`, each S3 input by name, its presigned URL; `s3_policy`, when
+  the host holds a storage credential for the pool, the run's
+  [POST policy](#s3-inputs-and-outputs) as `{url, fields}`, the bucket's URL
+  and the form fields of a presigned S3 POST; and `redaction_key`, the run's
+  32-byte key in standard base64. `wrap` is a compact JWE carrying the content key to the pool's
   current key from its [custodian snapshot](#custodian-snapshot), protected
   header exactly `alg` `ECDH-ES+A256KW`, `enc` `A256GCM`, `kid`, the
   recipient key's RFC 7638 thumbprint, and `epk`, a P-256 public JWK of
@@ -322,17 +325,33 @@ A submission is the task of one run.
   before it wraps the content key to a claimant, and by the claimant at open.
 - The envelope's credentials are exactly `supplied_credentials` and the
   task's `credentials`, each once, whatever the pool's terms say of the
-  agent's credentials when the envelope is opened; its S3 inputs are exactly `s3_inputs` and its S3
-  outputs exactly the outputs with `storage` `s3`. Each URL is https, or
+  agent's credentials when the envelope is opened; its S3 inputs are exactly
+  `s3_inputs`. Each URL is https, or
   http for a loopback storage endpoint, of the storage endpoint's scheme,
   host and port, with no user, opaque part or fragment, and the path of its
-  object: the bucket and `wherry/<tenant>/<s3_input_run>/inputs/<name>`, or
-  `wherry/<tenant>/<run>/outputs/<name>`, where a run without
-  `s3_input_run` is its own. No value is empty. A host refuses to build an
+  object: the bucket and `wherry/<tenant>/<s3_input_run>/inputs/<name>`,
+  where a run without `s3_input_run` is its own. No value is empty.
+- The envelope's `s3_policy`, when present, is exactly a policy for the run's
+  output prefix in the pool's storage. Its `url` is of the storage endpoint's
+  scheme, host and port, as a URL above, with the path `/<bucket>/` and no
+  query. Its `fields` are exactly `key`, `bucket`, `policy`,
+  `x-amz-algorithm`, `x-amz-credential`, `x-amz-date` and `x-amz-signature`,
+  with `x-amz-security-token` when the host's credential has a session token,
+  none empty: `key` is `wherry/<tenant>/<run>/outputs/`, `bucket` the pool's
+  bucket and `x-amz-algorithm` `AWS4-HMAC-SHA256`. `policy` is standard
+  base64 of `{"expiration": ..., "conditions": [...]}` and nothing else,
+  whose `expiration` is no later than `task_ended_by` plus 10 minutes and
+  whose conditions, each an array and none repeated, are exactly
+  `["eq", "$bucket", <bucket>]`, `["starts-with", "$key", <key>]`,
+  `["content-length-range", 0, 5368709120]`, and `eq` conditions on
+  `$x-amz-algorithm`, `$x-amz-credential`, `$x-amz-date` and, with the
+  token, `$x-amz-security-token` with the fields' values. A redirect, ACL or
+  other condition fails the check, as does the object form of a condition.
+  A pool without `storage` takes no policy. A host refuses to build an
   envelope that breaks these rules.
 - A host presigns an S3 input's GET until `task_started_by` plus 15
-  minutes, and an S3 output's PUT until `task_ended_by` plus 10 minutes,
-  the upload grace, each at most 7 days. A host refuses to presign for a
+  minutes, at most 7 days, and the run's policy until `task_ended_by` plus
+  10 minutes, the upload grace. A host refuses to presign for a
   `task_ended_by` that has passed, grace or no grace.
 
 A submission whose input names repeat, or whose names nest one under another,
@@ -723,10 +742,10 @@ extension reserves its keys ([Encoding](#encoding)):
 - `outputs` (array): each output the run returned, as `{name, sha256,
   size}`, where `sha256` is the lowercase hex SHA-256 and `size` the byte
   count of the bytes its output chunks carry. The receiver computes both.
-- `s3_outputs` (array): each S3 output the run returned, as `{name,
-  sha256, size, key}`, where `sha256` and `size` are of the bytes the
-  receiver uploaded, computed as it sent them, and `key` is the object's
-  key in the pool's bucket.
+- `s3_outputs` (array): each output the run returned through the pool's
+  bucket, as `{name, sha256, size, key}`, where `sha256` and `size` are of
+  the bytes the receiver uploaded, computed as it sent them, and `key` is
+  the object's key in the pool's bucket, `wherry/<tenant>/<run>/outputs/<name>`.
 - `not_returned` (array): each output the run did not return, as
   `{name, size, reason}`. `size` is present when the receiver knows it.
 - `reply` (object): the [reply chunks](#the-reply), as `{sha256, size}`,
@@ -737,18 +756,20 @@ extension reserves its keys ([Encoding](#encoding)):
 | --- | --- |
 | `missing` | an expected output the agent did not leave |
 | `not collected` | the plugin did not collect the outputs; every expected output is listed with it |
-| `exceeds output limit` | the file is over the pool's `output_limit`, or would take the run's outputs over it |
+| `exceeds output limit` | the file is over the pool's `output_limit`, or would take the run's outputs over it, and the run has no policy to upload it under |
 | `rejected: symlink`, `rejected: fifo`, `rejected: device`, `rejected: socket`, `rejected: irregular file` | the entry is not a regular file and was not read |
 | `rejected: invalid name` | the path is not a relative path of file names of at most 512 bytes; `name` is the path quoted as ASCII, at most 256 bytes |
 | `rejected: size changed while read` | the plugin read a length other than the size it listed |
 | `rejected: reserved name` | the path is `result` or `transcript`, a result's own [artifact](#reference-artifacts) IDs, or `reply.txt`, where an MCP host writes the reply |
-| `exceeds the S3 object limit` | an S3 output over 5 GiB |
-| `not streamed by the plugin` | the plugin did not stream an S3 output it found |
-| `not uploaded: no upload URL` | the attempt holds no PUT URL for the S3 output |
-| `not uploaded: redirected` | the store answered the PUT with a redirect, which the receiver does not follow |
-| `not uploaded: status <code>` | the store answered the PUT with another status than 200 |
-| `not uploaded: request failed (<class>)` | the PUT did not complete; `<class>` is `canceled`, `timeout`, `dns`, `tls`, `connection refused`, `connection closed` or `other`, and the error itself, which quotes the URL, is not given; a failure reading the plugin's stream shows here too |
-| `not uploaded: invalid request` | the PUT could not be built |
+| `exceeds the S3 object limit` | a file over the output limit is also over 5 GiB, the most the bucket takes |
+| `not streamed by the plugin` | the plugin listed a file the second pass named without streaming it |
+| `not uploaded: no upload policy` | the attempt holds no policy for the run's outputs |
+| `not uploaded: size changed while read` | the stream held fewer or more bytes than the size the plugin listed in the second pass |
+| `not uploaded: redirected` | the store answered the POST with a redirect, which the receiver does not follow |
+| `not uploaded: status <code>` | the store answered the POST with another status than 204 |
+| `not uploaded: request failed (<class>)` | the POST did not complete; `<class>` is `canceled`, `timeout`, `dns`, `tls`, `connection refused`, `connection closed` or `other`, and the error itself is not given; a failure reading the plugin's stream shows here too |
+| `not uploaded: invalid request` | the POST could not be built |
+| `not uploaded: collection failed`, `not uploaded: timeout`, `not uploaded: canceled` | the second collection pass failed, ended at `task_ended_by` plus 10 minutes, or was cancelled before the file uploaded; the first pass's outputs stand |
 
 `outputs`, `s3_outputs` and `not_returned` are present on a result of a run
 whose job ended after its agent started, and absent when they would be
@@ -891,7 +912,7 @@ process using the host's state directory, the host:
 3. stores the signed bytes, produces them, and marks them produced.
 
 A crash before the bytes are stored resolves the credentials again on the
-next pass. A replacement's S3 outputs use its own prefix. A host keeps the
+next pass. A replacement's policy covers its own output prefix. A host keeps the
 first run's prefix until the last replacement has ended; a run that ended
 `key-lost` before its `task_started_by` has not ended. `result` and the MCP
 server follow a run's replacements, refuse a chain that names a run twice,
@@ -1331,8 +1352,9 @@ file would change it while its hash still verified.
 What it replaces:
 
 - every occurrence of each credential value its envelope delivered, task
-  credentials and presigned URLs included, and of each URL's
-  `X-Amz-Signature` value alone;
+  credentials and presigned URLs included, of each URL's
+  `X-Amz-Signature` value alone, and of the policy's `policy`,
+  `x-amz-signature` and `x-amz-credential` fields, under one name;
 - two forms of each value: its bytes without trailing CR and LF, since a
   credential file usually ends in a newline that transcripts and replies
   drop, and those bytes escaped as a JSON string, as a transcript line
@@ -1513,10 +1535,10 @@ with `not ended by task_ended_by (<RFC 3339 time>)`. After a stop that
 succeeds, at that bound or on a cancel, the receiver collects the job's
 outputs as it does when the job ends ([Inputs and outputs](#inputs-and-outputs))
 and the result lists them; the state and message stay the bound's or the
-cancel's, whatever the outcome file says. An S3 output's presigned upload
-lasts 10 minutes past `task_ended_by`, and the collection runs within them,
-so an S3 output the job left uploads; one still uploading when they pass is
-listed as not uploaded.
+cancel's, whatever the outcome file says. The run's policy lasts 10 minutes
+past `task_ended_by`, and the second collection pass runs within them, so an
+output over the limit that the job left uploads; one still uploading when
+they pass is listed as not uploaded.
 
 A claimed run whose job has not started by `task_started_by`, while it
 waits for its open or for the platform to place its job, ends
@@ -1710,7 +1732,11 @@ Every other entry is listed with its type and left unread. The receiver gives
 up on a collection that takes over 2 minutes. A plugin that cannot collect, or a job that could not be stopped,
 leaves the outputs `not collected`; the receiver then asks the plugin for the
 outcome file alone, within another 2 minutes. The outcome file counts against
-neither output limit, and is invalid over the pool's `output_limit`.
+neither output limit, and is invalid over the pool's `output_limit`. A
+regular file over the limit, or one that would take the run's outputs over
+it, goes to the pool's bucket in a second pass when the run has a policy
+([S3 inputs and outputs](#s3-inputs-and-outputs)), and is otherwise listed
+`exceeds output limit`.
 
 The receiver checks every name and publishes each returned file as the
 agent wrote it, as [output chunks](#output-chunk) and in the result's
@@ -1744,8 +1770,8 @@ S3 output at `outputs/<name>`; a resubmission's S3 inputs stay under its
 `s3_input_run`. The host's own credential,
 scoped by the operator to `wherry/<tenant>/`, uploads, downloads and
 deletes them, and never leaves the host. Receivers and plugins get only
-the presigned URLs in the task's envelope, which the custodian and the
-claimant check against the pool's storage before use.
+the presigned URLs and the POST policy in the task's envelope, which the
+custodian and the claimant check against the pool's storage before use.
 
 - **In.** The host uploads each S3 input before it publishes the run and lists
   it in `s3_inputs`. The plugin fetches it into `WHERRY_INPUT_DIR` from its
@@ -1757,32 +1783,56 @@ claimant check against the pool's storage before use.
   `TASK_STATE_FAILED` with `an S3 input was not fetched, or did not match its
   size and SHA-256`, without returning the task to the pool. S3 inputs count
   against neither `record_limit` nor `inline_limit`.
-- **Out.** Once the job ends and is stopped, the plugin
-  streams each S3 output it finds as it collects, and the receiver sends it
-  to its presigned PUT as it reads it, with the size the plugin listed as
-  its Content-Length, hashing the bytes it sends. It follows no redirect.
-  An S3 output counts against neither `output_limit` nor the run's outputs
-  together, but is at most 5 GiB, and among the 256 outputs a submission
-  expects. Collection waits until the run's `task_ended_by` plus 10 minutes,
-  when the PUT URLs expire, if that is later than 2 minutes, so a run stopped
-  at the bound or by a cancel still uploads. The receiver does not redact an
-  S3 output, as it does not redact a feed output. An attempt that adopted an earlier attempt's job uploads
-  to the PUT URLs of the task's envelope.
-- **Continuation.** The host gives a run with `git.base` an expected
-  `changes.bundle` S3 output, so its bundle returns outside `output_limit`
-  whatever its size. This is the host's choice, not a rule
-  readers check.
-- **Back.** The host downloads each S3 output in the result's
-  `s3_outputs` that the run declares, at the key for its name, and keeps it
-  only when it matches the listed size and SHA-256. It reports each other
-  S3 output with `rejected by this host: ` and one of
-  `not an S3 output the run declares`,
+- **Policy.** A host with a storage credential for the pool puts one
+  presigned S3 POST policy in every run's envelope, for any object whose key
+  starts with `wherry/<tenant>/<run>/outputs/`, of at most 5 GiB, until
+  `task_ended_by` plus 10 minutes, the upload grace. The envelope rules above
+  pin its every field and condition. Under it a receiver creates any number
+  of objects under the run's output prefix, listed in the result or not,
+  until it expires; the host verifies what the result lists against its
+  hash and size, deletes the prefix once the run is collected, and the
+  bucket's quota and lifecycle rule bound the rest
+  ([Security](security.md#credential-envelopes)).
+- **Out.** Once the job ends and is stopped, the plugin collects the
+  outputs in a first pass, within 2 minutes, reading each file within the
+  pool's `output_limit`; those return on the transcript topic. A file over
+  the limit, or over what the limit leaves, is noted. When any were noted and
+  the run has a policy, a second pass asks the plugin to stream exactly those
+  files, reading no other, until `task_ended_by` plus 10 minutes, when the
+  policy expires, so a run stopped at the bound or by a cancel still uploads.
+  The receiver posts each stream as `multipart/form-data` to the policy's
+  URL: the policy's fields with `key` replaced by the object's key,
+  `wherry/<tenant>/<run>/outputs/<name>`, then the file, of exactly the size
+  the plugin listed in the second pass, with an exact `Content-Length`,
+  hashing the bytes it sends; the store answers 204. It follows no redirect
+  and reads no response body. A file the second pass does not list is
+  `missing`; one over 5 GiB is not streamed. A second pass that fails or
+  ends at its deadline leaves only its own files not uploaded: the first
+  pass's outputs stand. The receiver does not redact an S3 output, as it does
+  not redact a feed output. An attempt that adopted an earlier attempt's job
+  uploads under the policy of the task's envelope.
+- **Continuation.** A run with `git.base` expects `changes.bundle` as any
+  output; over `output_limit` it goes through the bucket like any other
+  file. Continuation needs a pool with storage and a host storage credential
+  for the base bundle, so the policy is always there for it.
+- **Back.** The host refuses a result whose output lists it cannot write
+  from, before writing anything: more than 256 names across `outputs`,
+  `s3_outputs` and `not_returned`; a returned name that is not a relative
+  path of portable file names, is `result`, `transcript` or `reply.txt`,
+  appears twice or is an ancestor of another; an S3 output whose `key` is
+  not `wherry/<tenant>/<run>/outputs/<name>`, whose `sha256` is not
+  lowercase hex or whose `size` is outside 0 to 5 GiB. The refusal is one
+  entry, `rejected by this host: <reason>` under the name `result`. It then
+  downloads each S3 output the result lists, at its key, and keeps it only
+  when it matches the listed size and SHA-256, reporting each other with
+  `rejected by this host: ` and one of `the run was issued no upload policy`,
   `listed at a key outside the run's prefix`, `not downloaded`,
   `not written` or `size or hash mismatch`. Once the run is terminal
   and every listed S3 output has verified, it deletes every
   object whose key a listing of `wherry/<tenant>/<run>/` returns and that
-  starts with it. A bucket lifecycle rule expiring `wherry/` removes what no
-  host deletes.
+  starts with it, whether or not the result listed it, for every run it
+  issued a policy for or uploaded an input for. A bucket lifecycle rule
+  expiring `wherry/` removes what no host deletes.
 
 ## Cancellation
 

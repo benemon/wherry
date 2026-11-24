@@ -75,9 +75,10 @@ run)
   if [ "${STORAGE:-false}" = true ]; then
     # Over the broker's record limit, so the input travels through the bucket.
     head -c 2097152 /dev/zero | tr '\0' 's' > "$work/s3-input.txt"
-    id=$(submit 'mock: s3' --input "$work/s3-input.txt" --output echo.txt:s3)
+    # big.bin is over the pool's 8 MiB output limit, so it returns through the bucket by size.
+    id=$(submit 'mock: bytes 9437184' --input "$work/s3-input.txt" --output big.bin)
     "$wherry" result "$id" --timeout 5m --outputs-dir "$work/out-s3" | tee "$work/watch-s3.txt"
-    [ "$(cat "$work/out-s3/echo.txt")" = "mock: s3" ] || fail "the S3 echo.txt does not hold the prompt"
+    [ "$(wc -c < "$work/out-s3/big.bin" | tr -d ' ')" = 9437184 ] || fail "the S3 big.bin is not 9437184 bytes"
     grep -q '^input s3-input.txt ' "$work/watch-s3.txt" || fail "the mock saw no S3 input"
   fi
   ;;

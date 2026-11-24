@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"encoding/xml"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -75,6 +77,111 @@ func (o *uploadOracle) expired(query url.Values) bool {
 	return o.clock().After(signedAt.Add(time.Duration(seconds) * time.Second))
 }
 
+// policyExpired reports whether a policy upload's policy has expired on the oracle's clock.
+func (o *uploadOracle) policyExpired(field string) bool {
+	if o.clock == nil {
+		return false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(field)
+	var document struct {
+		Expiration string `json:"expiration"`
+	}
+	if err != nil || json.Unmarshal(decoded, &document) != nil {
+		return true
+	}
+	expiration, err := time.Parse(time.RFC3339Nano, document.Expiration)
+	return err != nil || o.clock().After(expiration)
+}
+
+// readPostForm reads a policy upload's fields and file, which must come last.
+func readPostForm(r *http.Request) (map[string]string, []byte, error) {
+	reader, err := r.MultipartReader()
+	if err != nil {
+		return nil, nil, err
+	}
+	fields := map[string]string{}
+	var data []byte
+	for file := false; ; {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			if !file {
+				return nil, nil, errors.New("no file")
+			}
+			return fields, data, nil
+		}
+		if err != nil || file {
+			return nil, nil, errors.New("a part follows the file")
+		}
+		value, err := io.ReadAll(part)
+		if err != nil {
+			return nil, nil, err
+		}
+		if part.FormName() == "file" {
+			data, file = value, true
+			continue
+		}
+		fields[part.FormName()] = string(value)
+	}
+}
+
+// postUpload posts data at key through policy with client, as the receiver does: the policy's fields with key replaced,
+// then the file.
+func postUpload(t *testing.T, client *http.Client, policy *signed.S3Policy, key string, data []byte) *http.Response {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for _, name := range slices.Sorted(maps.Keys(policy.Fields)) {
+		value := policy.Fields[name]
+		if name == "key" {
+			value = key
+		}
+		if err := writer.WriteField(name, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	file, err := writer.CreateFormFile("file", "file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Write(data)
+	writer.Close()
+	request, err := http.NewRequest(http.MethodPost, policy.URL, &body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, response.Body)
+	response.Body.Close()
+	return response
+}
+
+// policyDocument decodes a policy field's document.
+func policyDocument(t *testing.T, policy *signed.S3Policy) (expiration time.Time, conditions []string) {
+	t.Helper()
+	decoded, err := base64.StdEncoding.DecodeString(policy.Fields["policy"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Expiration string           `json:"expiration"`
+		Conditions []jsontext.Value `json:"conditions"`
+	}
+	if err := json.Unmarshal(decoded, &document); err != nil {
+		t.Fatalf("policy %s: %v", decoded, err)
+	}
+	if expiration, err = time.Parse(time.RFC3339Nano, document.Expiration); err != nil {
+		t.Fatalf("policy expiration %q: %v", document.Expiration, err)
+	}
+	for _, condition := range document.Conditions {
+		conditions = append(conditions, string(condition))
+	}
+	return expiration, conditions
+}
+
 func newUploadOracle(t *testing.T) *uploadOracle {
 	t.Helper()
 	o := &uploadOracle{objects: map[string][]byte{}}
@@ -126,7 +233,19 @@ func newUploadOracle(t *testing.T) *uploadOracle {
 			w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
 			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 			w.Write(data)
-		case r.Method == http.MethodPost && query.Has("delete"):
+		case r.Method == http.MethodPost && !query.Has("delete"):
+			fields, data, err := readPostForm(r)
+			switch {
+			case err != nil || fields["key"] == "":
+				http.Error(w, "form", http.StatusBadRequest)
+			case o.policyExpired(fields["policy"]):
+				w.WriteHeader(http.StatusForbidden)
+			default:
+				o.objects[bucket+"/"+fields["key"]] = data
+				o.ops = append(o.ops, "POST "+bucket+"/"+fields["key"])
+				w.WriteHeader(http.StatusNoContent)
+			}
+		case r.Method == http.MethodPost:
 			var request struct {
 				Objects []struct {
 					Key string
@@ -312,13 +431,13 @@ func hexSum(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// submitS3 submits a task with a 5 MiB S3 input and one required S3 output through receiver, which claims it and
-// writes its echo and claimed status.
+// submitS3 submits a task with a 5 MiB S3 input and one required output through receiver, which claims it and writes
+// its echo and claimed status.
 func submitS3(t *testing.T, f *fixture, receiver *testReceiver, deadline time.Duration) (claimed, []byte) {
 	t.Helper()
 	file, data := randomFile(t, "dataset.bin", 5<<20)
 	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}},
-		Outputs: []wire.ExpectedOutput{{Name: "out/report.pdf", Storage: wire.StorageS3}}, EndBy: time.Now().Add(deadline), StartBy: time.Now().Add(time.Minute)})
+		Outputs: []wire.ExpectedOutput{{Name: "out/report.pdf"}}, EndBy: time.Now().Add(deadline), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -573,13 +692,16 @@ func TestTheEnvelopeCarriesPresignedURLsForTheRunsObjects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	get, put := values.S3Inputs["dataset.bin"], values.S3Outputs["out/report.pdf"]
-	if len(values.S3Inputs) != 1 || len(values.S3Outputs) != 1 || get == "" || put == "" {
-		t.Fatalf("enveloped %d input and %d output URLs; want one of each", len(values.S3Inputs), len(values.S3Outputs))
+	get, policy := values.S3Inputs["dataset.bin"], values.S3Policy
+	if len(values.S3Inputs) != 1 || get == "" || policy == nil {
+		t.Fatalf("enveloped %d input URLs and policy %+v; want one URL and a policy", len(values.S3Inputs), policy)
 	}
-	for _, enveloped := range []string{get, put} {
-		if strings.Contains(enveloped, o.secret) || strings.Contains(enveloped, url.QueryEscape(o.secret)) {
-			t.Fatalf("an enveloped URL holds the secret key: %s", enveloped)
+	if strings.Contains(get, o.secret) || strings.Contains(get, url.QueryEscape(o.secret)) {
+		t.Fatalf("an enveloped URL holds the secret key: %s", get)
+	}
+	for name, value := range policy.Fields {
+		if strings.Contains(value, o.secret) {
+			t.Fatalf("the policy's %s field holds the secret key", name)
 		}
 	}
 	expires := func(raw string) time.Duration {
@@ -588,12 +710,14 @@ func TestTheEnvelopeCarriesPresignedURLsForTheRunsObjects(t *testing.T) {
 		return time.Duration(seconds) * time.Second
 	}
 	getDeadline := time.Until(time.Unix(task.submission.Wherry.TaskStartedBy, 0).Add(15 * time.Minute))
-	deadline := time.Until(time.Unix(task.submission.Wherry.TaskEndedBy, 0))
-	putDeadline := deadline + operator.UploadGrace
-	if expires(get) < getDeadline-10*time.Second || expires(get) > getDeadline+2*time.Second || expires(put) < putDeadline-10*time.Second || expires(put) > putDeadline+2*time.Second {
-		t.Fatalf("GET lives %v and PUT %v; want the turn's task_started_by plus 15m, %v away, and its task_ended_by plus the 10m grace, %v away", expires(get), expires(put), getDeadline, putDeadline)
+	if expires(get) < getDeadline-10*time.Second || expires(get) > getDeadline+2*time.Second {
+		t.Fatalf("GET lives %v; want the turn's task_started_by plus 15m, %v away", expires(get), getDeadline)
 	}
-	// The store honours each URL for its own object and method alone.
+	endBy := time.Unix(task.submission.Wherry.TaskEndedBy, 0)
+	if expiration, _ := policyDocument(t, policy); !expiration.Equal(endBy.Add(operator.UploadGrace)) {
+		t.Fatalf("the policy expires at %v; want task_ended_by %v plus the 10m grace", expiration, endBy)
+	}
+	// The store honours the URL for its own object and method alone.
 	response, err := o.client.Get(get)
 	if err != nil {
 		t.Fatal(err)
@@ -611,51 +735,78 @@ func TestTheEnvelopeCarriesPresignedURLsForTheRunsObjects(t *testing.T) {
 	if response, err := o.client.Do(request); err != nil || response.StatusCode != http.StatusForbidden {
 		t.Fatalf("PUT with the GET URL answered %v, %v; want forbidden", response.Status, err)
 	}
-	request, _ = http.NewRequest(http.MethodPut, put, strings.NewReader("report"))
-	if response, err := o.client.Do(request); err != nil || response.StatusCode != http.StatusOK {
-		t.Fatalf("PUT answered %v, %v", response.Status, err)
+	// The policy takes any key under the run's output prefix, and none outside it.
+	key := wire.S3OutputKey("tenant-a", runID, "out/report.pdf")
+	if response := postUpload(t, o.client, policy, key, []byte("report")); response.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST under the prefix answered %v", response.Status)
 	}
-	if got := o.object(t, wire.S3OutputKey("tenant-a", runID, "out/report.pdf")); string(got) != "report" {
+	t.Cleanup(func() { _ = o.store.RemoveObject(context.Background(), testBucket, key, minio.RemoveObjectOptions{}) })
+	if got := o.object(t, key); string(got) != "report" {
 		t.Fatalf("output key holds %q", got)
 	}
-	if strings.Contains(f.logs.String(), "X-Amz") {
-		t.Fatalf("host logs hold a URL:\n%s", f.logs.String())
+	for name, outside := range map[string]string{"another run": wire.S3OutputKey("tenant-a", "run-other", "out/report.pdf"), "the run's inputs": wire.S3InputKey("tenant-a", runID, "dataset.bin")} {
+		if response := postUpload(t, o.client, policy, outside, []byte("elsewhere")); response.StatusCode != http.StatusForbidden {
+			t.Fatalf("POST at %s answered %v; want forbidden", name, response.Status)
+		}
+	}
+	if strings.Contains(f.logs.String(), "X-Amz") || strings.Contains(f.logs.String(), policy.Fields["x-amz-signature"]) || strings.Contains(f.logs.String(), policy.Fields["policy"]) {
+		t.Fatalf("host logs hold a URL or the policy:\n%s", f.logs.String())
 	}
 }
 
-// A PUT URL lasts operator.UploadGrace past task_ended_by: the store accepts it after end-by, and its signed lifetime
-// ends at the grace.
-func TestPutURLExpiresAtTheGraceAfterEndBy(t *testing.T) {
+// The policy lasts operator.UploadGrace past task_ended_by: its expiration is that instant, and the store accepts an
+// upload after end-by.
+func TestThePolicyExpiresAtTheGraceAfterEndBy(t *testing.T) {
 	f, o, receiver := storageFixture(t)
 	task, _ := submitS3(t, f, receiver, 4*time.Second)
 	_, values, err := open(t, f, task.submission.Wherry.Run, f.poolKeys["pool-s3"])
 	if err != nil {
 		t.Fatal(err)
 	}
-	put := values.S3Outputs["out/report.pdf"]
-	parsed, err := url.Parse(put)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signed, err := time.Parse("20060102T150405Z", parsed.Query().Get("X-Amz-Date"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	seconds, err := strconv.Atoi(parsed.Query().Get("X-Amz-Expires"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	endBy := time.Unix(task.submission.Wherry.TaskEndedBy, 0)
-	if expires := signed.Add(time.Duration(seconds) * time.Second); expires.Before(endBy.Add(operator.UploadGrace)) || expires.After(endBy.Add(operator.UploadGrace+2*time.Second)) {
-		t.Fatalf("PUT URL expires at %v; want task_ended_by %v plus the grace %v", expires, endBy, operator.UploadGrace)
+	if expiration, _ := policyDocument(t, values.S3Policy); !expiration.Equal(endBy.Add(operator.UploadGrace)) {
+		t.Fatalf("the policy expires at %v; want task_ended_by %v plus the grace %v", expiration, endBy, operator.UploadGrace)
 	}
 	time.Sleep(time.Until(endBy.Add(2 * time.Second)))
-	request, _ := http.NewRequest(http.MethodPut, put, strings.NewReader("late"))
-	response, err := o.client.Do(request)
-	if err != nil || response.StatusCode != http.StatusOK {
-		t.Fatalf("PUT after task_ended_by, within the grace, answered %v, %v; want OK", response, err)
+	key := wire.S3OutputKey("tenant-a", task.submission.Wherry.Run, "out/report.pdf")
+	t.Cleanup(func() { _ = o.store.RemoveObject(context.Background(), testBucket, key, minio.RemoveObjectOptions{}) })
+	if response := postUpload(t, o.client, values.S3Policy, key, []byte("late")); response.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST after task_ended_by, within the grace, answered %v; want no content", response.Status)
 	}
-	response.Body.Close()
+}
+
+// The store enforces what the builder sets: through it, with a 1 KiB range and a 2 s expiry, an upload outside the
+// prefix, over the range, or after the expiry is refused, and one within all three lands.
+func TestTheStoreEnforcesTheBuiltPolicy(t *testing.T) {
+	f, o, _ := storageFixture(t)
+	store, err := f.host.bucket(f.ctx, "pool-s3", &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}, newResolver(f.ctx, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := wire.S3OutputKey("tenant-a", "run-policy", "")
+	policy, err := store.postPolicy(f.ctx, testBucket, prefix, 1024, time.Now().Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{prefix + "small", prefix + "large", prefix + "late", wire.S3OutputKey("tenant-a", "run-other", "small")} {
+		t.Cleanup(func() { _ = o.store.RemoveObject(context.Background(), testBucket, key, minio.RemoveObjectOptions{}) })
+	}
+	if response := postUpload(t, o.client, policy, prefix+"small", bytes.Repeat([]byte("s"), 1024)); response.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST within the policy answered %v", response.Status)
+	}
+	if response := postUpload(t, o.client, policy, wire.S3OutputKey("tenant-a", "run-other", "small"), []byte("s")); response.StatusCode != http.StatusForbidden {
+		t.Fatalf("POST outside the prefix answered %v; want forbidden", response.Status)
+	}
+	if response := postUpload(t, o.client, policy, prefix+"large", bytes.Repeat([]byte("l"), 1025)); response.StatusCode == http.StatusNoContent {
+		t.Fatal("POST over the range was accepted")
+	}
+	if o.object(t, prefix+"large") != nil || o.object(t, wire.S3OutputKey("tenant-a", "run-other", "small")) != nil {
+		t.Fatal("a refused upload created its object")
+	}
+	time.Sleep(2500 * time.Millisecond)
+	if response := postUpload(t, o.client, policy, prefix+"late", []byte("l")); response.StatusCode != http.StatusForbidden {
+		t.Fatalf("POST after the expiry answered %v; want forbidden", response.Status)
+	}
 }
 
 func TestS3UseIsRefusedBeforePublishing(t *testing.T) {
@@ -671,12 +822,13 @@ func TestS3UseIsRefusedBeforePublishing(t *testing.T) {
 	if _, err := f.host.Submit(f.ctx, input); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "pool pool-a has no storage for S3 inputs and outputs") {
 		t.Fatalf("submit to a pool without storage = %v", err)
 	}
-	output := SubmitInput{Selector: defaultSelector(), Prompt: "x", Outputs: []wire.ExpectedOutput{{Name: "r", Storage: wire.StorageS3}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)}
-	if _, err := f.host.Submit(f.ctx, output); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "pool pool-a has no storage") {
-		t.Fatalf("submit of an S3 output to a pool without storage = %v", err)
+	// A pool without storage takes an output of any name: the route is chosen by size at collection.
+	f.host.storage = nil
+	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "x", Outputs: []wire.ExpectedOutput{{Name: "r"}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)}); err != nil {
+		t.Fatalf("submit of an output to a pool without storage = %v", err)
 	}
-	if end := f.tasksEnd(t, "pool-a"); end != 0 {
-		t.Fatalf("%d tasks published", end)
+	if end := f.tasksEnd(t, "pool-a"); end != 1 {
+		t.Fatalf("%d tasks published, want the one with an output alone", end)
 	}
 }
 
@@ -779,22 +931,12 @@ func TestADownloadThatDoesNotVerifyKeepsThePrefix(t *testing.T) {
 			return listed
 		},
 		"size": func(listed wire.ReturnedOutput) wire.ReturnedOutput { listed.Size--; return listed },
-		"key": func(listed wire.ReturnedOutput) wire.ReturnedOutput {
-			listed.Key = strings.Replace(listed.Key, "/outputs/", "/inputs/", 1)
-			return listed
-		},
-		"undeclared name": func(listed wire.ReturnedOutput) wire.ReturnedOutput {
-			listed.Name, listed.Key = "out/other.pdf", strings.Replace(listed.Key, "report.pdf", "other.pdf", 1)
-			return listed
-		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			task, _ := submitS3(t, f, receiver, time.Minute)
 			runID := task.submission.Wherry.Run
 			key := wire.S3OutputKey("tenant-a", runID, "out/report.pdf")
 			o.put(t, key, []byte("report"))
-			o.put(t, strings.Replace(key, "/outputs/", "/inputs/", 1), []byte("report"))
-			o.put(t, strings.Replace(key, "report.pdf", "other.pdf", 1), []byte("report"))
 			listed := tamper(wire.ReturnedOutput{Name: "out/report.pdf", SHA256: hexSum([]byte("report")), Size: 6, Key: key})
 			receiver.feed(t, f.ctx, runID, receiver.s3Result(t, task, []wire.ReturnedOutput{listed})...)
 			awaited, err := f.host.Await(f.ctx, runID, 5*time.Second)
@@ -814,6 +956,23 @@ func TestADownloadThatDoesNotVerifyKeepsThePrefix(t *testing.T) {
 			}
 		})
 	}
+	// An S3 output the run did not declare downloads like a declared one: the route is chosen by size.
+	t.Run("undeclared name", func(t *testing.T) {
+		task, _ := submitS3(t, f, receiver, time.Minute)
+		runID := task.submission.Wherry.Run
+		key := wire.S3OutputKey("tenant-a", runID, "out/other.pdf")
+		o.put(t, key, []byte("report"))
+		receiver.feed(t, f.ctx, runID, receiver.s3Result(t, task, []wire.ReturnedOutput{{Name: "out/other.pdf", SHA256: hexSum([]byte("report")), Size: 6, Key: key}})...)
+		awaited, err := f.host.Await(f.ctx, runID, 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		downloaded, rejected, err := f.host.DownloadOutputs(f.ctx, runID, awaited, dir)
+		if err != nil || len(rejected) != 0 || len(downloaded) != 1 || downloaded[0].Path != filepath.Join(dir, "out", "other.pdf") {
+			t.Fatalf("downloaded %+v, rejected %+v, %v", downloaded, rejected, err)
+		}
+	})
 }
 
 func TestCleanupDeletesTheRunsPrefixOnDemand(t *testing.T) {
@@ -836,13 +995,14 @@ func TestCleanupDeletesTheRunsPrefixOnDemand(t *testing.T) {
 }
 
 func TestAnEnvelopeOverItsLimitPublishesNothing(t *testing.T) {
-	f, _, _ := storageFixture(t)
-	var outputs []wire.ExpectedOutput
-	for i := range 100 {
-		outputs = append(outputs, wire.ExpectedOutput{Name: strings.Repeat("o", 200) + strconv.Itoa(i), Storage: wire.StorageS3})
+	// The limit is the host's own check, so the in-process store serves; 200 long-named uploads strain a real one.
+	f, _, _ := fakeStorageFixture(t)
+	// Each S3 input's presigned URL is a few hundred bytes of the envelope; 200 of them pass its limit.
+	var inputs []S3File
+	for i := range 200 {
+		inputs = append(inputs, S3File{Name: strings.Repeat("i", 200) + strconv.Itoa(i), Body: bytes.NewReader([]byte("x"))})
 	}
-	file, _ := randomFile(t, "dataset.bin", 16)
-	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "x", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}}, Outputs: outputs,
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "x", S3Inputs: inputs,
 		EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "over the 64 KiB limit") {
 		t.Fatalf("submit = %v; want the envelope's size refused", err)
@@ -937,13 +1097,16 @@ func TestLoopbackHTTPStorage(t *testing.T) {
 	if _, err := uploadInputs(ctx, store, &operator.Storage{Bucket: testBucket}, "tenant-a", "run-1", []S3File{{Name: "dataset.bin", Body: file}}); err != nil || puts.Load() != 1 {
 		t.Fatalf("upload = %v after %d PUTs; want one PUT over http", err, puts.Load())
 	}
-	values, err := presign(ctx, store, testBucket, "tenant-a", "run-1", "run-1", []string{"dataset.bin"}, nil, time.Now().Add(getLifetime), time.Now().Add(time.Hour))
+	urls, policy, err := presign(ctx, store, testBucket, "tenant-a", "run-1", "run-1", []string{"dataset.bin"}, time.Now().Add(getLifetime), time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
-	get, err := url.Parse(string(values[signed.S3InputValue("dataset.bin")]))
+	get, err := url.Parse(urls["dataset.bin"])
 	if err != nil || !storage.Serves(get) {
 		t.Fatalf("presigned %s, %v; want a URL the pool's storage serves", get, err)
+	}
+	if target, err := url.Parse(policy.URL); err != nil || !storage.Serves(target) {
+		t.Fatalf("policy URL %s, %v; want one the pool's storage serves", policy.URL, err)
 	}
 }
 
@@ -1017,19 +1180,20 @@ func TestStorageReadersUseTheRunsPoolsCredentials(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				for _, urls := range []map[string]string{values.S3Inputs, values.S3Outputs} {
-					for _, raw := range urls {
-						if parsed, err := url.Parse(raw); err != nil || !strings.HasPrefix(parsed.Query().Get("X-Amz-Credential"), want+"/") {
-							t.Fatalf("%s presigned %s, %v; want %s's credential", step, raw, err, want)
-						}
+				for _, raw := range values.S3Inputs {
+					if parsed, err := url.Parse(raw); err != nil || !strings.HasPrefix(parsed.Query().Get("X-Amz-Credential"), want+"/") {
+						t.Fatalf("%s presigned %s, %v; want %s's credential", step, raw, err, want)
 					}
+				}
+				if values.S3Policy == nil || !strings.HasPrefix(values.S3Policy.Fields["x-amz-credential"], want+"/") {
+					t.Fatalf("%s presigned the policy %+v; want %s's credential", step, values.S3Policy, want)
 				}
 			}
 			submit := func() claimed {
 				t.Helper()
 				file, _ := randomFile(t, "dataset.bin", 1024)
 				submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}},
-					Outputs: []wire.ExpectedOutput{{Name: "report.pdf", Storage: wire.StorageS3}}, EndBy: time.Now().Add(time.Hour), StartBy: time.Now().Add(time.Minute)})
+					Outputs: []wire.ExpectedOutput{{Name: "report.pdf"}}, EndBy: time.Now().Add(time.Hour), StartBy: time.Now().Add(time.Minute)})
 				if err != nil || submitted.Pool != pool {
 					t.Fatalf("submit = %+v, %v; want pool %s", submitted, err, pool)
 				}
@@ -1144,7 +1308,7 @@ func TestBundleStorageKeysReachNoStateRecordOrLog(t *testing.T) {
 	receiver.advertise(t, f.ctx, nil)
 	file, _ := randomFile(t, "dataset.bin", 1024)
 	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}},
-		Outputs: []wire.ExpectedOutput{{Name: "report.pdf", Storage: wire.StorageS3}}, EndBy: time.Now().Add(time.Hour), StartBy: time.Now().Add(time.Minute)})
+		Outputs: []wire.ExpectedOutput{{Name: "report.pdf"}}, EndBy: time.Now().Add(time.Hour), StartBy: time.Now().Add(time.Minute)})
 	if err != nil || submitted.Pool != "pool-s3" {
 		t.Fatalf("submit = %+v, %v; want pool-s3", submitted, err)
 	}
@@ -1158,18 +1322,24 @@ func TestBundleStorageKeysReachNoStateRecordOrLog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(values.S3Inputs) != 1 || len(values.S3Outputs) != 1 {
-		t.Fatalf("enveloped %d input and %d output URLs; want one of each", len(values.S3Inputs), len(values.S3Outputs))
+	if len(values.S3Inputs) != 1 || values.S3Policy == nil {
+		t.Fatalf("enveloped %d input URLs and policy %+v; want one URL and a policy", len(values.S3Inputs), values.S3Policy)
 	}
-	for _, urls := range []map[string]string{values.S3Inputs, values.S3Outputs} {
-		for _, raw := range urls {
-			parsed, err := url.Parse(raw)
-			if err != nil || !strings.HasPrefix(parsed.Query().Get("X-Amz-Credential"), bundled.AccessKey+"/") {
-				t.Fatalf("enveloped URL %s, %v; want it signed with the bundle's access key", raw, err)
-			}
-			if strings.Contains(raw, bundled.SecretKey) || strings.Contains(raw, url.QueryEscape(bundled.SecretKey)) {
-				t.Fatalf("enveloped URL %s holds the secret key", raw)
-			}
+	for _, raw := range values.S3Inputs {
+		parsed, err := url.Parse(raw)
+		if err != nil || !strings.HasPrefix(parsed.Query().Get("X-Amz-Credential"), bundled.AccessKey+"/") {
+			t.Fatalf("enveloped URL %s, %v; want it signed with the bundle's access key", raw, err)
+		}
+		if strings.Contains(raw, bundled.SecretKey) || strings.Contains(raw, url.QueryEscape(bundled.SecretKey)) {
+			t.Fatalf("enveloped URL %s holds the secret key", raw)
+		}
+	}
+	if credential := values.S3Policy.Fields["x-amz-credential"]; !strings.HasPrefix(credential, bundled.AccessKey+"/") {
+		t.Fatalf("enveloped policy credential %s; want the bundle's access key", credential)
+	}
+	for _, value := range values.S3Policy.Fields {
+		if strings.Contains(value, bundled.SecretKey) {
+			t.Fatal("an enveloped policy field holds the secret key")
 		}
 	}
 	records, err := readTasks(f.ctx, receiver.kafka, "pool-s3")
