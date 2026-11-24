@@ -493,6 +493,13 @@ func TestRecordValidation(t *testing.T) {
 			value.Message.Parts = append(value.Message.Parts, Part{Raw: StdBytes("x"), Filename: KnownHostsFile + "/local"})
 			return value
 		},
+		"submission whose git base is the host key file": func(r map[string]Record) Record {
+			value := r["submission"].(*Submission)
+			value.Wherry.Git = &GitInput{Remote: "ssh://git@git.example.test/org/repo.git", Ref: "main", HostKey: hostKey,
+				Base: &GitBase{Bundle: KnownHostsFile, Commit: strings.Repeat("a", 40)}}
+			value.Message.ContextID = "other-context"
+			return value
+		},
 		"submission with an S3 input nesting under another": func(r map[string]Record) Record {
 			value := r["submission"].(*Submission)
 			value.Wherry.S3Inputs = []S3Input{{Name: "data", Size: 1, SHA256: testHash}, {Name: "data/part", Size: 1, SHA256: testHash}}

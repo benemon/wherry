@@ -43,6 +43,11 @@ compatibility path remains.
 - The plugin protocol is 13. Receivers and plugins upgrade together: a
   protocol-12 plugin is refused at launch, and a protocol-13 plugin refuses a
   protocol-12 receiver. Use plugins built for protocol 13.
+- Upgrade receivers before hosts submit nested names: an older receiver
+  refuses such a task without publishing a rejection, so the run waits until
+  its `task_started_by` passes unclaimed.
+
+## The broker CA in the bundle
 
 Bundles carry the broker's CA as `ca` when `operator.yaml` names a
 `ca_file`, and hosts and receivers trust the broker through their own

@@ -652,15 +652,15 @@ func (value *Submission) validate() error {
 		if err := binding.Git.Validate(binding.Credentials); err != nil {
 			return err
 		}
+		// A receiver before git base ignores it; only a context other than the run's own makes such a receiver refuse.
+		if base := binding.Git.Base; base != nil && (!inputs[base.Bundle] || value.Message.ContextID == binding.Run) {
+			return errors.New("a git base names one of the run's input files and continues another run's context")
+		}
 		if binding.Git.HostKey != "" {
 			if inputs[KnownHostsFile] {
 				return errors.New("an input named known_hosts conflicts with the git host key")
 			}
 			inputs[KnownHostsFile] = true
-		}
-		// A receiver before git base ignores it; only a context other than the run's own makes such a receiver refuse.
-		if base := binding.Git.Base; base != nil && (!inputs[base.Bundle] || value.Message.ContextID == binding.Run) {
-			return errors.New("a git base names one of the run's input files and continues another run's context")
 		}
 	}
 	if nestedConflict(inputs) {
