@@ -18,6 +18,7 @@ import (
 	"time"
 
 	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 )
 
@@ -445,8 +446,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if *wait {
-		bound := max(time.Until(time.Unix(endTime.Unix(), 0).Add(submitWaitMargin)), time.Second)
-		err := runWait(ctx, client, []string{result.RunID, "--timeout", bound.String(), "--outputs-dir", *outputsDir}, stdout, stderr)
+		err := runWait(ctx, client, []string{result.RunID, "--outputs-dir", *outputsDir}, stdout, stderr)
 		var exit *exitError
 		if errors.As(err, &exit) && exit.code == timeoutCode {
 			command, commandErr := waitCommand(*configFile)
@@ -479,13 +479,26 @@ func outputFlag(outputs *[]wire.ExpectedOutput) func(string) error {
 // stdin is a variable so tests can give submit a prompt on standard input.
 var stdin io.Reader = os.Stdin
 
-// defaultSubmitWaitMargin is the margin result's default timeout has over the default task_ended_by.
-const defaultSubmitWaitMargin = busclient.DefaultStartBy
-
-var submitWaitMargin = defaultSubmitWaitMargin
+// resultGrace is how long past a run's task_ended_by result waits by default: operator.UploadGrace, while the run's S3
+// outputs may still upload, and 30 s for the collection pass after it. resultFloor is the least it waits, so a finished
+// run's result stays readable however late result runs, since Await bounds the whole feed replay. Variables so tests
+// shorten them.
+var (
+	resultGrace = operator.UploadGrace + 30*time.Second
+	resultFloor = time.Minute
+)
 
 // defaultWaitTimeout covers a run at the default task_started_by and task_ended_by.
 const defaultWaitTimeout = busclient.DefaultStartBy + busclient.DefaultEndBy
+
+// resultBound is result's wait with no --timeout: until endBy plus resultGrace, at least resultFloor; a zero endBy, a run
+// this host has no record of or recorded before task_ended_by was, takes defaultWaitTimeout.
+func resultBound(endBy time.Time) time.Duration {
+	if endBy.IsZero() {
+		return defaultWaitTimeout
+	}
+	return max(time.Until(endBy.Add(resultGrace)), resultFloor)
+}
 
 // streamRetry separates a failed read of a run's transcript that logs follows from the next, and bounds each wait for
 // more of it.
@@ -510,7 +523,7 @@ var stateCodes = map[wire.TaskState]int{
 const timeoutCode = 6
 
 func runWait(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
-	const waitUsage = "usage: wherry host result RUN_ID [--timeout 2h10m] [--outputs-dir DIR]"
+	const waitUsage = "usage: wherry host result RUN_ID [--timeout DURATION] [--outputs-dir DIR]"
 	flags := flag.NewFlagSet("result", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() {
@@ -518,7 +531,7 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 		flags.PrintDefaults()
 	}
 	configFile := flags.String("config-file", "", "host configuration file")
-	timeout := flags.Duration("timeout", defaultWaitTimeout, "wait timeout")
+	timeout := flags.Duration("timeout", 0, "wait timeout (default: the run's task_ended_by plus 10m30s, at least 1m; 2h10m without a record of the run)")
 	outputsDir := flags.String("outputs-dir", "", "directory for the run's outputs (default: <state_dir>/runs/RUN_ID/outputs)")
 	positional, err := parseAnywhere(flags, args)
 	if err != nil {
@@ -528,7 +541,8 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 		return errors.New(waitUsage)
 	}
 	runID := positional[0]
-	if *timeout <= 0 {
+	explicit := wasSet(flags, "timeout")
+	if explicit && *timeout <= 0 {
 		return errors.New("timeout must be positive")
 	}
 	client, closeClient, err := commandClient(client, *configFile, stderr)
@@ -536,6 +550,9 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 		return err
 	}
 	defer closeClient()
+	if !explicit {
+		*timeout = resultBound(client.RecordedEndBy(runID))
+	}
 	result, err := client.Await(ctx, runID, *timeout)
 	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 		if status, statusErr := client.LastStatus(ctx, runID); statusErr == nil {

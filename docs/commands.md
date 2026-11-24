@@ -1704,12 +1704,12 @@ standard error for each. A resubmission that fails is logged as
 reads the run. It does not fail the submission.
 
 With `--wait`, `submit` prints the `run_id=` line, then collects the run as
-`result` does. `--outputs-dir DIR` sets the output directory and requires
-`--wait`. The waiting budget is the published `task_ended_by` plus ten minutes,
-less the time already spent, with a minimum of one second. Downloads after
-the run finishes are outside that budget. On timeout it prints a command to
-collect later. It exits with `result`'s [exit codes](#exit-codes).
-Leaving the command does not cancel the run.
+`result` with no `--timeout` does. `--outputs-dir DIR` sets the output
+directory and requires `--wait`. The wait is `result`'s default bound: the
+published `task_ended_by` plus the ten-minute upload grace and 30 seconds.
+Downloads after the run finishes are outside that bound. On timeout it
+prints a command to collect later. It exits with `result`'s
+[exit codes](#exit-codes). Leaving the command does not cancel the run.
 
 ### `wherry host cancel RUN_ID`
 
@@ -1734,14 +1734,21 @@ finish and submit a follow-up that passes its outputs with `--input`.
 
 ### `wherry host result RUN_ID`
 
-Waits for a run to finish and collects it. `--timeout` sets the wait,
-`2h10m` by default: the default `--start-by` and `--end-by` together.
-`--outputs-dir DIR` sets where the run's outputs go, by default
-`<state_dir>/runs/<run>/outputs/`.
+Waits for a run to finish and collects it. Without `--timeout`, `result`
+waits until the run's recorded `task_ended_by` plus the ten-minute upload
+grace and 30 seconds, and at least one minute from now, so a finished run's
+result stays readable however late `result` runs. The grace covers one
+5 GiB output at the slowest upload rate measured, 13 MB/s, which takes
+about 6.6 minutes; ten minutes is about 1.5 times that. Several large S3
+outputs left by one run stopped at `task_ended_by` are not covered. A run
+this host has no record of, or recorded before `task_ended_by` was, takes
+`2h10m`: the default `--start-by` and `--end-by` together. `--timeout`
+sets the wait itself, longer or shorter. `--outputs-dir DIR` sets where the
+run's outputs go, by default `<state_dir>/runs/<run>/outputs/`.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--timeout` | `2h10m` | how long to wait for the run to end |
+| `--timeout` | `task_ended_by` plus `10m30s`, at least `1m`; `2h10m` without a record | how long to wait for the run to end |
 | `--outputs-dir` | `<state_dir>/runs/<run>/outputs/` | where the run's outputs go |
 
 Standard output carries the result: the `output=` lines, then each part of
@@ -1852,7 +1859,7 @@ exits with status 1 and
 | 2 | the run ended `TASK_STATE_FAILED` |
 | 3 | the run ended `TASK_STATE_CANCELED` |
 | 4 | the run ended `TASK_STATE_REJECTED` |
-| 6 | `--timeout`, or `submit --wait`'s budget, passed with the run still going |
+| 6 | `--timeout`, or the default bound `submit --wait` shares, passed with the run still going |
 
 For codes 2 to 4 the error is `run ended in <state>`. A run that ends in
 any other state but `TASK_STATE_COMPLETED` exits 1 with the same error.

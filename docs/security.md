@@ -207,7 +207,10 @@ admission: a malformed first task can win its run and then fail at open with
   presigned URL lasts, and one S3 POST policy per run, for any key under
   `wherry/<tenant>/<run>/outputs/` of at most 5 GiB, until `task_ended_by`
   plus 10 minutes. The 10 minutes let a run stopped at `task_ended_by`
-  upload the outputs its job left. For a pool with storage,
+  upload the outputs its job left: one 5 GiB object at the slowest measured
+  13 MB/s takes about 6.6 minutes, and 10 minutes is about 1.5 times that;
+  several large S3 outputs in one timed-out run are not covered. `result`
+  waits by default until that grace plus 30 seconds. For a pool with storage,
   `start_by_limit` plus six hours and ten minutes must not exceed 7 days.
   The host signs with its static storage credential, so the 7-day ceiling
   and those deadlines are the only bounds on a link or a policy.
