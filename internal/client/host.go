@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
@@ -203,6 +204,10 @@ type Host struct {
 	tracing   *telemetry.Tracing
 	awaitedMu sync.Mutex
 	awaited   map[string]*awaited
+	// gitVersion checks once that the host's git reads configuration from the environment, which an https credential
+	// for ls-remote needs; gitVersionErr is its refusal.
+	gitVersion    sync.Once
+	gitVersionErr error
 }
 
 // awaited is a run the process waits on: how many waits follow it and the records traced, by topic and offset.
@@ -373,6 +378,9 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		input.Outputs = append(slices.Clone(input.Outputs), wire.ExpectedOutput{Name: wire.GitBundle, Storage: wire.StorageS3})
 	}
 	outputs := input.Outputs
+	// One resolver: the bytes that decide what is supplied are the bytes the envelope carries, the storage keys sign
+	// with and ls-remote authenticates with.
+	resolver := newResolver(ctx, wire.RFC3339(input.EndBy.Unix()))
 	if input.Git != nil {
 		// An S3 changes file stays: it is the route for a bundle over output_limit.
 		for _, output := range asked {
@@ -381,6 +389,26 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			}
 		}
 		git := *input.Git
+		// The current repository and an unpinned remote need git on the host; a pinned remote runs none.
+		var runner *hostGit
+		var local currentRepo
+		if git.Remote == "." || git.Ref == "" {
+			var err error
+			if runner, err = newHostGit(ctx); err != nil {
+				return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+			}
+			defer runner.close()
+		}
+		if git.Remote == "." {
+			if git.Ref != "" {
+				return SubmitResult{}, fmt.Errorf("%w: the current repository is sent at its HEAD commit; drop the ref", ErrInvalidInput)
+			}
+			var err error
+			if local, err = runner.current(); err != nil {
+				return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+			}
+			git.Remote, git.Ref = local.origin, local.commit
+		}
 		git.Remote = sshRemote(git.Remote)
 		// The entry whose URL is the longest prefix of the remote gives the clone its credential and host key.
 		git.Credential, git.HostKey = "", ""
@@ -407,9 +435,38 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			}
 			git.HostKey = string(key)
 		}
+		// An unpinned remote is validated under a ref name before git is asked for its HEAD's commit.
+		pinned := git.Ref != ""
+		if !pinned {
+			git.Ref = "HEAD"
+		}
 		// Validate never quotes a value in its errors, so its text is safe to return.
 		if err := git.Validate(input.Credentials); err != nil {
 			return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+		}
+		if runner != nil {
+			if err := h.remoteGit(runner, git, matched, resolver); err != nil {
+				return SubmitResult{}, err
+			}
+			if pinned {
+				on, err := runner.onRemote(git.Remote, git.Ref)
+				if err != nil {
+					return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+				}
+				if !on {
+					hint := "push the commit to a branch first"
+					if local.branch != "" {
+						hint = "push " + local.branch + " first"
+					}
+					return SubmitResult{}, fmt.Errorf("%w: commit %s is not on %s: %s, or git fetch and retry", ErrInvalidInput, git.Ref[:12], git.Remote, hint)
+				}
+			} else {
+				commit, err := runner.defaultHead(git.Remote)
+				if err != nil {
+					return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+				}
+				git.Ref = commit
+			}
 		}
 		input.Git = &git
 		changes := map[string]string{"": wire.GitBundle, "bundle": wire.GitBundle, "patch": wire.GitPatch, "none": ""}
@@ -489,9 +546,6 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, fmt.Errorf("%w: requested credential %s is not one of agent %s's credentials", ErrInvalidInput, name, agent.Name)
 		}
 	}
-	// One resolver: the bytes that decide what is supplied are the bytes the envelope carries and the storage keys sign
-	// with.
-	resolver := newResolver(ctx, wire.RFC3339(input.EndBy.Unix()))
 	supplied, unsupplied, err := h.supplied(agent, input.Requested, resolver)
 	if err != nil {
 		return SubmitResult{}, err
@@ -745,6 +799,51 @@ func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms
 		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
 	return encoded, nil
+}
+
+// remoteGit gives runner the matched git entry's credential for ls-remote, by the entry's URL scheme: an ssh key goes in
+// a 0600 file in the scratch directory, which ssh reads with the entry's host key file and nothing else; an https token
+// goes in an Authorization header set through the environment, which needs git 2.31. Its value reaches no command line.
+func (h *Host) remoteGit(runner *hostGit, git wire.GitInput, matched *GitCredential, resolver *resolver) error {
+	var value []byte
+	if matched != nil && matched.Credential != "" {
+		source, configured := h.credentials[matched.Credential]
+		if !configured {
+			return fmt.Errorf("%w: auth required: credential %s is not in this host's configuration", ErrInvalidInput, matched.Credential)
+		}
+		var err error
+		if value, err = resolver.resolve(matched.Credential, source); err != nil {
+			return fmt.Errorf("resolve credential %s: %w", matched.Credential, err)
+		}
+	}
+	switch {
+	case strings.HasPrefix(git.Remote, "ssh://"):
+		identity := "-o IdentityFile=/dev/null"
+		if value != nil {
+			key := filepath.Join(runner.scratch, "key")
+			if err := os.WriteFile(key, slices.Concat(bytes.TrimRight(value, "\n"), []byte{'\n'}), 0o600); err != nil {
+				return err
+			}
+			identity = "-i " + shellQuote(key)
+		}
+		runner.ssh = "ssh -F /dev/null " + identity + " -o IdentitiesOnly=yes -o IdentityAgent=none -o ProxyCommand=none -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=" +
+			shellQuote(matched.HostKey) + " -o GlobalKnownHostsFile=/dev/null"
+	case value != nil:
+		h.gitVersion.Do(func() {
+			major, minor, err := runner.version()
+			switch {
+			case err != nil:
+				h.gitVersionErr = err
+			case major < 2 || major == 2 && minor < 31:
+				h.gitVersionErr = fmt.Errorf("git %d.%d is older than 2.31, which sending an https credential needs", major, minor)
+			}
+		})
+		if h.gitVersionErr != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidInput, h.gitVersionErr)
+		}
+		runner.header = "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+strings.TrimSpace(string(value))))
+	}
+	return nil
 }
 
 // sourceKind is the kind of a credential source, file, env or command: what a span may carry of it, never its key.

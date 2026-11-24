@@ -171,8 +171,8 @@ type receiversOutput struct {
 }
 
 type gitInput struct {
-	Remote  string `json:"remote" jsonschema:"repository the agent clones: an https or ssh url, or user@host:path"`
-	Ref     string `json:"ref" jsonschema:"branch, tag or commit to check out"`
+	Remote  string `json:"remote" jsonschema:"repository the agent clones: an https or ssh url, user@host:path, or . for the current directory's repository, sent as its origin at the commit checked out, which must be on the remote"`
+	Ref     string `json:"ref,omitempty" jsonschema:"branch, tag or commit to check out; without it, the remote's default branch pinned to its commit at submit, and none with remote ."`
 	Path    string `json:"path,omitempty" jsonschema:"checkout directory, relative; defaults to the repository name"`
 	Changes string `json:"changes,omitempty" jsonschema:"bundle, patch or none: the agent's commits come back as the output changes.bundle (default), as changes.patch, or not at all"`
 }
