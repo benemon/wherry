@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -702,6 +703,9 @@ func fallbackS3(t *testing.T) *s3Store {
 				http.NotFound(w, r)
 				return
 			}
+			w.Header().Set("ETag", `"test"`)
+			w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
+			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 			w.Write(data)
 		default:
 			http.Error(w, "method", http.StatusMethodNotAllowed)
