@@ -342,6 +342,9 @@ func TestReadinessFlapPassesTheProfileTurn(t *testing.T) {
 		t.Fatalf("later task was not claimed after the readiness flap; logs:\n%s", f.logs.String())
 	}
 	f.await(t, testRun("run-a"), completed)
+	// The run publishes its terminal before its handler returns and releases the hold, about a millisecond later.
+	for end := time.Now().Add(5 * time.Second); f.receiver.held() != 0 && time.Now().Before(end); time.Sleep(time.Millisecond) {
+	}
 	if held := f.receiver.held(); held != 0 {
 		t.Fatalf("held records after the later task completed=%d, want 0", held)
 	}
