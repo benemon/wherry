@@ -5,12 +5,15 @@ import (
 	"encoding/base64"
 	"errors"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -290,6 +293,91 @@ func TestGitIsolationRealGit(t *testing.T) {
 	}
 }
 
+// In a partial clone whose promisor remote is a listener, checking a tip the clone lacks fetches nothing: no request
+// reaches the listener, so neither does the header, and the repository is byte-identical afterwards.
+func TestGitPartialCloneNoLazyFetch(t *testing.T) {
+	var requests, authorized atomic.Int32
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Header.Get("Authorization") != "" {
+			authorized.Add(1)
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(listener.Close)
+	r := newGitRepos(t)
+	realGit(t, r.remote, "config", "uploadpack.allowFilter", "true")
+	partial := gitRepos{remote: r.remote, url: r.url, work: filepath.Join(t.TempDir(), "partial")}
+	realGit(t, "", "clone", "-q", "--filter=blob:none", r.url, partial.work)
+	r.commit(t, "two")
+	realGit(t, r.work, "push", "-q")
+	realGit(t, partial.work, "config", "--unset", "remote.origin.promisor")
+	realGit(t, partial.work, "config", "--unset", "remote.origin.partialclonefilter")
+	for _, setting := range [][2]string{{"remote.evil.url", listener.URL + "/steal"}, {"remote.evil.promisor", "true"}, {"extensions.partialClone", "evil"}} {
+		realGit(t, partial.work, "config", setting[0], setting[1])
+	}
+	t.Chdir(partial.work)
+	before := partial.dotGit(t)
+	runner := newRunner(t)
+	runner.header = "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+shimToken))
+	repo, err := runner.current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if on, err := runner.onRemote(repo.origin, repo.commit); err != nil || on {
+		t.Fatalf("a tip the partial clone lacks: on = %v, %v; want false", on, err)
+	}
+	if n, a := requests.Load(), authorized.Load(); n != 0 || a != 0 {
+		t.Fatalf("the promisor listener got %d requests, %d with an Authorization header; want none", n, a)
+	}
+	if after := partial.dotGit(t); !mapsEqual(before, after) {
+		t.Fatalf(".git changed: %v", changed(before, after))
+	}
+}
+
+// With TMPDIR inside a repository, ls-remote does not read that repository's configuration: its insteadOf does not
+// redirect the remote.
+func TestGitScratchOutsideEnclosingRepo(t *testing.T) {
+	r := newGitRepos(t)
+	enclosing := filepath.Join(t.TempDir(), "enclosing")
+	realGit(t, "", "init", "-q", "-b", "main", enclosing)
+	realGit(t, enclosing, "config", "url."+r.url+".insteadOf", "https://redirect.invalid/repo")
+	tmp := filepath.Join(enclosing, "tmp")
+	if err := os.Mkdir(tmp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tmp)
+	runner := newRunner(t)
+	if commit, err := runner.defaultHead("https://redirect.invalid/repo"); err == nil {
+		t.Fatalf("default head %s: the enclosing repository's insteadOf redirected ls-remote", commit)
+	}
+}
+
+// A version check that fails is run again on the next submit; one that passes is not.
+func TestSubmitGitVersionRetried(t *testing.T) {
+	f := gitFixture(t)
+	shim := installGitShim(t, "2.40.0")
+	shim.answer(t, "symref", "ref: refs/heads/main\tHEAD\n"+shimCommit+"\tHEAD\n")
+	shim.answer(t, "versionfail", "")
+	if _, err := f.host.Submit(f.ctx, gitSubmit(&wire.GitInput{Remote: shimOrigin})); !errors.Is(err, ErrInvalidInput) || err.Error() != ErrInvalidInput.Error()+": git version failed (exit 1)" {
+		t.Fatalf("first submit error %v, want git version failed", err)
+	}
+	for range 2 {
+		if _, err := f.host.Submit(f.ctx, gitSubmit(&wire.GitInput{Remote: shimOrigin})); err != nil {
+			t.Fatalf("submit after a failed check: %v", err)
+		}
+	}
+	versions := 0
+	for _, c := range shim.calls(t) {
+		if c.sub()[0] == "version" {
+			versions++
+		}
+	}
+	if versions != 2 {
+		t.Fatalf("git version ran %d times, want 2: the failed check and the first pass", versions)
+	}
+}
+
 // gitShim is a git stand-in first on PATH: it records every call's argv and environment under dir and answers from the
 // files the test writes there.
 type gitShim struct {
@@ -313,7 +401,7 @@ d='` + dir + `'
 n=$(cat "$d/n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$d/n"
 printf '%s\n' "$@" > "$d/calls/$n.argv"
 env > "$d/calls/$n.env"
-case "$GIT_SSH_COMMAND" in *" -i '"*) k=${GIT_SSH_COMMAND#*-i \'}; k=${k%%\'*}; stat -c %a "$k" > "$d/calls/$n.keymode"; cp "$k" "$d/calls/$n.key";; esac
+case "$GIT_SSH_COMMAND" in *" -i '"*) k=${GIT_SSH_COMMAND#*-i \'}; k=${k%%\'*}; cp -p "$k" "$d/calls/$n.key";; esac
 skip=; sub=
 for a in "$@"; do
   if [ -n "$skip" ]; then skip=; continue; fi
@@ -321,7 +409,7 @@ for a in "$@"; do
   sub=$a; break
 done
 case "$sub" in
-  version) echo "git version ` + version + `";;
+  version) if [ -f "$d/versionfail" ]; then rm "$d/versionfail"; exit 1; fi; echo "git version ` + version + `";;
   config) cat "$d/origin";;
   rev-parse) case "$*" in *abbrev-ref*) cat "$d/branch";; *) cat "$d/commit";; esac;;
   ls-remote) case "$*" in *--symref*) cat "$d/symref";; *) cat "$d/heads";; esac;;
@@ -375,9 +463,15 @@ func (s *gitShim) calls(t *testing.T) []call {
 				c.env[name] = value
 			}
 		}
-		key, _ := os.ReadFile(filepath.Join(s.dir, "calls", strconv.Itoa(n)+".key"))
-		mode, _ := os.ReadFile(filepath.Join(s.dir, "calls", strconv.Itoa(n)+".keymode"))
-		c.key, c.keyMode = string(key), strings.TrimSpace(string(mode))
+		// The shim copies the key with cp -p, which keeps its mode.
+		keyFile := filepath.Join(s.dir, "calls", strconv.Itoa(n)+".key")
+		if key, err := os.ReadFile(keyFile); err == nil {
+			info, err := os.Stat(keyFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.key, c.keyMode = string(key), strconv.FormatUint(uint64(info.Mode().Perm()), 8)
+		}
 		calls = append(calls, c)
 	}
 }
@@ -458,7 +552,7 @@ func shimRepo(t *testing.T, shim *gitShim, branch string) string {
 // command line, only the environment of ls-remote as an Authorization header.
 func TestSubmitGitCurrentRepo(t *testing.T) {
 	f := gitFixture(t)
-	shim := installGitShim(t, "2.39.5")
+	shim := installGitShim(t, "2.45.0")
 	top := shimRepo(t, shim, "main")
 	shim.answer(t, "heads", shimOther+"\trefs/heads/main\n"+shimCommit+"\trefs/heads/feature\n")
 	hostileGitEnv(t, newGitRepos(t))
@@ -479,12 +573,13 @@ func TestSubmitGitCurrentRepo(t *testing.T) {
 		}
 		subs = append(subs, strings.Join(c.sub(), " "))
 	}
-	wantSubs := []string{"config --get remote.origin.url", "rev-parse --verify --quiet HEAD^{commit}", "rev-parse --abbrev-ref HEAD", "version", "ls-remote --heads --tags " + shimOrigin}
+	wantSubs := []string{"version", "config --get remote.origin.url", "rev-parse --verify --quiet HEAD^{commit}", "rev-parse --abbrev-ref HEAD", "version", "ls-remote --heads --tags " + shimOrigin}
 	if !slices.Equal(subs, wantSubs) {
 		t.Fatalf("git calls %q, want %q", subs, wantSubs)
 	}
 	allowed := []string{"PATH", "TMPDIR", "LANG", "LC_ALL", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy",
-		"GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"}
+		"GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT", "GIT_NO_LAZY_FETCH", "GIT_CEILING_DIRECTORIES", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0",
+		"GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"}
 	for i, c := range calls {
 		settings := c.settings()
 		for _, setting := range []string{"core.hooksPath=/dev/null", "core.fsmonitor=false", "gc.auto=0", "credential.helper="} {
@@ -506,6 +601,12 @@ func TestSubmitGitCurrentRepo(t *testing.T) {
 				t.Errorf("call %d %q: environment lacks %s", i, c.sub(), name)
 			}
 		}
+		if c.env["GIT_NO_LAZY_FETCH"] != "1" {
+			t.Errorf("call %d %q: environment lacks GIT_NO_LAZY_FETCH=1", i, c.sub())
+		}
+		if _, ceiling := c.env["GIT_CEILING_DIRECTORIES"]; ceiling == inRepo {
+			t.Errorf("call %d %q: GIT_CEILING_DIRECTORIES %v, want it outside the repository alone", i, c.sub(), ceiling)
+		}
 		if c.env["GIT_CONFIG_GLOBAL"] != "/dev/null" || c.env["GIT_CONFIG_KEY_0"] != "http.extraHeader" || c.env["GIT_CONFIG_VALUE_0"] != "" {
 			t.Errorf("call %d %q: environment %v lacks the global config and the header reset", i, c.sub(), c.env)
 		}
@@ -523,7 +624,7 @@ func TestSubmitGitCurrentRepo(t *testing.T) {
 // token.
 func TestSubmitGitCurrentRepoUnpushed(t *testing.T) {
 	f := gitFixture(t)
-	shim := installGitShim(t, "2.39.5")
+	shim := installGitShim(t, "2.45.0")
 	shimRepo(t, shim, "main")
 	shim.answer(t, "heads", shimOther+"\trefs/heads/main\n")
 	shim.answer(t, "mergebase", "1\n")
@@ -553,6 +654,26 @@ func TestSubmitGitCurrentRepoUnpushed(t *testing.T) {
 	for _, c := range shim.calls(t) {
 		if c.sub()[0] == "fetch" || c.sub()[0] == "for-each-ref" {
 			t.Fatalf("git %q ran", c.sub())
+		}
+		// cat-file and merge-base run in the repository after the header is set; a promisor remote there must not get it.
+		if c.sub()[0] != "ls-remote" && (c.env["GIT_CONFIG_COUNT"] != "1" || c.env["GIT_CONFIG_VALUE_1"] != "") {
+			t.Fatalf("git %q in the repository carries the header", c.sub())
+		}
+	}
+}
+
+// --git . needs git 2.45, whose GIT_NO_LAZY_FETCH keeps a partial clone from fetching into the repository; an older
+// git is refused before anything reads the repository.
+func TestSubmitGitCurrentRepoNeedsGit245(t *testing.T) {
+	f := gitFixture(t)
+	shim := installGitShim(t, "2.44.2")
+	shimRepo(t, shim, "main")
+	if _, err := f.host.Submit(f.ctx, gitSubmit(&wire.GitInput{Remote: "."})); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "git 2.44 is older than 2.45") {
+		t.Fatalf("submit with git 2.44 = %v, want it refused naming 2.45", err)
+	}
+	for _, c := range shim.calls(t) {
+		if c.sub()[0] != "version" {
+			t.Fatalf("git %q ran before the version was checked", c.sub())
 		}
 	}
 }

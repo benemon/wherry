@@ -384,6 +384,9 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	}
 	if *gitRemote != "" {
 		remote, ref := busclient.ParseGit(*gitRemote)
+		if ref == "" && remote != *gitRemote {
+			return errors.New("--git REMOTE@ needs a branch, tag or commit after @; drop the @ for the default branch")
+		}
 		git = &wire.GitInput{Remote: remote, Ref: ref, Path: *gitPath}
 	} else if wasSet(flags, "git-path") || wasSet(flags, "git-changes") {
 		return errors.New("--git-path and --git-changes need --git")

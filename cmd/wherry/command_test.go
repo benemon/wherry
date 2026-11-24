@@ -1141,6 +1141,8 @@ func TestSubmitGitFlags(t *testing.T) {
 		"vcs host port":            {[]string{"--git", "https://git.example.test:8443/org/repo.git@main"}, "git remote host git.example.test:8443 is not in pool pool-a's vcs hosts"},
 		"ssh without key":          {[]string{"--git", "ssh://deploy@git.example.test/org/repo.git@main"}, "ssh git remote requires host_key"},
 		"changes":                  {[]string{"--git", "https://git.example.test/org/repo.git@main", "--git-changes", "diff"}, "git changes must be bundle, patch or none"},
+		"empty ref":                {[]string{"--git", "https://git.example.test/org/repo.git@"}, "--git REMOTE@ needs a branch, tag or commit after @"},
+		"empty scp ref":            {[]string{"--git", "git@git.example.test:org/repo.git@"}, "--git REMOTE@ needs a branch, tag or commit after @"},
 		"credential twice":         {[]string{"--git", "git@git.example.test:org/repo.git@main", "--credential", "deploy-key:env=DEPLOY_KEY"}, "credential deploy-key is listed twice"},
 	} {
 		t.Run(name, func(t *testing.T) {

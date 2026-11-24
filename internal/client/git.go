@@ -69,8 +69,11 @@ func (g *hostGit) close() {
 	os.RemoveAll(g.scratch)
 }
 
-func (g *hostGit) environment() []string {
-	env := []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0"}
+// environment is git's environment for a command in dir. Only commands in scratch reach the remote, so only they get
+// the header and ssh command; in the repository a promisor remote could otherwise fetch missing objects with them.
+// GIT_NO_LAZY_FETCH stops that fetch, and the ceiling keeps scratch's commands from finding an enclosing repository.
+func (g *hostGit) environment(dir string) []string {
+	env := []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0", "GIT_NO_LAZY_FETCH=1"}
 	for _, name := range gitInherited {
 		if value, ok := os.LookupEnv(name); ok {
 			env = append(env, name+"="+value)
@@ -79,15 +82,18 @@ func (g *hostGit) environment() []string {
 	// http.extraHeader is a list an empty value resets. The reset goes here, not in a -c setting: git reads -c after
 	// these entries, so it would reset the header set here too.
 	values := []string{""}
-	if g.header != "" {
+	if dir == g.scratch && g.header != "" {
 		values = append(values, g.header)
 	}
 	env = append(env, "GIT_CONFIG_COUNT="+strconv.Itoa(len(values)))
 	for i, value := range values {
 		env = append(env, fmt.Sprintf("GIT_CONFIG_KEY_%d=http.extraHeader", i), fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, value))
 	}
-	if g.ssh != "" {
-		env = append(env, "GIT_SSH_COMMAND="+g.ssh)
+	if dir == g.scratch {
+		env = append(env, "GIT_CEILING_DIRECTORIES="+filepath.Dir(g.scratch))
+		if g.ssh != "" {
+			env = append(env, "GIT_SSH_COMMAND="+g.ssh)
+		}
 	}
 	return env
 }
@@ -121,7 +127,7 @@ func (g *hostGit) run(dir string, args ...string) (string, error) {
 	argv = append(argv, args...)
 	command := exec.CommandContext(g.ctx, "git", argv...)
 	var stdout bytes.Buffer
-	command.Dir, command.Env, command.Stdout = dir, g.environment(), &stdout
+	command.Dir, command.Env, command.Stdout = dir, g.environment(dir), &stdout
 	err := command.Run()
 	var exit *exec.ExitError
 	switch {
@@ -141,6 +147,12 @@ type currentRepo struct {
 
 // current finds the repository holding the working directory, by its .git, and reads it. Nothing is written to it.
 func (g *hostGit) current() (currentRepo, error) {
+	// GIT_NO_LAZY_FETCH, which keeps a partial clone from fetching objects into the repository, needs git 2.45.
+	if major, minor, err := g.version(); err != nil {
+		return currentRepo{}, err
+	} else if major < 2 || major == 2 && minor < 45 {
+		return currentRepo{}, fmt.Errorf("git %d.%d is older than 2.45, which --git . needs so that it writes nothing to the repository", major, minor)
+	}
 	top, err := os.Getwd()
 	if err != nil {
 		return currentRepo{}, err

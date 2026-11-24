@@ -1477,8 +1477,11 @@ remote, and nothing is fetched, so a tip the repository lacks is not
 checked: `git fetch` and retry. A repository without `origin` or without a
 commit is refused with a hint, and uncommitted changes are neither checked
 nor sent. `submit` writes nothing to the repository: it reads it with
-`git config`, `git rev-parse`, `git cat-file` and `git merge-base`, and asks
-the remote with `git ls-remote` from a directory of its own.
+`git config`, `git rev-parse`, `git cat-file` and `git merge-base` with
+lazy fetching off, so a partial clone fetches nothing, and asks the remote
+with `git ls-remote` from a directory of its own, the only call that carries
+a credential. `--git .` needs `git` 2.45 or later, refused otherwise naming
+the version.
 
 Both forms run `git` on the host, from `PATH`, and are refused without it;
 a remote with `@REF` runs none. That `git` reads no system or global

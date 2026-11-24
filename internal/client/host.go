@@ -204,10 +204,10 @@ type Host struct {
 	tracing   *telemetry.Tracing
 	awaitedMu sync.Mutex
 	awaited   map[string]*awaited
-	// gitVersion checks once that the host's git reads configuration from the environment, which an https credential
-	// for ls-remote needs; gitVersionErr is its refusal.
-	gitVersion    sync.Once
-	gitVersionErr error
+	// gitVersionOK records that the host's git reads configuration from the environment, which an https credential for
+	// ls-remote needs. Only a pass is kept: a failed check, such as one whose submit was cancelled, runs again.
+	gitVersionMu sync.Mutex
+	gitVersionOK bool
 }
 
 // awaited is a run the process waits on: how many waits follow it and the records traced, by topic and offset.
@@ -829,17 +829,22 @@ func (h *Host) remoteGit(runner *hostGit, git wire.GitInput, matched *GitCredent
 		runner.ssh = "ssh -F /dev/null " + identity + " -o IdentitiesOnly=yes -o IdentityAgent=none -o ProxyCommand=none -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=" +
 			shellQuote(matched.HostKey) + " -o GlobalKnownHostsFile=/dev/null"
 	case value != nil:
-		h.gitVersion.Do(func() {
-			major, minor, err := runner.version()
+		h.gitVersionMu.Lock()
+		var err error
+		if !h.gitVersionOK {
+			var major, minor int
+			major, minor, err = runner.version()
 			switch {
 			case err != nil:
-				h.gitVersionErr = err
 			case major < 2 || major == 2 && minor < 31:
-				h.gitVersionErr = fmt.Errorf("git %d.%d is older than 2.31, which sending an https credential needs", major, minor)
+				err = fmt.Errorf("git %d.%d is older than 2.31, which sending an https credential needs", major, minor)
+			default:
+				h.gitVersionOK = true
 			}
-		})
-		if h.gitVersionErr != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidInput, h.gitVersionErr)
+		}
+		h.gitVersionMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidInput, err)
 		}
 		runner.header = "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+strings.TrimSpace(string(value))))
 	}
