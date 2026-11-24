@@ -45,7 +45,9 @@ var operatorUsage = map[string]string{
 	"view":                "usage: wherry operator view [--dir DIR] [--window 24h] [--port N] [--external-url URL]",
 }
 
-func runOperator(args []string, stdout, stderr io.Writer) error {
+func runOperator(args []string, stdout, stderr io.Writer) (err error) {
+	// Each command's first dial is inside it, so a broker certificate the system roots do not trust is explained here, once.
+	defer func() { err = operator.ExplainUnknownAuthority(err) }()
 	pos, options, err := operatorArgs(args)
 	if len(pos) > 0 && operatorUsage[operatorCommand(pos)] == "" {
 		return errors.New("unknown operator command")

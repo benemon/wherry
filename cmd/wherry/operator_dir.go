@@ -146,8 +146,7 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 	}
 	defer superUser.Close()
 	// Kafka answers a missing credential for the mechanism as it answers a wrong password; checked before Delegate, whose
-	// first error would name wherry.operator. The first dial, so a broker certificate the system roots do not trust
-	// fails here.
+	// first error would name wherry.operator.
 	if _, err := kadm.NewClient(superUser).ListBrokers(ctx); errors.Is(err, kerr.SaslAuthenticationFailed) {
 		hint := ""
 		if mechanism == operator.ScramSHA512 {
@@ -155,7 +154,7 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 		}
 		return fmt.Errorf("super user %s's %s login refused: Kafka answers a wrong password and no %s credential alike%s", answers["super-user"], mechanism, mechanism, hint)
 	} else if err != nil {
-		return operator.ExplainUnknownAuthority(fmt.Errorf("super user %s: %w", answers["super-user"], err))
+		return fmt.Errorf("super user %s: %w", answers["super-user"], err)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -423,13 +422,6 @@ func operatorService(dir string) (*operator.Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The first exchange with the broker, so a certificate the system roots do not trust fails here, explained.
-	ping, cancel := context.WithTimeout(context.Background(), operatorPingTimeout)
-	defer cancel()
-	if err := client.Ping(ping); err != nil {
-		client.Close()
-		return nil, operator.ExplainUnknownAuthority(err)
-	}
 	service := &operator.Service{Operator: client, Broker: config.Broker, Storage: func(tenant string) (operator.StorageKeys, error) { return tenantStorageKeys(dir, tenant) }}
 	if config.Tracing {
 		if service.Tracing, err = telemetry.New(context.Background(), telemetry.RoleOperator, telemetry.Names{}, client.Opts(), log.New(os.Stderr, "wherry: ", 0)); err != nil {
@@ -439,10 +431,6 @@ func operatorService(dir string) (*operator.Service, error) {
 	}
 	return service, nil
 }
-
-// operatorPingTimeout bounds operatorService's first exchange with the broker; franz-go bounds each dial and request at
-// 10 s.
-const operatorPingTimeout = 30 * time.Second
 
 func inDir(dir, path string) string {
 	if filepath.IsAbs(path) {
