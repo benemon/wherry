@@ -54,11 +54,10 @@ agents:
 default_agent: claude-code
 delivery_limit: 5
 lock_duration: 15s
-producer_byte_rate: 1048576
-request_percentage: 10
 ```
 
 The pool runs one agent, `claude-code`.
+Each host of the pool gets the default quotas, `1048576` bytes per second and `10` percent of broker request time.
 The name is a [catalog id](configuration-operator.md#catalog-agents), so the agent lists no model credential.
 `pool apply` adds the credential `claude-code-oauth-token`, which targets `CLAUDE_CODE_OAUTH_TOKEN`, the variable
 Claude Code reads.

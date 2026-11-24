@@ -346,6 +346,8 @@ func (service *Service) PoolApply(ctx context.Context, pool string, terms Terms,
 		return err
 	}
 	effective := withDefaults(terms)
+	// The record holds the quota defaults, since validateTerms refuses a recorded 0 on load.
+	terms.ProducerByteRate, terms.RequestPercentage = effective.ProducerByteRate, effective.RequestPercentage
 	if err := validateTerms(effective); err != nil {
 		return err
 	}

@@ -883,7 +883,7 @@ func devDefaultAgent(defaultHarness string, copied map[string]credential.Source)
 // explicit credential is required where up copied a source for it.
 func devTerms(agents []string, defaultHarness string, storage bool, copied map[string]credential.Source) operator.Terms {
 	optional := false
-	terms := operator.Terms{DefaultAgent: devDefaultAgent(defaultHarness, copied), DeliveryLimit: 2, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 10}
+	terms := operator.Terms{DefaultAgent: devDefaultAgent(defaultHarness, copied), DeliveryLimit: 2, LockDurationMS: 15000, ProducerByteRate: operator.DefaultProducerByteRate, RequestPercentage: operator.DefaultRequestPercentage}
 	for _, agent := range agents {
 		agentTerms := operator.AgentTerms{Name: agent, Credentials: []operator.AgentCredential{}}
 		if agent == "mock" {

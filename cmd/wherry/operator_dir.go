@@ -690,7 +690,7 @@ func promptPool(q *questions) (any, error) {
 	if err := q.answer("Default agent", file.DefaultAgent); err != nil {
 		return nil, err
 	}
-	_, err = q.ask("Producer byte rate per host, bytes a second", "", "1048576", "", func(s string) error {
+	_, err = q.ask("Producer byte rate per host, bytes a second", "", strconv.Itoa(operator.DefaultProducerByteRate), "", func(s string) error {
 		value, err := strconv.ParseInt(s, 10, 64)
 		if err != nil || value <= 0 {
 			return errors.New("producer byte rate must be greater than 0")
@@ -701,7 +701,7 @@ func promptPool(q *questions) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, err = q.ask("Request percentage per host", "", "10", "", func(s string) error {
+	_, err = q.ask("Request percentage per host", "", strconv.Itoa(operator.DefaultRequestPercentage), "", func(s string) error {
 		value, err := strconv.ParseFloat(s, 64)
 		if err != nil || !(value > 0) {
 			return errors.New("request percentage must be greater than 0")
