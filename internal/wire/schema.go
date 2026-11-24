@@ -269,10 +269,7 @@ type S3Input struct {
 	SHA256 string `json:"sha256"`
 }
 
-// StorageS3 is the storage of an expected output that returns through its pool's bucket.
-const StorageS3 = "s3"
-
-// MaxS3Object bounds an S3 input or output: 5 GiB, the S3 single-PUT maximum.
+// MaxS3Object bounds an S3 input or output: 5 GiB, the S3 single-PUT and POST maximum.
 const MaxS3Object = 5 << 30
 
 // S3Prefix is the prefix of a run's objects in its pool's bucket.

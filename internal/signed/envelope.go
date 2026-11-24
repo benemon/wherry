@@ -33,13 +33,21 @@ type EnvelopeBinding struct {
 }
 
 // EnvelopeValues are the confidential values of a task with the binding to it, an envelope's whole plaintext.
-// RedactionKey is the run's 32-byte key.
+// S3Policy is the run's POST policy for its S3 outputs, nil when the host issued none. RedactionKey is the run's
+// 32-byte key.
 type EnvelopeValues struct {
 	Binding      EnvelopeBinding   `json:"binding"`
 	Credentials  map[string][]byte `json:"credentials"`
 	S3Inputs     map[string]string `json:"s3_inputs"`
-	S3Outputs    map[string]string `json:"s3_outputs"`
+	S3Policy     *S3Policy         `json:"s3_policy,omitzero"`
 	RedactionKey []byte            `json:"redaction_key"`
+}
+
+// S3Policy is a presigned S3 POST policy for every object under a run's output prefix: the bucket URL the form posts to
+// and the form fields, key among them set to the prefix, which an upload replaces with the object's key.
+type S3Policy struct {
+	URL    string            `json:"url"`
+	Fields map[string]string `json:"fields"`
 }
 
 // envelopeHeader is every member an envelope's protected header may hold.
@@ -112,7 +120,7 @@ func OpenEnvelope(encoded, contentKey []byte) (EnvelopeValues, error) {
 	}
 	var values EnvelopeValues
 	binding := &values.Binding
-	if json.Unmarshal(plaintext, &values, Strict) != nil || values.Credentials == nil || values.S3Inputs == nil || values.S3Outputs == nil ||
+	if json.Unmarshal(plaintext, &values, Strict) != nil || values.Credentials == nil || values.S3Inputs == nil || values.S3Policy != nil && values.S3Policy.Fields == nil ||
 		binding.Run == "" || binding.Tenant == "" || binding.Pool == "" || binding.TaskStartedBy == 0 || binding.TaskEndedBy == 0 {
 		return EnvelopeValues{}, errors.New("envelope plaintext is not an envelope's")
 	}

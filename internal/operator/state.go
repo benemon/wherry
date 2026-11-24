@@ -163,8 +163,8 @@ const (
 	MaxRunDurationMS      = 6 * 60 * 60 * 1000
 	// MaxPresign is the longest lifetime S3 SigV4 allows a presigned URL.
 	MaxPresign = 7 * 24 * time.Hour
-	// UploadGrace is how long after task_ended_by a run's S3 outputs may still upload: the PUT URLs last that much
-	// longer, and so does the collection that streams them.
+	// UploadGrace is how long after task_ended_by a run's S3 outputs may still upload: the run's POST policy lasts that
+	// much longer, and so does the collection pass that streams them.
 	UploadGrace = 10 * time.Minute
 )
 

@@ -219,8 +219,9 @@ func (h *Host) replace(ctx context.Context, runID string, local *runRecord, now 
 	if err := h.atLeastOne(agent, submission.Wherry.Supplied); err != nil {
 		return "", err
 	}
+	// As at submit: a storable run gets a POST policy for its own output prefix.
 	var store *store
-	if len(submission.Wherry.S3Inputs)+len(s3OutputNames(submission.Wherry.Outputs)) > 0 {
+	if len(submission.Wherry.S3Inputs) > 0 || terms.Storage != nil && h.credentialed(local.Pool) {
 		if store, err = h.bucket(ctx, local.Pool, terms.Storage, resolver); err != nil {
 			return "", err
 		}
@@ -235,7 +236,7 @@ func (h *Host) replace(ctx context.Context, runID string, local *runRecord, now 
 	}
 	// The replacement keeps the original's signature topic: agent and selector cannot reconstruct the signature a task
 	// was placed on.
-	record, err := h.newRecord(ctx, &submission, local.Topic, encoded, now, redactionKey)
+	record, err := h.newRecord(ctx, &submission, local.Topic, encoded, now, redactionKey, store != nil)
 	if err != nil {
 		return "", err
 	}

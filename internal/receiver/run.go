@@ -1,6 +1,7 @@
 package receiver
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/sha256"
@@ -17,6 +18,7 @@ import (
 	"io/fs"
 	"maps"
 	"math"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
@@ -527,8 +529,8 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, profile Named)
 			return rejectAs(rejectionReasonVCS, "git remote host "+host+" is not in pool "+r.config.Pool+"'s vcs hosts")
 		}
 	}
-	if (len(declared.S3Inputs) > 0 || len(s3Outputs(declared.Outputs)) > 0) && terms.Storage == nil {
-		return rejectAs(rejectionReasonStorage, "pool "+r.config.Pool+" has no storage for S3 inputs and outputs")
+	if len(declared.S3Inputs) > 0 && terms.Storage == nil {
+		return rejectAs(rejectionReasonStorage, "pool "+r.config.Pool+" has no storage for S3 inputs")
 	}
 	inputs, rejection := deliverables(history, declared.Git)
 	if rejection != "" {
@@ -542,17 +544,6 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, profile Named)
 // modelInTerms reports whether agent's terms allow model: one of its models, or none when it has none.
 func modelInTerms(agent operator.AgentTerms, model string) bool {
 	return slices.Contains(agent.Models, model) || len(agent.Models) == 0 && model == ""
-}
-
-// s3Outputs names the outputs that return through the pool's bucket.
-func s3Outputs(outputs []wire.ExpectedOutput) []string {
-	var names []string
-	for _, output := range outputs {
-		if output.Storage == wire.StorageS3 {
-			names = append(names, output.Name)
-		}
-	}
-	return names
 }
 
 // deliverables returns the run's input files: the git input's host key as known_hosts, then the raw and data parts.
@@ -913,7 +904,6 @@ func (r *Receiver) executeAttempt(ctx context.Context, claim *runClaim, record *
 	for _, input := range admitted.s3Inputs {
 		inputNames = append(inputNames, input.Name)
 	}
-	outputNames := s3Outputs(admitted.outputs)
 	if !adopted {
 		named := run.profile
 		credentials := slices.Concat(admitted.agentCredentials, admitted.credentials)
@@ -928,7 +918,7 @@ func (r *Receiver) executeAttempt(ctx context.Context, claim *runClaim, record *
 		}
 		run.delivered(ctx, values.Credentials)
 		var fetches []pluginsdk.Fetch
-		fetches, run.puts = run.presigned(values, admitted.s3Inputs, outputNames)
+		fetches, run.policy = run.presigned(values, admitted.s3Inputs)
 		promptInputs := make([]string, 0, len(admitted.inputs)+len(inputNames))
 		for _, input := range admitted.inputs {
 			promptInputs = append(promptInputs, input.Name)
@@ -1071,7 +1061,7 @@ func (r *Receiver) executeAttempt(ctx context.Context, claim *runClaim, record *
 		}
 		run.redactionKey = values.RedactionKey
 		run.delivered(ctx, values.Credentials)
-		_, run.puts = run.presigned(values, nil, outputNames)
+		_, run.policy = run.presigned(values, nil)
 	}
 	if unplaced {
 		switch {
@@ -1652,31 +1642,31 @@ func (run *activeRun) hold(lines <-chan pluginsdk.Line) func() []pluginsdk.Line 
 	}
 }
 
-// presigned returns the run's fetches and PUT URLs from its envelope, and delivers the URLs for redaction under their
-// names, each with its signature, so a transcript quoting a URL in part is redacted too, with the URL's marker. The
-// envelope's URLs passed the section 5 checks.
-func (run *activeRun) presigned(values signed.EnvelopeValues, inputs []wire.S3Input, outputs []string) ([]pluginsdk.Fetch, map[string]string) {
+// policySecrets are the POST policy's form fields that sign it: delivered for redaction, never logged.
+var policySecrets = []string{"policy", "x-amz-signature", "x-amz-credential"}
+
+// presigned returns the run's fetches and POST policy from its envelope, and delivers them for redaction: each URL under
+// its name with its signature, so a transcript quoting a URL in part is redacted too, with the URL's marker, and the
+// policy's signing fields under one name. The envelope's values passed the section 5 checks.
+func (run *activeRun) presigned(values signed.EnvelopeValues, inputs []wire.S3Input) ([]pluginsdk.Fetch, *signed.S3Policy) {
 	urls, signatures := map[string][]byte{}, map[string][]byte{}
-	deliver := func(name, value string) {
-		urls[name] = []byte(value)
-		if parsed, err := url.Parse(value); err == nil {
-			signatures[name] = []byte(parsed.Query().Get("X-Amz-Signature"))
-		}
-	}
 	var fetches []pluginsdk.Fetch
 	for _, input := range inputs {
 		get := values.S3Inputs[input.Name]
-		deliver(signed.S3InputValue(input.Name), get)
+		urls[signed.S3InputValue(input.Name)] = []byte(get)
+		if parsed, err := url.Parse(get); err == nil {
+			signatures[signed.S3InputValue(input.Name)] = []byte(parsed.Query().Get("X-Amz-Signature"))
+		}
 		fetches = append(fetches, pluginsdk.Fetch{Name: input.Name, URL: get, Size: input.Size, SHA256: input.SHA256})
-	}
-	puts := map[string]string{}
-	for _, output := range outputs {
-		puts[output] = values.S3Outputs[output]
-		deliver(signed.S3OutputValue(output), puts[output])
 	}
 	run.deliver(urls)
 	run.deliver(signatures)
-	return fetches, puts
+	if values.S3Policy != nil {
+		for _, field := range policySecrets {
+			run.deliver(map[string][]byte{signed.S3PolicyValue: []byte(values.S3Policy.Fields[field])})
+		}
+	}
+	return fetches, values.S3Policy
 }
 
 type activeRun struct {
@@ -1692,10 +1682,10 @@ type activeRun struct {
 	// labels is set when this attempt dispatched the job; an adopted job's profile labels are unknown.
 	labels map[string]string
 	job    string
-	// deadline is when the run passes task_ended_by; puts are the presigned PUT URLs of its S3 outputs, by name, which
-	// an attempt holds once opened.
+	// deadline is when the run passes task_ended_by; policy is the POST policy for the run's S3 outputs, which an
+	// attempt holds once opened, nil when the host issued none.
 	deadline time.Time
-	puts     map[string]string
+	policy   *signed.S3Policy
 	// redactions are the forms of the values this attempt received, longest first, and redactionKey the run's key
 	// from its envelope.
 	redactions   []redact.Form
@@ -2215,12 +2205,11 @@ func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pen
 	return run.end(ctx, status, result, pending, ack)
 }
 
-// collect publishes feed outputs and uploads S3 outputs to the host's bucket, each as written, listing every expected
-// output as returned or missing.
+// collect publishes on the feed the outputs within the pool's output limit, as written, and uploads the larger ones to
+// the host's bucket under the run's POST policy in a second pass, listing every expected output as returned or missing.
 func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stopped bool, terms operator.Terms) {
 	limit := terms.OutputLimit
-	stored := map[string]storedOutput{}
-	collected, err := run.collected(ctx, handle, stopped, limit, stored, terms.Storage)
+	collected, err := run.collected(ctx, handle, stopped, limit)
 	if err != nil {
 		reason := collectionReasonFailed
 		switch {
@@ -2245,9 +2234,9 @@ func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stop
 	slices.SortFunc(collected, func(a, b pluginsdk.Output) int {
 		return cmp.Or(cmp.Compare(boolInt(run.changesFile(a.Name)), boolInt(run.changesFile(b.Name))), strings.Compare(a.Name, b.Name))
 	})
-	s3 := s3Outputs(run.expected)
 	var total int64
 	listed := map[string]bool{}
+	var large []pluginsdk.Output
 	for _, output := range collected {
 		name, reason := output.Name, ""
 		switch {
@@ -2262,22 +2251,18 @@ func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stop
 			reason = "rejected: reserved name"
 		case output.Mode.Type() != 0:
 			reason = "rejected: " + fileType(output.Mode)
-		case slices.Contains(s3, name):
-			upload, streamed := stored[name]
+		case output.Data == nil || total+output.Size > limit:
+			// Over the inline budget: with a policy, the second pass streams and uploads it.
 			switch {
-			case streamed && upload.reason == "":
-				listed[name] = true
-				run.s3Returned = append(run.s3Returned, upload.output)
-				continue
-			case streamed:
-				reason = upload.reason
+			case run.policy == nil:
+				reason = "exceeds output limit"
 			case output.Size > wire.MaxS3Object:
 				reason = "exceeds the S3 object limit"
 			default:
-				reason = "not streamed by the plugin"
+				listed[name] = true
+				large = append(large, output)
+				continue
 			}
-		case output.Data == nil || total+output.Size > limit:
-			reason = "exceeds output limit"
 		case int64(len(output.Data)) != output.Size:
 			reason = "rejected: size changed while read"
 		}
@@ -2292,6 +2277,20 @@ func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stop
 		total += output.Size
 		run.outputs = append(run.outputs, run.outputChunks(name, output.Data)...)
 		run.returned = append(run.returned, wire.ReturnedOutput{Name: name, SHA256: hex.EncodeToString(sum[:]), Size: output.Size})
+	}
+	if len(large) > 0 {
+		stored := run.uploaded(ctx, handle, large, terms.Storage)
+		for _, output := range large {
+			upload, found := stored[output.Name]
+			switch {
+			case found && upload.reason == "":
+				run.s3Returned = append(run.s3Returned, upload.output)
+			case found:
+				run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: output.Name, Size: upload.output.Size, Reason: upload.reason})
+			default:
+				run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: output.Name, Reason: "missing"})
+			}
+		}
 	}
 	for _, output := range run.expected {
 		if !listed[output.Name] {
@@ -2319,33 +2318,28 @@ func boolInt(b bool) int {
 	return 0
 }
 
-// storedOutput is an S3 output as the upload of its stream left it: listed for the result, or not returned for reason.
+// storedOutput is an S3 output as the upload of its stream left it: listed for the result, or not returned for reason,
+// with its name and size.
 type storedOutput struct {
 	output wire.ReturnedOutput
 	reason string
 }
 
-// collected runs the plugin's Collect under limit and uploads each streamed S3 output into stored as it arrives, to
-// the terms' storage. Collect may run until the run's PUT URLs expire, task_ended_by plus the upload grace, so a run
-// stopped at that bound or by a cancel still uploads. The count and total are checked again here, so a plugin that
-// ignores the limits cannot grow the run's memory.
-func (run *activeRun) collected(ctx context.Context, handle pluginsdk.Handle, stopped bool, limit int64, stored map[string]storedOutput, storage *operator.Storage) ([]pluginsdk.Output, error) {
+// collected is the first collection pass: the plugin's Collect under limit and collectTimeout, reading each file within
+// the limit and listing the rest. The count and total are checked again here, so a plugin that ignores the limits
+// cannot grow the run's memory.
+func (run *activeRun) collected(ctx context.Context, handle pluginsdk.Handle, stopped bool, limit int64) ([]pluginsdk.Output, error) {
 	if !stopped {
 		return nil, errors.New("the job was not stopped")
 	}
-	until := time.Now().Add(collectTimeout)
-	if expiry := run.deadline.Add(operator.UploadGrace); len(run.puts) > 0 && expiry.After(until) {
-		until = expiry
-	}
-	ctx, cancel := context.WithDeadline(ctx, until)
+	ctx, cancel := context.WithTimeout(ctx, collectTimeout)
 	defer cancel()
 	outputs := make(chan pluginsdk.Output)
 	ended := make(chan error, 1)
 	// Streamed, the outcome file counts against neither output limit, and the changes file is charged here, last.
-	s3 := s3Outputs(run.expected)
-	stream := append(s3, wire.OutcomeFile)
+	stream := []string{wire.OutcomeFile}
 	for _, expected := range run.expected {
-		if run.changesFile(expected.Name) && expected.Storage != wire.StorageS3 {
+		if run.changesFile(expected.Name) {
 			stream = append(stream, expected.Name)
 		}
 	}
@@ -2368,15 +2362,10 @@ func (run *activeRun) collected(ctx context.Context, handle pluginsdk.Handle, st
 			}
 			continue
 		}
-		changes := run.changesFile(output.Name) && !slices.Contains(s3, output.Name)
+		changes := run.changesFile(output.Name)
 		if output.Body != nil {
-			switch {
-			case changes:
+			if changes {
 				output.Data = buffered(output.Body, limit)
-			default:
-				if _, done := stored[output.Name]; !done && over == nil {
-					stored[output.Name] = run.store(ctx, output, storage)
-				}
 			}
 			output.Body.Close()
 			output.Body = nil
@@ -2396,6 +2385,52 @@ func (run *activeRun) collected(ctx context.Context, handle pluginsdk.Handle, st
 		return nil, err
 	}
 	return collected, nil
+}
+
+// uploaded is the second collection pass, run only for the files the first found over the inline budget: the plugin's
+// Collect streaming exactly those files and reading no other, under a deadline of task_ended_by plus the upload grace,
+// when the run's POST policy expires, so a run stopped at the bound or by a cancel still uploads. Each stream is
+// uploaded as it arrives. It returns what became of each file the pass listed; a pass that fails or ends at the deadline
+// leaves every file not yet uploaded as not uploaded, for its reason.
+func (run *activeRun) uploaded(ctx context.Context, handle pluginsdk.Handle, large []pluginsdk.Output, storage *operator.Storage) map[string]storedOutput {
+	ctx, cancel := context.WithDeadline(ctx, run.deadline.Add(operator.UploadGrace))
+	defer cancel()
+	names := make([]string, 0, len(large))
+	for _, output := range large {
+		names = append(names, output.Name)
+	}
+	outputs := make(chan pluginsdk.Output)
+	ended := make(chan error, 1)
+	go func() {
+		defer close(outputs)
+		ended <- run.profile.Plugin.Collect(ctx, handle, pluginsdk.Limits{Files: wire.MaxOutputs, Stream: names, StreamBytes: wire.MaxS3Object}, outputs)
+	}()
+	stored := map[string]storedOutput{}
+	for output := range outputs {
+		if _, done := stored[output.Name]; !done && slices.Contains(names, output.Name) {
+			stored[output.Name] = run.store(ctx, output, storage)
+		}
+		if output.Body != nil {
+			output.Body.Close()
+		}
+	}
+	if err := <-ended; err != nil {
+		reason, class := "not uploaded: collection failed", collectionReasonFailed
+		switch {
+		case errors.Is(err, context.DeadlineExceeded), errors.Is(ctx.Err(), context.DeadlineExceeded):
+			reason, class = "not uploaded: timeout", collectionReasonTimeout
+		case errors.Is(err, context.Canceled):
+			reason = "not uploaded: canceled"
+		}
+		run.receiver.metrics.collectionFailures.WithLabelValues(run.profile.Name, class).Inc()
+		run.receiver.logger.Printf("run %s: S3 outputs not uploaded: %s", run.task.Wherry.Run, logText(run.redactText, err))
+		for _, output := range large {
+			if _, done := stored[output.Name]; !done {
+				stored[output.Name] = storedOutput{output: wire.ReturnedOutput{Name: output.Name, Size: output.Size}, reason: reason}
+			}
+		}
+	}
+	return stored
 }
 
 // buffered reads a streamed changes file of at most limit bytes, nil for a longer one, which the plugin stops sending
@@ -2437,8 +2472,7 @@ var errRedirect = errors.New("redirected")
 var storageClient = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return errRedirect }}
 
 // uploadFailure names the class of a failed upload's error. The error itself is never shown: its *url.Error quotes the
-// presigned URL, whose query is a credential. A context cancelled with a cause reports the cause, so the request's own
-// context is read first.
+// request's URL. A context cancelled with a cause reports the cause, so the request's own context is read first.
 func uploadFailure(ctx context.Context, err error) string {
 	var dns *net.DNSError
 	var unknownAuthority x509.UnknownAuthorityError
@@ -2467,9 +2501,9 @@ func uploadFailure(ctx context.Context, err error) string {
 	return "other"
 }
 
-// store uploads a streamed output to its presigned PUT URL with the Content-Length of its listing, as it reads it, and
-// hashes the bytes the request sends. Its reason never quotes the URL or a response body; its span carries the terms'
-// endpoint and bucket, never the URL.
+// store uploads a streamed output under the run's POST policy as it reads it, with a Content-Length from its listing,
+// and hashes the bytes the request sends. Its reason never quotes the policy or a response body; its span carries the
+// terms' endpoint and bucket.
 func (run *activeRun) store(ctx context.Context, output pluginsdk.Output, storage *operator.Storage) storedOutput {
 	attrs := []attribute.KeyValue{telemetry.AttrSize.Int64(output.Size)}
 	if wire.ValidOutputName(output.Name) {
@@ -2487,48 +2521,128 @@ func (run *activeRun) store(ctx context.Context, output pluginsdk.Output, storag
 	return stored
 }
 
-// upload is store's PUT; its class is the fixed class of a failure, empty for success.
+// upload is store's POST: the policy's fields with key set to the output's key, then the file, as multipart/form-data of
+// an exact Content-Length; the store answers 204. Its class is the fixed class of a failure, empty for success. The
+// response body is discarded unread beyond a bound: a refusal echoes the policy.
 func (run *activeRun) upload(ctx context.Context, output pluginsdk.Output) (storedOutput, string) {
-	put, ok := run.puts[output.Name]
+	listed := wire.ReturnedOutput{Name: output.Name, Size: max(output.Size, 0)}
 	switch {
-	case !ok:
-		return storedOutput{reason: "not uploaded: no upload URL"}, telemetry.ClassError
+	case run.policy == nil:
+		return storedOutput{output: listed, reason: "not uploaded: no upload policy"}, telemetry.ClassError
 	case output.Mode.Type() != 0:
-		return storedOutput{reason: "rejected: " + fileType(output.Mode)}, telemetry.ClassError
+		return storedOutput{output: listed, reason: "rejected: " + fileType(output.Mode)}, telemetry.ClassError
 	case output.Size < 0 || output.Size > wire.MaxS3Object:
-		return storedOutput{reason: "exceeds the S3 object limit"}, telemetry.ClassTooLarge
+		return storedOutput{output: listed, reason: "exceeds the S3 object limit"}, telemetry.ClassTooLarge
+	case output.Body == nil:
+		return storedOutput{output: listed, reason: "not streamed by the plugin"}, telemetry.ClassError
 	}
+	key := wire.S3OutputKey(run.task.Wherry.Tenant, run.task.Wherry.Run, output.Name)
 	sum := sha256.New()
-	body := io.TeeReader(output.Body, sum)
-	if output.Size == 0 {
-		body = http.NoBody
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPut, put, body)
+	file := &sizedReader{body: output.Body, size: output.Size}
+	form, err := newPostForm(run.policy.Fields, key, io.TeeReader(file, sum), output.Size)
 	if err != nil {
-		return storedOutput{reason: "not uploaded: invalid request"}, telemetry.ClassError
+		return storedOutput{output: listed, reason: "not uploaded: invalid request"}, telemetry.ClassError
 	}
-	request.ContentLength = output.Size
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, run.policy.URL, form.body)
+	if err != nil {
+		return storedOutput{output: listed, reason: "not uploaded: invalid request"}, telemetry.ClassError
+	}
+	request.ContentLength = form.length
+	request.Header.Set("Content-Type", form.contentType)
 	response, err := storageClient.Do(request)
-	if err != nil {
-		class := uploadFailure(ctx, err)
-		reason := "not uploaded: request failed (" + class + ")"
-		if errors.Is(err, errRedirect) {
-			reason, class = "not uploaded: redirected", telemetry.ClassRedirect
+	if err == nil {
+		io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
+		response.Body.Close()
+	}
+	reason, class := "", ""
+	switch {
+	case file.err != nil:
+		reason, class = "not uploaded: size changed while read", telemetry.ClassError
+	case errors.Is(err, errRedirect):
+		reason, class = "not uploaded: redirected", telemetry.ClassRedirect
+	case err != nil:
+		class = uploadFailure(ctx, err)
+		reason = "not uploaded: request failed (" + class + ")"
+	case response.StatusCode != http.StatusNoContent:
+		reason, class = "not uploaded: status "+strconv.Itoa(response.StatusCode), telemetry.ClassStatus
+	}
+	if reason != "" {
+		run.receiver.logger.Printf("run %s: S3 output %s %s", run.task.Wherry.Run, output.Name, reason)
+		return storedOutput{output: listed, reason: reason}, class
+	}
+	listed.SHA256, listed.Key = hex.EncodeToString(sum.Sum(nil)), key
+	return storedOutput{output: listed}, ""
+}
+
+// postForm is the multipart/form-data body of an upload under a POST policy, of a length known before it is read.
+type postForm struct {
+	body        io.Reader
+	length      int64
+	contentType string
+}
+
+// newPostForm builds the form of an upload: fields, key replaced by key, then the file part, of exactly size bytes from
+// file. No other field goes in: the policy covers none, and the store refuses a field it does not cover.
+func newPostForm(fields map[string]string, key string, file io.Reader, size int64) (*postForm, error) {
+	var buffer bytes.Buffer
+	writer := multipart.NewWriter(&buffer)
+	for _, name := range slices.Sorted(maps.Keys(fields)) {
+		value := fields[name]
+		if name == "key" {
+			value = key
 		}
-		run.receiver.logger.Printf("run %s: S3 output %s %s", run.task.Wherry.Run, output.Name, reason)
-		return storedOutput{reason: reason}, class
+		if err := writer.WriteField(name, value); err != nil {
+			return nil, err
+		}
 	}
-	io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
-	response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		reason := "not uploaded: status " + strconv.Itoa(response.StatusCode)
-		run.receiver.logger.Printf("run %s: S3 output %s %s", run.task.Wherry.Run, output.Name, reason)
-		return storedOutput{reason: reason}, telemetry.ClassStatus
+	if _, err := writer.CreateFormFile("file", path.Base(key)); err != nil {
+		return nil, err
 	}
-	return storedOutput{output: wire.ReturnedOutput{
-		Name: output.Name, SHA256: hex.EncodeToString(sum.Sum(nil)), Size: output.Size,
-		Key: wire.S3OutputKey(run.task.Wherry.Tenant, run.task.Wherry.Run, output.Name),
-	}}, ""
+	headLength := buffer.Len()
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	head, trailer := buffer.Bytes()[:headLength], buffer.Bytes()[headLength:]
+	return &postForm{
+		body:        io.MultiReader(bytes.NewReader(head), file, bytes.NewReader(trailer)),
+		length:      int64(len(head)) + size + int64(len(trailer)),
+		contentType: writer.FormDataContentType(),
+	}, nil
+}
+
+// errSizeChanged is a sizedReader's error for a body of other than its size.
+var errSizeChanged = errors.New("the file's size changed while read")
+
+// sizedReader reads exactly size bytes of body, and fails with errSizeChanged, kept in err, when body ends short of size
+// or holds a byte beyond it: a file that changed between its listing and its stream is not uploaded, in full or in part.
+type sizedReader struct {
+	body       io.Reader
+	size, read int64
+	err        error
+}
+
+func (r *sizedReader) Read(p []byte) (int, error) {
+	if r.read == r.size {
+		var extra [1]byte
+		if n, _ := r.body.Read(extra[:]); n > 0 {
+			r.err = errSizeChanged
+			return 0, r.err
+		}
+		return 0, io.EOF
+	}
+	if int64(len(p)) > r.size-r.read {
+		p = p[:r.size-r.read]
+	}
+	n, err := r.body.Read(p)
+	r.read += int64(n)
+	if err == io.EOF {
+		if r.read < r.size {
+			r.err = errSizeChanged
+			return n, r.err
+		}
+		err = nil
+	}
+	return n, err
 }
 
 // readOutcome reads and decodes an outcome file of at most the pool's output limit. Any outcome but a TaskStatus of a state an

@@ -188,8 +188,7 @@ type fileInput struct {
 }
 
 type outputInput struct {
-	Name    string `json:"name" jsonschema:"relative path the agent must write in WHERRY_OUTPUT_DIR; the run fails without it"`
-	Storage string `json:"storage,omitempty" jsonschema:"s3 to return the output through the pool's bucket, up to 5 GiB, instead of the feed"`
+	Name string `json:"name" jsonschema:"relative path the agent must write in WHERRY_OUTPUT_DIR; the run fails without it; one over the pool's output limit returns through the pool's bucket, up to 5 GiB, when the pool has storage and the host a storage credential"`
 }
 
 type submitInput struct {
@@ -644,28 +643,22 @@ func droppedFields(next mcp.MethodHandler) mcp.MethodHandler {
 		if !ok || method != "tools/call" || call.Params == nil || call.Params.Name != "submit" {
 			return next(ctx, method, request)
 		}
+		type dropped struct {
+			Storage  jsontext.Value `json:"storage"`
+			Required jsontext.Value `json:"required"`
+		}
 		var arguments struct {
-			Inputs []struct {
-				Storage jsontext.Value `json:"storage"`
-			} `json:"inputs"`
-			Outputs []struct {
-				Required jsontext.Value `json:"required"`
-			} `json:"outputs"`
+			Inputs  []dropped `json:"inputs"`
+			Outputs []dropped `json:"outputs"`
 		}
 		hint := ""
 		if json.Unmarshal(call.Params.Arguments, &arguments) == nil {
 			switch {
-			case slices.ContainsFunc(arguments.Inputs, func(input struct {
-				Storage jsontext.Value `json:"storage"`
-			}) bool {
-				return input.Storage != nil
-			}):
+			case slices.ContainsFunc(arguments.Inputs, func(input dropped) bool { return input.Storage != nil }):
 				hint = "inputs move to S3 by size; drop :s3"
-			case slices.ContainsFunc(arguments.Outputs, func(output struct {
-				Required jsontext.Value `json:"required"`
-			}) bool {
-				return output.Required != nil
-			}):
+			case slices.ContainsFunc(arguments.Outputs, func(output dropped) bool { return output.Storage != nil }):
+				hint = "outputs move to S3 by size; drop :s3"
+			case slices.ContainsFunc(arguments.Outputs, func(output dropped) bool { return output.Required != nil }):
 				hint = "outputs are always required; drop :required"
 			}
 		}
@@ -716,7 +709,7 @@ func submitFromInput(input submitInput, openInput func(string) (*os.File, error)
 		submission.Credentials = append(submission.Credentials, wire.TaskCredential{Name: credential.Name, Env: credential.Env, File: credential.File})
 	}
 	for _, output := range input.Outputs {
-		submission.Outputs = append(submission.Outputs, wire.ExpectedOutput{Name: output.Name, Storage: output.Storage})
+		submission.Outputs = append(submission.Outputs, wire.ExpectedOutput{Name: output.Name})
 	}
 	for _, inputFile := range input.Inputs {
 		file, err := openInput(inputFile.Path)

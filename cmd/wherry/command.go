@@ -357,14 +357,14 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return nil
 	})
 	var outputs []wire.ExpectedOutput
-	flags.Func("output", "NAME[:s3]: a file the agent must leave in its output directory, returned through the pool's bucket with :s3 (repeatable)", outputFlag(&outputs))
+	flags.Func("output", "NAME: a file the agent must leave in its output directory; one over the pool's output limit returns through the pool's bucket (repeatable)", outputFlag(&outputs))
 	startBy := flags.String("start-by", busclient.DefaultStartBy.String(), "task_started_by: an RFC 3339 time or a Go duration from now by which the agent's job starts")
 	endBy := flags.String("end-by", busclient.DefaultEndBy.String(), "task_ended_by: an RFC 3339 time or a Go duration from now by which the task ends")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry host submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE[@REF]|. [--git-path PATH] [--git-changes bundle|patch|none] | --continue RUN_ID] [--input FILE]... [--credential NAME|NAME:file=FILE|NAME:env=VAR]... [--output NAME[:s3]]... [--start-by TIME|DURATION] [--end-by TIME|DURATION] [--wait [--outputs-dir DIR]]")
+		return errors.New("usage: wherry host submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE[@REF]|. [--git-path PATH] [--git-changes bundle|patch|none] | --continue RUN_ID] [--input FILE]... [--credential NAME|NAME:file=FILE|NAME:env=VAR]... [--output NAME]... [--start-by TIME|DURATION] [--end-by TIME|DURATION] [--wait [--outputs-dir DIR]]")
 	}
 	if wasSet(flags, "outputs-dir") && !*wait {
 		return errors.New("--outputs-dir requires --wait")
@@ -459,21 +459,19 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	return nil
 }
 
-// outputFlag parses NAME[:s3] into outputs.
+// outputFlag parses NAME into outputs, refusing the suffixes earlier versions took with the hint for each.
 func outputFlag(outputs *[]wire.ExpectedOutput) func(string) error {
 	return func(value string) error {
 		fields := strings.Split(value, ":")
-		output := wire.ExpectedOutput{Name: fields[0]}
 		switch {
 		case slices.Contains(fields[1:], "required"):
 			return errors.New("outputs are always required; drop :required")
-		case len(fields) == 1:
-		case len(fields) == 2 && fields[1] == "s3":
-			output.Storage = wire.StorageS3
-		default:
-			return fmt.Errorf("want NAME[:s3], not %q", value)
+		case slices.Contains(fields[1:], "s3"):
+			return errors.New("outputs move to S3 by size; drop :s3")
+		case len(fields) != 1:
+			return fmt.Errorf("want NAME, not %q", value)
 		}
-		*outputs = append(*outputs, output)
+		*outputs = append(*outputs, wire.ExpectedOutput{Name: fields[0]})
 		return nil
 	}
 }

@@ -947,7 +947,7 @@ func (r *runView) model() string {
 
 // markers maps each redaction marker the run's key gives to its name: the credentials this host configures, the
 // credentials the persisted submission supplied, among them those read from a catalog variable with no configuration
-// entry, the run's task credentials, and its S3 objects' URLs. The feed carries only the markers.
+// entry, the run's task credentials, its S3 inputs' URLs and its POST policy. The feed carries only the markers.
 func (h *Host) markers(local *runRecord) map[string]string {
 	if local == nil || len(local.RedactionKey) != 32 {
 		return nil
@@ -959,8 +959,8 @@ func (h *Host) markers(local *runRecord) map[string]string {
 	for _, input := range local.S3Inputs {
 		names = append(names, signed.S3InputValue(input))
 	}
-	for _, output := range local.S3Outputs {
-		names = append(names, signed.S3OutputValue(output))
+	if local.Policy {
+		names = append(names, signed.S3PolicyValue)
 	}
 	markers := map[string]string{}
 	for _, name := range names {
@@ -1449,7 +1449,8 @@ func (h *Host) awaitRun(waitCtx context.Context, runID string) (AwaitResult, err
 // verifiedOutputs joins, for each output the result lists and for its reply, the chunks its own attempt wrote, and
 // verifies them against the listed size and SHA-256. An output or reply whose chunks have a gap, an overlap or a
 // duplicate index, or whose bytes do not match, is rejected. It also returns the S3 outputs the result lists, and the
-// outputs it lists as not returned.
+// outputs it lists as not returned. A result whose output lists are not a set this host can write is refused whole,
+// before anything is written from it, as one rejected entry named result.
 func (r *runView) verifiedOutputs(result *wire.Result) ([]Output, []wire.ReturnedOutput, []wire.UnreturnedOutput, []wire.UnreturnedOutput, *Reply) {
 	var manifest struct {
 		Outputs     []wire.ReturnedOutput   `json:"outputs"`
@@ -1461,7 +1462,11 @@ func (r *runView) verifiedOutputs(result *wire.Result) ([]Output, []wire.Returne
 	if json.Unmarshal(result.Task.Metadata, &manifest) != nil {
 		return nil, nil, nil, nil, nil
 	}
-	joined := slices.DeleteFunc(slices.Clone(manifest.Outputs), func(output wire.ReturnedOutput) bool { return output.Name == wire.ReplyArtifact })
+	if why := checkOutputLists(r.h.tenant, result.Wherry.Run, manifest.Outputs, manifest.S3Outputs, manifest.NotReturned); why != "" {
+		r.h.logger.Printf("run %s: result refused: %s", r.run, why)
+		return nil, nil, nil, []wire.UnreturnedOutput{{Name: wire.ResultArtifact, Reason: "rejected by this host: " + why}}, nil
+	}
+	joined := slices.Clone(manifest.Outputs)
 	var reply *Reply
 	if manifest.Reply != nil {
 		reply = &Reply{Cut: manifest.Reply.Cut}
@@ -1521,6 +1526,46 @@ func (r *runView) verifiedOutputs(result *wire.Result) ([]Output, []wire.Returne
 		}
 	}
 	return verified, manifest.S3Outputs, manifest.NotReturned, rejected, reply
+}
+
+// checkOutputLists says why a result's output lists are not a set this host writes, or "": at most wire.MaxOutputs
+// names across the three lists; each name an output is listed under, inline or S3, a valid output name, not reserved,
+// appearing once, and no such name an ancestor of another; each S3 entry at the key of its name under run's prefix in
+// tenant's bucket, with a lowercase hex SHA-256 and a size of at most wire.MaxS3Object.
+func checkOutputLists(tenant, run string, inline, stored []wire.ReturnedOutput, unreturned []wire.UnreturnedOutput) string {
+	if len(inline)+len(stored)+len(unreturned) > wire.MaxOutputs {
+		return "the result lists more than 256 outputs"
+	}
+	names := map[string]bool{}
+	for _, listed := range slices.Concat(inline, stored) {
+		switch {
+		case !wire.ValidOutputName(listed.Name):
+			return "an output name is not a relative path of portable file names"
+		case listed.Name == wire.ReplyFile || wire.ReservedArtifact(listed.Name):
+			return "an output takes a reserved name"
+		case names[listed.Name]:
+			return "an output is listed twice"
+		}
+		names[listed.Name] = true
+	}
+	for name := range names {
+		for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
+			if names[parent] {
+				return "an output is listed under another's name"
+			}
+		}
+	}
+	for _, listed := range stored {
+		switch {
+		case listed.Key != wire.S3OutputKey(tenant, run, listed.Name):
+			return "an S3 output is listed at a key outside the run's prefix"
+		case !wire.ValidHash(listed.SHA256):
+			return "an S3 output's SHA-256 is not lowercase hex"
+		case listed.Size < 0 || listed.Size > wire.MaxS3Object:
+			return "an S3 output's size is outside 0 to 5 GiB"
+		}
+	}
+	return ""
 }
 
 // WriteOutputs writes a run's verified outputs beneath dir, by default <state_dir>/runs/<run>/outputs, and
