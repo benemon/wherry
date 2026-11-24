@@ -340,6 +340,7 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err := wire.ValidateRequirements(input.Selector); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
+	asked := input.Outputs
 	var continued continuation
 	if input.Continue != "" {
 		if input.Git != nil || input.GitChanges != "" {
@@ -373,6 +374,12 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	}
 	outputs := input.Outputs
 	if input.Git != nil {
+		// An S3 changes file stays: it is the route for a bundle over output_limit.
+		for _, output := range asked {
+			if output.Storage == "" && (output.Name == wire.GitBundle || output.Name == wire.GitPatch) {
+				return SubmitResult{}, fmt.Errorf("%w: the changes file comes back by default with --git; drop --output %s", ErrInvalidInput, output.Name)
+			}
+		}
 		git := *input.Git
 		git.Remote = sshRemote(git.Remote)
 		// The entry whose URL is the longest prefix of the remote gives the clone its credential and host key.

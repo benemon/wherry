@@ -1459,9 +1459,12 @@ the 8 KiB bound of its host key file. A remote under no entry clones without a
 credential, and an `ssh` remote under no entry with a host key is refused.
 With a host key, no input may be named `known_hosts`.
 
-`--git` adds `changes.bundle` to the expected outputs, unless `--output`
-names it already; `--git-changes patch` adds `changes.patch` instead, and
-`--git-changes none` adds nothing. A receiver never requires a git input's
+`--git` adds `changes.bundle` to the expected outputs; `--git-changes patch`
+adds `changes.patch` instead, and `--git-changes none` adds nothing. Beside
+`--git`, `--output changes.bundle` and `--output changes.patch` are refused
+with `the changes file comes back by default with --git; drop --output
+changes.bundle`, as is `--output changes.patch` beside `--continue`; the
+`:s3` form below stays. A receiver never requires a git input's
 changes file, since a run that commits nothing leaves none, and charges it
 against the pool's `output_limit` after every other output, so a large
 bundle is the output that exceeds the limit, never a declared one. On a pool
