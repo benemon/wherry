@@ -229,10 +229,13 @@ A submission is the task of one run.
   `raw`, `url` and `data`. Receivers reject a `url` part
   ([admission](#admission)).
 - Each `raw` and `data` part is an [input file](#inputs-and-outputs). Its
-  `filename` is required and is a file name: at most 255 bytes of letters,
-  digits, `.`, `_` and `-`, whose first character is not `.`. A `raw` part is
+  `filename` is required and is a relative path of file names joined by `/`,
+  at most 512 bytes, each segment letters, digits, `.`, `_` and `-` whose
+  first character is not `.`: an input carries its path in `filename` as an
+  output carries its path in `artifactId`. A `raw` part is
   delivered as its bytes under `filename`, and a `data` part as its JSON under
-  `filename` with `.json` added. The delivered names are unique. The signed
+  `filename` with `.json` added. The delivered names are unique, and none is a
+  directory of another. The signed
   submission is at most the pool's recorded `record_limit` bytes, the
   broker's record limit for the pool's task topics, and the `raw` and `data`
   parts together hold at most the smallest `inline_limit` the matching
@@ -283,8 +286,9 @@ A submission is the task of one run.
   through the pool's bucket ([S3 inputs and outputs](#s3-inputs-and-outputs));
   absent, it returns on the transcript topic.
 - `s3_inputs` lists files the host uploaded to the pool's bucket, each
-  `{name, size, sha256}`: a file name distinct from every input file's,
-  appearing once, the object's size in bytes, at most 5 GiB, and its
+  `{name, size, sha256}`: a relative path as an input file's `filename` is,
+  distinct from every input file's and nesting under none, appearing once,
+  the object's size in bytes, at most 5 GiB, and its
   lowercase hex SHA-256. It holds no URL. The message's parts and
   `s3_inputs` number at most 256 together.
 - `git` is the run's [git input](#git-input), optional. With a `host_key`,
@@ -331,9 +335,10 @@ A submission is the task of one run.
   the upload grace, each at most 7 days. A host refuses to presign for a
   `task_ended_by` that has passed, grace or no grace.
 
-A submission whose input names repeat, among its input files, its S3 inputs
-and `known_hosts`, fails to decode, so a receiver drops it at
-[admission](#admission) step 2.
+A submission whose input names repeat, or whose names nest one under another,
+among its input files, its S3 inputs and `known_hosts`, fails to decode, so a
+receiver drops it at [admission](#admission) step 2. `previous/` is reserved
+for a later non-git continue.
 
 ## Cancel
 
