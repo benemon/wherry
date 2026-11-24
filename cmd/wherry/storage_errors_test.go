@@ -119,8 +119,9 @@ func TestSubmitStorageErrorAndLogShowMarkersForTheStorageKeys(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// One byte over profile lab's inline limit, so submit carries the input through S3.
 	data := filepath.Join(dir, "dataset.bin")
-	if err := os.WriteFile(data, []byte("data"), 0o600); err != nil {
+	if err := os.WriteFile(data, make([]byte, 49153), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
@@ -147,7 +148,7 @@ func TestSubmitStorageErrorAndLogShowMarkersForTheStorageKeys(t *testing.T) {
 			}
 			defer host.Close()
 			var stdout, stderr bytes.Buffer
-			err = runSubmit(ctx, host, []string{"--prompt", "x", "--input", data + ":s3"}, &stdout, &stderr)
+			err = runSubmit(ctx, host, []string{"--prompt", "x", "--input", data}, &stdout, &stderr)
 			marker := signed.RedactionMarker(nil, tc.accessName)
 			if want := "upload S3 input dataset.bin: no access key " + marker; err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("submit = %v; want %q", err, want)
