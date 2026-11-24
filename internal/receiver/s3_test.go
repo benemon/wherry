@@ -143,14 +143,27 @@ func startStore(t *testing.T, start func(http.Handler) *httptest.Server) *store 
 	return s
 }
 
-// roots is the pool a receiver's ca_cert holding the store's CA builds: the system roots plus it.
+// roots is the pool a receiver's ca_cert holding the store's CA builds: the system roots plus it; nil, the system
+// roots alone, for a store over plain HTTP, which presents no certificate.
 func (s *store) roots(t *testing.T) *x509.CertPool {
 	t.Helper()
-	roots, err := operator.RootPool(string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.server.Certificate().Raw})))
+	certificate := s.server.Certificate()
+	if certificate == nil {
+		return nil
+	}
+	roots, err := operator.RootPool(string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw})))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return roots
+}
+
+// trusting gives f's receiver the upload client a ca_cert holding the store's CA builds, as s3Fixture does for the
+// fixtures it builds; the client keeps its redirect policy.
+func (s *store) trusting(t *testing.T, f fixture) fixture {
+	t.Helper()
+	f.receiver.storage = storageClient(s.roots(t))
+	return f
 }
 
 // readPost reads a policy upload: its fields, then the file, which must come last, as S3 requires.
@@ -230,10 +243,7 @@ func s3Terms(endpoint string) operator.Terms {
 
 func s3Fixture(t *testing.T, s *store, stream []string, outputs []pluginsdk.Output) fixture {
 	t.Helper()
-	f := newFixtureWith(t, stream, s3Terms(s.endpoint()), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: stream, outputs: outputs}})
-	// The receiver trusts the store as a ca_cert holding its CA would have it: the upload client keeps its redirect policy.
-	f.receiver.storage = storageClient(s.roots(t))
-	return f
+	return s.trusting(t, newFixtureWith(t, stream, s3Terms(s.endpoint()), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: stream, outputs: outputs}}))
 }
 
 // withS3 declares an S3 input and report.pdf, which its size sends through the bucket.
