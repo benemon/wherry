@@ -222,6 +222,11 @@ and in the bytes of the trace-topic records.
 
 ## Reading the topics
 
+The [operator view](operator-view.md#the-api) reads a run's spans from its
+tenant's topic for its drill-down, as timing only: it takes no run state,
+failure or S3 fact from a span, and passes span names, attribute keys and
+values through an allowlist of what its model knows.
+
 The records are standard OTLP, so a collector reads them with its Kafka
 receiver, under a principal granted READ and DESCRIBE on the topics it
 follows:

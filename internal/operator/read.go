@@ -44,8 +44,80 @@ type read struct {
 	// start and end are the highest log start and last stable offsets listed for the topic, start raised by those its
 	// fetches report.
 	start, end int64
+	// next is the offset the next read of the topic resumes at: end once the read reaches it, else just past the last
+	// record kept when the budget cut it short.
+	next int64
 	// once ends the read at its first fetch of the partition.
 	once bool
+	// budget bounds the records a ReadRanges call keeps over every topic it reads; nil is no bound.
+	budget *budget
+}
+
+// budget is what a bounded read may still keep: a record count and the bytes of their values. Spent, it ends every
+// read of its call.
+type budget struct {
+	records int
+	bytes   int64
+	spent   bool
+}
+
+// keep reports whether a record of size bytes fits the budget, taking it when it does and spending the budget when it
+// does not. A record is never split, so the first that does not fit ends the batch before it.
+func (b *budget) keep(size int) bool {
+	if b == nil {
+		return true
+	}
+	if b.spent || b.records <= 0 || b.bytes <= 0 {
+		b.spent = true
+		return false
+	}
+	b.records--
+	b.bytes -= int64(size)
+	return true
+}
+
+// Bounds limit one ReadRanges call: at most Records records and Bytes of record values over every topic it reads. A
+// call with a zero bound reads to each topic's end. A record larger than Bytes alone is still read, as the first of a
+// batch.
+type Bounds struct {
+	Records int
+	Bytes   int64
+}
+
+// Range is one topic's part of a ReadRanges: its records from the offset asked for, the log start and last stable
+// offsets as ReadRange returns them, and Next, the offset the next read resumes at, which is End when the read reached
+// it and just past the last record returned when the bounds cut it short. Err is the topic's own failure.
+type Range struct {
+	Records    []*kgo.Record
+	Start, End int64
+	Next       int64
+	Err        error
+}
+
+// ReadRanges is ReadRange for several topics at once, each from its offset, listing their offsets in one request of
+// each kind and fetching them together, keeping at most bounds over all of them. A topic's own failure is its Range's;
+// the error returned fails every topic. The caller resumes each topic at its Next: a read cut short by the bounds
+// resumes below the last stable offset it listed, and one that reached it at that offset, never past it.
+func (r *Reader) ReadRanges(ctx context.Context, offsets map[string]int64, bounds Bounds) (map[string]Range, error) {
+	var limit *budget
+	if bounds.Records > 0 || bounds.Bytes > 0 {
+		limit = &budget{records: bounds.Records, bytes: bounds.Bytes}
+		if limit.records <= 0 {
+			limit.records = int(^uint(0) >> 1)
+		}
+		if limit.bytes <= 0 {
+			limit.bytes = int64(^uint64(0) >> 1)
+		}
+	}
+	reads, err := r.read(ctx, offsets, false, limit)
+	if err != nil {
+		return nil, err
+	}
+	ranges := make(map[string]Range, len(reads))
+	for topic, current := range reads {
+		ranges[topic] = Range{Records: current.records, Start: current.start, End: current.end, Next: current.next, Err: current.err}
+	}
+	return ranges, nil
 }
 
 // NewReader returns a Reader that lists offsets and reads through a client built from client's options. client must be
@@ -154,6 +226,11 @@ func (r *Reader) ReadAt(ctx context.Context, topic string, offset int64) (*kgo.R
 // fetching them together, or with once as ReadAt does. A topic's own failure is its read's error; the error returned
 // fails every topic.
 func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64, once bool) (map[string]*read, error) {
+	return r.read(ctx, offsets, once, nil)
+}
+
+// read is readFrom keeping at most limit over every topic; nil reads each to its end.
+func (r *Reader) read(ctx context.Context, offsets map[string]int64, once bool, limit *budget) (map[string]*read, error) {
 	reads := map[string]*read{}
 	if len(offsets) == 0 {
 		// kadm lists every topic when it is given none.
@@ -192,7 +269,7 @@ func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64, once bo
 		}
 	}
 	for topic, offset := range offsets {
-		current := &read{remaining: map[int32]int64{}, partitions: map[int32]kgo.Offset{}, done: make(chan struct{}), once: once}
+		current := &read{remaining: map[int32]int64{}, partitions: map[int32]kgo.Offset{}, done: make(chan struct{}), once: once, budget: limit}
 		reads[topic] = current
 		for partition, end := range ends[topic] {
 			start, ok := starts.Lookup(topic, partition)
@@ -208,7 +285,12 @@ func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64, once bo
 				current.partitions[partition] = kgo.NewOffset().At(max(start.Offset, offset))
 			}
 		}
+		current.next = current.end
 		if current.err != nil || len(current.remaining) == 0 {
+			close(current.done)
+		} else if limit != nil && limit.spent {
+			// An earlier call's budget is never shared; a spent one here means a bound of zero, which reads nothing.
+			current.next = max(current.start, offset)
 			close(current.done)
 		}
 	}
@@ -394,6 +476,12 @@ func (r *Reader) fetch(ctx context.Context) {
 		current.start = max(current.start, partition.LogStartOffset)
 		for _, record := range partition.Records {
 			if record.Offset < end && !record.Attrs.IsControl() {
+				if !current.budget.keep(len(record.Value)) {
+					// The budget is spent: the read resumes at this record, and the records of the fetch past it, this
+					// partition's and every other's, are fetched again then.
+					current.next = record.Offset
+					break
+				}
 				current.records = append(current.records, record)
 			}
 			if record.Offset >= end-1 {
@@ -407,6 +495,19 @@ func (r *Reader) fetch(ctx context.Context) {
 			r.finish(partition.Topic, current, nil)
 		}
 	})
+	// A spent budget ends every read of its call, each resuming where it stopped.
+	for topic, current := range r.reads {
+		if current.budget != nil && current.budget.spent {
+			if len(current.records) > 0 && current.next == current.end {
+				current.next = current.records[len(current.records)-1].Offset + 1
+			} else if len(current.records) == 0 && current.next == current.end {
+				for _, offset := range current.partitions {
+					current.next = offset.EpochOffset().Offset
+				}
+			}
+			r.finish(topic, current, nil)
+		}
+	}
 }
 
 // Load folds wherry.operator as client's principal; it fails closed.

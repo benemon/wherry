@@ -780,6 +780,15 @@ var ErrNewerRecord = errors.New("wherry.operator holds records a later wherry re
 // load folds wherry.operator, which is append-only and read from offset 0, so an
 // undecodable record leaves no state this release can trust.
 func load(raw []rawRecord) (State, error) {
+	records, err := decode(raw)
+	if err != nil {
+		return State{}, err
+	}
+	return Fold(records)
+}
+
+// decode is raw's records with their offsets as At, or the error load fails with.
+func decode(raw []rawRecord) ([]Record, error) {
 	var records []Record
 	var undecodable []string
 	allNewer := true
@@ -796,11 +805,11 @@ func load(raw []rawRecord) (State, error) {
 	}
 	if len(undecodable) > 0 {
 		if allNewer {
-			return State{}, fmt.Errorf("%w; upgrade this wherry: %s", ErrNewerRecord, strings.Join(undecodable, "; "))
+			return nil, fmt.Errorf("%w; upgrade this wherry: %s", ErrNewerRecord, strings.Join(undecodable, "; "))
 		}
-		return State{}, fmt.Errorf("this wherry release cannot read wherry.operator; reset the deployment: %s", strings.Join(undecodable, "; "))
+		return nil, fmt.Errorf("this wherry release cannot read wherry.operator; reset the deployment: %s", strings.Join(undecodable, "; "))
 	}
-	return Fold(records)
+	return records, nil
 }
 
 func validateTerms(terms Terms) error {
