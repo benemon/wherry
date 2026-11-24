@@ -623,7 +623,9 @@ func TestTheEnvelopeCarriesPresignedURLsForTheRunsObjects(t *testing.T) {
 	}
 }
 
-func TestPutURLExpiresAtTheTurnsEndBy(t *testing.T) {
+// A PUT URL lasts operator.UploadGrace past task_ended_by: the store accepts it after end-by, and its signed lifetime
+// ends at the grace.
+func TestPutURLExpiresAtTheGraceAfterEndBy(t *testing.T) {
 	f, o, receiver := storageFixture(t)
 	task, _ := submitS3(t, f, receiver, 4*time.Second)
 	_, values, err := open(t, f, task.submission.Wherry.Run, f.poolKeys["pool-s3"])
@@ -631,11 +633,29 @@ func TestPutURLExpiresAtTheTurnsEndBy(t *testing.T) {
 		t.Fatal(err)
 	}
 	put := values.S3Outputs["out/report.pdf"]
-	time.Sleep(time.Until(time.Unix(task.submission.Wherry.TaskEndedBy, 0).Add(2 * time.Second)))
-	request, _ := http.NewRequest(http.MethodPut, put, strings.NewReader("late"))
-	if response, err := o.client.Do(request); err != nil || response.StatusCode != http.StatusForbidden {
-		t.Fatalf("PUT after task_ended_by answered %v, %v; want forbidden", response.Status, err)
+	parsed, err := url.Parse(put)
+	if err != nil {
+		t.Fatal(err)
 	}
+	signed, err := time.Parse("20060102T150405Z", parsed.Query().Get("X-Amz-Date"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seconds, err := strconv.Atoi(parsed.Query().Get("X-Amz-Expires"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	endBy := time.Unix(task.submission.Wherry.TaskEndedBy, 0)
+	if expires := signed.Add(time.Duration(seconds) * time.Second); expires.Before(endBy.Add(operator.UploadGrace)) || expires.After(endBy.Add(operator.UploadGrace+2*time.Second)) {
+		t.Fatalf("PUT URL expires at %v; want task_ended_by %v plus the grace %v", expires, endBy, operator.UploadGrace)
+	}
+	time.Sleep(time.Until(endBy.Add(2 * time.Second)))
+	request, _ := http.NewRequest(http.MethodPut, put, strings.NewReader("late"))
+	response, err := o.client.Do(request)
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("PUT after task_ended_by, within the grace, answered %v, %v; want OK", response, err)
+	}
+	response.Body.Close()
 }
 
 func TestS3UseIsRefusedBeforePublishing(t *testing.T) {
