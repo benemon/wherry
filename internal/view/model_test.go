@@ -103,13 +103,13 @@ func TestRebuildAuthorisation(t *testing.T) {
 	if r := summaryOf(t, s, l1); r.State != string(wire.TaskStateCompleted) || r.Receiver != receiverB || r.Host != hostA {
 		t.Errorf("run completed by a since-removed receiver under its earlier key: %+v", r)
 	}
-	if d, _ := v.RunDetail(l1); d.Echoes[0].Signer != operator.ReceiverPrincipal(receiverB) || d.Attempts[0].Events[1].Signer != operator.ReceiverPrincipal(receiverB) {
+	if d, _ := v.RunDetail(l1); len(d.Echoes) != 1 || len(d.Attempts) != 1 || len(d.Attempts[0].Events) != 2 || d.Echoes[0].Signer != operator.ReceiverPrincipal(receiverB) || d.Attempts[0].Events[1].Signer != operator.ReceiverPrincipal(receiverB) {
 		t.Errorf("signers of a since-removed receiver's run: %+v %+v", d.Echoes, d.Attempts)
 	}
 	if r := summaryOf(t, s, l6); !r.Terminal || r.Receiver != receiverB {
 		t.Errorf("status an ended receiver signed after its end, the accepted residual: %+v", r)
 	}
-	if d, _ := v.RunDetail(l6); d.Attempts[0].Events[0].Signer != operator.ReceiverPrincipal(receiverB) {
+	if d, _ := v.RunDetail(l6); len(d.Attempts) != 1 || len(d.Attempts[0].Events) != 1 || d.Attempts[0].Events[0].Signer != operator.ReceiverPrincipal(receiverB) {
 		t.Errorf("the residual is not labelled with its signer: %+v", d.Attempts)
 	}
 	if r := summaryOf(t, s, l2); r.State != string(wire.TaskStateCompleted) || !r.Terminal {
@@ -120,7 +120,7 @@ func TestRebuildAuthorisation(t *testing.T) {
 			t.Errorf("%s is absent: %+v", name, r)
 		}
 	}
-	if d, _ := v.RunDetail(l4); d.Cancels[0].Signer != operator.TenantPrincipal(tenantA, hostA) {
+	if d, _ := v.RunDetail(l4); len(d.Cancels) != 1 || d.Cancels[0].Signer != operator.TenantPrincipal(tenantA, hostA) {
 		t.Errorf("cancel signer: %+v", d.Cancels)
 	}
 	if s.Counts["refused"] != 5 || s.Counts["pending"] != 0 {
