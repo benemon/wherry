@@ -342,9 +342,8 @@ func TestReadinessFlapPassesTheProfileTurn(t *testing.T) {
 		t.Fatalf("later task was not claimed after the readiness flap; logs:\n%s", f.logs.String())
 	}
 	f.await(t, testRun("run-a"), completed)
-	if held := f.receiver.held(); held != 0 {
-		t.Fatalf("held records after the later task completed=%d, want 0", held)
-	}
+	// The run publishes its terminal before settling its record and releasing the hold.
+	waitFor(t, f, func() bool { return f.receiver.held() == 0 })
 }
 
 func TestWaiterRechecksReadinessAfterTakingTheProfileTurn(t *testing.T) {
