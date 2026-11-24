@@ -995,7 +995,8 @@ func TestCleanupDeletesTheRunsPrefixOnDemand(t *testing.T) {
 }
 
 func TestAnEnvelopeOverItsLimitPublishesNothing(t *testing.T) {
-	f, _, _ := storageFixture(t)
+	// The limit is the host's own check, so the in-process store serves; 200 long-named uploads strain a real one.
+	f, _, _ := fakeStorageFixture(t)
 	// Each S3 input's presigned URL is a few hundred bytes of the envelope; 200 of them pass its limit.
 	var inputs []S3File
 	for i := range 200 {
