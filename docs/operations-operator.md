@@ -776,6 +776,25 @@ a pool's terms or a broker or topic limit: receivers apply both within 15
 seconds, and `check` reports a receiver configuration or a record they no
 longer fit.
 
+Once every check passes, it lists what removal left behind, since no wherry
+command deletes a topic or group: the feed, transcript, trace and host key
+topics of each ended tenant, the key topic of each ended host of a live
+tenant, the key and progress topics of each ended receiver, and each pool's
+signature task topics that no live receiver's recorded profile uses, with the
+offsets each retains.
+[`wherry operator check`](commands.md#wherry-operator-check) gives the lines.
+Retention empties the data topics on its own: a feed and transcript topic
+within 30 days of a record, a trace topic within 7, a task and progress topic
+within the pool's bounds. The key topics keep their records forever. An ended
+receiver's key topic, marked `kept: holds keys`, must stay: hosts and
+receivers reading the pool's retained records verify them against it. Every
+other listed topic a Kafka admin may delete with the Admin API once no
+retained work needs it, as
+[Removal and retained data](security.md#removal-and-retained-data) lists; a
+deleted topic drops from the report. Nothing in the report fails the check.
+The report is read while no other operator command runs: run `check` again
+with none running before you delete a topic it lists.
+
 ## Reset a deployment
 
 Every reader of `wherry.operator` stops while any record on it fails to
@@ -838,5 +857,6 @@ To offboard:
 3. Retry a failed removal command to complete its remaining work.
 
 An ended tenant name cannot be reused.
-Removal keeps retained data.
+Removal keeps retained data; `wherry operator check` lists the topics it left
+and what each retains.
 See [Removal and retained data](security.md#removal-and-retained-data).

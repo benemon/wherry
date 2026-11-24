@@ -400,7 +400,15 @@ func runOperator(args []string, stdout, stderr io.Writer) error {
 		if len(pos) != 1 {
 			return errors.New(operatorUsage[command])
 		}
-		return service.Check(ctx)
+		if err := service.Check(ctx); err != nil {
+			return err
+		}
+		// What removal left is reported only once every check passes; leftovers are no failure.
+		leftovers, err := service.Leftovers(ctx)
+		if err != nil {
+			return err
+		}
+		return writeLeftovers(stdout, leftovers)
 	default:
 		return errors.New("unknown operator command")
 	}
@@ -416,6 +424,35 @@ func hostBundleNext(out io.Writer, did, bundle string) error {
 // it before the receiver is started or restarted, as then says.
 func receiverBundleNext(out io.Writer, did, bundle, then string) error {
 	_, err := fmt.Fprintf(out, "%s %s; hand it to the receiver's platform, whose install guide's bundle step installs it, then %s the receiver\n", did, bundle, then)
+	return err
+}
+
+// writeLeftovers prints one line per leftover topic with its owner and retained offsets, marking the topics readers
+// still need, then a summary, or nothing when there are none.
+func writeLeftovers(out io.Writer, leftovers []operator.Leftover) error {
+	var offsets int64
+	var b strings.Builder
+	for _, leftover := range leftovers {
+		owner := "tenant=" + leftover.Tenant
+		switch {
+		case leftover.Pool != "":
+			owner = "pool=" + leftover.Pool + " unattributed"
+		case leftover.Receiver != "":
+			owner = "receiver=" + leftover.Receiver
+		case leftover.Host != "":
+			owner += " host=" + leftover.Host
+		}
+		fmt.Fprintf(&b, "leftover %s %s offsets=%d", leftover.Topic, owner, leftover.Offsets)
+		if leftover.Kept {
+			fmt.Fprint(&b, " kept: holds keys")
+		}
+		fmt.Fprintln(&b)
+		offsets += leftover.Offsets
+	}
+	if len(leftovers) > 0 {
+		fmt.Fprintf(&b, "leftovers: %d topics, %d offsets\n", len(leftovers), offsets)
+	}
+	_, err := io.WriteString(out, b.String())
 	return err
 }
 
