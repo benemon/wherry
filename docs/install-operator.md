@@ -28,12 +28,12 @@ wherry operator init --dir wherry-prod --broker kafka.example.com:9093 \
 cd wherry-prod
 ```
 
-Or pipe the password from a password manager, with `-` for the password file:
+Or pipe the password from a password manager, with `@-` as the password:
 
 ```sh
 op read "op://Infra/kafka-admin/password" | wherry operator init --dir wherry-prod \
   --broker kafka.example.com:9093 \
-  --super-user kafka-admin --super-user-password-file -
+  --super-user kafka-admin --super-user-password @-
 cd wherry-prod
 ```
 

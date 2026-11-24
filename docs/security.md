@@ -585,10 +585,12 @@ certificate`. A renewed CA is a new value in the configuration and a
 restart. A bundle or configuration keeping a CA setting of earlier releases
 is refused naming the key ([Upgrade](upgrade.md#broker-trust)).
 
-A failure to verify the broker's certificate says so once and names the one
-remedy: install the CA that signed it in the machine's trust store, or set
-`ca_cert` in the configuration, which the message names. Go's x509 error
-ends the message.
+A failure to verify the broker's certificate says so once and names the
+configuration file. With no `ca_cert` set, it names the one remedy: install
+the CA that signed it in the machine's trust store, or set `ca_cert` in that
+file. With one set, it says the certificate is signed neither by the
+machine's trust store nor by the CA in `ca_cert` in that file, and asks for
+no key already set. Go's x509 error ends the message.
 
 Go's own `SSL_CERT_FILE` and `SSL_CERT_DIR`, no wherry setting, reach every
 Go program the shell that sets them starts: with either set, Go on macOS and

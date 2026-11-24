@@ -137,17 +137,18 @@ The configuration of host `laptop`, setting every field:
 bundle: ~/.config/wherry/laptop.bundle
 host_key: ~/.config/wherry/laptop.key
 state_dir: ~/.local/state/wherry/laptop
-# The CA that signed the broker's and the bucket's certificates, when the machine's trust store lacks it.
+# The CA that signed the broker's and the bucket's certificates, when the machine's trust store lacks it. This value
+# is an example: a certificate that expired in 2021 and verifies nothing. Put the PEM of your CA here.
 ca_cert: |
   -----BEGIN CERTIFICATE-----
-  MIIBaDCCAQ2gAwIBAgIBATAKBggqhkjOPQQDAjAbMRkwFwYDVQQDExBFeGFtcGxl
-  IEthZmthIENBMB4XDTI2MDEwMTAwMDAwMFoXDTM2MDEwMTAwMDAwMFowGzEZMBcG
-  A1UEAxMQRXhhbXBsZSBLYWZrYSBDQTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IA
-  BFEgy9TOBEc4a9mgnw+3d4qvgVIU0/Fmc8rYHJV3j6w5mDh+2RhsPMfPemvvalyk
-  NjkTrsV9YHdVrC23oTKT1+ujQjBAMA4GA1UdDwEB/wQEAwICBDAPBgNVHRMBAf8E
-  BTADAQH/MB0GA1UdDgQWBBTk2lyUabR4G7GnUkG5jMjgRppaBDAKBggqhkjOPQQD
-  AgNJADBGAiEAhzRsT5hv5IVb4PPTDkywm8ODz0YaOKKW6TVKAqny25ACIQCOs0pI
-  XTLjEqjdY8QInPTKgfhfGCVcW/VdIWyidLG0yQ==
+  MIIBbjCCAROgAwIBAgIBATAKBggqhkjOPQQDAjAeMRwwGgYDVQQDExNFeGFtcGxl
+  IENBLCBleHBpcmVkMB4XDTIwMDEwMTAwMDAwMFoXDTIxMDEwMTAwMDAwMFowHjEc
+  MBoGA1UEAxMTRXhhbXBsZSBDQSwgZXhwaXJlZDBZMBMGByqGSM49AgEGCCqGSM49
+  AwEHA0IABKDgH46Z0Jb9ijDRVLk48an3uitOHZeFCHLHl//CE3czOjBUK8aYhf8i
+  KDOaGR3cXQMiPQtlhg4wWYT4iLg313ijQjBAMA4GA1UdDwEB/wQEAwICBDAPBgNV
+  HRMBAf8EBTADAQH/MB0GA1UdDgQWBBSnYcbbuJwFY2RscVcSxkcCI8YfxTAKBggq
+  hkjOPQQDAgNJADBGAiEAtMamhnY5+6DmGNUyq5lrYAwO9q3hy4UBzj6rpOxyY4QC
+  IQDwU2k2agkVRkUA3eGCeDwXqbGOQ+zWrjYwV85RVNKMHQ==
   -----END CERTIFICATE-----
 credentials:
   claude-oauth-token:

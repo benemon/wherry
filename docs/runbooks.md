@@ -409,9 +409,10 @@ Then:
   the `ca_cert` of its local configuration against the listener's
   certificate chain, and the bundle's principal and password against the
   cluster's SCRAM credentials. A failure to verify the broker's certificate
-  says so and names the remedy: install the CA that signed it in the
-  machine's trust store, or set `ca_cert` in the configuration it names
-  ([Broker and S3 trust](security.md#broker-and-s3-trust)).
+  says so and names the configuration: with no `ca_cert` set, install the
+  CA that signed it in the machine's trust store or set `ca_cert` there;
+  with one set, the certificate is signed neither by the trust store nor by
+  the CA in `ca_cert` ([Broker and S3 trust](security.md#broker-and-s3-trust)).
 - For `denied <op>`, run `wherry operator check` to confirm the ACLs the state
   calls for exist, and fix the bundle's credentials; until then the
   receiver restarts and exits again.

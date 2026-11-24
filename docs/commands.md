@@ -203,7 +203,7 @@ one.
 
 ```sh
 wherry operator init [--dir DIR] [--broker ADDR] \
-  [--super-user NAME --super-user-password-file FILE|-] \
+  [--super-user NAME --super-user-password @FILE|@-] \
   [--super-user-mechanism SCRAM-SHA-512|SCRAM-SHA-256] \
   [--ca-cert PEM|@FILE|@-]
 ```
@@ -226,22 +226,29 @@ Press Ctrl-C to stop before any files are written.
 If stderr is redirected, or prompts are otherwise unavailable, give every
 required flag.
 Missing flags are named in the error:
-`operator init has no terminal to prompt on; give --broker, --super-user, --super-user-password-file`.
+`operator init has no terminal to prompt on; give --broker, --super-user, --super-user-password`.
 
-`--super-user-password-file` takes a file path, or `-` to read the password
-from standard input, for example piped from a password manager. `-` is
-refused when standard input is a terminal; there the prompt is the route.
-Errors about `-` say standard input and never treat it as a path. The
-password is written nowhere, whichever way it arrives.
+`--super-user-password` takes `@FILE`, the file holding the password, or
+`@-` to read it from standard input, for example piped from a password
+manager, as every flag that takes a value reads them. The password as the
+flag's own text is refused, since a command line is visible to the other
+users of the machine: `--super-user-password takes @FILE or @-; a password
+on the command line is visible to other users`. `@-` is refused when
+standard input is a terminal; there the prompt is the route. Errors about
+`@-` say standard input and never treat it as a path. The password is
+written nowhere, whichever way it arrives.
 
 `--ca-cert` gives a CA the machine's trust store lacks, which the super-user
 dial and every later command verify the broker against: the PEM text, `@FILE`
 for a file's contents or `@-` for standard input, as every flag that takes a
-value reads it. A value from which Go reads no certificate, a bare path among
-them, is refused, and `--super-user-password-file -` and `--ca-cert @-`
-cannot both read standard input. The value goes into `operator.yaml` as
-`ca_cert`, with CRLF line ends normalised to LF, and the file is read back
-before success is reported ([Broker and S3 trust](security.md#broker-and-s3-trust)).
+value reads it. An empty value, and a value from which Go reads no
+certificate, a bare path among them, are refused, and `--super-user-password
+@-` and `--ca-cert @-` cannot both read standard input. The value goes into
+`operator.yaml` as `ca_cert`, with every CR removed, so `"$(cat ca.pem)"` of
+a CRLF file reads as the file does, and the file is read back before success
+is reported ([Broker and S3 trust](security.md#broker-and-s3-trust)). Without
+`--ca-cert`, a re-run keeps the `ca_cert` the existing `operator.yaml` holds,
+dials through it and writes it back, as `host init` keeps one.
 
 The super user logs in with SCRAM-SHA-512 unless `--super-user-mechanism SCRAM-SHA-256` says its credential is
 SCRAM-SHA-256; the mechanism is never prompted for, and any other value is refused before a prompt. Kafka answers a
@@ -936,9 +943,10 @@ verifying the broker's certificate, and its pool's bucket, against the
 machine's trust store plus the configuration's `ca_cert`. A configuration or
 bundle keeping a CA setting of earlier releases is refused naming the key
 ([Upgrade](upgrade.md#broker-trust)). When neither the trust store nor
-`ca_cert` trusts the broker's certificate, the failure says so with the one
-remedy: install the CA that signed it in the machine's trust store, or set
-`ca_cert` in the configuration, which it names
+`ca_cert` trusts the broker's certificate, the failure says so and names the
+configuration: with no `ca_cert` set, install the CA that signed it in the
+machine's trust store or set `ca_cert` there; with one set, that the
+certificate is signed neither by the trust store nor by the CA in `ca_cert`
 ([Broker and S3 trust](security.md#broker-and-s3-trust)). Go's x509 error
 ends the message.
 `--config-file` defaults to `/etc/wherry/config.yaml`. It creates the
@@ -1206,17 +1214,20 @@ is entitled to:
 2. It verifies the broker's certificate against the machine's trust store
    plus the configuration's `ca_cert`, which `--ca-cert` writes: the PEM
    text, `@FILE` for a file's contents or `@-` for standard input, as every
-   flag that takes a value reads it, with CRLF line ends normalised to LF. A
-   value from which Go reads no certificate, a bare path among them, is
+   flag that takes a value reads it, with every CR removed, so `"$(cat
+   ca.pem)"` of a CRLF file reads as the file does. An empty value, and a
+   value from which Go reads no certificate, a bare path among them, are
    refused before anything is written; init dials nothing with the value
    itself, and reads the configuration back before it connects. A
    configuration or `BUNDLE` keeping a CA setting of earlier releases is
    refused naming the key ([Upgrade](upgrade.md#broker-trust)). When neither the
    trust store nor `ca_cert` trusts the broker's certificate, the failure
-   says so with the one remedy: install the CA that signed it in this
-   machine's trust store, or set `ca_cert` in the configuration, which it
-   names ([Broker and S3 trust](security.md#broker-and-s3-trust)). Go's
-   x509 error ends the message, and every host command fails so.
+   says so and names the configuration: with no `ca_cert` set, install the
+   CA that signed it in this machine's trust store or set `ca_cert` there;
+   with one set, that the certificate is signed neither by the trust store
+   nor by the CA in `ca_cert`
+   ([Broker and S3 trust](security.md#broker-and-s3-trust)). Go's x509
+   error ends the message, and every host command fails so.
    When the file is new or step 1 changed it, init writes the
    configuration now, before it connects.
 3. It creates the host key at `host_key`, by default `host.key` in the
@@ -1747,14 +1758,16 @@ result stays readable however late `result` runs. The grace covers one
 5 GiB output at the slowest upload rate measured, 13 MB/s, which takes
 about 6.6 minutes; ten minutes is about 1.5 times that. Several large S3
 outputs left by one run stopped at `task_ended_by` are not covered. A run
-this host has no record of, or recorded before `task_ended_by` was, takes
-`2h10m`: the default `--start-by` and `--end-by` together. `--timeout`
-sets the wait itself, longer or shorter. `--outputs-dir DIR` sets where the
+recorded before `task_ended_by` was takes `2h10m` from its submission, the
+default `--start-by` and `--end-by` together, and one this host has no
+record of `2h10m` from now; the MCP `result` tool stops offering
+`retry_after` at the same bound. `--timeout` sets the wait itself, longer or
+shorter. `--outputs-dir DIR` sets where the
 run's outputs go, by default `<state_dir>/runs/<run>/outputs/`.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--timeout` | `task_ended_by` plus `10m30s`, at least `1m`; `2h10m` without a record | how long to wait for the run to end |
+| `--timeout` | `task_ended_by` plus `10m30s`, at least `1m`; `2h10m` from the submission without a recorded `task_ended_by`, from now without a record | how long to wait for the run to end |
 | `--outputs-dir` | `<state_dir>/runs/<run>/outputs/` | where the run's outputs go |
 
 Standard output carries the result: the `output=` lines, then each part of

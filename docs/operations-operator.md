@@ -68,7 +68,7 @@ Kafka super user, from flags or, on a terminal, its prompts:
 ```sh
 mkdir wherry-prod && cd wherry-prod
 wherry operator init --broker kafka.example.com:9093 \
-  --super-user kafka-admin --super-user-password-file /etc/wherry/admin-password
+  --super-user kafka-admin --super-user-password @/etc/wherry/admin-password
 ```
 
 The listener's certificate chains to a CA in this machine's trust store, or
@@ -556,17 +556,18 @@ host that meets [Run a receiver](operations-receivers.md#run-a-receiver).
    bundle: /etc/wherry/receiver.bundle
    state_dir: /var/lib/wherry/state
    plugin_dir: /usr/local/libexec/wherry/plugins
-   # The CA that signed the broker's and the bucket's certificates, when the machine's trust store lacks it.
+   # The CA that signed the broker's and the bucket's certificates, when the machine's trust store lacks it. This value
+   # is an example: a certificate that expired in 2021 and verifies nothing. Put the PEM of your CA here.
    ca_cert: |
      -----BEGIN CERTIFICATE-----
-     MIIBaDCCAQ2gAwIBAgIBATAKBggqhkjOPQQDAjAbMRkwFwYDVQQDExBFeGFtcGxl
-     IEthZmthIENBMB4XDTI2MDEwMTAwMDAwMFoXDTM2MDEwMTAwMDAwMFowGzEZMBcG
-     A1UEAxMQRXhhbXBsZSBLYWZrYSBDQTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IA
-     BFEgy9TOBEc4a9mgnw+3d4qvgVIU0/Fmc8rYHJV3j6w5mDh+2RhsPMfPemvvalyk
-     NjkTrsV9YHdVrC23oTKT1+ujQjBAMA4GA1UdDwEB/wQEAwICBDAPBgNVHRMBAf8E
-     BTADAQH/MB0GA1UdDgQWBBTk2lyUabR4G7GnUkG5jMjgRppaBDAKBggqhkjOPQQD
-     AgNJADBGAiEAhzRsT5hv5IVb4PPTDkywm8ODz0YaOKKW6TVKAqny25ACIQCOs0pI
-     XTLjEqjdY8QInPTKgfhfGCVcW/VdIWyidLG0yQ==
+     MIIBbjCCAROgAwIBAgIBATAKBggqhkjOPQQDAjAeMRwwGgYDVQQDExNFeGFtcGxl
+     IENBLCBleHBpcmVkMB4XDTIwMDEwMTAwMDAwMFoXDTIxMDEwMTAwMDAwMFowHjEc
+     MBoGA1UEAxMTRXhhbXBsZSBDQSwgZXhwaXJlZDBZMBMGByqGSM49AgEGCCqGSM49
+     AwEHA0IABKDgH46Z0Jb9ijDRVLk48an3uitOHZeFCHLHl//CE3czOjBUK8aYhf8i
+     KDOaGR3cXQMiPQtlhg4wWYT4iLg313ijQjBAMA4GA1UdDwEB/wQEAwICBDAPBgNV
+     HRMBAf8EBTADAQH/MB0GA1UdDgQWBBSnYcbbuJwFY2RscVcSxkcCI8YfxTAKBggq
+     hkjOPQQDAgNJADBGAiEAtMamhnY5+6DmGNUyq5lrYAwO9q3hy4UBzj6rpOxyY4QC
+     IQDwU2k2agkVRkUA3eGCeDwXqbGOQ+zWrjYwV85RVNKMHQ==
      -----END CERTIFICATE-----
    metrics_addr: ":9464"
    drain_timeout: 20s

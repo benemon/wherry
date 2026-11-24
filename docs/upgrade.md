@@ -66,10 +66,20 @@ naming the key. Upgrade the operator first: an older operator with a
    reissue until it installs its new bundle.
 3. For each holder: stop it, install the binary and the new bundle, replace
    `ca_file` in its configuration with `ca_cert` holding the PEM, start it.
-   A host runs `wherry host init BUNDLE --ca-cert @ca.pem` and restarts the
-   harness sessions that run `wherry host mcp`.
+   A host deletes `ca_file` from its `config.yaml` first, since `host init`
+   refuses a configuration holding it, then runs `wherry host init BUNDLE
+   --ca-cert @ca.pem`, which writes `ca_cert`, and restarts the harness
+   sessions that run `wherry host mcp`.
 
 Or reset the deployment and provision it again.
+
+## `operator init` reads the password as `@FILE` or `@-`
+
+`--super-user-password-file FILE|-` is now `--super-user-password @FILE|@-`,
+the form every flag that takes a value reads. A password as the flag's own
+text is refused, since a command line is visible to other users. Scripts
+that run `operator init` change the flag; the prompt, when the flag is
+absent on a terminal, is as before.
 
 ## Optional credentials the host resolves
 

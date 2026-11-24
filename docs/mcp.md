@@ -150,9 +150,10 @@ notification every 5 seconds. While the run is unfinished it returns the
 run's `state` with `retry_after`, and the `message` `status` gives, such as
 the step the agent last reported; for a resubmitted run, those of the last
 replacement, the run `cancel` names. Past the run's recorded `task_ended_by`
-plus the upload grace, the bound `wherry result` waits to, an unfinished run
-returns no `retry_after`, and `message` starts with the timeout `wherry
-result` exits 6 with. For a run whose `task_started_by` passes
+plus the upload grace, the bound `wherry result` waits to, or, for a run
+recorded before `task_ended_by` was, past `2h10m` from its submission, the
+fallback `wherry result` takes, an unfinished run returns no `retry_after`,
+and `message` starts with the timeout `wherry result` exits 6 with. For a run whose `task_started_by` passes
 with no status from a receiver, it returns at once with `state`
 `TASK_STATE_SUBMITTED`, the `message` `status` gives and no `retry_after`,
 and writes nothing.
