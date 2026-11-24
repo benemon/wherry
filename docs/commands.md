@@ -1417,6 +1417,10 @@ and needs `wherry host init` on a re-provisioned host.
 | `--wait` | false | collect the result after publishing |
 | `--outputs-dir` | `<state_dir>/runs/<run>/outputs/` | where the run's outputs go; requires `--wait` |
 
+An input's delivered name, like an output's, is a relative path of file names
+joined by `/`, and no input name is a directory of another; `--input FILE`
+delivers the file under its base name.
+
 Each bound must fall after now, and travels in whole seconds. `submit`
 refuses, before it publishes, an `--end-by` later than `--start-by` plus
 six hours, and a `--start-by` later than the pool's `start_by_limit` from

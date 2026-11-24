@@ -472,6 +472,39 @@ func TestRecordValidation(t *testing.T) {
 			value.Wherry.Outputs[0].Name = TranscriptArtifact
 			return value
 		},
+		"submission with an input nesting under another": func(r map[string]Record) Record {
+			value := r["submission"].(*Submission)
+			value.Message.Parts = append(value.Message.Parts, Part{Raw: StdBytes("x"), Filename: "a"}, Part{Raw: StdBytes("y"), Filename: "a/b"})
+			return value
+		},
+		"submission with a duplicate nested input name": func(r map[string]Record) Record {
+			value := r["submission"].(*Submission)
+			value.Message.Parts = append(value.Message.Parts, Part{Raw: StdBytes("x"), Filename: "docs/a.md"}, Part{Raw: StdBytes("y"), Filename: "docs/a.md"})
+			return value
+		},
+		"submission with an input path over 512 bytes": func(r map[string]Record) Record {
+			value := r["submission"].(*Submission)
+			value.Message.Parts = append(value.Message.Parts, Part{Raw: StdBytes("x"), Filename: strings.Repeat("a/", 256) + "a"})
+			return value
+		},
+		"submission with an input nesting under the host key file": func(r map[string]Record) Record {
+			value := r["submission"].(*Submission)
+			value.Wherry.Git = &GitInput{Remote: "ssh://git@git.example.test/org/repo.git", Ref: "main", HostKey: hostKey}
+			value.Message.Parts = append(value.Message.Parts, Part{Raw: StdBytes("x"), Filename: KnownHostsFile + "/local"})
+			return value
+		},
+		"submission whose git base is the host key file": func(r map[string]Record) Record {
+			value := r["submission"].(*Submission)
+			value.Wherry.Git = &GitInput{Remote: "ssh://git@git.example.test/org/repo.git", Ref: "main", HostKey: hostKey,
+				Base: &GitBase{Bundle: KnownHostsFile, Commit: strings.Repeat("a", 40)}}
+			value.Message.ContextID = "other-context"
+			return value
+		},
+		"submission with an S3 input nesting under another": func(r map[string]Record) Record {
+			value := r["submission"].(*Submission)
+			value.Wherry.S3Inputs = []S3Input{{Name: "data", Size: 1, SHA256: testHash}, {Name: "data/part", Size: 1, SHA256: testHash}}
+			return value
+		},
 		"result with a duplicate artifact ID": func(r map[string]Record) Record {
 			value := r["result with references"].(*Result)
 			value.Task.Artifacts = append(value.Task.Artifacts, value.Task.Artifacts[1])
@@ -641,10 +674,10 @@ func TestProgressDecodes(t *testing.T) {
 
 func TestValidateInputsAppliesTheLimit(t *testing.T) {
 	parts := []Part{{Text: "hello"}, {Raw: make(StdBytes, 60), Filename: "a"}, {Data: []byte(`"` + strings.Repeat("x", 38) + `"`), Filename: "b"}}
-	if err := ValidateInputs(parts, 100); err != nil {
+	if err := ValidateInputs(parts, nil, 100); err != nil {
 		t.Fatalf("inputs at the limit: %v", err)
 	}
-	if err := ValidateInputs(parts, 99); err == nil || err.Error() != "inline inputs are 100 bytes, over the 99-byte limit" {
+	if err := ValidateInputs(parts, nil, 99); err == nil || err.Error() != "inline inputs are 100 bytes, over the 99-byte limit" {
 		t.Fatalf("inputs over the limit: %v", err)
 	}
 	value := testRecords()["submission"].(*Submission)
@@ -656,6 +689,41 @@ func TestValidateInputsAppliesTheLimit(t *testing.T) {
 	}
 	if err != nil {
 		t.Fatalf("submission past the default limit: %v", err)
+	}
+}
+
+// ValidateInputs, the host's pre-check, carries the S3 input names, so a collision among them is refused before the
+// submission is built.
+func TestValidateInputsCoversS3Inputs(t *testing.T) {
+	parts := []Part{{Raw: StdBytes("x"), Filename: "data/a"}}
+	if err := ValidateInputs(parts, []string{"logs/b"}, 100); err != nil {
+		t.Fatalf("distinct S3 input: %v", err)
+	}
+	if err := ValidateInputs(parts, []string{"data"}, 100); err == nil {
+		t.Fatal("accepted an S3 input over a nested input file's directory")
+	}
+	if err := ValidateInputs(nil, []string{"data", "data/b"}, 100); err == nil {
+		t.Fatal("accepted two S3 inputs, one nesting under the other")
+	}
+	if err := ValidateInputs(nil, []string{"data", "data"}, 100); err == nil {
+		t.Fatal("accepted a duplicate S3 input name")
+	}
+}
+
+// A submission whose input files and S3 inputs carry relative paths, none nesting under another, decodes.
+func TestNestedInputNamesDecode(t *testing.T) {
+	keys, host, _ := testKeys(t)
+	value := testRecords()["submission"].(*Submission)
+	value.Message.Parts = append(value.Message.Parts,
+		Part{Raw: StdBytes("x"), Filename: "docs/a.md"},
+		Part{Data: []byte(`{}`), Filename: "docs/config"})
+	value.Wherry.S3Inputs = []S3Input{{Name: "data/big.bin", Size: 1, SHA256: testHash}}
+	encoded, err := SignRecord(value, host)
+	if err == nil {
+		err = ParseRecord(encoded, keys, &Submission{})
+	}
+	if err != nil {
+		t.Fatalf("nested input names: %v", err)
 	}
 }
 

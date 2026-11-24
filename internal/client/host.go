@@ -579,7 +579,11 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		}
 		input.Parts = append(input.Parts, wire.Part{Raw: data, Filename: file.Name})
 	}
-	if err := wire.ValidateInputs(input.Parts, math.MaxInt64); err != nil {
+	s3Names := make([]string, len(input.S3Inputs))
+	for i, file := range input.S3Inputs {
+		s3Names[i] = file.Name
+	}
+	if err := wire.ValidateInputs(input.Parts, s3Names, math.MaxInt64); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
 	if continued.last != nil && !storable {
@@ -601,7 +605,7 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		stored = true
 	}
 	if limit, limiting := profileInlineLimit(v.state, pool, topic, declared); limit > 0 {
-		if err := wire.ValidateInputs(input.Parts, limit); err != nil {
+		if err := wire.ValidateInputs(input.Parts, s3Names, limit); err != nil {
 			if !storable {
 				return SubmitResult{}, fmt.Errorf("%w: inline inputs are over profile %s's %d-byte limit; a pool with storage and a host storage credential would carry the inputs through S3", ErrInvalidInput, limiting, limit)
 			}

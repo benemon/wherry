@@ -604,7 +604,8 @@ func (value *Submission) validate() error {
 	if value.Message.Role != RoleUser {
 		return errors.New("a submission's message role must be ROLE_USER")
 	}
-	if _, err := inputBytes(value.Message.Parts); err != nil {
+	inputs, _, err := inputBytes(value.Message.Parts)
+	if err != nil {
 		return err
 	}
 	if err := ValidateCredentials(binding.Credentials); err != nil {
@@ -637,43 +638,52 @@ func (value *Submission) validate() error {
 	if len(binding.S3Inputs)+len(value.Message.Parts) > MaxParts {
 		return errors.New("a run's parts and S3 inputs are at most 256")
 	}
-	inputs := map[string]bool{}
-	for _, part := range value.Message.Parts {
-		if part.Raw != nil || part.Data != nil {
-			inputs[InputName(part)] = true
-		}
-	}
 	for _, input := range binding.S3Inputs {
-		if !ValidFileName(input.Name) || inputs[input.Name] {
-			return errors.New("S3 inputs need unique portable file names, distinct from the run's input files")
+		if !ValidOutputName(input.Name) || inputs[input.Name] {
+			return errS3Inputs
 		}
 		if input.Size < 0 || input.Size > MaxS3Object || !ValidHash(input.SHA256) {
 			return errors.New("an S3 input has a size of at most 5 GiB and a lowercase hex SHA-256")
 		}
 		inputs[input.Name] = true
 	}
-	if binding.Git == nil {
-		return nil
+	// previous/ is reserved for a later non-git continue; it enters the set then.
+	if binding.Git != nil {
+		if err := binding.Git.Validate(binding.Credentials); err != nil {
+			return err
+		}
+		// A receiver before git base ignores it; only a context other than the run's own makes such a receiver refuse.
+		if base := binding.Git.Base; base != nil && (!inputs[base.Bundle] || value.Message.ContextID == binding.Run) {
+			return errors.New("a git base names one of the run's input files and continues another run's context")
+		}
+		if binding.Git.HostKey != "" {
+			if inputs[KnownHostsFile] {
+				return errors.New("an input named known_hosts conflicts with the git host key")
+			}
+			inputs[KnownHostsFile] = true
+		}
 	}
-	if err := binding.Git.Validate(binding.Credentials); err != nil {
-		return err
-	}
-	if binding.Git.HostKey != "" && inputs[KnownHostsFile] {
-		return errors.New("an input named known_hosts conflicts with the git host key")
-	}
-	// A receiver before git base ignores it; only a context other than the run's own makes such a receiver refuse.
-	if base := binding.Git.Base; base != nil && (!inputs[base.Bundle] || value.Message.ContextID == binding.Run) {
-		return errors.New("a git base names one of the run's input files and continues another run's context")
+	if nestedConflict(inputs) {
+		return errNestedInputs
 	}
 	return nil
 }
 
-// ValidateInputs checks the raw and data parts of a message: each names a unique portable file, and together they
-// fit limit.
-func ValidateInputs(parts []Part, limit int64) error {
-	inline, err := inputBytes(parts)
+// ValidateInputs checks the raw and data parts of a message and the names of its S3 inputs: each names a unique
+// relative path, none nests under another, and the inline parts together fit limit.
+func ValidateInputs(parts []Part, s3 []string, limit int64) error {
+	names, inline, err := inputBytes(parts)
 	if err != nil {
 		return err
+	}
+	for _, name := range s3 {
+		if !ValidOutputName(name) || names[name] {
+			return errS3Inputs
+		}
+		names[name] = true
+	}
+	if nestedConflict(names) {
+		return errNestedInputs
 	}
 	if inline > limit {
 		return fmt.Errorf("inline inputs are %d bytes, over the %d-byte limit", inline, limit)
@@ -681,8 +691,14 @@ func ValidateInputs(parts []Part, limit int64) error {
 	return nil
 }
 
-// inputBytes checks that each raw and data part names a unique portable file, and returns their bytes together.
-func inputBytes(parts []Part) (int64, error) {
+var (
+	errS3Inputs     = errors.New("S3 inputs need unique relative paths of portable file names, distinct from the run's input files")
+	errNestedInputs = errors.New("input names must not nest: no name is a directory of another")
+)
+
+// inputBytes checks that each raw and data part names a unique relative path of portable segments, and returns the set
+// of delivered names and their bytes together.
+func inputBytes(parts []Part) (map[string]bool, int64, error) {
 	names := map[string]bool{}
 	var inline int64
 	for _, part := range parts {
@@ -690,16 +706,29 @@ func inputBytes(parts []Part) (int64, error) {
 			continue
 		}
 		name := InputName(part)
-		if !ValidFileName(part.Filename) || !ValidFileName(name) {
-			return 0, errors.New("a raw or data part needs a filename of letters, digits, '.', '_' and '-', not starting with a dot, at most 255 bytes")
+		if !ValidOutputName(part.Filename) || !ValidOutputName(name) {
+			return nil, 0, errors.New("a raw or data part needs a filename that is a relative path of portable segments of at most 512 bytes")
 		}
 		if names[name] {
-			return 0, errors.New("input file names must be unique")
+			return nil, 0, errors.New("input file names must be unique")
 		}
 		names[name] = true
 		inline += int64(len(part.Raw) + len(part.Data))
 	}
-	return inline, nil
+	return names, inline, nil
+}
+
+// nestedConflict reports whether a name in the set is a parent directory of another, so the two cannot both be
+// delivered as files.
+func nestedConflict(names map[string]bool) bool {
+	for name := range names {
+		for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
+			if names[parent] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (value *Cancel) validate() error {

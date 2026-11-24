@@ -46,6 +46,9 @@ The defaults are `10m` and `2h`.
   required, and an output's `storage` is `s3` or absent, as `:s3`. An input's
   `storage` is refused with `inputs move to S3 by size; drop :s3`, and an
   output's `required` with `outputs are always required; drop :required`.
+  An input's delivered name, like an output's, is a relative path of file
+  names joined by `/`, no name a directory of another; a `{path}` input is
+  delivered under its base name.
   An input must resolve, through any
   symbolic links, to a regular file beneath one of the
   [`input_roots`](configuration-host.md#client-configuration), and opens through that

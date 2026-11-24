@@ -1,4 +1,4 @@
-// The plugin protocol, version 12: the receiver core calls a plugin's profiles
+// The plugin protocol, version 13: the receiver core calls a plugin's profiles
 // over this service, and every request names its profile.
 syntax = "proto3";
 
