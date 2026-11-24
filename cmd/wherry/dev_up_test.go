@@ -16,6 +16,7 @@ import (
 
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/twmb/franz-go/pkg/kfake"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 // devProvision runs up's provisioning steps, operator to host, for instance on a TLS fake broker whose super user is
@@ -39,8 +40,8 @@ func devProvision(t *testing.T, instance devInstance) (string, string) {
 		}
 	}
 	manifest := writeCache(t, instance, []byte("snapshot"))
-	env := devEnv{instance: instance, manifest: manifest, driver: "docker"}
-	service, err := devOperator(ctx, instance, address)
+	env := devEnv{instance: instance, manifest: manifest, driver: "docker", caCert: ca}
+	service, err := devOperator(ctx, env, address)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,6 +56,52 @@ func devProvision(t *testing.T, instance devInstance) (string, string) {
 	var ready bytes.Buffer
 	printReady(&ready, env, config)
 	return ready.String(), config
+}
+
+// devConfigsCarryTheCA fails t unless the host configuration at config, the receiver's local configuration and
+// operator.yaml, as up wrote them, each hold the instance CA as ca_cert.
+func devConfigsCarryTheCA(t *testing.T, instance devInstance, config string) {
+	t.Helper()
+	ca, err := os.ReadFile(instance.env("tls", "ca.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if host, err := busclient.LoadConfig(config); err != nil || host.CACert != string(ca) {
+		t.Errorf("host config ca_cert %q, %v; want the instance CA", host.CACert, err)
+	}
+	if local, err := loadReceiverLocalConfig(instance.env("receiver", "config.yaml")); err != nil || local.CACert != string(ca) {
+		t.Errorf("receiver config ca_cert %q, %v; want the instance CA", local.CACert, err)
+	}
+	if operatorFile, _, err := loadOperatorConfig(instance.env("operator")); err != nil || operatorFile.CACert != string(ca) {
+		t.Errorf("operator.yaml ca_cert %q, %v; want the instance CA", operatorFile.CACert, err)
+	}
+}
+
+// up's readiness wait verifies the broker against the machine's trust store plus the instance CA: with the CA it dials
+// a broker under it, and without it does not.
+func TestDevKafkaReadinessTrustsTheInstanceCA(t *testing.T) {
+	cluster, ca := tlsBroker(t, kfake.Superuser("SCRAM-SHA-512", devSuperUser, "super-secret"))
+	address := cluster.ListenAddrs()[0]
+	ping := func(env devEnv) error {
+		opts, err := devKafkaOpts(env, address, "super-secret")
+		if err != nil {
+			return err
+		}
+		client, err := kgo.NewClient(opts...)
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return client.Ping(ctx)
+	}
+	if err := ping(devEnv{caCert: ca}); err != nil {
+		t.Fatalf("readiness dial with the instance CA: %v", err)
+	}
+	if err := ping(devEnv{}); err == nil || !unknownAuthority(err) {
+		t.Fatalf("readiness dial without the instance CA = %v; want the certificate refused", err)
+	}
 }
 
 // standardHostPaths are the default instance's host files at the standard paths and the standard state directory, which
@@ -139,12 +186,15 @@ func TestDevUpWritesTheStandardHostPaths(t *testing.T) {
 			if loaded, err := busclient.LoadConfig(config); err != nil || loaded.StateDir != instance.env("host", "state") {
 				t.Errorf("state_dir %q, %v; want the instance's %s", loaded.StateDir, err, instance.env("host", "state"))
 			}
-			ca := shellQuote(instance.env("tls", "ca.pem"))
-			for _, want := range []string{"export SSL_CERT_FILE=" + ca + "\n", "submit: wherry submit --prompt \"...\"\n", "claude: claude mcp add wherry-default --env SSL_CERT_FILE=" + ca + " -- wherry host mcp\n"} {
+			for _, want := range []string{"submit: wherry submit --prompt \"...\"\n", "claude: claude mcp add wherry-default -- wherry host mcp\n"} {
 				if !strings.Contains(ready, want) {
 					t.Errorf("ready output\n%s\nlacks %q", ready, want)
 				}
 			}
+			if strings.Contains(ready, "SSL_CERT_FILE") {
+				t.Errorf("ready output names SSL_CERT_FILE:\n%s", ready)
+			}
+			devConfigsCarryTheCA(t, instance, config)
 			if strings.Contains(ready, "--config-file") || strings.Contains(ready, "WHERRY_CONFIG") {
 				t.Errorf("ready output names the config:\n%s", ready)
 			}
@@ -212,8 +262,7 @@ func TestDevUpLeavesAnotherHostConfig(t *testing.T) {
 			t.Errorf("up wrote %s beside a config it did not write", path)
 		}
 	}
-	ca := shellQuote(instance.env("tls", "ca.pem"))
-	for _, want := range []string{"export SSL_CERT_FILE=" + ca + "\n", "export WHERRY_CONFIG=" + shellQuote(config) + "\n", "claude mcp add wherry-default --env SSL_CERT_FILE=" + ca + " --env WHERRY_CONFIG=" + shellQuote(config) + " -- wherry host mcp\n"} {
+	for _, want := range []string{"export WHERRY_CONFIG=" + shellQuote(config) + "\n", "claude mcp add wherry-default --env WHERRY_CONFIG=" + shellQuote(config) + " -- wherry host mcp\n"} {
 		if !strings.Contains(ready, want) {
 			t.Errorf("ready output\n%s\nlacks %q", ready, want)
 		}
@@ -435,7 +484,6 @@ func TestDevReadyLines(t *testing.T) {
 	manifest := writeCache(t, instance, []byte("snapshot"))
 	manifest.Agents = []string{"claude", "codex", "gemini"}
 	config := "/x/it's/config.yaml"
-	ca := shellQuote(instance.env("tls", "ca.pem"))
 	agents := devAgents(manifest, nil)
 	for _, c := range []struct {
 		files *devHostFiles
@@ -443,17 +491,15 @@ func TestDevReadyLines(t *testing.T) {
 	}{
 		{&devHostFiles{}, []string{
 			"agents: claude-code, anthropic (default), codex, google, mock\n",
-			"export SSL_CERT_FILE=" + ca + "\n",
-			"claude: claude mcp add wherry-default --env SSL_CERT_FILE=" + ca + " -- wherry host mcp\n",
-			"codex:  codex mcp add wherry-default --env SSL_CERT_FILE=" + ca + " -- wherry host mcp\n",
-			"gemini: gemini mcp add --env SSL_CERT_FILE=" + ca + " wherry-default wherry host mcp\n",
+			"claude: claude mcp add wherry-default -- wherry host mcp\n",
+			"codex:  codex mcp add wherry-default -- wherry host mcp\n",
+			"gemini: gemini mcp add wherry-default wherry host mcp\n",
 		}},
 		{nil, []string{
-			"export SSL_CERT_FILE=" + ca + "\n",
 			`export WHERRY_CONFIG='/x/it'\''s/config.yaml'` + "\n",
-			"claude: claude mcp add wherry-default --env SSL_CERT_FILE=" + ca + ` --env WHERRY_CONFIG='/x/it'\''s/config.yaml' -- wherry host mcp` + "\n",
-			"codex:  codex mcp add wherry-default --env SSL_CERT_FILE=" + ca + ` --env WHERRY_CONFIG='/x/it'\''s/config.yaml' -- wherry host mcp` + "\n",
-			"gemini: gemini mcp add --env SSL_CERT_FILE=" + ca + ` --env WHERRY_CONFIG='/x/it'\''s/config.yaml' wherry-default wherry host mcp` + "\n",
+			"claude: claude mcp add wherry-default" + ` --env WHERRY_CONFIG='/x/it'\''s/config.yaml' -- wherry host mcp` + "\n",
+			"codex:  codex mcp add wherry-default" + ` --env WHERRY_CONFIG='/x/it'\''s/config.yaml' -- wherry host mcp` + "\n",
+			"gemini: gemini mcp add" + ` --env WHERRY_CONFIG='/x/it'\''s/config.yaml' wherry-default wherry host mcp` + "\n",
 		}},
 	} {
 		manifest.HostFiles = c.files

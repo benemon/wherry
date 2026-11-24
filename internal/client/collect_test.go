@@ -19,6 +19,7 @@ func fakeStorageFixture(t *testing.T) (*fixture, *uploadOracle, *testReceiver) {
 	t.Helper()
 	o := newUploadOracle(t)
 	f := newFixture(t)
+	f.host.roots = o.roots
 	terms := testTerms()
 	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
 	f.host.storage = map[string]StorageConfig{"pool-s3": *o.config}

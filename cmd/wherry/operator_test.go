@@ -29,7 +29,7 @@ import (
 func TestKafkaClientRejectsPlaintextListener(t *testing.T) {
 	cluster := kfake.MustCluster(kfake.EnableSASL(), kfake.EnableACLs(), kfake.Superuser("SCRAM-SHA-512", "admin", "password"))
 	defer cluster.Close()
-	client, err := operatorKafka(cluster.ListenAddrs()[0], "admin", "password")
+	client, err := operatorKafka(cluster.ListenAddrs()[0], "admin", "password", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,13 +57,13 @@ func operatorEnv(t *testing.T) *operator.Service {
 		t.Fatal(err)
 	}
 	address := cluster.ListenAddrs()[0]
-	if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{Broker: address, PasswordFile: "operator.password"}); err != nil {
+	if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{Broker: address, PasswordFile: "operator.password", CACert: testCA.pem}); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
 	noTerminal(t)
 	return &operator.Service{Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, DeliveryCeiling: 10, LockCeilingMS: 60000}
+		Broker: address, Roots: testRoots(t), DeliveryCeiling: 10, LockCeilingMS: 60000}
 }
 
 func TestOperatorCommandUsage(t *testing.T) {

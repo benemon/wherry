@@ -2470,8 +2470,16 @@ var errOverLimits = errors.New("the plugin returned more than the limits")
 // errRedirect is what an upload's client returns for a redirect, which it never follows.
 var errRedirect = errors.New("redirected")
 
-// storageClient uploads S3 outputs. A variable so tests can trust their TLS servers.
-var storageClient = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return errRedirect }}
+// storageClient is the client that uploads S3 outputs: Go's default transport verifying against roots, following no
+// redirect.
+func storageClient(roots *x509.CertPool) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	}
+	transport.TLSClientConfig.RootCAs = roots
+	return &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return errRedirect }}
+}
 
 // uploadFailure names the class of a failed upload's error. The error itself is never shown: its *url.Error quotes the
 // request's URL. A context cancelled with a cause reports the cause, so the request's own context is read first.
@@ -2551,7 +2559,7 @@ func (run *activeRun) upload(ctx context.Context, output pluginsdk.Output) (stor
 	}
 	request.ContentLength = form.length
 	request.Header.Set("Content-Type", form.contentType)
-	response, err := storageClient.Do(request)
+	response, err := run.receiver.storage.Do(request)
 	if err == nil {
 		io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
 		response.Body.Close()

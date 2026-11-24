@@ -50,7 +50,7 @@ func newKeyHost(t *testing.T) keyHost {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(h.config, []byte("bundle: "+bundle+"\nhost_key: "+h.keyPath+"\nstate_dir: "+h.stateDir+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(h.config, []byte("bundle: "+bundle+"\nhost_key: "+h.keyPath+"\nstate_dir: "+h.stateDir+"\n"+caCertYAML()), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
@@ -245,7 +245,7 @@ func TestReceiverRotateKey(t *testing.T) {
 		return key
 	}
 	localConfig := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(localConfig, []byte("bundle: "+bundle+"\nstate_dir: "+stateDir+"\nplugin_dir: "+t.TempDir()+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(localConfig, []byte("bundle: "+bundle+"\nstate_dir: "+stateDir+"\nplugin_dir: "+t.TempDir()+"\n"+caCertYAML()), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// With no plugin the receiver stops at configuration, which comes before it advertises or claims anything.

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,11 +90,36 @@ func TestResultOnAFinishedRunPastItsBound(t *testing.T) {
 	}
 }
 
+// An explicit --timeout wins over the bound, longer or shorter: result on a held run with a --timeout past the run's
+// task_ended_by plus the grace exits 6 at the timeout, not at the bound.
+func TestExplicitTimeoutLongerThanTheBoundWins(t *testing.T) {
+	b := newBus(t)
+	shortResultBound(t, 50*time.Millisecond, time.Second)
+	runID, admitted := b.shortRun(t, time.Second, time.Second)
+	b.feed(t, runID, b.echo(t, admitted), b.status(t, admitted, "claimed-1", "claimed", now(wire.TaskStateWorking)))
+	started := time.Now()
+	var stdout, stderr bytes.Buffer
+	err := runWait(b.ctx, b.client, []string{runID, "--timeout", "4s"}, &stdout, &stderr)
+	var exit *exitError
+	if !errors.As(err, &exit) || exit.code != timeoutCode {
+		t.Fatalf("result with --timeout 4s on a held run = %v; want exit %d", err, timeoutCode)
+	}
+	if elapsed := time.Since(started); elapsed < 3500*time.Millisecond || elapsed > 5*time.Second {
+		t.Fatalf("result ended after %s; want near its 4s --timeout, past the run's bound", elapsed)
+	}
+	if strings.Contains(err.Error(), "task_ended_by plus the upload grace") {
+		t.Fatalf("result with an explicit --timeout = %v; want no bound named", err)
+	}
+}
+
 // A record without task_ended_by, as hosts wrote before it was recorded, takes the 2h10m fallback: result with no
-// --timeout outlives the bound the run's end-by would give.
+// --timeout exits 6 at the fallback, shortened through its seam, past the bound the run's end-by would give.
 func TestResultWithoutARecordedEndByTakesTheFallback(t *testing.T) {
 	b := newBus(t)
 	shortResultBound(t, 50*time.Millisecond, time.Second)
+	oldFallback := defaultWaitTimeout
+	defaultWaitTimeout = 3 * time.Second
+	t.Cleanup(func() { defaultWaitTimeout = oldFallback })
 	runID, admitted := b.shortRun(t, time.Second, time.Second)
 	b.feed(t, runID, b.echo(t, admitted), b.status(t, admitted, "claimed-1", "claimed", now(wire.TaskStateWorking)))
 	path := filepath.Join(b.stateDir, "runs", runID+".json")
@@ -118,16 +144,14 @@ func TestResultWithoutARecordedEndByTakesTheFallback(t *testing.T) {
 	if got := b.client.RecordedEndBy(runID); !got.IsZero() {
 		t.Fatalf("recorded end-by %s; want none", got)
 	}
-	ctx, cancel := context.WithCancel(b.ctx)
-	defer cancel()
-	waited := make(chan error, 1)
+	started := time.Now()
 	var stdout, stderr bytes.Buffer
-	go func() { waited <- runWait(ctx, b.client, []string{runID}, &stdout, &stderr) }()
-	select {
-	case err := <-waited:
-		t.Fatalf("result ended within the run's own bound: %v", err)
-	case <-time.After(3 * time.Second):
+	err = runWait(b.ctx, b.client, []string{runID}, &stdout, &stderr)
+	var exit *exitError
+	if !errors.As(err, &exit) || exit.code != timeoutCode {
+		t.Fatalf("result without a recorded end-by = %v; want exit %d at the fallback", err, timeoutCode)
 	}
-	cancel()
-	<-waited
+	if elapsed := time.Since(started); elapsed < 2500*time.Millisecond || elapsed > 4*time.Second {
+		t.Fatalf("result ended after %s; want the %s fallback, past the run's own bound", elapsed, defaultWaitTimeout)
+	}
 }

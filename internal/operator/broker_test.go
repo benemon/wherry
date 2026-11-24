@@ -386,7 +386,7 @@ func (f *fixture) connect(t *testing.T, principal string, opts ...kgo.Opt) *kgo.
 	if !ok {
 		t.Fatalf("no bundle for %s", principal)
 	}
-	ca, err := os.ReadFile(os.Getenv("SSL_CERT_FILE"))
+	ca, err := os.ReadFile(os.Getenv("WHERRY_TRUST_CA"))
 	if err != nil {
 		t.Fatal(err)
 	}

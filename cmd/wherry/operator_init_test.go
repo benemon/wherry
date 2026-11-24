@@ -52,7 +52,7 @@ func (b initBroker) init(t *testing.T, dir string) error {
 // standard input, as - names it, or the masked prompt. A success logs in as the new password.
 func (b initBroker) initVia(t *testing.T, dir, route string) error {
 	t.Helper()
-	args := []string{"init", "--dir", dir, "--broker", b.address, "--super-user", b.superUser}
+	args := []string{"init", "--dir", dir, "--broker", b.address, "--super-user", b.superUser, "--ca-cert", b.ca}
 	switch route {
 	case "file":
 		args = append(args, "--super-user-password-file", b.superPasswordFile)
@@ -143,7 +143,7 @@ func realInitBroker(t *testing.T) initBroker {
 		t.Skip("WHERRY_TRUST_BROKER is not set")
 	}
 	b := initBroker{address: os.Getenv("WHERRY_TRUST_BROKER"), superUser: os.Getenv("WHERRY_TRUST_SUPER_USER"), superPasswordFile: os.Getenv("WHERRY_TRUST_SUPER_USER_PASSWORD_FILE"), login: func(*testing.T, string) {}}
-	ca, err := os.ReadFile(os.Getenv("SSL_CERT_FILE"))
+	ca, err := os.ReadFile(os.Getenv("WHERRY_TRUST_CA"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +275,7 @@ func testOperatorInitDelegates(t *testing.T, b initBroker, removes bool) {
 		t.Fatal(err)
 	}
 	var config operatorConfig
-	if err := readYAML(filepath.Join(dir, "operator.yaml"), &config); err != nil || config != (operatorConfig{Broker: b.address, PasswordFile: "operator.password"}) {
+	if err := readYAML(filepath.Join(dir, "operator.yaml"), &config); err != nil || config != (operatorConfig{Broker: b.address, PasswordFile: "operator.password", CACert: b.ca}) {
 		t.Fatalf("operator.yaml %+v, %v; want the broker and operator.password", config, err)
 	}
 	if info, err := os.Stat(filepath.Join(dir, "operator.password")); err != nil || info.Mode().Perm() != 0o600 {
@@ -440,7 +440,7 @@ func TestOperatorInitRecoversFromAFailure(t *testing.T) {
 	run := func() error {
 		t.Helper()
 		var stdout, stderr bytes.Buffer
-		err := runOperator([]string{"init", "--dir", dir, "--broker", b.address, "--super-user", b.superUser, "--super-user-password-file", b.superPasswordFile}, &stdout, &stderr)
+		err := runOperator([]string{"init", "--dir", dir, "--broker", b.address, "--super-user", b.superUser, "--super-user-password-file", b.superPasswordFile, "--ca-cert", b.ca}, &stdout, &stderr)
 		if err == nil {
 			b.login(t, dir)
 			secrets = append(secrets, operatorPassword(t, dir))
@@ -568,7 +568,7 @@ func TestOperatorInitWithoutATerminalNamesTheFlags(t *testing.T) {
 	b, _ := kfakeInitBroker(t)
 	scriptForms(t, keys(b.address+"\r"), keys(b.superUser+"\r"))
 	var stdout, prompts bytes.Buffer
-	if err := runOperator([]string{"init", "--dir", dir, "--super-user-password-file", b.superPasswordFile}, &stdout, &prompts); err != nil {
+	if err := runOperator([]string{"init", "--dir", dir, "--super-user-password-file", b.superPasswordFile, "--ca-cert", b.ca}, &stdout, &prompts); err != nil {
 		t.Fatal(err)
 	}
 	if stdout.Len() != 0 {
@@ -920,7 +920,7 @@ func TestWaitOperatorCredential(t *testing.T) {
 			t.Fatal(err)
 		}
 		root := connectTLS(t, cluster.ListenAddrs()[0], ca, "kafka-root", "root-secret-value")
-		return cluster, &operator.Service{Operator: root, Broker: cluster.ListenAddrs()[seed]}
+		return cluster, &operator.Service{Operator: root, Broker: cluster.ListenAddrs()[seed], Roots: testRoots(t)}
 	}
 	// metadata counts the Metadata requests each node answers itself.
 	metadata := func(cluster *kfake.Cluster) func(int32) int {
@@ -1186,7 +1186,7 @@ func TestOperatorInitKeepsItsFilesWhenTheCredentialWaitFails(t *testing.T) {
 		return refusing.Load()
 	})
 	var stdout, stderr bytes.Buffer
-	err := runOperator([]string{"init", "--dir", dir, "--broker", b.address, "--super-user", b.superUser, "--super-user-password-file", b.superPasswordFile}, &stdout, &stderr)
+	err := runOperator([]string{"init", "--dir", dir, "--broker", b.address, "--super-user", b.superUser, "--super-user-password-file", b.superPasswordFile, "--ca-cert", b.ca}, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("init succeeded while every broker refused the new password")
 	}
@@ -1221,13 +1221,13 @@ func TestOperatorInitWithASCRAMSHA256SuperUser(t *testing.T) {
 	if err := os.WriteFile(passwordFile, []byte("root-secret-value\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	root, err := superUserKafka(cluster.ListenAddrs()[0], "kafka-root", "root-secret-value", operator.ScramSHA256)
+	root, err := superUserKafka(cluster.ListenAddrs()[0], "kafka-root", "root-secret-value", operator.ScramSHA256, testRoots(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(root.Close)
 	shareCeilings(t, root)
-	flags := []string{"init", "--broker", cluster.ListenAddrs()[0], "--super-user", "kafka-root", "--super-user-password-file", passwordFile}
+	flags := []string{"init", "--broker", cluster.ListenAddrs()[0], "--super-user", "kafka-root", "--super-user-password-file", passwordFile, "--ca-cert", testCA.pem}
 
 	refused := filepath.Join(dir, "refused")
 	var refusing atomic.Bool
@@ -1279,7 +1279,7 @@ func TestOperatorInitReportsAnUnreachableBrokerForTheSuperUser(t *testing.T) {
 	if err := os.WriteFile(passwordFile, []byte("root-secret-value\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err = runOperator([]string{"init", "--dir", filepath.Join(t.TempDir(), "dir"), "--broker", address, "--super-user", "kafka-root", "--super-user-password-file", passwordFile}, io.Discard, io.Discard)
+	err = runOperator([]string{"init", "--dir", filepath.Join(t.TempDir(), "dir"), "--broker", address, "--super-user", "kafka-root", "--super-user-password-file", passwordFile, "--ca-cert", testCA.pem}, io.Discard, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "super user kafka-root") || strings.Contains(err.Error(), "login refused") || strings.Contains(err.Error(), operator.OperatorPrincipal) {
 		t.Fatalf("init against a closed port: %v; want the super user's connection error, not a refused login or wherry.operator", err)
 	}
@@ -1300,7 +1300,7 @@ func TestOperatorInitRefusesAnUnknownMechanism(t *testing.T) {
 			t.Fatalf("--super-user-mechanism %q: %v, connected %v; want a refusal naming both mechanisms, before connecting, without the value", value, err, connected)
 		}
 	}
-	if _, err := operator.SuperUserKafkaOpts("host:9093", "root", "password", "SCRAM-SHA-1"); err == nil {
+	if _, err := operator.SuperUserKafkaOpts("host:9093", "root", "password", "SCRAM-SHA-1", nil); err == nil {
 		t.Fatal("SuperUserKafkaOpts accepted SCRAM-SHA-1")
 	}
 }

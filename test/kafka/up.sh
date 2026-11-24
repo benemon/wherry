@@ -84,7 +84,7 @@ cat > "$dir/env" <<EOF
 export WHERRY_KAFKA_TEST_BROKER=$ip:9092
 export WHERRY_TRUST_BROKER=$ip:9093
 export WHERRY_TRUST_CLUSTER_ID=$cluster_id
-export SSL_CERT_FILE=$dir/ca.crt
+export WHERRY_TRUST_CA=$dir/ca.crt
 export WHERRY_TRUST_SUPER_USER=wherry-admin
 export WHERRY_TRUST_SUPER_USER_PASSWORD_FILE=$dir/admin-password
 export WHERRY_TRUST_OPERATOR_PASSWORD_FILE=$dir/operator-password

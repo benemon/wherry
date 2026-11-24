@@ -37,6 +37,9 @@ import (
 type Service struct {
 	Operator *kgo.Client // connected as wherry.operator
 	Broker   string      // the broker address host bundles carry
+	// Roots is the pool every client the service builds verifies the broker against: RootPool of the operator's
+	// configuration; nil is the system roots alone.
+	Roots *x509.CertPool
 	// Tracing is the operator role's tracer provider, nil for none: each command is a root marker span under it.
 	Tracing *telemetry.Tracing
 	// Storage is the storage keys the operator recorded for a tenant, zero for a tenant without any, which every host
@@ -223,8 +226,38 @@ func ReplaceStorageKeys(path string, keys StorageKeys) (err error) {
 }
 
 // BundleKafkaOpts are KafkaOpts for bundle's principal.
-func BundleKafkaOpts(bundle Bundle) ([]kgo.Opt, error) {
-	return KafkaOpts(bundle.Broker, bundle.Principal, bundle.Password)
+func BundleKafkaOpts(bundle Bundle, roots *x509.CertPool) ([]kgo.Opt, error) {
+	return KafkaOpts(bundle.Broker, bundle.Principal, bundle.Password, roots)
+}
+
+// ErrNoCertificate is a ca_cert from which Go appends no certificate: the value is set, and is not PEM Go reads.
+var ErrNoCertificate = errors.New("holds no certificate")
+
+// RootPool is the pool every TLS connection wherry makes verifies against: the system roots, SystemCertPool's error
+// returned as it is, plus the certificates of caCert when it is set. Go verifies through the platform first and the
+// added certificates after, so caCert adds to the machine's trust and replaces none of it.
+func RootPool(caCert string) (*x509.CertPool, error) {
+	pool, err := x509.SystemCertPool()
+	if err != nil {
+		return nil, err
+	}
+	if caCert == "" {
+		return pool, nil
+	}
+	if !pool.AppendCertsFromPEM([]byte(caCert)) {
+		return nil, ErrNoCertificate
+	}
+	return pool, nil
+}
+
+// ConfigRootPool is RootPool for the ca_cert of the configuration at path, whose error names the key and the file, never
+// the value.
+func ConfigRootPool(path, caCert string) (*x509.CertPool, error) {
+	pool, err := RootPool(caCert)
+	if errors.Is(err, ErrNoCertificate) {
+		return nil, fmt.Errorf("ca_cert in %s %w", path, err)
+	}
+	return pool, err
 }
 
 // RemovedKey reports whether encoded, a YAML mapping, names key at its top level: a field no release reads, which a
@@ -239,12 +272,12 @@ func RemovedKey(encoded []byte, key string) bool {
 }
 
 // RefuseCAFile is why the configuration at path, encoded, is refused when it keeps the ca_file earlier releases read:
-// the broker's CA belongs in the machine's trust store. Nil when it names none.
+// the CA's PEM goes in ca_cert. Nil when it names none.
 func RefuseCAFile(path string, encoded []byte) error {
 	if !RemovedKey(encoded, "ca_file") {
 		return nil
 	}
-	return fmt.Errorf("%s: ca_file is no longer read; remove the line and install the broker's CA in this machine's trust store", path)
+	return fmt.Errorf("%s: ca_file is now ca_cert", path)
 }
 
 // unknownAuthority reports whether err is a connection the broker's certificate failed because it chains to no CA the
@@ -254,13 +287,13 @@ func unknownAuthority(err error) bool {
 	return errors.As(err, &unknown)
 }
 
-// ExplainUnknownAuthority replaces err, when unknownAuthority, with what failed and the one remedy, keeping err at the
-// end; any other err is returned as it is.
-func ExplainUnknownAuthority(err error) error {
+// ExplainUnknownAuthority replaces err, when unknownAuthority, with what failed and the one remedy, naming config, the
+// configuration file whose ca_cert takes the CA, and keeping err at the end; any other err is returned as it is.
+func ExplainUnknownAuthority(err error, config string) error {
 	if !unknownAuthority(err) {
 		return err
 	}
-	return fmt.Errorf("cannot verify the broker's certificate: install the CA that signed it in this machine's trust store, or set SSL_CERT_FILE, which replaces the system roots (%w)", err)
+	return fmt.Errorf("cannot verify the broker's certificate: install the CA that signed it in this machine's trust store, or set ca_cert in %s (%w)", config, err)
 }
 
 var yamlLine = regexp.MustCompile(`line \d+`)
@@ -272,25 +305,26 @@ const (
 	ScramSHA256 = "SCRAM-SHA-256"
 )
 
-// KafkaOpts are the options of a TLS and SCRAM-SHA-512 connection to broker as user, trusting the system roots, which
-// SSL_CERT_FILE replaces. A trailing line break, as a password file ends with, is not part of password, and nothing
-// else is no password.
-func KafkaOpts(broker, user, password string) ([]kgo.Opt, error) {
-	return kafkaOpts(broker, user, password, scram.Auth.AsSha512Mechanism)
+// KafkaOpts are the options of a TLS and SCRAM-SHA-512 connection to broker as user, verifying the broker against
+// roots, RootPool's; nil is the system roots alone. A trailing line break, as a password file ends with, is not part of
+// password, and nothing else is no password.
+func KafkaOpts(broker, user, password string, roots *x509.CertPool) ([]kgo.Opt, error) {
+	return kafkaOpts(broker, user, password, roots, scram.Auth.AsSha512Mechanism)
 }
 
 // SuperUserKafkaOpts is KafkaOpts for a Kafka super user that logs in with mechanism, ScramSHA512 or ScramSHA256.
-func SuperUserKafkaOpts(broker, user, password, mechanism string) ([]kgo.Opt, error) {
+func SuperUserKafkaOpts(broker, user, password, mechanism string, roots *x509.CertPool) ([]kgo.Opt, error) {
 	switch mechanism {
 	case ScramSHA512:
-		return kafkaOpts(broker, user, password, scram.Auth.AsSha512Mechanism)
+		return kafkaOpts(broker, user, password, roots, scram.Auth.AsSha512Mechanism)
 	case ScramSHA256:
-		return kafkaOpts(broker, user, password, scram.Auth.AsSha256Mechanism)
+		return kafkaOpts(broker, user, password, roots, scram.Auth.AsSha256Mechanism)
 	}
 	return nil, fmt.Errorf("the super user's mechanism is %s or %s", ScramSHA512, ScramSHA256)
 }
 
-func kafkaOpts(broker, user, password string, mechanism func(scram.Auth) sasl.Mechanism) ([]kgo.Opt, error) {
+// kafkaOpts holds the one tls.Config of every Kafka connection wherry makes.
+func kafkaOpts(broker, user, password string, roots *x509.CertPool, mechanism func(scram.Auth) sasl.Mechanism) ([]kgo.Opt, error) {
 	password = strings.TrimRight(password, "\r\n")
 	if password == "" {
 		return nil, errors.New("password is empty")
@@ -300,7 +334,7 @@ func kafkaOpts(broker, user, password string, mechanism func(scram.Auth) sasl.Me
 	versions.SetMaxKeyVersion(18, 4)
 	return []kgo.Opt{
 		kgo.SeedBrokers(broker),
-		kgo.DialTLSConfig(&tls.Config{}),
+		kgo.DialTLSConfig(&tls.Config{RootCAs: roots}),
 		kgo.SASL(mechanism(scram.Auth{User: user, Pass: password})),
 		kgo.DisableClientMetrics(),
 		kgo.MaxVersions(versions),

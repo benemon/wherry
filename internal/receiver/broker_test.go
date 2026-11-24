@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -68,6 +69,20 @@ func newBrokerPool(t *testing.T, ctx context.Context, address string) brokerPool
 }
 
 // applyTerms applies terms to the pool as pool apply does.
+// trustRoots is the pool the disposable broker's CA, WHERRY_TRUST_CA, builds as a receiver's ca_cert would.
+func trustRoots(t *testing.T) *x509.CertPool {
+	t.Helper()
+	ca, err := os.ReadFile(os.Getenv("WHERRY_TRUST_CA"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, err := operator.RootPool(string(ca))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return roots
+}
+
 func (b brokerPool) applyTerms(t *testing.T, ctx context.Context, terms operator.Terms) {
 	t.Helper()
 	if err := b.service.PoolApply(ctx, b.pool, terms, false); err != nil {
@@ -905,7 +920,7 @@ func tenantEndReceiver(t *testing.T, ctx context.Context, b brokerPool) *Receive
 	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
 		t.Fatal(err)
 	}
-	r, err := New(bundle, t.TempDir(), false, time.Second, nil, log.New(&syncBuffer{}, "", 0), prometheus.NewRegistry())
+	r, err := New(bundle, trustRoots(t), t.TempDir(), false, time.Second, nil, log.New(&syncBuffer{}, "", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}

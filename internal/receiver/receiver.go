@@ -5,10 +5,12 @@ import (
 	"cmp"
 	"context"
 	"crypto/ed25519"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log"
 	"maps"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -63,6 +65,9 @@ type ProfileFactory func(pool string, settings operator.ProfileSettings, pluginS
 type Receiver struct {
 	id   string
 	base *kgo.Client
+	// storage uploads S3 outputs, verifying the bucket's certificate against the roots New was given and following no
+	// redirect.
+	storage *http.Client
 	// reader reads every topic the receiver reads.
 	reader  *operator.Reader
 	signing ed25519.PrivateKey
@@ -123,15 +128,15 @@ type Receiver struct {
 	custodian *telemetry.Tracing
 }
 
-// New builds the receiver's Kafka client from bundle, trusting the broker through the system roots, loads or creates its
-// signing key in stateDir, settling a rotation an earlier start left, rotates it in Run with rotateKey, and registers
-// its metric families on registry.
-func New(bundle operator.Bundle, stateDir string, rotateKey bool, drainTimeout time.Duration, factory ProfileFactory, logger *log.Logger, registry *prometheus.Registry) (*Receiver, error) {
+// New builds the receiver's Kafka client from bundle, verifying the broker, and later each pool's bucket, against roots,
+// operator.RootPool's, loads or creates its signing key in stateDir, settling a rotation an earlier start left, rotates
+// it in Run with rotateKey, and registers its metric families on registry.
+func New(bundle operator.Bundle, roots *x509.CertPool, stateDir string, rotateKey bool, drainTimeout time.Duration, factory ProfileFactory, logger *log.Logger, registry *prometheus.Registry) (*Receiver, error) {
 	id, ok := strings.CutPrefix(bundle.Principal, operator.ReceiverPrincipal(""))
 	if !ok || !wire.ValidName(id) {
 		return nil, errors.New("bundle principal is not a receiver principal")
 	}
-	opts, err := operator.BundleKafkaOpts(bundle)
+	opts, err := operator.BundleKafkaOpts(bundle, roots)
 	if err != nil {
 		return nil, fmt.Errorf("bundle: %w", err)
 	}
@@ -154,7 +159,7 @@ func New(bundle operator.Bundle, stateDir string, rotateKey bool, drainTimeout t
 		base.Close()
 		return nil, fmt.Errorf("signing key: %w", err)
 	}
-	return &Receiver{id: id, base: base, reader: operator.NewReader(base), signing: signing, keyFile: keyFile, stateDir: stateDir, rotateKey: rotateKey, drainTimeout: drainTimeout, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
+	return &Receiver{id: id, base: base, storage: storageClient(roots), reader: operator.NewReader(base), signing: signing, keyFile: keyFile, stateDir: stateDir, rotateKey: rotateKey, drainTimeout: drainTimeout, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
 }
 
 // feedBatches is opts with producer batches up to what a tenant's feed takes, so the largest result fits. Every client

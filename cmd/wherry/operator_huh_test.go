@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -38,7 +39,7 @@ func stopOperatorConnection(t *testing.T, check func(string, string, string)) er
 	old := superUserKafka
 	t.Cleanup(func() { superUserKafka = old })
 	stop := errors.New("connection seam")
-	superUserKafka = func(b, u, p, _ string) (*kgo.Client, error) { check(b, u, p); return nil, stop }
+	superUserKafka = func(b, u, p, _ string, _ *x509.CertPool) (*kgo.Client, error) { check(b, u, p); return nil, stop }
 	return stop
 }
 

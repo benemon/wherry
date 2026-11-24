@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -193,8 +192,7 @@ type outputInput struct {
 
 type submitInput struct {
 	Wait        bool               `json:"wait,omitempty" jsonschema:"collect the result within one result call's wait; only worth setting for runs expected to finish within it, otherwise call result"`
-	Prompt      string             `json:"prompt,omitempty" jsonschema:"the task for the remote agent; exactly one of prompt and prompt_file is required"`
-	PromptFile  string             `json:"prompt_file,omitempty" jsonschema:"local file holding the prompt, read as an input is"`
+	Prompt      string             `json:"prompt,omitempty" jsonschema:"the task for the remote agent: its text, or @FILE for the contents of a local file read as an input is; required"`
 	Agent       string             `json:"agent,omitempty" jsonschema:"agent to run, as the pool's terms name it; default: the pool's default agent"`
 	Model       string             `json:"model,omitempty" jsonschema:"model the agent runs, one of its models as receivers lists them; default: the agent's default model"`
 	Selector    []wire.Requirement `json:"selector,omitempty" jsonschema:"labels the profile must carry, each {key, operator, values}; operator is In or NotIn (with values), Exists or DoesNotExist (without); keys are arbitrary operator labels such as gpu or example.com/segment"`
@@ -272,7 +270,7 @@ type waitReply struct {
 	ID          string                  `json:"id"`
 	State       string                  `json:"state"`
 	Model       string                  `json:"model,omitempty" jsonschema:"model the run's placement names"`
-	RetryAfter  int                     `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished: seconds to wait before calling result again"`
+	RetryAfter  int                     `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished and within its bound, its task_ended_by plus the upload grace: seconds to wait before calling result again; absent past the bound, where message reports the timeout wherry result exits 6 with"`
 	Message     string                  `json:"message,omitempty" jsonschema:"status message: the agent's answer or what went wrong, a credential the run could not obtain, the step the agent last reported while the run is unfinished, or, while no receiver has reported a status, this host's note of why the run waits as the receivers' live advertisements show it now (a run past task_started_by: that no receiver claimed the task) and of a cancel waiting for a claim; an answer over 64 KiB is cut to its first 64 KiB, and reply names the whole"`
 	Reply       *replyFile              `json:"reply,omitempty" jsonschema:"set when the agent's answer is over 64 KiB"`
 	Artifacts   []resultArtifact        `json:"artifacts,omitempty"`
@@ -383,10 +381,17 @@ func newMCPServer(connect func() (*busclient.Host, error), openInput func(string
 			if err != nil {
 				return nil, waitReply{}, failure(err)
 			}
-			return nil, waitReply{
+			reply := waitReply{
 				ID: input.ID, State: string(status.Status.State), Model: status.Model, Message: cmp.Or(statusText(status.Status), notes(status.Unclaimed, status.Waiting, status.CancelRequested)),
 				Redacted: status.Redacted, RetryAfter: retryAfter, Skipped: status.Skipped,
-			}, nil
+			}
+			// Past the bound wherry result waits to, the run's recorded task_ended_by plus the upload grace, the run is
+			// reported as the CLI's exit 6 reports it: timed out, with no retry_after.
+			if endBy := client.RecordedEndBy(input.ID); !endBy.IsZero() && !time.Now().Before(endBy.Add(resultGrace)) {
+				reply.RetryAfter = 0
+				reply.Message = notes(resultTimeout(endBy), reply.Message)
+			}
+			return nil, reply, nil
 		}
 		if err != nil {
 			return nil, waitReply{}, failure(err)
@@ -513,7 +518,8 @@ func newMCPServer(connect func() (*busclient.Host, error), openInput func(string
 		Name: "result",
 		Description: fmt.Sprintf("Wait up to %d seconds for a run to finish. Returns the result, a failed, canceled or rejected state "+
 			"with its message, or {id, state, message, redacted, retry_after} while the run is unfinished, message the latest status message, "+
-			"such as the step the agent last reported: call result again. "+
+			"such as the step the agent last reported: call result again. Past the run's task_ended_by plus the upload grace, an unfinished run "+
+			"returns no retry_after and message reports the timeout, as wherry result's exit 6 does. "+
 			"A run whose task_started_by passed with no receiver claiming it returns its state and a message saying so, without retry_after. "+
 			"A finished run's outputs are verified and written under this host's state directory; outputs lists their paths and hashes. "+
 			"Use status to check a run without waiting.", int(waitBound.Seconds())),
@@ -672,19 +678,19 @@ func droppedFields(next mcp.MethodHandler) mcp.MethodHandler {
 }
 
 func submitFromInput(input submitInput, openInput func(string) (*os.File, error)) (busclient.SubmitInput, error) {
-	if (input.Prompt == "") == (input.PromptFile == "") {
-		return busclient.SubmitInput{}, invalidArgument("exactly one of prompt and prompt_file is required")
+	if input.Prompt == "" {
+		return busclient.SubmitInput{}, invalidArgument("prompt is required")
 	}
-	if input.PromptFile != "" {
-		part, err := inputReader(openInput)(input.PromptFile, math.MaxInt64)
-		if err != nil {
-			return busclient.SubmitInput{}, err
-		}
-		if len(part.Raw) == 0 {
-			return busclient.SubmitInput{}, invalidArgument("prompt_file is empty")
-		}
-		input.Prompt = string(part.Raw)
+	// @FILE opens through the input roots as an input does; the server's standard input carries the MCP protocol, so
+	// @- is refused.
+	prompt, err := flagValue("prompt", input.Prompt, openInput, nil)
+	if err != nil {
+		return busclient.SubmitInput{}, argumentError(err)
 	}
+	if prompt == "" {
+		return busclient.SubmitInput{}, invalidArgument("prompt is empty")
+	}
+	input.Prompt = prompt
 	selector := input.Selector
 	if selector == nil {
 		selector = []wire.Requirement{}
@@ -720,6 +726,16 @@ func submitFromInput(input submitInput, openInput func(string) (*os.File, error)
 		submission.Files = append(submission.Files, busclient.S3File{Name: filepath.Base(inputFile.Path), Body: file})
 	}
 	return submission, nil
+}
+
+// argumentError is err as a tool error: the toolError it wraps, as an input the roots refuse carries, else
+// INVALID_ARGUMENT with its text, which names a path and never a value.
+func argumentError(err error) error {
+	var failed *toolError
+	if errors.As(err, &failed) {
+		return failed
+	}
+	return invalidArgument(err.Error())
 }
 
 // bounds parses start_by and end_by and applies the CLI's defaults to unset ones.

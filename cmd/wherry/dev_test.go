@@ -806,6 +806,10 @@ func TestDevNomadJobs(t *testing.T) {
 	if _, err := runJob(context.Background(), nomad, receiverJob(env)); err != nil {
 		t.Fatal(err)
 	}
+	// The receiver trusts the instance CA through its configuration's ca_cert, not its environment.
+	if task := receiverJob(env).TaskGroups[0].Tasks[0]; len(task.Env) != 0 {
+		t.Fatalf("receiver job env %v; want none", task.Env)
+	}
 	*calls = nil
 	seen, err := stopJobs(context.Background(), nomad, instance)
 	if err != nil || !slices.Equal(seen, []string{"wherry-default-receiver-alloc", "wherry-default-kafka-alloc"}) {

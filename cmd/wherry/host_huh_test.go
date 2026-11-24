@@ -303,7 +303,7 @@ func TestHostHuhInterruptAfterBootstrap(t *testing.T) {
 	h := newInitHost(t, map[string]operator.Terms{"a": agentTerms(envCredential("key", "KEY"))})
 	scriptForms(t, keys("\x03"))
 	var out bytes.Buffer
-	err := hostInit(h.ctx, h.config, h.bundle, &out, &out)
+	err := hostInit(h.ctx, h.config, h.bundle, &testCA.pem, &out, &out)
 	if !errors.Is(err, errInterrupted) {
 		t.Fatal(err)
 	}
@@ -333,7 +333,7 @@ func TestHostKeyIDStaysInTerminalSummary(t *testing.T) {
 		io.Copy(&output, master)
 		close(done)
 	}()
-	if err := hostInit(h.ctx, h.config, h.bundle, tty, tty); err != nil {
+	if err := hostInit(h.ctx, h.config, h.bundle, &testCA.pem, tty, tty); err != nil {
 		t.Fatal(err)
 	}
 	tty.Close()
@@ -782,7 +782,7 @@ func TestHostSSHRequiresSchemeHostAndNewPrefix(t *testing.T) {
 func TestHostReturnedErrorIsEscapedAndWrapped(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "host\x1b]52;c;x\a.yaml")
 	var out bytes.Buffer
-	err := hostInit(context.Background(), path, "", &out, &out)
+	err := hostInit(context.Background(), path, "", nil, &out, &out)
 	if err == nil || strings.Contains(err.Error(), "\x1b") || errors.Unwrap(err) == nil {
 		t.Fatal(err)
 	}

@@ -25,16 +25,20 @@ import (
 // credential name to the source of its value. Git names the credential and
 // host key a task cloning under each URL prefix takes. InputRoots are the
 // directories the MCP server sends inputs from. Storage maps a pool to the credentials of its bucket. Tracing writes
-// the host's spans to its tenant's trace topic; off by default. The broker is trusted through the system roots.
+// the host's spans to its tenant's trace topic; off by default. CACert is the PEM of the CA the host's Kafka and S3
+// connections trust beside the machine's trust store; empty for the trust store alone. Path is the file the
+// configuration was loaded from, which the hint on an unknown authority names.
 type Config struct {
 	Bundle      string                       `yaml:"bundle"`
 	HostKey     string                       `yaml:"host_key,omitempty"`
 	StateDir    string                       `yaml:"state_dir,omitempty"`
+	CACert      string                       `yaml:"ca_cert,omitempty"`
 	Credentials map[string]credential.Source `yaml:"credentials,omitempty"`
 	Git         []GitCredential              `yaml:"git,omitempty"`
 	Storage     map[string]StorageConfig     `yaml:"storage,omitempty"`
 	InputRoots  []string                     `yaml:"input_roots,omitempty"`
 	Tracing     bool                         `yaml:"tracing,omitempty"`
+	Path        string                       `yaml:"-"`
 }
 
 // GitCredential gives a task whose git remote starts with URL the credential Credential and, for ssh, the known_hosts
@@ -135,7 +139,8 @@ func sameExistingFile(a, b string) bool {
 	return errA == nil && errB == nil && os.SameFile(infoA, infoB)
 }
 
-// LoadConfig decodes the config at path, defaulting host_key and state_dir to DefaultPaths' for path.
+// LoadConfig decodes the config at path, defaulting host_key and state_dir to DefaultPaths' for path, and refusing a
+// ca_cert from which Go appends no certificate.
 func LoadConfig(path string) (Config, error) {
 	path, err := ExpandHome(path)
 	if err != nil {
@@ -154,6 +159,10 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if config.Bundle == "" {
 		return Config{}, errors.New("config requires bundle")
+	}
+	config.Path = path
+	if _, err := operator.ConfigRootPool(path, config.CACert); err != nil {
+		return Config{}, err
 	}
 	if config.HostKey == "" || config.StateDir == "" {
 		paths, err := DefaultPaths(path)
@@ -258,14 +267,18 @@ func Init(ctx context.Context, config Config) (string, map[string]operator.Terms
 // pingTimeout bounds Connect's first exchange with the broker; franz-go bounds each dial and request at 10 s.
 const pingTimeout = 30 * time.Second
 
-// Connect opens the bundle's TLS and SCRAM-SHA-512 Kafka connection as its host principal, trusting the broker through
-// the system roots; the host logs to logger.
+// Connect opens the bundle's TLS and SCRAM-SHA-512 Kafka connection as its host principal, verifying the broker, and
+// later each pool's bucket, against the machine's trust store plus config's ca_cert; the host logs to logger.
 func Connect(config Config, logger *log.Logger) (*Host, error) {
 	bundle, err := operator.ReadBundle(config.Bundle)
 	if err != nil {
 		return nil, err
 	}
-	opts, err := operator.BundleKafkaOpts(bundle)
+	roots, err := operator.ConfigRootPool(config.Path, config.CACert)
+	if err != nil {
+		return nil, err
+	}
+	opts, err := operator.BundleKafkaOpts(bundle, roots)
 	if err != nil {
 		return nil, fmt.Errorf("bundle: %w", err)
 	}
@@ -279,12 +292,13 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 		kafka.Close()
 		return nil, err
 	}
+	host.roots = roots
 	// The first exchange with the broker, so a certificate the connection does not trust fails here.
 	ping, cancel := context.WithTimeout(context.Background(), pingTimeout)
 	defer cancel()
 	if err := kafka.Ping(ping); err != nil {
 		kafka.Close()
-		return nil, operator.ExplainUnknownAuthority(err)
+		return nil, operator.ExplainUnknownAuthority(err, config.Path)
 	}
 	if host.key, err = operator.RecoverKey(context.Background(), kafka, signed.HostOwner(host.tenant, host.host), operator.HostTopic(host.tenant, host.host), config.HostKey); err != nil {
 		kafka.Close()

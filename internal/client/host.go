@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	json "encoding/json/v2"
 	"errors"
@@ -195,7 +196,9 @@ type Host struct {
 	// bundleStorage is the tenant's S3 key pair the bundle carries, zero for none: the keys of every pool with storage
 	// that storage does not map. It is no credential, so no pool's terms can request it.
 	bundleStorage operator.StorageKeys
-	logger        *log.Logger
+	// roots is the pool each bucket's certificate is verified against, Connect's; nil is the system roots alone.
+	roots  *x509.CertPool
+	logger *log.Logger
 	// follower is the host's reader of the tenant feed, kept while its context lasts.
 	followMu sync.Mutex
 	follower *follower

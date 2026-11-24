@@ -43,18 +43,21 @@ const (
 // receiverLocalConfig is the receiver's local configuration file. Credentials maps the name a profile's config gives
 // its platform credential to the source of its value. DrainTimeout bounds how long held runs may finish after a stop
 // signal; it stays below the platform's stop window, which the receiver cannot read. Tracing writes the receiver's
-// spans to the trace topics; off by default. The broker is trusted through the system roots.
+// spans to the trace topics; off by default. CACert is the PEM of the CA the receiver's Kafka and S3 connections trust
+// beside the machine's trust store; empty for the trust store alone.
 type receiverLocalConfig struct {
 	Bundle       string                       `yaml:"bundle"`
 	StateDir     string                       `yaml:"state_dir"`
 	PluginDir    string                       `yaml:"plugin_dir"`
+	CACert       string                       `yaml:"ca_cert,omitempty"`
 	MetricsAddr  string                       `yaml:"metrics_addr"`
 	DrainTimeout time.Duration                `yaml:"drain_timeout"`
 	Credentials  map[string]credential.Source `yaml:"credentials"`
 	Tracing      bool                         `yaml:"tracing,omitempty"`
 }
 
-// loadReceiverLocalConfig decodes the receiver's local configuration at path, defaulting state_dir and plugin_dir.
+// loadReceiverLocalConfig decodes the receiver's local configuration at path, defaulting state_dir and plugin_dir, and
+// refusing a ca_cert from which Go appends no certificate.
 func loadReceiverLocalConfig(path string) (receiverLocalConfig, error) {
 	path, err := client.ExpandHome(path)
 	if err != nil {
@@ -73,6 +76,9 @@ func loadReceiverLocalConfig(path string) (receiverLocalConfig, error) {
 	}
 	if config.Bundle == "" {
 		return receiverLocalConfig{}, errors.New("config requires bundle")
+	}
+	if _, err := operator.ConfigRootPool(path, config.CACert); err != nil {
+		return receiverLocalConfig{}, err
 	}
 	if config.DrainTimeout < 0 {
 		return receiverLocalConfig{}, errors.New("config drain_timeout must not be negative")
@@ -123,6 +129,10 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	roots, err := operator.ConfigRootPool(*configPath, config.CACert)
+	if err != nil {
+		return err
+	}
 	bundle, err := operator.ReadBundle(config.Bundle)
 	if err != nil {
 		return err
@@ -138,9 +148,9 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	}
 	plugins := &plugins{dir: config.PluginDir, credentials: config.Credentials, logger: logger, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
-	r, err := receiver.New(bundle, config.StateDir, *rotateKey, config.DrainTimeout, plugins.profile, logger, registry)
+	r, err := receiver.New(bundle, roots, config.StateDir, *rotateKey, config.DrainTimeout, plugins.profile, logger, registry)
 	if err != nil {
-		return operator.ExplainUnknownAuthority(err)
+		return operator.ExplainUnknownAuthority(err, *configPath)
 	}
 	plugins.logs, plugins.hold = r.PluginLogs(stdout), r.HoldPlatformCredential
 	if config.Tracing {
@@ -149,7 +159,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := r.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		return operator.ExplainUnknownAuthority(err)
+		return operator.ExplainUnknownAuthority(err, *configPath)
 	}
 	return nil
 }

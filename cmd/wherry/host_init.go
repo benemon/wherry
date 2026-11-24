@@ -31,8 +31,9 @@ func (use credentialUse) as() string {
 	return use.target.Env
 }
 
-// hostInit registers a host and configures references to the sources its entitled pools need.
-func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Writer) (result error) {
+// hostInit registers a host and configures references to the sources its entitled pools need. caCert, when given, is
+// the PEM --ca-cert resolved to, written as the configuration's ca_cert.
+func hostInit(ctx context.Context, path, bundle string, caCert *string, stdout, prompts io.Writer) (result error) {
 	defer func() {
 		if result != nil {
 			result = presentationError{result}
@@ -111,6 +112,10 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 		}
 	} else if file.Bundle == "" {
 		return fmt.Errorf("%s names no bundle; run wherry host init BUNDLE", path)
+	}
+	if caCert != nil && file.CACert != *caCert {
+		file.CACert = *caCert
+		changed = true
 	}
 
 	q := &questions{ctx, stdin, &promptLatch{out: prompts}}

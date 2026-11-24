@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	json "encoding/json/v2"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -86,15 +85,7 @@ func tracedS3(t *testing.T) *s3Store {
 		}
 	}))
 	t.Cleanup(server.Close)
-	previous := http.DefaultTransport
-	http.DefaultTransport = server.Client().Transport
-	t.Cleanup(func() { http.DefaultTransport = previous })
-	ca := filepath.Join(t.TempDir(), "s3-ca.pem")
-	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("SSL_CERT_FILE", ca)
-	return &s3Store{endpoint: server.URL, keys: operator.StorageKeys{AccessKey: tracedAccess, SecretKey: tracedSecret}, client: server.Client()}
+	return &s3Store{endpoint: server.URL, keys: operator.StorageKeys{AccessKey: tracedAccess, SecretKey: tracedSecret}, client: server.Client(), ca: serverCA(server)}
 }
 
 func readBundle(t *testing.T, path string) operator.Bundle {
@@ -202,7 +193,7 @@ func TestTracedRoundTrip(t *testing.T) {
 	plugins := &plugins{dir: pluginDir, credentials: map[string]credential.Source{"fake-token": {Env: "WHERRY_TRACED_PLATFORM"}}, logger: log.New(io.Discard, "", 0), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	logs := &syncBuffer{}
-	r, err := receiver.New(receiverBundled, filepath.Join(dir, "receiver-state"), false, 0, plugins.profile, log.New(logs, "receiver: ", 0), prometheus.NewRegistry())
+	r, err := receiver.New(receiverBundled, testRoots(t, bucket.ca), filepath.Join(dir, "receiver-state"), false, 0, plugins.profile, log.New(logs, "receiver: ", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +213,7 @@ func TestTracedRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("ANTHROPIC_API_KEY", credentialText)
-	hostConfig := busclient.Config{Bundle: hostBundle, HostKey: filepath.Join(dir, "host.key"), StateDir: filepath.Join(dir, "host-state"),
+	hostConfig := busclient.Config{Bundle: hostBundle, HostKey: filepath.Join(dir, "host.key"), StateDir: filepath.Join(dir, "host-state"), CACert: caCert(bucket.ca),
 		Credentials: map[string]credential.Source{"deploy-key": {Command: []string{"cat", deployPath}}}, Tracing: true}
 	if _, _, err := busclient.Init(ctx, hostConfig); err != nil {
 		t.Fatal(err)
@@ -234,7 +225,7 @@ func TestTracedRoundTrip(t *testing.T) {
 	}
 	// The second session's cost: a trace client built as the host's is, connected as Trace connects it in the
 	// background: the dial, the TLS handshake, the SCRAM exchange and the first metadata.
-	hostOpts, err := operator.BundleKafkaOpts(hostBundled)
+	hostOpts, err := operator.BundleKafkaOpts(hostBundled, testRoots(t))
 	if err != nil {
 		t.Fatal(err)
 	}

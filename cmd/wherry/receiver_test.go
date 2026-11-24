@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,7 +29,7 @@ import (
 var pluginDir, fakeSHA256 string
 
 func TestMain(m *testing.M) {
-	// A trust helper is this binary re-run with the SSL_CERT_FILE its test chose, which it keeps.
+	// A trust helper is this binary re-run in the environment its test chose, which it keeps.
 	if os.Getenv(trustHelperVariable) != "" {
 		os.Exit(m.Run())
 	}
@@ -40,15 +39,8 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	pluginDir = dir
-	// The process trusts testCA as its system roots, as a machine trusts the broker's CA through its trust store; Go
-	// reads SSL_CERT_FILE once, at the first verification, so the roots are loaded here, before any test sets the
-	// variable for an S3 client of its own.
+	// No system root trusts testCA: each test configuration names it in ca_cert, as a configuration names a private CA.
 	if err := newTestCA(filepath.Join(dir, "ca.pem")); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	os.Setenv("SSL_CERT_FILE", testCA.file)
-	if _, err := x509.SystemCertPool(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -330,7 +322,7 @@ func writeLocalConfig(t *testing.T, content string) string {
 
 func TestReceiverLocalConfigExampleParses(t *testing.T) {
 	config, err := loadReceiverLocalConfig(filepath.Join("testdata", "example-receiver-config.yaml"))
-	want := receiverLocalConfig{Bundle: "/etc/wherry/receiver.bundle", StateDir: "/var/lib/wherry/state", PluginDir: defaultPluginDir, MetricsAddr: ":9464", DrainTimeout: 20 * time.Second,
+	want := receiverLocalConfig{Bundle: "/etc/wherry/receiver.bundle", StateDir: "/var/lib/wherry/state", PluginDir: defaultPluginDir, CACert: "-----BEGIN CERTIFICATE-----\nMIIBaDCCAQ2gAwIBAgIBATAKBggqhkjOPQQDAjAbMRkwFwYDVQQDExBFeGFtcGxl\nIEthZmthIENBMB4XDTI2MDEwMTAwMDAwMFoXDTM2MDEwMTAwMDAwMFowGzEZMBcG\nA1UEAxMQRXhhbXBsZSBLYWZrYSBDQTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IA\nBFEgy9TOBEc4a9mgnw+3d4qvgVIU0/Fmc8rYHJV3j6w5mDh+2RhsPMfPemvvalyk\nNjkTrsV9YHdVrC23oTKT1+ujQjBAMA4GA1UdDwEB/wQEAwICBDAPBgNVHRMBAf8E\nBTADAQH/MB0GA1UdDgQWBBTk2lyUabR4G7GnUkG5jMjgRppaBDAKBggqhkjOPQQD\nAgNJADBGAiEAhzRsT5hv5IVb4PPTDkywm8ODz0YaOKKW6TVKAqny25ACIQCOs0pI\nXTLjEqjdY8QInPTKgfhfGCVcW/VdIWyidLG0yQ==\n-----END CERTIFICATE-----\n", MetricsAddr: ":9464", DrainTimeout: 20 * time.Second,
 		Credentials: map[string]credential.Source{"nomad-token": {File: "/etc/wherry/nomad-token"}}, Tracing: true}
 	if err != nil || !reflect.DeepEqual(config, want) {
 		t.Fatalf("example = %+v, %v; want %+v", config, err, want)

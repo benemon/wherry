@@ -1587,7 +1587,7 @@ func TestConfigRefusesCAFileByName(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := LoadConfig(path)
-	if want := path + ": ca_file is no longer read; remove the line and install the broker's CA in this machine's trust store"; err == nil || err.Error() != want {
+	if want := path + ": ca_file is now ca_cert"; err == nil || err.Error() != want {
 		t.Fatalf("config with a ca_file: %v; want %q", err, want)
 	}
 }

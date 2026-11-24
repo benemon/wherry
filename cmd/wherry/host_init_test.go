@@ -74,11 +74,11 @@ func (h initHost) entitle(t *testing.T, pool string, terms operator.Terms) {
 	}
 }
 
-// init runs wherry host init with args, returning its stdout and its prompts.
+// init runs wherry host init with args and the broker's CA as --ca-cert, returning its stdout and its prompts.
 func (h initHost) init(t *testing.T, args ...string) (string, string) {
 	t.Helper()
 	var stdout, prompts bytes.Buffer
-	if err := run(append([]string{"host", "init"}, args...), &stdout, &prompts); err != nil {
+	if err := run(append([]string{"host", "init", "--ca-cert", testCA.pem}, args...), &stdout, &prompts); err != nil {
 		t.Fatalf("host init: %v\n%s", err, prompts.String())
 	}
 	return stdout.String(), prompts.String()
@@ -325,7 +325,7 @@ func TestHostInitKeepsAnExplicitBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, prompts bytes.Buffer
-	err := run([]string{"host", "init", h.bundle, "--config-file", other}, &stdout, &prompts)
+	err := run([]string{"host", "init", h.bundle, "--config-file", other, "--ca-cert", testCA.pem}, &stdout, &prompts)
 	if want := taken + " exists and is not the bundle of configuration " + other + "; set bundle in " + other + " to a path of its own"; err == nil || err.Error() != want {
 		t.Fatalf("init = %v; want %q", err, want)
 	}
@@ -351,7 +351,7 @@ func TestHostInitRefusesADanglingLinkAtADerivedPath(t *testing.T) {
 				t.Fatal(err)
 			}
 			var stdout, prompts bytes.Buffer
-			err := run([]string{"host", "init", h.bundle, "--config-file", config}, &stdout, &prompts)
+			err := run([]string{"host", "init", h.bundle, "--config-file", config, "--ca-cert", testCA.pem}, &stdout, &prompts)
 			what := map[string]string{"bundle": "bundle", "host_key": "host key", "state_dir": "state directory"}[setting]
 			if want := config + suffix + " exists and is not the " + what + " of configuration " + config + "; set " + setting + " in " + config + " to a path of its own"; err == nil || err.Error() != want {
 				t.Fatalf("init = %v; want %q", err, want)
@@ -462,7 +462,7 @@ func TestHostInitMalformedHostKeyEchoesNoKeyMaterial(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, prompts bytes.Buffer
-	err := run([]string{"host", "init", h.bundle, "--config-file", own}, &stdout, &prompts)
+	err := run([]string{"host", "init", h.bundle, "--config-file", own, "--ca-cert", testCA.pem}, &stdout, &prompts)
 	if err == nil {
 		t.Fatal("init with a malformed host key succeeded")
 	}
@@ -491,7 +491,7 @@ func TestHostInitRefusesAnotherConfigurationsFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 		var stdout, prompts bytes.Buffer
-		if err := run([]string{"host", "init", h.bundle, "--config-file", a}, &stdout, &prompts); err == nil || err.Error() != want {
+		if err := run([]string{"host", "init", h.bundle, "--config-file", a, "--ca-cert", testCA.pem}, &stdout, &prompts); err == nil || err.Error() != want {
 			t.Fatalf("init = %v; want %q", err, want)
 		}
 		if after, err := os.ReadFile(blocking); err != nil || !bytes.Equal(before, after) {

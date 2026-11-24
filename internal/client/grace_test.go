@@ -37,7 +37,7 @@ func TestS3OutputsUploadUntilTaskEndedByPlusTheGrace(t *testing.T) {
 		o.mu.Lock()
 		o.clock = func() time.Time { return at }
 		o.mu.Unlock()
-		return postUpload(t, &http.Client{Transport: storageTransport}, values.S3Policy, key, []byte("report")).StatusCode
+		return postUpload(t, o.client, values.S3Policy, key, []byte("report")).StatusCode
 	}
 	if status := upload(endBy.Add(operator.UploadGrace + time.Minute)); status != http.StatusForbidden {
 		t.Fatalf("POST past the grace answered %d, want forbidden", status)

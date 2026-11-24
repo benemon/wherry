@@ -1,6 +1,18 @@
 bundle: /etc/wherry/receiver.bundle
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
+# The CA that signed the broker's and the bucket's certificates, when the machine's trust store lacks it.
+ca_cert: |
+  -----BEGIN CERTIFICATE-----
+  MIIBaDCCAQ2gAwIBAgIBATAKBggqhkjOPQQDAjAbMRkwFwYDVQQDExBFeGFtcGxl
+  IEthZmthIENBMB4XDTI2MDEwMTAwMDAwMFoXDTM2MDEwMTAwMDAwMFowGzEZMBcG
+  A1UEAxMQRXhhbXBsZSBLYWZrYSBDQTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IA
+  BFEgy9TOBEc4a9mgnw+3d4qvgVIU0/Fmc8rYHJV3j6w5mDh+2RhsPMfPemvvalyk
+  NjkTrsV9YHdVrC23oTKT1+ujQjBAMA4GA1UdDwEB/wQEAwICBDAPBgNVHRMBAf8E
+  BTADAQH/MB0GA1UdDgQWBBTk2lyUabR4G7GnUkG5jMjgRppaBDAKBggqhkjOPQQD
+  AgNJADBGAiEAhzRsT5hv5IVb4PPTDkywm8ODz0YaOKKW6TVKAqny25ACIQCOs0pI
+  XTLjEqjdY8QInPTKgfhfGCVcW/VdIWyidLG0yQ==
+  -----END CERTIFICATE-----
 metrics_addr: ":9464"
 drain_timeout: 20s
 credentials:

@@ -5,10 +5,12 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"encoding/pem"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -50,6 +52,7 @@ type oracle struct {
 	sources  map[string]credential.Source
 	store    *minio.Client
 	client   *http.Client
+	roots    *x509.CertPool
 	secret   string
 }
 
@@ -59,10 +62,15 @@ type uploadOracle struct {
 	endpoint string
 	config   *StorageConfig
 	sources  map[string]credential.Source
-	mu       sync.Mutex
-	objects  map[string][]byte
-	ops      []string
-	access   []string
+	// roots is the pool a host's ca_cert holding the oracle's CA builds, and client an HTTP client that trusts it.
+	roots  *x509.CertPool
+	client *http.Client
+	// onRequest, when set, sees each request before the oracle handles it.
+	onRequest func(*http.Request)
+	mu        sync.Mutex
+	objects   map[string][]byte
+	ops       []string
+	access    []string
 	// clock, when set, is the time the oracle checks a presigned URL's X-Amz-Date plus X-Amz-Expires against.
 	clock func() time.Time
 }
@@ -186,6 +194,9 @@ func newUploadOracle(t *testing.T) *uploadOracle {
 	t.Helper()
 	o := &uploadOracle{objects: map[string][]byte{}}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if o.onRequest != nil {
+			o.onRequest(r)
+		}
 		o.mu.Lock()
 		defer o.mu.Unlock()
 		query, bucket := r.URL.Query(), strings.TrimSuffix(r.URL.Path, "/")
@@ -266,9 +277,7 @@ func newUploadOracle(t *testing.T) *uploadOracle {
 		}
 	}))
 	t.Cleanup(server.Close)
-	previous := storageTransport
-	storageTransport = server.Client().Transport
-	t.Cleanup(func() { storageTransport = previous })
+	o.roots, o.client = serverRoots(t, server), server.Client()
 	access, secret := filepath.Join(t.TempDir(), "access"), filepath.Join(t.TempDir(), "secret")
 	if err := os.WriteFile(access, []byte("access"), 0o600); err != nil {
 		t.Fatal(err)
@@ -279,6 +288,16 @@ func newUploadOracle(t *testing.T) *uploadOracle {
 	o.endpoint, o.config = server.URL, &StorageConfig{AccessKey: "storage-access", SecretKey: "storage-secret"}
 	o.sources = map[string]credential.Source{"storage-access": {File: access}, "storage-secret": {File: secret}}
 	return o
+}
+
+// serverRoots is the pool a ca_cert holding server's certificate builds: the system roots plus it.
+func serverRoots(t *testing.T, server *httptest.Server) *x509.CertPool {
+	t.Helper()
+	roots, err := operator.RootPool(string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return roots
 }
 
 func (o *uploadOracle) object(path string) []byte {
@@ -332,9 +351,7 @@ func newOracle(t *testing.T) *oracle {
 			}
 		}
 	})
-	previous := storageTransport
-	storageTransport = proxy.Client().Transport
-	t.Cleanup(func() { storageTransport = previous })
+	roots := serverRoots(t, proxy)
 	store, err := minio.New(parsed.Host, &minio.Options{Creds: credentials.NewStaticV4(access, secret, ""), BucketLookup: minio.BucketLookupPath})
 	if err != nil {
 		t.Fatal(err)
@@ -357,7 +374,7 @@ func newOracle(t *testing.T) *oracle {
 	})
 	client := proxy.Client()
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &oracle{endpoint: proxy.URL, config: config, sources: sources, store: store, client: client, secret: secret}
+	return &oracle{endpoint: proxy.URL, config: config, sources: sources, store: store, client: client, roots: roots, secret: secret}
 }
 
 // object is the content of key in the test bucket, or nil when it does not exist.
@@ -393,6 +410,7 @@ func storageFixture(t *testing.T) (*fixture, *oracle, *testReceiver) {
 	t.Helper()
 	o := newOracle(t)
 	f := newFixture(t)
+	f.host.roots = o.roots
 	terms := testTerms()
 	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
 	if err := f.service.PoolApply(f.ctx, "pool-s3", terms, false); err != nil {
@@ -475,6 +493,7 @@ func TestSubmitUploadsS3InputsBeforePublishing(t *testing.T) {
 func TestSubmitMovesInputsOverSmallestProfileLimitToS3(t *testing.T) {
 	o := newUploadOracle(t)
 	f := newFixture(t)
+	f.host.roots = o.roots
 	terms := testTerms()
 	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
 	if err := f.service.PoolApply(f.ctx, "pool-inline", terms, false); err != nil {
@@ -509,6 +528,7 @@ func recordLimitFixture(t *testing.T, stored bool) (*fixture, *uploadOracle, *te
 	t.Helper()
 	o := newUploadOracle(t)
 	f := newFixture(t)
+	f.host.roots = o.roots
 	terms := testTerms()
 	if stored {
 		terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
@@ -573,12 +593,8 @@ func TestSubmitOverTheRecordLimitMovesInputsToS3(t *testing.T) {
 	}
 }
 
-type transportFunc func(*http.Request) (*http.Response, error)
-
-func (f transportFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
-
 func TestSubmitUploadsAFileOverTheRecordLimitFromDisk(t *testing.T) {
-	f, _, receiver := recordLimitFixture(t, true)
+	f, o, receiver := recordLimitFixture(t, true)
 	big, err := os.Create(filepath.Join(t.TempDir(), "big.bin"))
 	if err != nil {
 		t.Fatal(err)
@@ -590,15 +606,13 @@ func TestSubmitUploadsAFileOverTheRecordLimitFromDisk(t *testing.T) {
 	}
 	small, _ := randomFile(t, "small.bin", 100)
 	var before, during runtime.MemStats
-	previous := storageTransport
-	storageTransport = transportFunc(func(request *http.Request) (*http.Response, error) {
+	// The heap is read as the PUT arrives, before the oracle reads its body.
+	o.onRequest = func(request *http.Request) {
 		if request.Method == http.MethodPut && strings.HasSuffix(request.URL.Path, "/big.bin") {
 			runtime.GC()
 			runtime.ReadMemStats(&during)
 		}
-		return previous.RoundTrip(request)
-	})
-	t.Cleanup(func() { storageTransport = previous })
+	}
 	runtime.GC()
 	runtime.ReadMemStats(&before)
 	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Files: []S3File{{Name: "big.bin", Body: big}, {Name: "small.bin", Body: small}},
@@ -645,6 +659,7 @@ func TestSubmitRefusesAPromptOverTheRecordLimit(t *testing.T) {
 func TestSubmitAppliesTheProfileLimitOfAStaleReceiver(t *testing.T) {
 	o := newUploadOracle(t)
 	f := newFixture(t)
+	f.host.roots = o.roots
 	terms := testTerms()
 	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
 	if err := f.service.PoolApply(f.ctx, "pool-inline", terms, false); err != nil {
@@ -1028,9 +1043,6 @@ func refusingStore(t *testing.T) *httptest.Server {
 		fmt.Fprintf(w, "<Error><Code>InvalidAccessKeyId</Code><Message>no access key %s</Message></Error>", access)
 	}))
 	t.Cleanup(server.Close)
-	previous := storageTransport
-	storageTransport = server.Client().Transport
-	t.Cleanup(func() { storageTransport = previous })
 	return server
 }
 
@@ -1046,7 +1058,7 @@ func TestPaddedStorageKeyIsRedacted(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := &Host{storage: map[string]StorageConfig{"pool-s3": {AccessKey: "padded-access", SecretKey: "padded-secret"}},
-		credentials: map[string]credential.Source{"padded-access": {File: access}, "padded-secret": {File: secret}}}
+		credentials: map[string]credential.Source{"padded-access": {File: access}, "padded-secret": {File: secret}}, roots: serverRoots(t, server)}
 	ctx := context.Background()
 	store, err := h.bucket(ctx, "pool-s3", &operator.Storage{Endpoint: server.URL, Bucket: testBucket}, newResolver(ctx, ""))
 	if err != nil {
@@ -1138,6 +1150,7 @@ func twoPoolS3Fixture(t *testing.T, pool string) (*uploadOracle, *fixture, *test
 	t.Helper()
 	o := newUploadOracle(t)
 	f := newFixture(t)
+	f.host.roots = o.roots
 	terms := testTerms()
 	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
 	f.host.storage = map[string]StorageConfig{}
@@ -1294,6 +1307,7 @@ func TestBundleStorageKeysServeUnmappedPools(t *testing.T) {
 func TestBundleStorageKeysReachNoStateRecordOrLog(t *testing.T) {
 	o := newUploadOracle(t)
 	f := newFixture(t)
+	f.host.roots = o.roots
 	terms := testTerms()
 	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
 	if err := f.service.PoolApply(f.ctx, "pool-s3", terms, false); err != nil {
@@ -1389,6 +1403,7 @@ func TestBundleStorageKeysReachNoStateRecordOrLog(t *testing.T) {
 func TestStorageErrorsAndLogsNameNoStorageKey(t *testing.T) {
 	server := refusingStore(t)
 	f := newFixture(t)
+	f.host.roots = serverRoots(t, server)
 	terms := testTerms()
 	terms.Storage = &operator.Storage{Endpoint: server.URL, Bucket: testBucket}
 	if err := f.service.PoolApply(f.ctx, "pool-s3", terms, false); err != nil {
@@ -1467,7 +1482,7 @@ func TestObjectReaderErrorsNameNoStorageKey(t *testing.T) {
 	t.Run("a refusal at the first read", func(t *testing.T) {
 		server := refusingStore(t)
 		bundled := operator.StorageKeys{AccessKey: "AKIAREADERACCESSKEY", SecretKey: "reader-secret-key-value-sentinel"}
-		h := &Host{bundleStorage: bundled}
+		h := &Host{bundleStorage: bundled, roots: serverRoots(t, server)}
 		store, err := h.bucket(ctx, "pool-s3", &operator.Storage{Endpoint: server.URL, Bucket: testBucket}, newResolver(ctx, ""))
 		if err != nil {
 			t.Fatal(err)
@@ -1496,7 +1511,7 @@ func TestObjectReaderErrorsNameNoStorageKey(t *testing.T) {
 	t.Run("a served object", func(t *testing.T) {
 		o := newUploadOracle(t)
 		o.objects["/"+testBucket+"/"+key] = []byte("report")
-		h := &Host{storage: map[string]StorageConfig{"pool-s3": *o.config}, credentials: o.sources}
+		h := &Host{storage: map[string]StorageConfig{"pool-s3": *o.config}, credentials: o.sources, roots: o.roots}
 		store, err := h.bucket(ctx, "pool-s3", &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}, newResolver(ctx, ""))
 		if err != nil {
 			t.Fatal(err)

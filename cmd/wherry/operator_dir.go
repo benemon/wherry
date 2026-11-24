@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -28,12 +29,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// operatorConfig is a working directory's operator.yaml: how its commands connect as wherry.operator, through the system
-// roots; a relative PasswordFile is in the working directory. Tracing writes each command's span to the trace topics;
-// off by default.
+// operatorConfig is a working directory's operator.yaml: how its commands connect as wherry.operator; a relative
+// PasswordFile is in the working directory. CACert is the PEM of the CA the connection trusts beside the machine's trust
+// store; empty for the trust store alone. Tracing writes each command's span to the trace topics; off by default.
 type operatorConfig struct {
 	Broker       string `yaml:"broker"`
 	PasswordFile string `yaml:"password_file"`
+	CACert       string `yaml:"ca_cert,omitempty"`
 	Tracing      bool   `yaml:"tracing,omitempty"`
 }
 
@@ -45,6 +47,7 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 			result = presentationError{result}
 		}
 	}()
+	var err error
 	required := []string{"broker", "super-user", "super-user-password-file"}
 	mechanism := operator.ScramSHA512
 	if value, given := options["super-user-mechanism"]; given {
@@ -55,11 +58,24 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 		mechanism = value
 	}
 	// `-` reads the password from standard input; checked before loadPassword, whose errors would name `-` as a path, and
-	// before any prompt.
+	// before any prompt. One flag at most reads standard input.
 	if options["super-user-password-file"] == "-" {
+		if options["ca-cert"] == "@-" {
+			return errors.New("--super-user-password-file - and --ca-cert @- both read standard input; give one of them a file")
+		}
 		if err := terminalStandardInput("super-user-password-file", "password"); err != nil {
 			return err
 		}
+	}
+	// The CA is resolved first, so a value Go reads no certificate from fails before any prompt or dial.
+	caCert := ""
+	var roots *x509.CertPool
+	if value, given := options["ca-cert"]; given {
+		if caCert, roots, err = caCertFlag(value); err != nil {
+			return err
+		}
+	} else if roots, err = operator.RootPool(""); err != nil {
+		return err
 	}
 	onTerminal := promptsEligible(prompts)
 	if !onTerminal {
@@ -130,7 +146,6 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 		return err
 	}
 	if superPassword == nil {
-		var err error
 		if answers["super-user-password-file"] == "-" {
 			superPassword, err = secretFromStandardInput("password")
 		} else {
@@ -140,7 +155,7 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 			return err
 		}
 	}
-	superUser, err := superUserKafka(answers["broker"], answers["super-user"], string(superPassword), mechanism)
+	superUser, err := superUserKafka(answers["broker"], answers["super-user"], string(superPassword), mechanism, roots)
 	if err != nil {
 		return err
 	}
@@ -177,7 +192,7 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 		err = operator.Delegate(ctx, superUser, password)
 	}
 	if err == nil {
-		if err = (&operator.Service{Operator: superUser, Broker: answers["broker"]}).WaitOperatorCredential(ctx, password); err != nil {
+		if err = (&operator.Service{Operator: superUser, Broker: answers["broker"], Roots: roots}).WaitOperatorCredential(ctx, password); err != nil {
 			err = fmt.Errorf("%w; run operator init again", err)
 		}
 	}
@@ -193,7 +208,11 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 	if err := (&operator.Service{Operator: superUser}).EnsureTraceTopics(ctx); err != nil {
 		return fmt.Errorf("%w; run operator init again", err)
 	}
-	if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{Broker: answers["broker"], PasswordFile: "operator.password"}); err != nil {
+	if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{Broker: answers["broker"], PasswordFile: "operator.password", CACert: caCert}); err != nil {
+		return err
+	}
+	// The written file is what every later command reads, so it is read back before success is reported.
+	if _, _, err := loadOperatorConfig(dir); err != nil {
 		return err
 	}
 	if err := ignore(filepath.Join(dir, ".gitignore"), "operator.password", "bundles/", "storage/"); err != nil {
@@ -395,34 +414,49 @@ func ignore(path string, lines ...string) error {
 	return err
 }
 
-// operatorService connects as wherry.operator through dir's operator.yaml, trusting the broker through the system roots.
-func operatorService(dir string) (*operator.Service, error) {
+// loadOperatorConfig reads dir's operator.yaml and builds the pool its ca_cert gives: the machine's trust store plus the
+// CA, refusing a ca_cert from which Go appends no certificate.
+func loadOperatorConfig(dir string) (operatorConfig, *x509.CertPool, error) {
 	path := filepath.Join(dir, "operator.yaml")
 	encoded, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("%s does not exist; run wherry operator init", path)
+		return operatorConfig{}, nil, fmt.Errorf("%s does not exist; run wherry operator init", path)
 	} else if err != nil {
-		return nil, err
+		return operatorConfig{}, nil, err
 	}
 	if err := operator.RefuseCAFile(path, encoded); err != nil {
-		return nil, err
+		return operatorConfig{}, nil, err
 	}
 	var config operatorConfig
 	if err := operator.DecodeYAML(encoded, &config); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return operatorConfig{}, nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if config.Broker == "" || config.PasswordFile == "" {
-		return nil, fmt.Errorf("%s requires broker and password_file", path)
+		return operatorConfig{}, nil, fmt.Errorf("%s requires broker and password_file", path)
+	}
+	roots, err := operator.ConfigRootPool(path, config.CACert)
+	if err != nil {
+		return operatorConfig{}, nil, err
+	}
+	return config, roots, nil
+}
+
+// operatorService connects as wherry.operator through dir's operator.yaml, verifying the broker against the machine's
+// trust store plus its ca_cert.
+func operatorService(dir string) (*operator.Service, error) {
+	config, roots, err := loadOperatorConfig(dir)
+	if err != nil {
+		return nil, err
 	}
 	password, err := os.ReadFile(inDir(dir, config.PasswordFile))
 	if err != nil {
 		return nil, err
 	}
-	client, err := operatorKafka(config.Broker, operator.OperatorPrincipal, string(password))
+	client, err := operatorKafka(config.Broker, operator.OperatorPrincipal, string(password), roots)
 	if err != nil {
 		return nil, err
 	}
-	service := &operator.Service{Operator: client, Broker: config.Broker, Storage: func(tenant string) (operator.StorageKeys, error) { return tenantStorageKeys(dir, tenant) }}
+	service := &operator.Service{Operator: client, Broker: config.Broker, Roots: roots, Storage: func(tenant string) (operator.StorageKeys, error) { return tenantStorageKeys(dir, tenant) }}
 	if config.Tracing {
 		if service.Tracing, err = telemetry.New(context.Background(), telemetry.RoleOperator, telemetry.Names{}, client.Opts(), log.New(os.Stderr, "wherry: ", 0)); err != nil {
 			client.Close()

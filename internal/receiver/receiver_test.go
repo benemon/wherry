@@ -825,7 +825,7 @@ func (f fixture) newReceiver(t *testing.T, config operator.ReceiverConfig) (*Rec
 		plugin.mu.Unlock()
 		return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: plugin, Exited: plugin.exited}, nil
 	}
-	r := &Receiver{id: config.Receiver, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), factory: factory, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry())}
+	r := &Receiver{id: config.Receiver, base: base, storage: storageClient(nil), reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), factory: factory, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry())}
 	if teletest.On() {
 		r.Trace()
 	}
@@ -1427,10 +1427,10 @@ func TestRunJoinsPeriodicWork(t *testing.T) {
 
 func TestNewTakesItsIDFromTheBundle(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.TenantPrincipal("tenant-a", "host-a"), Password: "p"}, filepath.Join(dir, "host"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry()); err == nil {
+	if _, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.TenantPrincipal("tenant-a", "host-a"), Password: "p"}, nil, filepath.Join(dir, "host"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry()); err == nil {
 		t.Fatal("New accepted a host principal's bundle")
 	}
-	r, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"}, filepath.Join(dir, "state"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
+	r, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"}, nil, filepath.Join(dir, "state"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1438,7 +1438,7 @@ func TestNewTakesItsIDFromTheBundle(t *testing.T) {
 	if r.id != "receiver-a" {
 		t.Fatalf("receiver ID %q", r.id)
 	}
-	again, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"}, filepath.Join(dir, "state"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
+	again, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"}, nil, filepath.Join(dir, "state"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
