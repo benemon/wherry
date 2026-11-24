@@ -18,15 +18,12 @@ Choose a systemd plugin release that pairs with your wherry release.
 - The record uses pool `build` from Set up the operator.
   A pool is one trust and tenancy boundary; the platform is a label.
   `build` is that boundary here.
-- This guide's broker uses a private CA. The bundle carries it, so skip the steps' lines for a separate CA file;
-  a `ca_file` in the local configuration would override the bundle's CA.
+- This guide's broker uses a private CA. Install it where the receiver runs, as
+  [Broker trust](security.md#broker-trust) describes.
 - The steps install files from the operator machine on the receiver host: the receiver's bundle and its local
   configuration.
   Copy them over a channel you trust.
   The bundle holds the receiver's Kafka password.
-- The record's profile names `agent: claude`.
-  Set it to `claude-code`, the agent of pool `build`.
-  `receiver apply` refuses a profile whose agent is outside the pool's terms.
 - The last step runs `wherry host receivers` from a host.
   You set up your laptop as a host on a later page.
   Run the check at the end of this page from the operator machine instead.
