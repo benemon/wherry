@@ -47,7 +47,7 @@ func mcpSessionReading(t *testing.T, connect func() (*busclient.Host, error), pr
 	t.Helper()
 	ctx := context.Background()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := newMCPServer(connect, inputReader(openInput), openInput, func(id string) string { return "wherry result " + id }, log.New(testLog{t}, "mcp server: ", 0)).Connect(ctx, serverTransport, nil)
+	serverSession, err := newMCPServer(connect, openInput, func(id string) string { return "wherry result " + id }, log.New(testLog{t}, "mcp server: ", 0)).Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1097,7 +1097,7 @@ func TestMCPUnavailableLogsItsCause(t *testing.T) {
 	}
 	open := inputOpener(t.TempDir(), busclient.Config{})
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry result " + id }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
+	serverSession, err := newMCPServer(connect, open, func(id string) string { return "wherry result " + id }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1136,7 +1136,7 @@ func TestMCPUnavailableLogNamesTheRefreshOnAnUnknownAuthority(t *testing.T) {
 	connect := func() (*busclient.Host, error) { return busclient.Connect(config, log.New(io.Discard, "", 0)) }
 	open := inputOpener(t.TempDir(), busclient.Config{})
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry result " + id }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
+	serverSession, err := newMCPServer(connect, open, func(id string) string { return "wherry result " + id }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1165,7 +1165,7 @@ func TestMCPUnavailableLogRedactsResolvedCredentials(t *testing.T) {
 	}
 	open := inputOpener(t.TempDir(), busclient.Config{})
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry result " + id }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
+	serverSession, err := newMCPServer(connect, open, func(id string) string { return "wherry result " + id }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

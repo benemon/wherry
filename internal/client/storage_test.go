@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -60,6 +61,18 @@ type uploadOracle struct {
 	objects  map[string][]byte
 	ops      []string
 	access   []string
+	// clock, when set, is the time the oracle checks a presigned URL's X-Amz-Date plus X-Amz-Expires against.
+	clock func() time.Time
+}
+
+// expired reports whether a presigned request's lifetime has passed on the oracle's clock.
+func (o *uploadOracle) expired(query url.Values) bool {
+	signedAt, err := time.Parse("20060102T150405Z", query.Get("X-Amz-Date"))
+	seconds, _ := strconv.Atoi(query.Get("X-Amz-Expires"))
+	if err != nil || seconds == 0 || o.clock == nil {
+		return false
+	}
+	return o.clock().After(signedAt.Add(time.Duration(seconds) * time.Second))
 }
 
 func newUploadOracle(t *testing.T) *uploadOracle {
@@ -72,6 +85,10 @@ func newUploadOracle(t *testing.T) *uploadOracle {
 		if _, signature, ok := strings.Cut(r.Header.Get("Authorization"), "Credential="); ok {
 			access, _, _ := strings.Cut(signature, "/")
 			o.access = append(o.access, access)
+		}
+		if o.expired(query) {
+			w.WriteHeader(http.StatusForbidden)
+			return
 		}
 		switch {
 		case r.Method == http.MethodGet && query.Has("location"):
@@ -301,7 +318,7 @@ func submitS3(t *testing.T, f *fixture, receiver *testReceiver, deadline time.Du
 	t.Helper()
 	file, data := randomFile(t, "dataset.bin", 5<<20)
 	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}},
-		Outputs: []wire.ExpectedOutput{{Name: "out/report.pdf", Required: true, Storage: wire.StorageS3}}, EndBy: time.Now().Add(deadline), StartBy: time.Now().Add(time.Minute)})
+		Outputs: []wire.ExpectedOutput{{Name: "out/report.pdf", Storage: wire.StorageS3}}, EndBy: time.Now().Add(deadline), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,6 +454,51 @@ func TestSubmitOverTheRecordLimitMovesInputsToS3(t *testing.T) {
 	}
 }
 
+type transportFunc func(*http.Request) (*http.Response, error)
+
+func (f transportFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
+
+func TestSubmitUploadsAFileOverTheRecordLimitFromDisk(t *testing.T) {
+	f, _, receiver := recordLimitFixture(t, true)
+	big, err := os.Create(filepath.Join(t.TempDir(), "big.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer big.Close()
+	const size = 64 << 20
+	if err := big.Truncate(size); err != nil {
+		t.Fatal(err)
+	}
+	small, _ := randomFile(t, "small.bin", 100)
+	var before, during runtime.MemStats
+	previous := storageTransport
+	storageTransport = transportFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method == http.MethodPut && strings.HasSuffix(request.URL.Path, "/big.bin") {
+			runtime.GC()
+			runtime.ReadMemStats(&during)
+		}
+		return previous.RoundTrip(request)
+	})
+	t.Cleanup(func() { storageTransport = previous })
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Files: []S3File{{Name: "big.bin", Body: big}, {Name: "small.bin", Body: small}},
+		EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if during.HeapAlloc == 0 {
+		t.Fatal("big.bin was never uploaded")
+	}
+	if growth := int64(during.HeapAlloc) - int64(before.HeapAlloc); growth > size/4 {
+		t.Fatalf("the heap grew %d bytes by the upload of a %d-byte file; want it streamed from disk", growth, size)
+	}
+	task := receiver.claim(t, f.ctx, result.RunID)[0].submission
+	if len(task.Message.Parts) != 2 || task.Message.Parts[1].Filename != "small.bin" || len(task.Wherry.S3Inputs) != 1 || task.Wherry.S3Inputs[0].Name != "big.bin" || task.Wherry.S3Inputs[0].Size != size {
+		t.Fatalf("submission has parts %+v and S3 inputs %+v; want small.bin inline and big.bin through S3", task.Message.Parts, task.Wherry.S3Inputs)
+	}
+}
+
 func TestSubmitRefusesARecordOverTheLimitWithoutStorage(t *testing.T) {
 	f, _, _ := recordLimitFixture(t, false)
 	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 60000), Filename: "data.bin"}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
@@ -527,8 +589,9 @@ func TestTheEnvelopeCarriesPresignedURLsForTheRunsObjects(t *testing.T) {
 	}
 	getDeadline := time.Until(time.Unix(task.submission.Wherry.TaskStartedBy, 0).Add(15 * time.Minute))
 	deadline := time.Until(time.Unix(task.submission.Wherry.TaskEndedBy, 0))
-	if expires(get) < getDeadline-10*time.Second || expires(get) > getDeadline+2*time.Second || expires(put) < deadline-10*time.Second || expires(put) > deadline+2*time.Second {
-		t.Fatalf("GET lives %v and PUT %v; want the turn's task_started_by plus 15m, %v away, and its task_ended_by, %v away", expires(get), expires(put), getDeadline, deadline)
+	putDeadline := deadline + operator.UploadGrace
+	if expires(get) < getDeadline-10*time.Second || expires(get) > getDeadline+2*time.Second || expires(put) < putDeadline-10*time.Second || expires(put) > putDeadline+2*time.Second {
+		t.Fatalf("GET lives %v and PUT %v; want the turn's task_started_by plus 15m, %v away, and its task_ended_by plus the 10m grace, %v away", expires(get), expires(put), getDeadline, putDeadline)
 	}
 	// The store honours each URL for its own object and method alone.
 	response, err := o.client.Get(get)
@@ -560,7 +623,9 @@ func TestTheEnvelopeCarriesPresignedURLsForTheRunsObjects(t *testing.T) {
 	}
 }
 
-func TestPutURLExpiresAtTheTurnsEndBy(t *testing.T) {
+// A PUT URL lasts operator.UploadGrace past task_ended_by: the store accepts it after end-by, and its signed lifetime
+// ends at the grace.
+func TestPutURLExpiresAtTheGraceAfterEndBy(t *testing.T) {
 	f, o, receiver := storageFixture(t)
 	task, _ := submitS3(t, f, receiver, 4*time.Second)
 	_, values, err := open(t, f, task.submission.Wherry.Run, f.poolKeys["pool-s3"])
@@ -568,11 +633,29 @@ func TestPutURLExpiresAtTheTurnsEndBy(t *testing.T) {
 		t.Fatal(err)
 	}
 	put := values.S3Outputs["out/report.pdf"]
-	time.Sleep(time.Until(time.Unix(task.submission.Wherry.TaskEndedBy, 0).Add(2 * time.Second)))
-	request, _ := http.NewRequest(http.MethodPut, put, strings.NewReader("late"))
-	if response, err := o.client.Do(request); err != nil || response.StatusCode != http.StatusForbidden {
-		t.Fatalf("PUT after task_ended_by answered %v, %v; want forbidden", response.Status, err)
+	parsed, err := url.Parse(put)
+	if err != nil {
+		t.Fatal(err)
 	}
+	signed, err := time.Parse("20060102T150405Z", parsed.Query().Get("X-Amz-Date"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seconds, err := strconv.Atoi(parsed.Query().Get("X-Amz-Expires"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	endBy := time.Unix(task.submission.Wherry.TaskEndedBy, 0)
+	if expires := signed.Add(time.Duration(seconds) * time.Second); expires.Before(endBy.Add(operator.UploadGrace)) || expires.After(endBy.Add(operator.UploadGrace+2*time.Second)) {
+		t.Fatalf("PUT URL expires at %v; want task_ended_by %v plus the grace %v", expires, endBy, operator.UploadGrace)
+	}
+	time.Sleep(time.Until(endBy.Add(2 * time.Second)))
+	request, _ := http.NewRequest(http.MethodPut, put, strings.NewReader("late"))
+	response, err := o.client.Do(request)
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("PUT after task_ended_by, within the grace, answered %v, %v; want OK", response, err)
+	}
+	response.Body.Close()
 }
 
 func TestS3UseIsRefusedBeforePublishing(t *testing.T) {

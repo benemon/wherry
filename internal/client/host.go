@@ -61,6 +61,9 @@ type SubmitInput struct {
 	Prompt   string
 	// Parts follow the prompt's text part.
 	Parts []wire.Part
+	// Files are input files read into raw parts after Parts, except that on a pool with storage one over the pool's
+	// record limit, which can never travel inline, uploads from its Body as an S3 input.
+	Files []S3File
 	// Credentials name credentials this host configures, each delivered to the agent at its target.
 	Credentials []wire.TaskCredential
 	// Requested names the placed agent's credentials the task asks for: an optional one named here fails the submission
@@ -70,7 +73,8 @@ type SubmitInput struct {
 	Outputs []wire.ExpectedOutput
 	// Git is the repository the agent clones; its credential and host key come from the host's git configuration.
 	Git *wire.GitInput
-	// GitChanges, patch or bundle, asks for the clone's changes back as that output.
+	// GitChanges is how the clone's changes come back: as changes.bundle when empty or bundle, as changes.patch for
+	// patch, and not at all for none.
 	GitChanges string
 	// Continue names a run of this host whose collected changes.bundle the agent continues from: the run takes that
 	// run's git input and context, and returns its own changes.bundle through S3.
@@ -336,6 +340,7 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err := wire.ValidateRequirements(input.Selector); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
+	asked := input.Outputs
 	var continued continuation
 	if input.Continue != "" {
 		if input.Git != nil || input.GitChanges != "" {
@@ -347,7 +352,7 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 				names = append(names, wire.InputName(part))
 			}
 		}
-		for _, file := range input.S3Inputs {
+		for _, file := range slices.Concat(input.Files, input.S3Inputs) {
 			names = append(names, file.Name)
 		}
 		for _, output := range input.Outputs {
@@ -364,11 +369,17 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		previous := continued.last.Task.Wherry.Git
 		input.Git = &wire.GitInput{Remote: previous.Remote, Ref: previous.Ref, Path: previous.Path}
 		input.S3Inputs = append(slices.Clone(input.S3Inputs), S3File{Name: baseBundle, Body: continued.bundle})
-		// Not required: an agent that stops before its fetch leaves no bundle.
+		// Through S3, so the bundle returns whatever its size; a receiver never requires a git input's changes file.
 		input.Outputs = append(slices.Clone(input.Outputs), wire.ExpectedOutput{Name: wire.GitBundle, Storage: wire.StorageS3})
 	}
 	outputs := input.Outputs
 	if input.Git != nil {
+		// An S3 changes file stays: it is the route for a bundle over output_limit.
+		for _, output := range asked {
+			if output.Storage == "" && (output.Name == wire.GitBundle || output.Name == wire.GitPatch) {
+				return SubmitResult{}, fmt.Errorf("%w: the changes file comes back by default with --git; drop --output %s", ErrInvalidInput, output.Name)
+			}
+		}
 		git := *input.Git
 		git.Remote = sshRemote(git.Remote)
 		// The entry whose URL is the longest prefix of the remote gives the clone its credential and host key.
@@ -401,10 +412,10 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 		}
 		input.Git = &git
-		changes := map[string]string{"": "", "patch": wire.GitPatch, "bundle": wire.GitBundle}
+		changes := map[string]string{"": wire.GitBundle, "bundle": wire.GitBundle, "patch": wire.GitPatch, "none": ""}
 		name, ok := changes[input.GitChanges]
 		if !ok {
-			return SubmitResult{}, fmt.Errorf("%w: git changes must be patch or bundle", ErrInvalidInput)
+			return SubmitResult{}, fmt.Errorf("%w: git changes must be bundle, patch or none", ErrInvalidInput)
 		}
 		if name != "" && !slices.ContainsFunc(outputs, func(output wire.ExpectedOutput) bool { return output.Name == name }) {
 			outputs = append(slices.Clone(outputs), wire.ExpectedOutput{Name: name})
@@ -493,10 +504,30 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, fmt.Errorf("%w: task credential %s takes the %s of one of agent %s's credentials", ErrInvalidInput, credential.Name, credential.Target(), agent.Name)
 		}
 	}
+	storable := v.state.Pools[pool].Storage != nil && h.credentialed(pool)
+	input.Parts = slices.Clone(input.Parts)
+	for _, file := range input.Files {
+		size, err := file.Body.Seek(0, io.SeekEnd)
+		if err != nil {
+			return SubmitResult{}, err
+		}
+		if storable && size > v.state.Pools[pool].RecordLimit {
+			input.S3Inputs = append(slices.Clone(input.S3Inputs), file)
+			stored = true
+			continue
+		}
+		if _, err := file.Body.Seek(0, io.SeekStart); err != nil {
+			return SubmitResult{}, err
+		}
+		data, err := io.ReadAll(file.Body)
+		if err != nil {
+			return SubmitResult{}, err
+		}
+		input.Parts = append(input.Parts, wire.Part{Raw: data, Filename: file.Name})
+	}
 	if err := wire.ValidateInputs(input.Parts, math.MaxInt64); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
-	storable := v.state.Pools[pool].Storage != nil && h.credentialed(pool)
 	if continued.last != nil && !storable {
 		return SubmitResult{}, fmt.Errorf("%w: continue needs a pool with storage and a host storage credential: the bundles travel through S3", ErrInvalidInput)
 	}
@@ -635,7 +666,7 @@ func (h *Host) poolKey(ctx context.Context, v view, pool string) (*ecdsa.PublicK
 // enveloped signs submission with an envelope of its credentials, its S3 links and redactionKey, under a fresh content
 // key wrapped to poolKey. The credentials' values come through resolver, which supplied filled for the agent's
 // credentials, so no source runs again here; a task credential's source is the configuration's. GET links last until
-// task_started_by plus getLifetime and PUT links until task_ended_by.
+// task_started_by plus getLifetime and PUT links until task_ended_by plus the upload grace.
 func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms operator.Terms, poolKey *ecdsa.PublicKey, store *store, redactionKey []byte, resolver *resolver) ([]byte, error) {
 	binding := submission.Wherry
 	values := signed.EnvelopeValues{Binding: binding.EnvelopeBinding(), Credentials: map[string][]byte{}, S3Inputs: map[string]string{}, S3Outputs: map[string]string{}, RedactionKey: redactionKey}
@@ -986,7 +1017,7 @@ type runRecord struct {
 	S3Inputs  []string `json:"s3_inputs,omitzero"`
 	S3Outputs []string `json:"s3_outputs,omitzero"`
 	// TaskStartedBy and TaskEndedBy are the submission's bounds, in whole seconds; a PUT URL for its S3 outputs expires
-	// at TaskEndedBy.
+	// operator.UploadGrace after TaskEndedBy.
 	TaskStartedBy int64 `json:"task_started_by,omitzero"`
 	TaskEndedBy   int64 `json:"task_ended_by,omitzero"`
 	// FeedOffset is the tenant feed's committed end before the submission was published. Every record about the run

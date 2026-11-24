@@ -38,10 +38,12 @@ clones itself.
    Leaving a credential unnamed does not withhold it: the user withholds
    one, a billing credential such as an API key included, by removing its
    source from their wherry configuration and unsetting its variable where
-   `wherry` runs. Add `--output NAME[:required]` for each file you want back. Where the
-   pool has storage and your configuration a storage credential for it,
-   `--input FILE:s3` sends a larger file (5 GiB at most) through the pool's
-   bucket, and `--output NAME:s3` returns one that way. Keep working.
+   `wherry` runs. Add `--output NAME` for each file you want back; the run
+   fails without it. Where the pool has storage and your configuration a
+   storage credential for it, an `--input` over the inline limits (5 GiB at
+   most) goes through the pool's bucket by itself, and `--output NAME:s3`
+   returns a file that way. With `--git`, the agent's commits come back as
+   `changes.bundle` unless `--git-changes` says `patch` or `none`. Keep working.
 3. `wherry result RUN_ID` blocks until the run ends (2 hours 10 minutes at
    most by default), then writes each returned output, S3 outputs included,
    prints an `output=<name> path=<path>` line for each, and prints the

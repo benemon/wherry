@@ -319,6 +319,53 @@ func TestSubmitRefusesAContinuationBeforeUploadOrPublish(t *testing.T) {
 	}
 }
 
+func TestSubmitRefusesAnExplicitChangesOutputWithAGitInput(t *testing.T) {
+	git := &wire.GitInput{Remote: "https://git.example.test/org/repo.git", Ref: "main"}
+	for name, test := range map[string]struct {
+		changes, output string
+		continued       bool
+	}{
+		"git and changes.bundle":        {"", wire.GitBundle, false},
+		"git, patch and changes.patch":  {"patch", wire.GitPatch, false},
+		"git, patch and changes.bundle": {"patch", wire.GitBundle, false},
+		"git, none and changes.patch":   {"none", wire.GitPatch, false},
+		"continue and changes.patch":    {"", wire.GitPatch, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, o, _ := continueFixture(t)
+			first := firstRun(t, f, testBundle)
+			input := SubmitInput{Selector: defaultSelector(), Prompt: "work", Git: git, GitChanges: test.changes, EndBy: time.Now().Add(30 * time.Minute), StartBy: time.Now().Add(10 * time.Minute)}
+			if test.continued {
+				input = continueInput(first)
+			}
+			input.Outputs = []wire.ExpectedOutput{{Name: test.output}}
+			refused(t, f, o, input, "the changes file comes back by default with --git; drop --output "+test.output)
+		})
+	}
+	t.Run("git and an S3 changes.bundle", func(t *testing.T) {
+		f, _, receiver := continueFixture(t)
+		submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Git: git, Outputs: []wire.ExpectedOutput{{Name: wire.GitBundle, Storage: wire.StorageS3}}, EndBy: time.Now().Add(30 * time.Minute), StartBy: time.Now().Add(10 * time.Minute)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if task := receiver.claim(t, f.ctx, submitted.RunID)[0].submission; !slices.Equal(task.Wherry.Outputs, []wire.ExpectedOutput{{Name: wire.GitBundle, Storage: wire.StorageS3}}) {
+			t.Fatalf("outputs %+v, want the bundle through S3 alone", task.Wherry.Outputs)
+		}
+	})
+	t.Run("no git input", func(t *testing.T) {
+		f, _, receiver := continueFixture(t)
+		for _, output := range []string{wire.GitBundle, wire.GitPatch} {
+			submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Outputs: []wire.ExpectedOutput{{Name: output}}, EndBy: time.Now().Add(30 * time.Minute), StartBy: time.Now().Add(10 * time.Minute)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if task := receiver.claim(t, f.ctx, submitted.RunID)[0].submission; !slices.Equal(task.Wherry.Outputs, []wire.ExpectedOutput{{Name: output}}) {
+				t.Fatalf("outputs %+v, want %s as an ordinary output", task.Wherry.Outputs, output)
+			}
+		}
+	})
+}
+
 func TestSubmitRefusesABundleWithoutOneBaseAndAHead(t *testing.T) {
 	other := strings.Repeat("ef", 20)
 	for name, header := range map[string]string{

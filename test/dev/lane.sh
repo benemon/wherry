@@ -65,7 +65,7 @@ receivers)
   grep -q '^  profile=mock plugin=nomad agent=mock ready=true ' "$work/receivers.txt" || fail "profile mock is not ready"
   ;;
 run)
-  id=$(submit 'mock: ci' --output echo.txt:required)
+  id=$(submit 'mock: ci' --output echo.txt)
   echo "$id" > "$work/run-id"
   "$wherry" result "$id" --timeout 5m --outputs-dir "$work/out" | tee "$work/watch.txt"
   "$wherry" logs "$id" > "$work/out/transcript.jsonl"
@@ -73,8 +73,9 @@ run)
   [ "$(cat "$work/out/echo.txt")" = "mock: ci" ] || fail "echo.txt does not hold the prompt"
   grep -qx 'MOCK_TOKEN set' "$work/watch.txt" || fail "the mock had no MOCK_TOKEN"
   if [ "${STORAGE:-false}" = true ]; then
-    echo "s3 input" > "$work/s3-input.txt"
-    id=$(submit 'mock: s3' --input "$work/s3-input.txt:s3" --output echo.txt:required:s3)
+    # Over the broker's record limit, so the input travels through the bucket.
+    head -c 2097152 /dev/zero | tr '\0' 's' > "$work/s3-input.txt"
+    id=$(submit 'mock: s3' --input "$work/s3-input.txt" --output echo.txt:s3)
     "$wherry" result "$id" --timeout 5m --outputs-dir "$work/out-s3" | tee "$work/watch-s3.txt"
     [ "$(cat "$work/out-s3/echo.txt")" = "mock: s3" ] || fail "the S3 echo.txt does not hold the prompt"
     grep -q '^input s3-input.txt ' "$work/watch-s3.txt" || fail "the mock saw no S3 input"

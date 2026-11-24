@@ -359,6 +359,12 @@ const (
 	GitBundle = "changes.bundle"
 )
 
+// GitChangesFile reports whether name is the changes file of a run with a git input: an expected output the run
+// may return without, as a run that commits nothing leaves none.
+func GitChangesFile(name string) bool {
+	return name == GitPatch || name == GitBundle
+}
+
 var (
 	// The agent pastes the remote, ref and path into shell commands and git arguments, so none carries a quote,
 	// a space or a shell metacharacter, and neither a ref nor a path segment starts with a dash.

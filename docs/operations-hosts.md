@@ -152,7 +152,7 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
 
    Receivers and agents never hold the S3 credential; they get presigned URLs, a GET per input
    until the run's `task_started_by` plus 15 minutes and a PUT per output until
-   its `task_ended_by`, 7 days at most.
+   its `task_ended_by` plus 10 minutes, 7 days at most.
 
 4. Set a lifecycle rule that expires `wherry/` after a period longer than
    any run: the host deletes a run's objects when it sees the run end with
@@ -312,16 +312,18 @@ credential as a file and checks the host:
   host key strictly and ignores every other `known_hosts`.
 - A public repository needs no credential.
 
-With `--git-changes`, the agent returns its commits as `changes.patch` or
-`changes.bundle`, which `result` writes like any output, and the parent
-applies them with its own credentials:
+With `--git`, the agent returns its commits as `changes.bundle`, or as
+`changes.patch` with `--git-changes patch`, which `result` writes like any
+output, and the parent applies them with its own credentials;
+`--git-changes none` asks for neither. A run that commits nothing returns no
+changes file and completes all the same:
 
 ```
 apply with: git am /home/me/.local/state/wherry/runs/run-.../outputs/changes.patch
 ```
 
-On a pool with storage, `--output changes.bundle:s3` beside
-`--git-changes bundle` returns the bundle through the pool's bucket. To
+On a pool with storage, `--output changes.bundle:s3` returns the bundle
+through the pool's bucket. To
 build on a run's commits in a new run, `wherry host submit --continue RUN_ID`
 reuses its repository and continues from the `changes.bundle` that `result`
 collected; each round returns its bundle through the pool's bucket, so the

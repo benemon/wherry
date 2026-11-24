@@ -191,12 +191,12 @@ func ValidateCredentials(credentials []TaskCredential) error {
 	return nil
 }
 
-// ExpectedOutput is a file the agent is asked to leave in its outputs directory; a run that does not return a
-// required one fails. Storage StorageS3 returns it through the pool's bucket instead of the feed.
+// ExpectedOutput is a file the agent is asked to leave in its outputs directory; a run that does not return it
+// fails, unless it is the changes file of a git input. Storage StorageS3 returns it through the pool's bucket
+// instead of the feed.
 type ExpectedOutput struct {
-	Name     string `json:"name"`
-	Required bool   `json:"required,omitzero"`
-	Storage  string `json:"storage,omitzero"`
+	Name    string `json:"name"`
+	Storage string `json:"storage,omitzero"`
 }
 
 // Submission is a host's task on its pool's task topic.

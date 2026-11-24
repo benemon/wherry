@@ -68,7 +68,7 @@ func runMCP(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return newMCPServer(connect, inputReader(open), open, wait, logger).Run(ctx, &mcp.StdioTransport{})
+	return newMCPServer(connect, open, wait, logger).Run(ctx, &mcp.StdioTransport{})
 }
 
 // waitCommand returns the shell command that waits for a run and prints its reply, naming the config configFile, else
@@ -174,7 +174,7 @@ type gitInput struct {
 	Remote  string `json:"remote" jsonschema:"repository the agent clones: an https or ssh url, or user@host:path"`
 	Ref     string `json:"ref" jsonschema:"branch, tag or commit to check out"`
 	Path    string `json:"path,omitempty" jsonschema:"checkout directory, relative; defaults to the repository name"`
-	Changes string `json:"changes,omitempty" jsonschema:"patch or bundle: ask for the agent's commits back as the output changes.patch or changes.bundle"`
+	Changes string `json:"changes,omitempty" jsonschema:"bundle, patch or none: the agent's commits come back as the output changes.bundle (default), as changes.patch, or not at all"`
 }
 
 type credentialInput struct {
@@ -184,14 +184,12 @@ type credentialInput struct {
 }
 
 type fileInput struct {
-	Path    string `json:"path" jsonschema:"local file"`
-	Storage string `json:"storage,omitempty" jsonschema:"s3 to upload the file, up to 5 GiB, to the pool's bucket, from which the agent's plugin fetches it; absent, it goes in the task, or through the pool's bucket when over the broker's record limit or a profile's declared limit and the pool has storage and the host a storage credential, else submit refuses"`
+	Path string `json:"path" jsonschema:"local file; it goes in the task, or through the pool's bucket, up to 5 GiB, when over the broker's record limit or a profile's declared limit and the pool has storage and the host a storage credential, else submit refuses"`
 }
 
 type outputInput struct {
-	Name     string `json:"name" jsonschema:"relative path the agent is asked to write in WHERRY_OUTPUT_DIR"`
-	Required bool   `json:"required,omitempty" jsonschema:"fail the run when the output is not returned"`
-	Storage  string `json:"storage,omitempty" jsonschema:"s3 to return the output through the pool's bucket, up to 5 GiB, instead of the feed"`
+	Name    string `json:"name" jsonschema:"relative path the agent must write in WHERRY_OUTPUT_DIR; the run fails without it"`
+	Storage string `json:"storage,omitempty" jsonschema:"s3 to return the output through the pool's bucket, up to 5 GiB, instead of the feed"`
 }
 
 type submitInput struct {
@@ -348,7 +346,7 @@ type logsReply struct {
 
 // newMCPServer serves the wherry tools. Every call uses the host connect returns, so the process runs one tenant-feed
 // follower.
-func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error), waitCommand func(id string) string, logger *log.Logger) *mcp.Server {
+func newMCPServer(connect func() (*busclient.Host, error), openInput func(string) (*os.File, error), waitCommand func(id string) string, logger *log.Logger) *mcp.Server {
 	// The model sees an UNAVAILABLE's class alone; the server's log, which only the host's user reads, keeps its cause
 	// with every credential value the host resolved redacted.
 	failure := func(err error) error {
@@ -363,6 +361,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		version = info.Main.Version
 	}
 	server := mcp.NewServer(&mcp.Implementation{Name: "wherry", Version: version}, nil)
+	server.AddReceivingMiddleware(droppedFields)
 	readOnly := &mcp.ToolAnnotations{ReadOnlyHint: true}
 
 	collectResult := func(ctx context.Context, request *mcp.CallToolRequest, input runInput, budget time.Duration) (*mcp.CallToolResult, waitReply, error) {
@@ -451,17 +450,11 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		Description: fmt.Sprintf("Sign and publish a task to the task topic of a signature, an agent and all the labels of the profiles that carry it, that live receivers offer matching the selector, preferring the default agent, then the greatest spare capacity, then the lowest topic name. Returns the run id; set wait only for runs expected to finish within %d seconds, otherwise collect the result with result, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR or in environment variables, or, by name alone, the placed agent's own optional credentials the task cannot go without: every agent credential this host can resolve is delivered at its target, required or optional, named or not, and unsupplied lists the optional ones it could not resolve, which the run goes without; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which result writes locally. Submit encrypts the agent's and the task's configured credentials into the task's envelope under the pool's key; the run needs nothing more from this host. Submit refuses with auth required when this host has no source for a credential the agent requires or the task names, when none of a catalog agent's model credentials resolves, and refuses a name that is not one of the placed agent's credentials.", int(waitBound.Seconds())),
 	}, func(ctx context.Context, request *mcp.CallToolRequest, input submitInput) (*mcp.CallToolResult, submitOutput, error) {
 		started := time.Now()
-		submission, err := submitFromInput(input, readInput, openInput)
+		submission, err := submitFromInput(input, openInput)
+		defer closeFiles(submission.Files)
 		if err != nil {
 			return nil, submitOutput{}, err
 		}
-		defer func() {
-			for _, file := range submission.S3Inputs {
-				if closer, ok := file.Body.(io.Closer); ok {
-					closer.Close()
-				}
-			}
-		}()
 		client, err := connect()
 		if err != nil {
 			return nil, submitOutput{}, failure(err)
@@ -643,12 +636,54 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 	return server
 }
 
-func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error)) (busclient.SubmitInput, error) {
+// droppedFields refuses a submit whose arguments carry a field this version dropped, with the hint submit gives for the
+// flag suffix, before the schema refuses the field as unknown.
+func droppedFields(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, request mcp.Request) (mcp.Result, error) {
+		call, ok := request.(*mcp.CallToolRequest)
+		if !ok || method != "tools/call" || call.Params == nil || call.Params.Name != "submit" {
+			return next(ctx, method, request)
+		}
+		var arguments struct {
+			Inputs []struct {
+				Storage jsontext.Value `json:"storage"`
+			} `json:"inputs"`
+			Outputs []struct {
+				Required jsontext.Value `json:"required"`
+			} `json:"outputs"`
+		}
+		hint := ""
+		if json.Unmarshal(call.Params.Arguments, &arguments) == nil {
+			switch {
+			case slices.ContainsFunc(arguments.Inputs, func(input struct {
+				Storage jsontext.Value `json:"storage"`
+			}) bool {
+				return input.Storage != nil
+			}):
+				hint = "inputs move to S3 by size; drop :s3"
+			case slices.ContainsFunc(arguments.Outputs, func(output struct {
+				Required jsontext.Value `json:"required"`
+			}) bool {
+				return output.Required != nil
+			}):
+				hint = "outputs are always required; drop :required"
+			}
+		}
+		if hint == "" {
+			return next(ctx, method, request)
+		}
+		var refused mcp.CallToolResult
+		refused.SetError(invalidArgument(hint))
+		return &refused, nil
+	}
+}
+
+func submitFromInput(input submitInput, openInput func(string) (*os.File, error)) (busclient.SubmitInput, error) {
 	if (input.Prompt == "") == (input.PromptFile == "") {
 		return busclient.SubmitInput{}, invalidArgument("exactly one of prompt and prompt_file is required")
 	}
 	if input.PromptFile != "" {
-		part, err := readInput(input.PromptFile, math.MaxInt64)
+		part, err := inputReader(openInput)(input.PromptFile, math.MaxInt64)
 		if err != nil {
 			return busclient.SubmitInput{}, err
 		}
@@ -661,28 +696,12 @@ func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part
 	if selector == nil {
 		selector = []wire.Requirement{}
 	}
-	var parts []wire.Part
-	var s3Inputs []string
-	for _, file := range input.Inputs {
-		switch file.Storage {
-		case "":
-			part, err := readInput(file.Path, math.MaxInt64)
-			if err != nil {
-				return busclient.SubmitInput{}, err
-			}
-			parts = append(parts, part)
-		case wire.StorageS3:
-			s3Inputs = append(s3Inputs, file.Path)
-		default:
-			return busclient.SubmitInput{}, invalidArgument("an input's storage is s3 or absent")
-		}
-	}
 	startBy, endBy, err := bounds(input.StartBy, input.EndBy, time.Now())
 	if err != nil {
 		return busclient.SubmitInput{}, err
 	}
 	submission := busclient.SubmitInput{
-		Agent: input.Agent, Model: input.Model, Selector: selector, Prompt: input.Prompt, Parts: parts,
+		Agent: input.Agent, Model: input.Model, Selector: selector, Prompt: input.Prompt,
 		Continue: input.Continue, StartBy: startBy, EndBy: endBy,
 	}
 	if input.Git != nil {
@@ -697,19 +716,15 @@ func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part
 		submission.Credentials = append(submission.Credentials, wire.TaskCredential{Name: credential.Name, Env: credential.Env, File: credential.File})
 	}
 	for _, output := range input.Outputs {
-		submission.Outputs = append(submission.Outputs, wire.ExpectedOutput{Name: output.Name, Required: output.Required, Storage: output.Storage})
+		submission.Outputs = append(submission.Outputs, wire.ExpectedOutput{Name: output.Name, Storage: output.Storage})
 	}
-	for _, path := range s3Inputs {
-		file, err := openInput(path)
+	for _, inputFile := range input.Inputs {
+		file, err := openInput(inputFile.Path)
 		if err != nil {
-			for _, opened := range submission.S3Inputs {
-				if closer, ok := opened.Body.(io.Closer); ok {
-					closer.Close()
-				}
-			}
+			closeFiles(submission.Files)
 			return busclient.SubmitInput{}, err
 		}
-		submission.S3Inputs = append(submission.S3Inputs, busclient.S3File{Name: filepath.Base(path), Body: file})
+		submission.Files = append(submission.Files, busclient.S3File{Name: filepath.Base(inputFile.Path), Body: file})
 	}
 	return submission, nil
 }
@@ -881,6 +896,13 @@ func inputReader(open func(string) (*os.File, error)) func(string, int64) (wire.
 			return wire.Part{}, invalidArgument("inputs must be readable regular files beneath one of the MCP server's input roots, outside the wherry configuration")
 		}
 		return wire.Part{Raw: append(wire.StdBytes{}, data...), Filename: filepath.Base(path)}, nil
+	}
+}
+
+// closeFiles closes the input files a submission opened.
+func closeFiles(files []busclient.S3File) {
+	for _, file := range files {
+		file.Body.(io.Closer).Close()
 	}
 }
 

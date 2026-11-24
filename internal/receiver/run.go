@@ -2187,13 +2187,15 @@ func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pen
 	if cause != "" {
 		status = taskStatus(wire.TaskStateFailed, cause)
 	}
-	result := ""
+	result, replied := "", false
 	if status.Message != nil {
-		result = run.reply(text(*status.Message), terms.ReplyLimit)
+		reply := text(*status.Message)
+		replied = strings.TrimSpace(reply) != "" || run.dataReply
+		result = run.reply(reply, terms.ReplyLimit)
 		status.Message = replyMessage(*status.Message, result)
 	}
 	for _, output := range run.unreturned {
-		if slices.ContainsFunc(run.expected, func(expected wire.ExpectedOutput) bool { return expected.Name == output.Name && expected.Required }) {
+		if slices.ContainsFunc(run.expected, func(expected wire.ExpectedOutput) bool { return expected.Name == output.Name && run.required(expected) }) {
 			missing := "required output " + output.Name + " not returned: " + output.Reason
 			if cause != "" {
 				missing = cause + "; " + missing
@@ -2201,6 +2203,10 @@ func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pen
 			status = taskStatus(wire.TaskStateFailed, missing)
 			break
 		}
+	}
+	// A completed run answers: with every declared output returned, one that left no reply fails.
+	if status.State == wire.TaskStateCompleted && !replied {
+		status = taskStatus(wire.TaskStateFailed, "agent returned no reply")
 	}
 	ack := kgo.AckReject
 	if status.State == wire.TaskStateCompleted {
@@ -2235,7 +2241,10 @@ func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stop
 		}
 		return
 	}
-	slices.SortFunc(collected, func(a, b pluginsdk.Output) int { return strings.Compare(a.Name, b.Name) })
+	// The changes file is charged against the limit last, after every declared output.
+	slices.SortFunc(collected, func(a, b pluginsdk.Output) int {
+		return cmp.Or(cmp.Compare(boolInt(run.changesFile(a.Name)), boolInt(run.changesFile(b.Name))), strings.Compare(a.Name, b.Name))
+	})
 	s3 := s3Outputs(run.expected)
 	var total int64
 	listed := map[string]bool{}
@@ -2247,6 +2256,9 @@ func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stop
 			name, reason = strconv.QuoteToASCII(name), "rejected: invalid name"
 			name = name[:min(len(name), 256)]
 		case wire.ReservedArtifact(name):
+			reason = "rejected: reserved name"
+		case name == wire.ReplyFile:
+			// The host writes the reply there among the outputs.
 			reason = "rejected: reserved name"
 		case output.Mode.Type() != 0:
 			reason = "rejected: " + fileType(output.Mode)
@@ -2288,6 +2300,25 @@ func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stop
 	}
 }
 
+// changesFile reports whether name is the changes file of the run's git input: the one among its expected outputs.
+func (run *activeRun) changesFile(name string) bool {
+	return run.task.Wherry.Git != nil && wire.GitChangesFile(name) &&
+		slices.ContainsFunc(run.expected, func(expected wire.ExpectedOutput) bool { return expected.Name == name })
+}
+
+// required reports whether the run fails without expected: every declared output, except the changes file of a git
+// input, which a run that commits nothing leaves unwritten.
+func (run *activeRun) required(expected wire.ExpectedOutput) bool {
+	return !run.changesFile(expected.Name)
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // storedOutput is an S3 output as the upload of its stream left it: listed for the result, or not returned for reason.
 type storedOutput struct {
 	output wire.ReturnedOutput
@@ -2295,22 +2326,29 @@ type storedOutput struct {
 }
 
 // collected runs the plugin's Collect under limit and uploads each streamed S3 output into stored as it arrives, to
-// the terms' storage. Collect may run until the run passes task_ended_by, when its PUT URLs expire. The count and
-// total are checked again here, so a plugin that ignores the limits cannot grow the run's memory.
+// the terms' storage. Collect may run until the run's PUT URLs expire, task_ended_by plus the upload grace, so a run
+// stopped at that bound or by a cancel still uploads. The count and total are checked again here, so a plugin that
+// ignores the limits cannot grow the run's memory.
 func (run *activeRun) collected(ctx context.Context, handle pluginsdk.Handle, stopped bool, limit int64, stored map[string]storedOutput, storage *operator.Storage) ([]pluginsdk.Output, error) {
 	if !stopped {
 		return nil, errors.New("the job was not stopped")
 	}
 	until := time.Now().Add(collectTimeout)
-	if len(run.puts) > 0 && run.deadline.After(until) {
-		until = run.deadline
+	if expiry := run.deadline.Add(operator.UploadGrace); len(run.puts) > 0 && expiry.After(until) {
+		until = expiry
 	}
 	ctx, cancel := context.WithDeadline(ctx, until)
 	defer cancel()
 	outputs := make(chan pluginsdk.Output)
 	ended := make(chan error, 1)
-	// Streamed, the outcome file counts against neither output limit.
-	stream := append(s3Outputs(run.expected), wire.OutcomeFile)
+	// Streamed, the outcome file counts against neither output limit, and the changes file is charged here, last.
+	s3 := s3Outputs(run.expected)
+	stream := append(s3, wire.OutcomeFile)
+	for _, expected := range run.expected {
+		if run.changesFile(expected.Name) && expected.Storage != wire.StorageS3 {
+			stream = append(stream, expected.Name)
+		}
+	}
 	go func() {
 		defer close(outputs)
 		ended <- run.profile.Plugin.Collect(ctx, handle, pluginsdk.Limits{
@@ -2330,14 +2368,22 @@ func (run *activeRun) collected(ctx context.Context, handle pluginsdk.Handle, st
 			}
 			continue
 		}
+		changes := run.changesFile(output.Name) && !slices.Contains(s3, output.Name)
 		if output.Body != nil {
-			if _, done := stored[output.Name]; !done && over == nil {
-				stored[output.Name] = run.store(ctx, output, storage)
+			switch {
+			case changes:
+				output.Data = buffered(output.Body, limit)
+			default:
+				if _, done := stored[output.Name]; !done && over == nil {
+					stored[output.Name] = run.store(ctx, output, storage)
+				}
 			}
 			output.Body.Close()
 			output.Body = nil
 		}
-		total += int64(len(output.Data))
+		if !changes {
+			total += int64(len(output.Data))
+		}
 		if over == nil && (len(collected) == wire.MaxOutputs || total > limit) {
 			over = errOverLimits
 			cancel()
@@ -2350,6 +2396,16 @@ func (run *activeRun) collected(ctx context.Context, handle pluginsdk.Handle, st
 		return nil, err
 	}
 	return collected, nil
+}
+
+// buffered reads a streamed changes file of at most limit bytes, nil for a longer one, which the plugin stops sending
+// once the body is closed.
+func buffered(body io.Reader, limit int64) []byte {
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil || int64(len(data)) > limit {
+		return nil
+	}
+	return data
 }
 
 // collectOutcome runs the plugin's Collect for the outcome file alone, reading no other output, under collectTimeout.
@@ -2504,7 +2560,7 @@ func (run *activeRun) readOutcome(output pluginsdk.Output, limit int64) *wire.Ta
 		return nil
 	}
 	reply, fromData := text(*reported.Message), false
-	if reply == "" {
+	if strings.TrimSpace(reply) == "" {
 		for i, part := range parts {
 			if part.Data != nil && i != credential {
 				reply, fromData = string(part.Data), true
@@ -2976,11 +3032,7 @@ func Preamble(directories pluginsdk.Directories, inputs []string, credentials []
 	if len(outputs) > 0 {
 		paths := make([]string, 0, len(outputs))
 		for _, file := range outputs {
-			path := output + "/" + file.Name
-			if file.Required {
-				path += " (required)"
-			}
-			paths = append(paths, path)
+			paths = append(paths, output+"/"+file.Name)
 		}
 		lines = append(lines, "Write these output files, creating their directories if they do not exist: "+strings.Join(paths, ", ")+".")
 	}
@@ -2996,7 +3048,7 @@ func Preamble(directories pluginsdk.Directories, inputs []string, credentials []
 	lines = append(lines, "When you finish, whatever happened, write an A2A TaskStatus JSON object to "+output+"/"+wire.OutcomeFile+", creating its directory: "+
 		`{"state": "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_AUTH_REQUIRED", "message": {"role": "ROLE_AGENT", "parts": [{"text": "<the answer, or what went wrong>"}]}}. `+
 		`For TASK_STATE_AUTH_REQUIRED, add the part {"data": {"credential": "<name>"}} naming the credential you need. `+listed,
-		"The answer goes in the message text; long or structured content belongs in files in "+output+". A reply over "+strconv.FormatInt(replyLimit, 10)+" bytes is cut.")
+		"The answer goes in the message text; long or structured content belongs in files in "+output+". A completed run must end with a reply. A reply over "+strconv.FormatInt(replyLimit, 10)+" bytes is cut.")
 	return strings.Join(lines, "\n") + "\n\n"
 }
 

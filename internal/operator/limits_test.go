@@ -651,13 +651,14 @@ func TestPoolApplyCreateRefusesAStartByLimitPastThePresignLimitWithStorage(t *te
 	defer closeFixture()
 	ctx := context.Background()
 	terms := modelTerms()
-	terms.StartByLimitMS = Millis((7*24*time.Hour - 6*time.Hour + time.Millisecond).Milliseconds())
+	// The presigned PUT URLs must outlast the run by the upload grace.
+	terms.StartByLimitMS = Millis((7*24*time.Hour - 6*time.Hour - UploadGrace + time.Millisecond).Milliseconds())
 	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
 		t.Fatalf("pool apply without storage = %v", err)
 	}
 	terms.Storage = &Storage{Endpoint: "https://s3.example.test:8443", Bucket: "wherry-lab"}
 	err := service.PoolApply(ctx, "pool-b", terms, false)
-	if err == nil || err.Error() != "start_by_limit plus the 6h run cap exceeds 7 days, the longest an S3 SigV4 presigned URL lasts" {
+	if err == nil || err.Error() != "start_by_limit plus the 6h run cap and the 10m upload grace exceeds 7 days, the longest an S3 SigV4 presigned URL lasts" {
 		t.Fatalf("pool apply with storage = %v", err)
 	}
 	if err := service.PoolApply(ctx, "pool-a", terms, false); err == nil {

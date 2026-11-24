@@ -203,12 +203,14 @@ admission: a malformed first task can win its run and then fail at open with
   public keys only.
 - **Presigned links.** A host presigns an S3 input's GET until
   `task_started_by` plus 15 minutes and an S3 output's PUT until
-  `task_ended_by`, each at most 7 days, the longest an
+  `task_ended_by` plus 10 minutes, each at most 7 days, the longest an
   [S3 SigV4](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html)
-  presigned URL lasts. For a pool with storage, `start_by_limit` plus six
-  hours must not exceed 7 days. The host signs with its static storage
-  credential, so the 7-day ceiling and those deadlines are the only bounds
-  on a link.
+  presigned URL lasts. The 10 minutes let a run stopped at `task_ended_by`
+  upload the outputs its job left; a leaked PUT URL works that much longer,
+  for its one object key, PUT only. For a pool with storage,
+  `start_by_limit` plus six hours and ten minutes must not exceed 7 days.
+  The host signs with its static storage credential, so the 7-day ceiling
+  and those deadlines are the only bounds on a link.
 
 ## What the pool key protects
 

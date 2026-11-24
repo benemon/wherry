@@ -252,7 +252,7 @@ func TestTracedRoundTrip(t *testing.T) {
 	traceClient.Close()
 	input := busclient.SubmitInput{Agent: "claude", Selector: []wire.Requirement{{Key: "gpu", Operator: wire.OpExists}},
 		Prompt: tracedPrompt, Parts: []wire.Part{{Raw: wire.StdBytes(bytes.Repeat([]byte("dataset "), 250)), Filename: "dataset.bin"}},
-		Credentials: []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}, Outputs: []wire.ExpectedOutput{{Name: "big.bin", Required: true, Storage: wire.StorageS3}},
+		Credentials: []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}, Outputs: []wire.ExpectedOutput{{Name: "big.bin", Storage: wire.StorageS3}},
 		EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)}
 	var submitted busclient.SubmitResult
 	for ctx.Err() == nil {

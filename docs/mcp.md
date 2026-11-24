@@ -30,13 +30,17 @@ The defaults are `10m` and `2h`.
   fails with `INVALID_ARGUMENT` naming the model, agent and pool.
   `selector` is an array of `{key, operator, values}`. `git` is
   `{remote, ref, path, changes}`, as `--git`, `--git-path` and `--git-changes`
-  take them, with `remote` and `ref` required; its credential and host key come
+  take them, with `remote` and `ref` required and `changes` `bundle` unless
+  set to `patch` or `none`; its credential and host key come
   from the client configuration's `git` entries, as for `submit`. `continue`
   is a run ID, as `--continue` takes it, and is refused with `git`. `inputs` is
-  an array of `{path, storage}`, `credentials` an array of `{name}`,
-  `{name, file}` or `{name, env}` and `outputs` an array of `{name, required, storage}`,
-  as `--input`, `--credential` and `--output` take them;
-  `storage` is `s3` or absent, and `s3` is `:s3`. An input must resolve, through any
+  an array of `{path}`, `credentials` an array of `{name}`,
+  `{name, file}` or `{name, env}` and `outputs` an array of `{name, storage}`,
+  as `--input`, `--credential` and `--output` take them; every output is
+  required, and an output's `storage` is `s3` or absent, as `:s3`. An input's
+  `storage` is refused with `inputs move to S3 by size; drop :s3`, and an
+  output's `required` with `outputs are always required; drop :required`.
+  An input must resolve, through any
   symbolic links, to a regular file beneath one of the
   [`input_roots`](configuration-host.md#client-configuration), and opens through that
   root, so a link that leads out of it, even one that appears after the path

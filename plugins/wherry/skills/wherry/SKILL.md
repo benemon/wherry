@@ -96,10 +96,11 @@ loop below. Then carry on with other work.
 URL, or `user@host:path`) and `ref` are required. The clone's credential, and an
 `ssh` remote's host key, come from the `git` entry of the user's wherry
 configuration whose `url` is the longest prefix of the remote; a remote under no
-entry clones anonymously, and an `ssh` one then returns `INVALID_ARGUMENT`. Add
-`changes`, `patch` or `bundle`, to get its commits back as the output
-`changes.patch` or `changes.bundle`, which you apply with `git am` or
-`git fetch`. The remote's host must be one of the pool's VCS hosts, or
+entry clones anonymously, and an `ssh` one then returns `INVALID_ARGUMENT`. Its
+commits come back as the output `changes.bundle`, which you `git fetch`; set
+`changes` to `patch` for `changes.patch`, which you apply with `git am`, or to
+`none` for no changes file. A run that commits nothing returns none and
+completes all the same. The remote's host must be one of the pool's VCS hosts, or
 `submit` returns `INVALID_ARGUMENT` naming the host and the pool. The agent
 pushes only when your prompt asks it to, and only to the branch
 `wherry/<run>`.
@@ -157,12 +158,12 @@ unsetting its variable where the wherry MCP server runs; when a task must
 not carry a credential whose `status` in `receivers` is `ready` or
 `unchecked`, tell the user so and do not submit.
 To get files back, add
-`outputs`: `{name, required}` for each file the agent should leave in
-`WHERRY_OUTPUT_DIR`. The prompt the agent receives names all of them.
+`outputs`: `{name}` for each file the agent must leave in
+`WHERRY_OUTPUT_DIR`; the run fails without it. The prompt the agent receives
+names all of them, and every completed run ends with a reply.
 
-To send a large file through S3 directly, up to 5 GiB, add `storage: "s3"`
-to its input: the server uploads it to the pool's bucket and the agent finds it
-in its input directory like any input. Add `storage: "s3"` to an output to
+A large input, up to 5 GiB, goes through S3 by its size alone; an input's
+`storage` is refused. Add `storage: "s3"` to an output to
 return it through the bucket. Both need a pool with storage and a storage
 credential for that pool in the user's wherry configuration; without them `submit`
 returns `INVALID_ARGUMENT` saying which is missing. `result` downloads S3

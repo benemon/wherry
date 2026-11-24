@@ -341,7 +341,7 @@ func TestRoundTrip(t *testing.T) {
 	for ctx.Err() == nil {
 		submitted, err = host.Submit(ctx, busclient.SubmitInput{Agent: "claude", Selector: []wire.Requirement{{Key: "gpu", Operator: wire.OpExists}},
 			Prompt: "hello from the host", Parts: []wire.Part{{Raw: wire.StdBytes("a,b\n"), Filename: "data.csv"}},
-			Credentials: []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}, Outputs: []wire.ExpectedOutput{{Name: "big.bin", Required: true}},
+			Credentials: []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}, Outputs: []wire.ExpectedOutput{{Name: "big.bin"}},
 			EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 		if err == nil {
 			break
@@ -499,7 +499,7 @@ func s3RoundTrip(t *testing.T, ctx context.Context, bucket *s3Store, host *buscl
 	}
 	defer file.Close()
 	submitted, err := host.Submit(ctx, busclient.SubmitInput{Agent: "claude", Selector: []wire.Requirement{{Key: "gpu", Operator: wire.OpExists}}, Prompt: "use the dataset",
-		S3Inputs: []busclient.S3File{{Name: "dataset.bin", Body: file}}, Outputs: []wire.ExpectedOutput{{Name: "big.bin", Required: true, Storage: wire.StorageS3}},
+		S3Inputs: []busclient.S3File{{Name: "dataset.bin", Body: file}}, Outputs: []wire.ExpectedOutput{{Name: "big.bin", Storage: wire.StorageS3}},
 		EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)

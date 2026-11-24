@@ -185,6 +185,8 @@ type fakePlugin struct {
 	collects    int
 	stopsBefore []int
 	limits      pluginsdk.Limits
+	// collectDeadline is the deadline of the last Collect's context.
+	collectDeadline time.Time
 	// samples are what Metrics reports, unless metricsHang makes it block until its context ends.
 	samples     []pluginsdk.Sample
 	metricsHang bool
@@ -444,6 +446,7 @@ func (f *fakePlugin) Collect(ctx context.Context, handle pluginsdk.Handle, limit
 	f.mu.Lock()
 	f.collects++
 	f.limits = limits
+	f.collectDeadline, _ = ctx.Deadline()
 	f.stopsBefore = append(f.stopsBefore, f.stops)
 	outputs, err, hangs, collecting := slices.Clone(f.outputs), f.collectErr, f.collectHangs, f.collecting
 	if f.collects <= f.collectFailures {

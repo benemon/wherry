@@ -1141,7 +1141,7 @@ func TestSubmitGitFlags(t *testing.T) {
 		"outside vcs hosts":        {[]string{"--git", "https://github.com/org/repo.git@main"}, "git remote host github.com is not in pool pool-a's vcs hosts"},
 		"vcs host port":            {[]string{"--git", "https://git.example.test:8443/org/repo.git@main"}, "git remote host git.example.test:8443 is not in pool pool-a's vcs hosts"},
 		"ssh without key":          {[]string{"--git", "ssh://deploy@git.example.test/org/repo.git@main"}, "ssh git remote requires host_key"},
-		"changes":                  {[]string{"--git", "https://git.example.test/org/repo.git@main", "--git-changes", "diff"}, "git changes must be patch or bundle"},
+		"changes":                  {[]string{"--git", "https://git.example.test/org/repo.git@main", "--git-changes", "diff"}, "git changes must be bundle, patch or none"},
 		"credential twice":         {[]string{"--git", "git@git.example.test:org/repo.git@main", "--credential", "deploy-key:env=DEPLOY_KEY"}, "credential deploy-key is listed twice"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1209,12 +1209,27 @@ func TestParseAnywhere(t *testing.T) {
 	}
 }
 
-func TestOutputSuffixesInEitherOrder(t *testing.T) {
-	for _, value := range []string{"big.bin:s3:required", "big.bin:required:s3"} {
+func TestOutputSuffixes(t *testing.T) {
+	for value, want := range map[string]string{
+		"big.bin":             "",
+		"big.bin:s3":          "s3",
+		"big.bin:required":    "outputs are always required; drop :required",
+		"big.bin:s3:required": "outputs are always required; drop :required",
+		"big.bin:required:s3": "outputs are always required; drop :required",
+		"big.bin:needed":      `want NAME[:s3], not "big.bin:needed"`,
+		"big.bin:s3:s3":       `want NAME[:s3], not "big.bin:s3:s3"`,
+	} {
 		flags := flag.NewFlagSet("submit", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
 		var outputs []wire.ExpectedOutput
 		flags.Func("output", "", outputFlag(&outputs))
-		if err := flags.Parse([]string{"--output", value}); err != nil || len(outputs) != 1 || outputs[0] != (wire.ExpectedOutput{Name: "big.bin", Required: true, Storage: wire.StorageS3}) {
+		err := flags.Parse([]string{"--output", value})
+		switch {
+		case strings.HasPrefix(want, "outputs") || strings.HasPrefix(want, "want"):
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("%s: %v, want %q", value, err, want)
+			}
+		case err != nil || len(outputs) != 1 || outputs[0] != (wire.ExpectedOutput{Name: "big.bin", Storage: want}):
 			t.Fatalf("%s: outputs %+v, %v", value, outputs, err)
 		}
 	}

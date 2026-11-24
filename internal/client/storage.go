@@ -234,7 +234,8 @@ func putInputs(ctx context.Context, store *store, bucket, tenant, run string, fi
 }
 
 // presign returns the URLs of a run's S3 inputs, under inputRun's prefix, and outputs, under run's: GET URLs that
-// expire at getDeadline and PUT URLs at deadline.
+// expire at getDeadline and PUT URLs at deadline plus the upload grace, so a run stopped at deadline still uploads.
+// A deadline that has passed is refused all the same.
 func presign(ctx context.Context, store *store, bucket, tenant, inputRun, run string, inputs, outputs []string, getDeadline, deadline time.Time) (map[string][]byte, error) {
 	values := map[string][]byte{}
 	if len(inputs) > 0 {
@@ -253,10 +254,11 @@ func presign(ctx context.Context, store *store, bucket, tenant, inputRun, run st
 	if len(outputs) == 0 {
 		return values, nil
 	}
-	lifetime := min(time.Until(deadline).Truncate(time.Second)+time.Second, operator.MaxPresign)
-	if lifetime < 2*time.Second {
+	remaining := time.Until(deadline).Truncate(time.Second) + time.Second
+	if remaining < 2*time.Second {
 		return nil, errors.New("task_ended_by has passed")
 	}
+	lifetime := min(remaining+operator.UploadGrace, operator.MaxPresign)
 	for _, output := range outputs {
 		put, err := store.presignPut(ctx, bucket, wire.S3OutputKey(tenant, run, output), lifetime)
 		if err != nil {
