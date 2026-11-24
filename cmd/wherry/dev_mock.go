@@ -77,6 +77,20 @@ func runDevMock(args []string, stdout io.Writer) error {
 	if err := os.WriteFile(filepath.Join(output, "echo.txt"), []byte(prompt), 0o600); err != nil {
 		return err
 	}
+	// "mock: bytes N" also writes big.bin of N bytes, so a lane can return an output over the inline limit.
+	if value := strings.TrimPrefix(first, "mock: bytes "); value != first {
+		size, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || size < 0 {
+			return fmt.Errorf("mock: bytes takes a size in bytes, not %q", value)
+		}
+		file, err := os.Create(filepath.Join(output, "big.bin"))
+		if err != nil {
+			return err
+		}
+		if err := errors.Join(file.Truncate(size), file.Close()); err != nil {
+			return err
+		}
+	}
 	step(map[string]any{"step": "echo"})
 	home, _ := os.UserHomeDir()
 	cwd, _ := os.Getwd()
