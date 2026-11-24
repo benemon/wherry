@@ -2559,7 +2559,7 @@ func (run *activeRun) readOutcome(output pluginsdk.Output, limit int64) *wire.Ta
 		return nil
 	}
 	reply, fromData := text(*reported.Message), false
-	if reply == "" {
+	if strings.TrimSpace(reply) == "" {
 		for i, part := range parts {
 			if part.Data != nil && i != credential {
 				reply, fromData = string(part.Data), true

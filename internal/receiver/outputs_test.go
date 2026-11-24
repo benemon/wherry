@@ -40,6 +40,7 @@ func TestACompletedRunWithoutAReplyFails(t *testing.T) {
 		"whitespace":                  {nil, outcomeWith(wire.TaskStateCompleted, textPart(" \n\t ")), wire.TaskStateFailed, noReply},
 		"text":                        {nil, outcomeWith(wire.TaskStateCompleted, textPart(" the answer ")), wire.TaskStateCompleted, " the answer "},
 		"data part":                   {nil, outcomeWith(wire.TaskStateCompleted, map[string]any{"data": map[string]int{"answer": 1}}), wire.TaskStateCompleted, `{"answer":1}`},
+		"whitespace and a data part":  {nil, outcomeWith(wire.TaskStateCompleted, textPart(" \n"), map[string]any{"data": map[string]int{"answer": 1}}), wire.TaskStateCompleted, `{"answer":1}`},
 		"credential part alone":       {nil, outcomeWith(wire.TaskStateAuthRequired, credential), wire.TaskStateFailed, ""},
 		"failed without a reply":      {nil, outcomeWith(wire.TaskStateFailed), wire.TaskStateFailed, ""},
 		"missing output and no reply": {[]wire.ExpectedOutput{{Name: "report.md"}}, outcomeWith(wire.TaskStateCompleted), wire.TaskStateFailed, "required output report.md not returned: missing"},
