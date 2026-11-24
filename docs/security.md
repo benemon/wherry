@@ -560,9 +560,12 @@ when the configuration keeps a `ca_file` and the bundle carries a `ca`, and
 the renewal below removes the line. A machine that trusts the system roots
 trusts every CA they hold for the broker's address.
 
-A bundle written before the operator trusted the broker through a CA file
-carries no `ca`. A host or receiver running it with no `ca_file` fails
-against a private-CA broker, and the failure names the refresh.
+A failure to verify the broker's certificate names the CA the connection
+used, a `ca_file` by its path, and one remedy for it. A bundle written
+before the operator trusted the broker through a CA file carries no `ca`. A
+host or receiver running it with no `ca_file` fails against a private-CA
+broker, and the failure says the system roots do not trust the certificate
+and names the refresh.
 
 ### Renew the broker CA
 

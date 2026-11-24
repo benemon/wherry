@@ -354,7 +354,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 	failure := func(err error) error {
 		mapped := toolFailure(err)
 		if failed, ok := mapped.(*toolError); ok && failed.Code == "UNAVAILABLE" {
-			logger.Print("tool failed: " + busclient.Redact(operator.ExplainUnknownAuthority(err, hostRefreshCommand).Error()))
+			logger.Print("tool failed: " + busclient.Redact(err.Error()))
 		}
 		return mapped
 	}

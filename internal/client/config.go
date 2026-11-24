@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/operator"
@@ -253,6 +254,9 @@ func Init(ctx context.Context, config Config) (string, map[string]operator.Terms
 	return keyID, pools, nil
 }
 
+// pingTimeout bounds Connect's first exchange with the broker; franz-go bounds each dial and request at 10 s.
+const pingTimeout = 30 * time.Second
+
 // Connect opens the bundle's TLS and SCRAM-SHA-512 Kafka connection as its host principal, trusting the broker through
 // the configuration's ca_file, else the bundle's ca, else the system roots; the host logs to logger.
 func Connect(config Config, logger *log.Logger) (*Host, error) {
@@ -280,6 +284,15 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 		kafka.Close()
 		return nil, err
 	}
+	// The first exchange with the broker, so a certificate the connection does not trust fails here, where the CA it
+	// was checked against is known.
+	ping, cancel := context.WithTimeout(context.Background(), pingTimeout)
+	defer cancel()
+	if err := kafka.Ping(ping); err != nil {
+		kafka.Close()
+		source := operator.TrustSource{CAFile: config.CAFile, Config: "your host configuration", BundleCA: bundle.CA != ""}
+		return nil, operator.ExplainUnknownAuthority(err, source, hostRefresh(host.tenant, host.host))
+	}
 	if host.key, err = operator.RecoverKey(context.Background(), kafka, signed.HostOwner(host.tenant, host.host), operator.HostTopic(host.tenant, host.host), config.HostKey); err != nil {
 		kafka.Close()
 		return nil, fmt.Errorf("load host key: %w", err)
@@ -292,6 +305,11 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 		}
 	}
 	return host, nil
+}
+
+// hostRefresh is the operator command that rewrites the bundle of host in tenant, and how the host installs it.
+func hostRefresh(tenant, host string) operator.BundleRefresh {
+	return operator.BundleRefresh{Command: "wherry operator tenant host refresh " + tenant + " " + host, Install: "install it with wherry host init"}
 }
 
 // RotateKey replaces the host key with a new one and returns the old and new key IDs. It refuses while a run this host

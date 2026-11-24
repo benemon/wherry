@@ -133,11 +133,85 @@ func TestOldBundleWithoutCAFailsNamingRefresh(t *testing.T) {
 	if err == nil || !unknownAuthority(err) {
 		t.Fatalf("host init with a bundle carrying no ca = %v; want the connection refused on the certificate", err)
 	}
-	if text := err.Error(); !strings.Contains(text, "wherry operator tenant host refresh TENANT HOST") || !strings.Contains(text, "ca_file") {
-		t.Fatalf("host init with a bundle carrying no ca = %v; want the refresh command and ca_file named", err)
+	if text := err.Error(); !strings.Contains(text, "the system roots do not trust it") || !strings.Contains(text, "wherry operator tenant host refresh tenant-a host-a") {
+		t.Fatalf("host init with a bundle carrying no ca = %v; want the system roots and the refresh command named", err)
 	}
 	if strings.Contains(err.Error(), "password") {
 		t.Fatalf("host init = %v; want no password in the error", err)
+	}
+}
+
+// unknownAuthorityText is the x509 error a broker certificate the connection does not trust fails with, kept at the
+// end of its explanation.
+const unknownAuthorityText = "x509: certificate signed by unknown authority"
+
+// hostRefreshRemedy is the remedy of a host whose bundle wants a refresh, by the test host's names.
+const hostRefreshRemedy = "ask the operator for a new bundle (wherry operator tenant host refresh tenant-a host-a) and install it with wherry host init ("
+
+// explained fails t unless err is an unknown authority explained once, starting with want and ending with the x509
+// error, with no password or certificate in it.
+func explained(t *testing.T, what string, err error, want string) {
+	t.Helper()
+	if err == nil || !unknownAuthority(err) {
+		t.Fatalf("%s = %v; want the connection refused on the certificate", what, err)
+	}
+	text := err.Error()
+	if !strings.HasPrefix(text, want) || !strings.Contains(text, unknownAuthorityText) || !strings.HasSuffix(text, ")") {
+		t.Fatalf("%s = %q; want %q with the x509 error at the end", what, text, want)
+	}
+	if n := strings.Count(text, "cannot verify the broker's certificate"); n != 1 {
+		t.Fatalf("%s = %q; want the explanation once, not %d times", what, text, n)
+	}
+	if strings.Contains(text, "password") || strings.Contains(text, "-----BEGIN") {
+		t.Fatalf("%s = %q; want no password or certificate in the error", what, text)
+	}
+}
+
+// A connection the broker's certificate fails names the CA it was checked against and the one remedy for that CA, once,
+// through host init, a host command and its top-level shortcut: a ca_file by its path in the host configuration, with
+// its removal offered only while the bundle carries a CA; the bundle's CA and the system roots by the refresh of the
+// host's real tenant and host.
+func TestHostUnknownAuthorityNamesTheCAUsed(t *testing.T) {
+	h := newInitHost(t, nil)
+	noTerminal(t)
+	h.init(t, h.bundle)
+	installed := filepath.Join(h.dir, "bundle.yaml")
+	wrong := writeFile(t, "wrong-ca.pem", otherCA(t))
+	right, err := operator.ReadBundle(h.bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name, caFile, bundleCA, want string
+	}{
+		{"ca_file", wrong, right.CA, "cannot verify the broker's certificate: it does not chain to a CA in ca_file " + wrong + " in your host configuration; point ca_file at the broker's CA, or remove it to use the bundle's ("},
+		{"ca_file without a bundle ca", wrong, "", "cannot verify the broker's certificate: it does not chain to a CA in ca_file " + wrong + " in your host configuration; point ca_file at the broker's CA ("},
+		{"bundle ca", "", otherCA(t), "cannot verify the broker's certificate: it does not chain to the CA in your bundle; " + hostRefreshRemedy},
+		{"system roots", "", "", "cannot verify the broker's certificate: your bundle carries no CA and the system roots do not trust it; " + hostRefreshRemedy},
+	} {
+		if err := writeYAML(h.config, busclient.Config{Bundle: installed, CAFile: c.caFile}); err != nil {
+			t.Fatal(err)
+		}
+		editBundle(t, h.bundle, func(bundle *operator.Bundle) { bundle.CA = c.bundleCA })
+		// host init installs the bundle before it connects, so the commands after it read the same bundle.
+		for _, args := range [][]string{{"host", "init", h.bundle}, {"host", "status"}, {"status"}} {
+			var out bytes.Buffer
+			explained(t, c.name+" through wherry "+strings.Join(args, " "), run(args, &out, &out), c.want)
+		}
+	}
+}
+
+// Connect explains an unknown authority alone: a connection that fails for another reason, here a wrong password,
+// returns that failure as it is.
+func TestHostConnectPassesOtherFailuresThrough(t *testing.T) {
+	h := newInitHost(t, nil)
+	noTerminal(t)
+	h.init(t, h.bundle)
+	editBundle(t, filepath.Join(h.dir, "bundle.yaml"), func(bundle *operator.Bundle) { bundle.Password = "wrong-" + bundle.Password })
+	var out bytes.Buffer
+	err := run([]string{"status"}, &out, &out)
+	if err == nil || unknownAuthority(err) || strings.Contains(err.Error(), "cannot verify the broker's certificate") {
+		t.Fatalf("status with a wrong password = %v; want its own failure, unexplained", err)
 	}
 }
 
@@ -213,19 +287,27 @@ func TestReceiverTrustsTheBrokerThroughItsBundle(t *testing.T) {
 	if err != nil || keys["receiver-a"].Current == nil {
 		t.Fatalf("keys %v, %v; want the receiver registered through the bundle's CA", keys, err)
 	}
-	editBundle(t, bundle, func(bundle *operator.Bundle) { bundle.CA = "" })
-	err = run([]string{"receiver", "run", "--config-file", localConfig}, &stdout, &stderr)
-	if err == nil || !unknownAuthority(err) || !strings.Contains(err.Error(), "wherry operator receiver apply receiver-a") {
-		t.Fatalf("receiver run with a bundle carrying no ca = %v; want the certificate refused and receiver apply named", err)
+	// The failure names the CA the receiver used and the receiver's own refresh and install, never the host's.
+	const refresh = "ask the operator for a new bundle (wherry operator receiver apply receiver-a) and install the new bundle by your receiver platform's procedure and restart the receiver ("
+	receiverRun := func(what, want string) {
+		t.Helper()
+		err := run([]string{"receiver", "run", "--config-file", localConfig}, &stdout, &stderr)
+		explained(t, what, err, want)
+		if text := err.Error(); strings.Contains(text, "tenant host refresh") || strings.Contains(text, "wherry host init") {
+			t.Fatalf("%s = %q; want the receiver's remedy, not the host's", what, text)
+		}
 	}
-	// A ca_file that does not trust the broker overrides the bundle's ca.
+	editBundle(t, bundle, func(bundle *operator.Bundle) { bundle.CA = "" })
+	receiverRun("receiver run with a bundle carrying no ca", "cannot verify the broker's certificate: your bundle carries no CA and the system roots do not trust it; "+refresh)
+	editBundle(t, bundle, func(bundle *operator.Bundle) { bundle.CA = otherCA(t) })
+	receiverRun("receiver run with a bundle whose ca does not trust the broker", "cannot verify the broker's certificate: it does not chain to the CA in your bundle; "+refresh)
+	// A ca_file that does not trust the broker overrides the bundle's ca, and is named with the configuration's path.
 	editBundle(t, bundle, func(bundle *operator.Bundle) { bundle.CA = ca })
-	if err := os.WriteFile(localConfig, []byte("bundle: "+bundle+"\nca_file: "+writeFile(t, "wrong-ca.pem", otherCA(t))+"\nstate_dir: "+filepath.Join(dir, "state")+"\nplugin_dir: "+t.TempDir()+"\n"), 0o600); err != nil {
+	wrong := writeFile(t, "wrong-ca.pem", otherCA(t))
+	if err := os.WriteFile(localConfig, []byte("bundle: "+bundle+"\nca_file: "+wrong+"\nstate_dir: "+filepath.Join(dir, "state")+"\nplugin_dir: "+t.TempDir()+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := run([]string{"receiver", "run", "--config-file", localConfig}, &stdout, &stderr); err == nil || !unknownAuthority(err) {
-		t.Fatalf("receiver run with a ca_file that does not trust the broker = %v; want the certificate refused, not the bundle's ca used", err)
-	}
+	receiverRun("receiver run with a ca_file that does not trust the broker", "cannot verify the broker's certificate: it does not chain to a CA in ca_file "+wrong+" in "+localConfig+"; point ca_file at the broker's CA, or remove it to use the bundle's (")
 }
 
 // receiver apply of an existing receiver compares the broker and the CA on their own: with the broker unchanged and

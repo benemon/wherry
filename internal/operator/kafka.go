@@ -237,13 +237,38 @@ func unknownAuthority(err error) bool {
 	return errors.As(err, &unknown)
 }
 
-// ExplainUnknownAuthority adds to err, when unknownAuthority, that a bundle written before the operator trusted the
-// broker through a CA file carries no ca and that refresh rewrites it; any other err is returned as it is.
-func ExplainUnknownAuthority(err error, refresh string) error {
+// TrustSource is the CA a connection trusts the broker through, as BundleKafkaOpts chose it: CAFile is the
+// configuration's ca_file, absolute, when it is the CA, and Config what an explanation calls the configuration naming
+// it; BundleCA reports whether the bundle carries a ca.
+type TrustSource struct {
+	CAFile, Config string
+	BundleCA       bool
+}
+
+// BundleRefresh is the operator command that rewrites a bundle, and how its holder installs the new one.
+type BundleRefresh struct{ Command, Install string }
+
+// ExplainUnknownAuthority replaces err, when unknownAuthority, with what failed, why in terms of the CA source names
+// and the one remedy for that CA, keeping err at the end; any other err is returned as it is.
+func ExplainUnknownAuthority(err error, source TrustSource, refresh BundleRefresh) error {
 	if !unknownAuthority(err) {
 		return err
 	}
-	return fmt.Errorf("%w; the broker's certificate chains to a CA this connection does not trust: a bundle written before the operator trusted the broker through a CA file carries none, so install the bundle %s writes, or name the CA as ca_file", err, refresh)
+	switch {
+	case source.CAFile != "":
+		remedy := "point ca_file at the broker's CA"
+		if source.BundleCA {
+			remedy += ", or remove it to use the bundle's"
+		}
+		path := source.CAFile
+		if abs, absErr := filepath.Abs(path); absErr == nil {
+			path = abs
+		}
+		return fmt.Errorf("cannot verify the broker's certificate: it does not chain to a CA in ca_file %s in %s; %s (%w)", path, source.Config, remedy, err)
+	case source.BundleCA:
+		return fmt.Errorf("cannot verify the broker's certificate: it does not chain to the CA in your bundle; ask the operator for a new bundle (%s) and %s (%w)", refresh.Command, refresh.Install, err)
+	}
+	return fmt.Errorf("cannot verify the broker's certificate: your bundle carries no CA and the system roots do not trust it; ask the operator for a new bundle (%s) and %s (%w)", refresh.Command, refresh.Install, err)
 }
 
 var yamlLine = regexp.MustCompile(`line \d+`)

@@ -143,10 +143,12 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	}
 	plugins := &plugins{dir: config.PluginDir, credentials: config.Credentials, logger: logger, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
-	refresh := "wherry operator receiver apply " + strings.TrimPrefix(bundle.Principal, operator.ReceiverPrincipal(""))
+	source := operator.TrustSource{CAFile: config.CAFile, Config: *configPath, BundleCA: bundle.CA != ""}
+	refresh := operator.BundleRefresh{Command: "wherry operator receiver apply " + strings.TrimPrefix(bundle.Principal, operator.ReceiverPrincipal("")),
+		Install: "install the new bundle by your receiver platform's procedure and restart the receiver"}
 	r, err := receiver.New(bundle, ca, config.StateDir, *rotateKey, config.DrainTimeout, plugins.profile, logger, registry)
 	if err != nil {
-		return operator.ExplainUnknownAuthority(err, refresh)
+		return operator.ExplainUnknownAuthority(err, source, refresh)
 	}
 	plugins.logs, plugins.hold = r.PluginLogs(stdout), r.HoldPlatformCredential
 	if config.Tracing {
@@ -155,7 +157,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := r.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		return operator.ExplainUnknownAuthority(err, refresh)
+		return operator.ExplainUnknownAuthority(err, source, refresh)
 	}
 	return nil
 }
