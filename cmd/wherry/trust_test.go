@@ -66,10 +66,12 @@ func writeFile(t *testing.T, name, contents string) string {
 	return path
 }
 
-// unknownAuthority reports whether err is a connection the broker's certificate failed for chaining to no trusted CA.
-func unknownAuthority(err error) bool {
-	var unknown x509.UnknownAuthorityError
-	return errors.As(err, &unknown)
+// certificateRefused reports whether err is a connection the broker's certificate failed, whatever the verifier said of
+// it: Go's own verifier names an unknown authority, the platform verifier of macOS and Windows words it its own way,
+// and crypto/tls wraps both the same.
+func certificateRefused(err error) bool {
+	var verification *tls.CertificateVerificationError
+	return errors.As(err, &verification)
 }
 
 // untrustedBroker is kfake behind TLS with a self-signed certificate the process's system roots do not trust, with
@@ -101,27 +103,41 @@ func untrustedBroker(t *testing.T) *kfake.Cluster {
 	return cluster
 }
 
-// unknownAuthorityText is the x509 error a broker certificate the connection does not trust fails with, kept at the
-// end of its explanation; unknownAuthorityHint is the explanation's one remedy, which precedes it and names the
-// configuration file whose ca_cert takes the CA.
+// unknownAuthorityText is the x509 error Go's own verifier gives a broker certificate the connection does not trust,
+// kept at the end of its explanation; unknownAuthorityHint is the explanation's one remedy where the configuration
+// holds no ca_cert, which precedes it and names the configuration file whose ca_cert takes the CA, and caCertSetHint
+// the explanation where it holds one, which asks for no key already set.
 const (
 	unknownAuthorityText = "x509: certificate signed by unknown authority"
 	unknownAuthorityHint = "cannot verify the broker's certificate: install the CA that signed it in this machine's trust store, or set ca_cert in "
+	caCertSetHint        = "cannot verify the broker's certificate: it is signed neither by this machine's trust store nor by the CA in ca_cert in "
 )
 
 // trustHelperVariable names, in a re-run of this binary, the host command the trust helper runs.
 const trustHelperVariable = "WHERRY_TEST_TRUST_HELPER"
 
-// explained fails t unless err is an unknown authority explained once, with the one hint naming config, ending with the
-// x509 error, with neither password nor a certificate in it.
-func explained(t *testing.T, what string, err error, config, password string) {
+// explained fails t unless err is an unknown authority explained once, with the hint for ca, the configuration file and
+// whether it holds a ca_cert, ending with the x509 error, with neither password nor a certificate in it. With a ca_cert
+// set, Go's own verifier runs after the platform's and names the unknown authority on every OS; without one, the
+// platform verifier of macOS and Windows words the refusal its own way, so only x509's prefix is required.
+func explained(t *testing.T, what string, err error, ca operator.CASetting, password string) {
 	t.Helper()
-	if err == nil || !unknownAuthority(err) {
+	if err == nil || !certificateRefused(err) {
 		t.Fatalf("%s = %v; want the connection refused on the certificate", what, err)
 	}
 	text := err.Error()
-	if !strings.HasPrefix(text, unknownAuthorityHint+config+" (") || !strings.Contains(text, unknownAuthorityText) || !strings.HasSuffix(text, ")") {
-		t.Fatalf("%s = %q; want %q with the x509 error at the end", what, text, unknownAuthorityHint+config+" (")
+	hint := unknownAuthorityHint
+	if ca.Set {
+		hint = caCertSetHint
+	}
+	if !strings.HasPrefix(text, hint+ca.File+" (") || !strings.Contains(text, "x509: ") || !strings.HasSuffix(text, ")") {
+		t.Fatalf("%s = %q; want %q with the x509 error at the end", what, text, hint+ca.File+" (")
+	}
+	if ca.Set && !strings.Contains(text, unknownAuthorityText) {
+		t.Fatalf("%s = %q; want Go's verifier's %q after the added CA failed too", what, text, unknownAuthorityText)
+	}
+	if strings.Contains(text, "set ca_cert") == ca.Set {
+		t.Fatalf("%s = %q; want the hint to say to set ca_cert exactly when the configuration holds none (set: %v)", what, text, ca.Set)
 	}
 	if n := strings.Count(text, "cannot verify the broker's certificate"); n != 1 {
 		t.Fatalf("%s = %q; want the explanation once, not %d times", what, text, n)
@@ -268,10 +284,19 @@ func TestUnknownAuthorityGetsTheOneHint(t *testing.T) {
 		}
 		editBundle(t, filepath.Join(h.dir, "bundle.yaml"), func(bundle *operator.Bundle) { bundle.Broker = untrusted })
 		editBundle(t, h.bundle, func(bundle *operator.Bundle) { bundle.Broker = untrusted })
+		// init wrote the test CA as ca_cert, so the hint says the CA in it signed nothing either.
 		for _, args := range [][]string{{"host", "receivers"}, {"status"}, {"host", "init", h.bundle}} {
 			var out bytes.Buffer
-			explained(t, "wherry "+strings.Join(args, " "), run(args, &out, &out), h.config, bundle.Password)
+			explained(t, "wherry "+strings.Join(args, " "), run(args, &out, &out), operator.CASetting{File: h.config, Set: true}, bundle.Password)
 		}
+		// Without a ca_cert, the hint says to set it.
+		config := h.written(t)
+		config.CACert = ""
+		if err := writeYAML(h.config, config); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		explained(t, "wherry host receivers without a ca_cert", run([]string{"host", "receivers"}, &out, &out), operator.CASetting{File: h.config}, bundle.Password)
 	})
 	t.Run("receiver", func(t *testing.T) {
 		const password = "receiver-password-s3cr3t"
@@ -279,19 +304,30 @@ func TestUnknownAuthorityGetsTheOneHint(t *testing.T) {
 		if err := operator.ReplaceBundle(bundle, operator.Bundle{Broker: untrusted, Principal: operator.ReceiverPrincipal("receiver-a"), Password: password}); err != nil {
 			t.Fatal(err)
 		}
-		localConfig := receiverLocal(t, bundle, testCA.pem)
-		var out bytes.Buffer
-		explained(t, "receiver run", run([]string{"receiver", "run", "--config-file", localConfig}, &out, &out), localConfig, password)
+		for _, caCert := range []string{testCA.pem, ""} {
+			localConfig := receiverLocal(t, bundle, caCert)
+			var out bytes.Buffer
+			explained(t, "receiver run", run([]string{"receiver", "run", "--config-file", localConfig}, &out, &out), operator.CASetting{File: localConfig, Set: caCert != ""}, password)
+		}
 	})
 	t.Run("operator", func(t *testing.T) {
-		dir := operatorDir(t, untrusted, testCA.pem)
-		explained(t, "operator check", runOperator([]string{"check", "--dir", dir}, io.Discard, io.Discard), filepath.Join(dir, "operator.yaml"), "operator-password")
+		for _, caCert := range []string{testCA.pem, ""} {
+			dir := operatorDir(t, untrusted, caCert)
+			explained(t, "operator check", runOperator([]string{"check", "--dir", dir}, io.Discard, io.Discard), operator.CASetting{File: filepath.Join(dir, "operator.yaml"), Set: caCert != ""}, "operator-password")
+		}
 		noTerminal(t)
-		init := filepath.Join(t.TempDir(), "operator")
-		err := runOperator([]string{"init", "--dir", init, "--broker", untrusted, "--super-user", "wherry.operator", "--super-user-password-file", filepath.Join(dir, "operator.password"), "--ca-cert", testCA.pem}, io.Discard, io.Discard)
-		explained(t, "operator init", err, filepath.Join(init, "operator.yaml"), "operator-password")
-		if _, err := os.Stat(init); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("a refused init wrote %s: %v", init, err)
+		passwordFile := writeFile(t, "operator.password", "operator-password\n")
+		for _, caCert := range []string{testCA.pem, ""} {
+			init := filepath.Join(t.TempDir(), "operator")
+			args := []string{"init", "--dir", init, "--broker", untrusted, "--super-user", "wherry.operator", "--super-user-password", "@" + passwordFile}
+			if caCert != "" {
+				args = append(args, "--ca-cert", caCert)
+			}
+			err := runOperator(args, io.Discard, io.Discard)
+			explained(t, "operator init", err, operator.CASetting{File: filepath.Join(init, "operator.yaml"), Set: caCert != ""}, "operator-password")
+			if _, err := os.Stat(init); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("a refused init wrote %s: %v", init, err)
+			}
 		}
 	})
 }
@@ -308,8 +344,35 @@ func TestRevocationProbeUsesThePool(t *testing.T) {
 		t.Fatalf("probe through the pool = %v; want a login finding the principal still authorised", err)
 	}
 	without := &operator.Service{Operator: root, Broker: address}
-	if err := without.Probe("wherry.operator")(ctx, "admin", "password"); err == nil || !unknownAuthority(err) {
+	if err := without.Probe("wherry.operator")(ctx, "admin", "password"); err == nil || !certificateRefused(err) {
 		t.Fatalf("probe without the pool = %v; want the certificate refused", err)
+	}
+}
+
+// A remove through operatorService probes every broker as the revoked principal through operator.yaml's pool, the
+// service's Roots: the probe reaches the broker, which denies the principal Describe on its topic once its ACLs are
+// gone, and the revocation completes, deleting the bundle. The probe is not stubbed here; a service built without the
+// pool fails the probe on the certificate and keeps the bundle.
+func TestRemoveProbesThroughTheServicePool(t *testing.T) {
+	service := operatorEnv(t)
+	ctx := context.Background()
+	if err := service.TenantAdd(ctx, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runOperator([]string{"tenant", "host", "add", "tenant-a", "host-a"}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	revocationBounds(t, service, "1")
+	hostBundle := filepath.Join("bundles", "hosts", "tenant-a", "host-a.bundle")
+	var stdout bytes.Buffer
+	if err := runOperator([]string{"tenant", "host", "remove", "tenant-a", "host-a", "--wait", "1s"}, &stdout, io.Discard); err != nil {
+		t.Fatalf("remove through the service's pool = %v; printed\n%s", err, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "step=3 complete=true") {
+		t.Fatalf("remove printed\n%s\nwant the probe complete", stdout.String())
+	}
+	if _, err := os.Stat(hostBundle); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remove left %s after a complete revocation: %v", hostBundle, err)
 	}
 }
 
@@ -355,7 +418,7 @@ func TestCACertAddsToTheSystemRoots(t *testing.T) {
 	}{
 		{"the broker's CA in ca_cert, no SSL_CERT variable", testCA.pem, "OK\n", nil},
 		{"the broker's CA as the system roots, another in ca_cert", other, "OK\n", []string{"SSL_CERT_FILE=" + testCA.file, "SSL_CERT_DIR=" + t.TempDir()}},
-		{"another CA in ca_cert, no SSL_CERT variable", other, "ERR: " + unknownAuthorityHint + h.config + " (", nil},
+		{"another CA in ca_cert, no SSL_CERT variable", other, "ERR: " + caCertSetHint + h.config + " (", nil},
 	} {
 		withCACert(c.caCert)
 		if output := trustHelper(t, "host receivers", c.env...); !strings.Contains(output, c.want) {
@@ -422,15 +485,18 @@ func TestFlagValue(t *testing.T) {
 }
 
 // --ca-cert on host init and operator init takes the PEM text, @FILE or @-, writes it into the configuration's ca_cert
-// as a block scalar with CRLF normalised to LF, which loads back, and refuses a value from which Go appends no
-// certificate, a bare path among them; operator init refuses reading the password and the CA from standard input at once.
+// as a block scalar with every CR removed, which loads back as the PEM with LF line ends, the text as "$(cat FILE)" gives
+// it of a CRLF file included, where the shell strips the final LF and leaves the CR before it; and refuses a value from
+// which Go appends no certificate, a bare path among them. operator init refuses reading the password and the CA from
+// standard input at once.
 func TestCACertFlagWritesABlockScalar(t *testing.T) {
 	crlf := strings.ReplaceAll(testCA.pem, "\n", "\r\n")
 	crlfFile := writeFile(t, "ca-crlf.pem", crlf)
+	forms := map[string]string{"@FILE": "@" + crlfFile, "the text": crlf, "the text as $(cat FILE) gives it": strings.TrimRight(crlf, "\n"), "@-": "@-"}
 	t.Run("host", func(t *testing.T) {
 		h := newInitHost(t, nil)
 		noTerminal(t)
-		for name, value := range map[string]string{"@FILE": "@" + crlfFile, "the text": crlf, "@-": "@-"} {
+		for name, value := range forms {
 			// Each form writes the configuration afresh; the host key, once registered, stays.
 			if err := os.RemoveAll(h.config); err != nil {
 				t.Fatal(err)
@@ -470,33 +536,108 @@ func TestCACertFlagWritesABlockScalar(t *testing.T) {
 		b, _ := kfakeInitBroker(t)
 		address, passwordFile := b.address, b.superPasswordFile
 		noTerminal(t)
-		dir := filepath.Join(t.TempDir(), "operator")
-		if err := runOperator([]string{"init", "--dir", dir, "--broker", address, "--super-user", b.superUser, "--super-user-password-file", passwordFile, "--ca-cert", "@" + crlfFile}, io.Discard, io.Discard); err != nil {
-			t.Fatalf("operator init --ca-cert @FILE: %v", err)
-		}
-		written, err := os.ReadFile(filepath.Join(dir, "operator.yaml"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(string(written), "ca_cert: |\n") || strings.Contains(string(written), "\r") {
-			t.Fatalf("operator init wrote\n%s; want ca_cert as a block scalar without CR", written)
-		}
-		if config, _, err := loadOperatorConfig(dir); err != nil || config.CACert != testCA.pem {
-			t.Fatalf("operator.yaml loads ca_cert %q, %v; want the PEM with LF line ends", config.CACert, err)
-		}
-		if err := runOperator([]string{"check", "--dir", dir}, io.Discard, io.Discard); err != nil {
-			t.Fatalf("operator check through the written ca_cert: %v", err)
+		for name, value := range forms {
+			dir := filepath.Join(t.TempDir(), "operator")
+			if value == "@-" {
+				pipeStandardInput(t, crlf)
+			}
+			if err := runOperator([]string{"init", "--dir", dir, "--broker", address, "--super-user", b.superUser, "--super-user-password", "@" + passwordFile, "--ca-cert", value}, io.Discard, io.Discard); err != nil {
+				t.Fatalf("operator init --ca-cert %s: %v", name, err)
+			}
+			written, err := os.ReadFile(filepath.Join(dir, "operator.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(written), "ca_cert: |\n") || strings.Contains(string(written), "\r") {
+				t.Fatalf("operator init --ca-cert %s wrote\n%s; want ca_cert as a block scalar without CR", name, written)
+			}
+			if config, _, err := loadOperatorConfig(dir); err != nil || config.CACert != testCA.pem {
+				t.Fatalf("operator init --ca-cert %s: operator.yaml loads ca_cert %q, %v; want the PEM with LF line ends", name, config.CACert, err)
+			}
+			if err := runOperator([]string{"check", "--dir", dir}, io.Discard, io.Discard); err != nil {
+				t.Fatalf("operator check through the ca_cert --ca-cert %s wrote: %v", name, err)
+			}
 		}
 		want := "--ca-cert holds no certificate; give the PEM text, @FILE or @-"
-		if err := runOperator([]string{"init", "--dir", filepath.Join(t.TempDir(), "operator"), "--broker", address, "--super-user", b.superUser, "--super-user-password-file", passwordFile, "--ca-cert", crlfFile}, io.Discard, io.Discard); err == nil || err.Error() != want {
+		if err := runOperator([]string{"init", "--dir", filepath.Join(t.TempDir(), "operator"), "--broker", address, "--super-user", b.superUser, "--super-user-password", "@" + passwordFile, "--ca-cert", crlfFile}, io.Discard, io.Discard); err == nil || err.Error() != want {
 			t.Fatalf("operator init --ca-cert with a bare path = %v; want %q", err, want)
 		}
 		pipeStandardInput(t, "root-secret-value\n")
-		want = "--super-user-password-file - and --ca-cert @- both read standard input; give one of them a file"
-		if err := runOperator([]string{"init", "--dir", filepath.Join(t.TempDir(), "operator"), "--broker", address, "--super-user", b.superUser, "--super-user-password-file", "-", "--ca-cert", "@-"}, io.Discard, io.Discard); err == nil || err.Error() != want {
+		want = "--super-user-password @- and --ca-cert @- both read standard input; give one of them a file"
+		if err := runOperator([]string{"init", "--dir", filepath.Join(t.TempDir(), "operator"), "--broker", address, "--super-user", b.superUser, "--super-user-password", "@-", "--ca-cert", "@-"}, io.Discard, io.Discard); err == nil || err.Error() != want {
 			t.Fatalf("operator init reading both from standard input = %v; want %q", err, want)
 		}
 	})
+}
+
+// An empty or blank --ca-cert, however given, is refused before anything is written or dialled, as an empty --prompt is:
+// the flag's own text, a file holding nothing and standard input holding nothing.
+func TestEmptyCACertIsRefused(t *testing.T) {
+	const want = "--ca-cert is empty; give the PEM text, @FILE or @-"
+	blank := writeFile(t, "blank.pem", " \r\n\n")
+	values := map[string]string{"the empty text": "", "blank text": " \n", "@FILE of nothing": "@/dev/null", "@FILE of whitespace": "@" + blank, "@- holding nothing": "@-"}
+	t.Run("host", func(t *testing.T) {
+		h := newInitHost(t, nil)
+		noTerminal(t)
+		for name, value := range values {
+			if value == "@-" {
+				pipeStandardInput(t, "")
+			}
+			var out bytes.Buffer
+			if err := run([]string{"host", "init", h.bundle, "--ca-cert", value}, &out, &out); err == nil || err.Error() != want {
+				t.Fatalf("host init --ca-cert %s = %v; want %q", name, err, want)
+			}
+			if _, err := os.Stat(h.config); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("host init --ca-cert %s wrote %s: %v", name, h.config, err)
+			}
+		}
+	})
+	t.Run("operator", func(t *testing.T) {
+		noTerminal(t)
+		passwordFile := writeFile(t, "password", "root-secret-value\n")
+		for name, value := range values {
+			if value == "@-" {
+				pipeStandardInput(t, "")
+			}
+			dir := filepath.Join(t.TempDir(), "operator")
+			err := runOperator([]string{"init", "--dir", dir, "--broker", "127.0.0.1:1", "--super-user", "kafka-root", "--super-user-password", "@" + passwordFile, "--ca-cert", value}, io.Discard, io.Discard)
+			if err == nil || err.Error() != want {
+				t.Fatalf("operator init --ca-cert %s = %v; want %q", name, err, want)
+			}
+			if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("operator init --ca-cert %s wrote %s: %v", name, dir, err)
+			}
+		}
+	})
+}
+
+// operator init run again without --ca-cert keeps the existing operator.yaml's ca_cert, dials through it and writes it
+// back, as host init keeps an existing value; with --ca-cert, the new value replaces it.
+func TestOperatorInitWithoutCACertKeepsTheExistingOne(t *testing.T) {
+	b, _ := kfakeInitBroker(t)
+	noTerminal(t)
+	dir := filepath.Join(t.TempDir(), "operator")
+	if err := b.init(t, dir); err != nil {
+		t.Fatal(err)
+	}
+	again := []string{"init", "--dir", dir, "--broker", b.address, "--super-user", b.superUser, "--super-user-password", "@" + b.superPasswordFile}
+	if err := runOperator(again, io.Discard, io.Discard); err != nil {
+		t.Fatalf("operator init again without --ca-cert: %v", err)
+	}
+	b.login(t, dir)
+	if config, _, err := loadOperatorConfig(dir); err != nil || config.CACert != b.ca {
+		t.Fatalf("after init again, operator.yaml holds ca_cert %q, %v; want the CA the first init wrote", config.CACert, err)
+	}
+	if err := runOperator([]string{"check", "--dir", dir}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("operator check after init again: %v", err)
+	}
+	other := otherCA(t)
+	if err := runOperator(append(again, "--ca-cert", b.ca+other), io.Discard, io.Discard); err != nil {
+		t.Fatalf("operator init again with --ca-cert: %v", err)
+	}
+	if config, _, err := loadOperatorConfig(dir); err != nil || config.CACert != b.ca+other {
+		t.Fatalf("after init again with --ca-cert, operator.yaml holds ca_cert %q, %v; want the new value", config.CACert, err)
+	}
 }
 
 // A kept bundle that carries the ca earlier operators wrote is refused by tenant host refresh and receiver apply

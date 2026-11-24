@@ -223,14 +223,14 @@ func TestDocsNameNoCA(t *testing.T) {
 	if err != nil || len(pages) == 0 {
 		t.Fatal("no docs", err)
 	}
-	removed := regexp.MustCompile("`ca_file`|`ca`|^\\s*ca_file:|^\\s*ca:|--ca-file|kafka-ca|--prompt-file|`prompt_file`")
+	removed := regexp.MustCompile("`ca_file`|`ca`|^\\s*ca_file:|^\\s*ca:|--ca-file|kafka-ca|--prompt-file|`prompt_file`|--super-user-password-file")
 	caCertPath := regexp.MustCompile("ca_cert:\\s*[\"'@/~.]|ca_cert:\\s*\\S+\\.(pem|crt)|`ca_cert`[^.]*\\bpath\\b")
 	linuxReplaces := regexp.MustCompile("(?i)SSL_CERT_FILE[^.]*replaces[^.]*Linux|Linux[^.]*SSL_CERT_FILE[^.]*replaces[^.]*roots")
 	for _, page := range pages {
 		name := filepath.Base(page)
 		for i, line := range strings.Split(docRead(t, page), "\n") {
 			if name != "upgrade.md" && !strings.Contains(line, "nomad-ca.pem") && removed.MatchString(line) {
-				t.Errorf("%s:%d names a CA wherry no longer carries or --prompt-file: %s", name, i+1, strings.TrimSpace(line))
+				t.Errorf("%s:%d names a CA wherry no longer carries, --prompt-file or --super-user-password-file: %s", name, i+1, strings.TrimSpace(line))
 			}
 			if caCertPath.MatchString(line) {
 				t.Errorf("%s:%d names ca_cert as a path: %s", name, i+1, strings.TrimSpace(line))

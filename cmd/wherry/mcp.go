@@ -385,11 +385,13 @@ func newMCPServer(connect func() (*busclient.Host, error), openInput func(string
 				ID: input.ID, State: string(status.Status.State), Model: status.Model, Message: cmp.Or(statusText(status.Status), notes(status.Unclaimed, status.Waiting, status.CancelRequested)),
 				Redacted: status.Redacted, RetryAfter: retryAfter, Skipped: status.Skipped,
 			}
-			// Past the bound wherry result waits to, the run's recorded task_ended_by plus the upload grace, the run is
-			// reported as the CLI's exit 6 reports it: timed out, with no retry_after.
-			if endBy := client.RecordedEndBy(input.ID); !endBy.IsZero() && !time.Now().Before(endBy.Add(resultGrace)) {
+			// Past the bound wherry result waits to, the run's recorded task_ended_by plus the upload grace, or without one
+			// the fallback from its submission, the run is reported as the CLI's exit 6 reports it: timed out, with no
+			// retry_after.
+			submitted, endBy := client.RecordedBounds(input.ID)
+			if deadline := resultDeadline(submitted, endBy); !deadline.IsZero() && !time.Now().Before(deadline) {
 				reply.RetryAfter = 0
-				reply.Message = notes(resultTimeout(endBy), reply.Message)
+				reply.Message = notes(resultTimeout(submitted, endBy), reply.Message)
 			}
 			return nil, reply, nil
 		}
@@ -518,8 +520,8 @@ func newMCPServer(connect func() (*busclient.Host, error), openInput func(string
 		Name: "result",
 		Description: fmt.Sprintf("Wait up to %d seconds for a run to finish. Returns the result, a failed, canceled or rejected state "+
 			"with its message, or {id, state, message, redacted, retry_after} while the run is unfinished, message the latest status message, "+
-			"such as the step the agent last reported: call result again. Past the run's task_ended_by plus the upload grace, an unfinished run "+
-			"returns no retry_after and message reports the timeout, as wherry result's exit 6 does. "+
+			"such as the step the agent last reported: call result again. Past the run's task_ended_by plus the upload grace, or without a recorded "+
+			"task_ended_by past 2h10m from its submission, an unfinished run returns no retry_after and message reports the timeout, as wherry result's exit 6 does. "+
 			"A run whose task_started_by passed with no receiver claiming it returns its state and a message saying so, without retry_after. "+
 			"A finished run's outputs are verified and written under this host's state directory; outputs lists their paths and hashes. "+
 			"Use status to check a run without waiting.", int(waitBound.Seconds())),

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	json "encoding/json/v2"
 	"errors"
@@ -57,35 +58,37 @@ type receiverLocalConfig struct {
 }
 
 // loadReceiverLocalConfig decodes the receiver's local configuration at path, defaulting state_dir and plugin_dir, and
-// refusing a ca_cert from which Go appends no certificate.
-func loadReceiverLocalConfig(path string) (receiverLocalConfig, error) {
+// builds the pool its ca_cert gives, the machine's trust store plus the CA, refusing a ca_cert from which Go appends
+// no certificate; the pool is built here once and carried to the dial.
+func loadReceiverLocalConfig(path string) (receiverLocalConfig, *x509.CertPool, error) {
 	path, err := client.ExpandHome(path)
 	if err != nil {
-		return receiverLocalConfig{}, err
+		return receiverLocalConfig{}, nil, err
 	}
 	encoded, err := os.ReadFile(path)
 	if err != nil {
-		return receiverLocalConfig{}, err
+		return receiverLocalConfig{}, nil, err
 	}
 	if err := operator.RefuseCAFile(path, encoded); err != nil {
-		return receiverLocalConfig{}, err
+		return receiverLocalConfig{}, nil, err
 	}
 	var config receiverLocalConfig
 	if err := operator.DecodeYAML(encoded, &config); err != nil {
-		return receiverLocalConfig{}, fmt.Errorf("decode config: %w", err)
+		return receiverLocalConfig{}, nil, fmt.Errorf("decode config: %w", err)
 	}
 	if config.Bundle == "" {
-		return receiverLocalConfig{}, errors.New("config requires bundle")
+		return receiverLocalConfig{}, nil, errors.New("config requires bundle")
 	}
-	if _, err := operator.ConfigRootPool(path, config.CACert); err != nil {
-		return receiverLocalConfig{}, err
+	roots, err := operator.ConfigRootPool(path, config.CACert)
+	if err != nil {
+		return receiverLocalConfig{}, nil, err
 	}
 	if config.DrainTimeout < 0 {
-		return receiverLocalConfig{}, errors.New("config drain_timeout must not be negative")
+		return receiverLocalConfig{}, nil, errors.New("config drain_timeout must not be negative")
 	}
 	for _, path := range []*string{&config.Bundle, &config.StateDir, &config.PluginDir} {
 		if *path, err = client.ExpandHome(*path); err != nil {
-			return receiverLocalConfig{}, err
+			return receiverLocalConfig{}, nil, err
 		}
 	}
 	if config.StateDir == "" {
@@ -96,14 +99,14 @@ func loadReceiverLocalConfig(path string) (receiverLocalConfig, error) {
 	}
 	for name, source := range config.Credentials {
 		if err := source.Validate(); err != nil {
-			return receiverLocalConfig{}, fmt.Errorf("config credential %s: %w", name, err)
+			return receiverLocalConfig{}, nil, fmt.Errorf("config credential %s: %w", name, err)
 		}
 		if source.File, err = client.ExpandHome(source.File); err != nil {
-			return receiverLocalConfig{}, err
+			return receiverLocalConfig{}, nil, err
 		}
 		config.Credentials[name] = source
 	}
-	return config, nil
+	return config, roots, nil
 }
 
 func runReceiver(args []string, stdout, stderr io.Writer) error {
@@ -125,14 +128,12 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	if flags.NArg() != 0 {
 		return errors.New(usage)
 	}
-	config, err := loadReceiverLocalConfig(*configPath)
+	config, roots, err := loadReceiverLocalConfig(*configPath)
 	if err != nil {
 		return err
 	}
-	roots, err := operator.ConfigRootPool(*configPath, config.CACert)
-	if err != nil {
-		return err
-	}
+	// Where ca_cert lives, for the hint on an unknown authority: the file --config-file names.
+	ca := operator.CASetting{File: *configPath, Set: config.CACert != ""}
 	bundle, err := operator.ReadBundle(config.Bundle)
 	if err != nil {
 		return err
@@ -150,7 +151,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	defer plugins.close()
 	r, err := receiver.New(bundle, roots, config.StateDir, *rotateKey, config.DrainTimeout, plugins.profile, logger, registry)
 	if err != nil {
-		return operator.ExplainUnknownAuthority(err, *configPath)
+		return operator.ExplainUnknownAuthority(err, ca)
 	}
 	plugins.logs, plugins.hold = r.PluginLogs(stdout), r.HoldPlatformCredential
 	if config.Tracing {
@@ -159,7 +160,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := r.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		return operator.ExplainUnknownAuthority(err, *configPath)
+		return operator.ExplainUnknownAuthority(err, ca)
 	}
 	return nil
 }

@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -27,7 +28,9 @@ import (
 // directories the MCP server sends inputs from. Storage maps a pool to the credentials of its bucket. Tracing writes
 // the host's spans to its tenant's trace topic; off by default. CACert is the PEM of the CA the host's Kafka and S3
 // connections trust beside the machine's trust store; empty for the trust store alone. Path is the file the
-// configuration was loaded from, which the hint on an unknown authority names.
+// configuration was loaded from, which the hint on an unknown authority names. Roots is the pool LoadConfig built from
+// CACert, the machine's trust store plus the CA, carried to Connect so it is built once per load; a Config built in
+// code leaves it nil and Connect builds it.
 type Config struct {
 	Bundle      string                       `yaml:"bundle"`
 	HostKey     string                       `yaml:"host_key,omitempty"`
@@ -39,6 +42,12 @@ type Config struct {
 	InputRoots  []string                     `yaml:"input_roots,omitempty"`
 	Tracing     bool                         `yaml:"tracing,omitempty"`
 	Path        string                       `yaml:"-"`
+	Roots       *x509.CertPool               `yaml:"-"`
+}
+
+// ca is where config's ca_cert lives, for the hint on an unknown authority.
+func (config Config) ca() operator.CASetting {
+	return operator.CASetting{File: config.Path, Set: config.CACert != ""}
 }
 
 // GitCredential gives a task whose git remote starts with URL the credential Credential and, for ssh, the known_hosts
@@ -161,7 +170,7 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, errors.New("config requires bundle")
 	}
 	config.Path = path
-	if _, err := operator.ConfigRootPool(path, config.CACert); err != nil {
+	if config.Roots, err = operator.ConfigRootPool(path, config.CACert); err != nil {
 		return Config{}, err
 	}
 	if config.HostKey == "" || config.StateDir == "" {
@@ -274,9 +283,12 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 	if err != nil {
 		return nil, err
 	}
-	roots, err := operator.ConfigRootPool(config.Path, config.CACert)
-	if err != nil {
-		return nil, err
+	// LoadConfig built the pool; a Config built in code gets it here.
+	roots := config.Roots
+	if roots == nil {
+		if roots, err = operator.ConfigRootPool(config.Path, config.CACert); err != nil {
+			return nil, err
+		}
 	}
 	opts, err := operator.BundleKafkaOpts(bundle, roots)
 	if err != nil {
@@ -298,7 +310,7 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 	defer cancel()
 	if err := kafka.Ping(ping); err != nil {
 		kafka.Close()
-		return nil, operator.ExplainUnknownAuthority(err, config.Path)
+		return nil, operator.ExplainUnknownAuthority(err, config.ca())
 	}
 	if host.key, err = operator.RecoverKey(context.Background(), kafka, signed.HostOwner(host.tenant, host.host), operator.HostTopic(host.tenant, host.host), config.HostKey); err != nil {
 		kafka.Close()

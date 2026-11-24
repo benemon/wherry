@@ -1010,9 +1010,14 @@ func TestMCPPrompt(t *testing.T) {
 		}
 	}
 	b := newBus(t)
-	// The host's bundle sits beneath the input root, as a configuration kept beside a project might.
+	// The host's bundle sits beneath the input root, as a configuration kept beside a project might; the file outside the
+	// roots exists, so only confinement can refuse it.
 	bundle := filepath.Join(work, "bundle.yaml")
 	if err := os.WriteFile(bundle, []byte("broker: b\nprincipal: p\npassword: s3cr3t\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "brief.md")
+	if err := os.WriteFile(outside, []byte("the brief outside the roots"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	session := mcpSessionReading(t, b.connect(t), nil, inputOpener(work, busclient.Config{Bundle: bundle}))
@@ -1028,7 +1033,7 @@ func TestMCPPrompt(t *testing.T) {
 		message   string
 	}{
 		"the bundle":      {map[string]any{"prompt": "@bundle.yaml"}, "inputs must be readable regular files beneath one of the MCP server's input roots, outside the wherry configuration"},
-		"outside":         {map[string]any{"prompt": "@" + filepath.Join(t.TempDir(), "brief.md")}, "inputs must be readable regular files beneath one of the MCP server's input roots, outside the wherry configuration"},
+		"outside":         {map[string]any{"prompt": "@" + outside}, "inputs must be readable regular files beneath one of the MCP server's input roots, outside the wherry configuration"},
 		"standard input":  {map[string]any{"prompt": "@-"}, "prompt @- cannot read standard input here; give the text or @FILE"},
 		"an empty file":   {map[string]any{"prompt": "@empty.md"}, "prompt is empty"},
 		"an empty prompt": {map[string]any{"prompt": ""}, "prompt is required"},
@@ -1043,12 +1048,20 @@ func TestMCPPrompt(t *testing.T) {
 			t.Errorf("%s: the error holds the bundle's password: %+v", name, failure)
 		}
 	}
+	// The refusal comes as a tool error or as a protocol error, and either names the argument; a transport failure
+	// names neither and fails here.
 	result, err := session.CallTool(b.ctx, &mcp.CallToolParams{Name: "submit", Arguments: map[string]any{"prompt_file": "brief.md"}})
-	if err == nil && !result.IsError {
+	refusal := ""
+	switch {
+	case err != nil:
+		refusal = err.Error()
+	case result.IsError:
+		refusal = toolText(result)
+	default:
 		t.Fatal("submit accepted prompt_file")
 	}
-	if text := toolText(result); err == nil && !strings.Contains(text, "prompt_file") {
-		t.Fatalf("submit with prompt_file: %q; want it rejected as an unknown argument", text)
+	if !strings.Contains(refusal, "prompt_file") {
+		t.Fatalf("submit with prompt_file: %q; want it rejected as an unknown argument", refusal)
 	}
 }
 
@@ -1076,8 +1089,43 @@ func TestMCPResultPastTheBoundReportsTheTimeout(t *testing.T) {
 		t.Fatalf("result past the bound = %#v; want no retry_after", reply)
 	}
 	message, _ := reply["message"].(string)
-	if want := resultTimeout(endBy); !strings.HasPrefix(message, want) || reply["state"] != string(wire.TaskStateWorking) {
+	if want := resultTimeout(time.Time{}, endBy); !strings.HasPrefix(message, want) || reply["state"] != string(wire.TaskStateWorking) {
 		t.Fatalf("result past the bound = %#v; want the timeout %q", reply, want)
+	}
+}
+
+// With no recorded task_ended_by, the result tool stops offering retry_after at the bound the CLI's fallback gives, the
+// 2h10m fallback from the run's submission, shortened through its seam, and reports the timeout the CLI's exit 6 names;
+// within it, retry_after is offered.
+func TestMCPResultWithoutARecordedEndByStopsAtTheFallback(t *testing.T) {
+	b := newBus(t)
+	shortResultBound(t, 50*time.Millisecond, time.Second)
+	old := waitBound
+	waitBound = time.Second
+	t.Cleanup(func() { waitBound = old })
+	oldFallback := defaultWaitTimeout
+	defaultWaitTimeout = 4 * time.Second
+	t.Cleanup(func() { defaultWaitTimeout = oldFallback })
+	// The run's own end-by is an hour off, so only the fallback can end the offers.
+	runID, admitted := b.shortRun(t, time.Second, time.Hour)
+	b.feed(t, runID, b.echo(t, admitted), b.status(t, admitted, "claimed-1", "claimed", now(wire.TaskStateWorking)))
+	b.dropRecordedEndBy(t, runID)
+	submitted, _ := b.client.RecordedBounds(runID)
+	session := mcpSession(t, b.connect(t), nil)
+	var reply map[string]any
+	callTool(t, b.ctx, session, "result", map[string]any{"id": runID}, &reply)
+	if reply["retry_after"] != float64(retryAfter) {
+		t.Fatalf("result within the fallback = %#v; want retry_after", reply)
+	}
+	time.Sleep(time.Until(submitted.Add(defaultWaitTimeout + 100*time.Millisecond)))
+	reply = map[string]any{}
+	callTool(t, b.ctx, session, "result", map[string]any{"id": runID}, &reply)
+	if _, offered := reply["retry_after"]; offered {
+		t.Fatalf("result past the fallback = %#v; want no retry_after", reply)
+	}
+	message, _ := reply["message"].(string)
+	if want := resultTimeout(submitted, time.Time{}); !strings.HasPrefix(message, want) || reply["state"] != string(wire.TaskStateWorking) {
+		t.Fatalf("result past the fallback = %#v; want the timeout %q", reply, want)
 	}
 }
 
@@ -1204,7 +1252,8 @@ func TestMCPUnavailableLogExplainsAnUnknownAuthority(t *testing.T) {
 	if failure := callToolError(t, ctx, session, "receivers", map[string]any{}); failure != (toolError{Code: "UNAVAILABLE", Message: "the wherry bus could not complete the request; the wherry CLI reports the cause"}) {
 		t.Fatalf("tool error %#v; want UNAVAILABLE alone", failure)
 	}
-	want := "tool failed: " + unknownAuthorityHint + h.config + " ("
+	// The configuration host init wrote holds the test CA, so the hint asks for no key already set.
+	want := "tool failed: " + caCertSetHint + h.config + " ("
 	if text := logged.String(); !strings.HasPrefix(text, want) || !strings.Contains(text, unknownAuthorityText) {
 		t.Fatalf("server log %q; want %q with the x509 error", text, want)
 	}

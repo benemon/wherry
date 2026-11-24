@@ -53,7 +53,7 @@ func receiverLocalFile(ctx context.Context, dir, name, receiverPath string, dire
 	}
 	var local receiverLocalConfig
 	if err == nil {
-		local, err = loadReceiverLocalConfig(path)
+		local, _, err = loadReceiverLocalConfig(path)
 		if err != nil {
 			return fmt.Errorf("%s: %w", path, err)
 		}

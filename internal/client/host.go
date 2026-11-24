@@ -1185,14 +1185,20 @@ func (h *Host) localRun(runID string) (*runRecord, error) {
 	return &record, nil
 }
 
-// RecordedEndBy is the task_ended_by this host recorded for runID; zero without a record, or with one written before
-// the field was recorded.
-func (h *Host) RecordedEndBy(runID string) time.Time {
+// RecordedBounds are when this host published runID and the task_ended_by it recorded, each zero without a record,
+// or with one written before the field was recorded.
+func (h *Host) RecordedBounds(runID string) (submitted, endBy time.Time) {
 	local, err := h.localRun(runID)
-	if err != nil || local == nil || local.TaskEndedBy == 0 {
-		return time.Time{}
+	if err != nil || local == nil {
+		return time.Time{}, time.Time{}
 	}
-	return time.Unix(local.TaskEndedBy, 0)
+	if local.SubmittedMS != 0 {
+		submitted = time.UnixMilli(local.SubmittedMS)
+	}
+	if local.TaskEndedBy != 0 {
+		endBy = time.Unix(local.TaskEndedBy, 0)
+	}
+	return submitted, endBy
 }
 
 func (h *Host) writeRun(record runRecord) error {

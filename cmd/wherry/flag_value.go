@@ -59,14 +59,22 @@ func openFlagFile(path string) (*os.File, error) {
 }
 
 // caCertFlag resolves --ca-cert's value through flagValue and builds the pool it gives: the PEM text as a configuration's
-// ca_cert will hold it, CRLF normalised to LF, and the roots. A value from which Go appends no certificate, a path given
-// without @ among them, is refused.
+// ca_cert will hold it, every CR removed, so a CRLF file reads the same through @FILE and through "$(cat FILE)", which
+// strips the final LF and leaves the CR, and ending in a line break, so it is written as a block scalar; and the roots.
+// An empty or blank value, however given, and a value from which Go appends no certificate, a path given without @
+// among them, are refused.
 func caCertFlag(value string) (string, *x509.CertPool, error) {
 	text, err := flagValue("--ca-cert", value, openFlagFile, stdin)
 	if err != nil {
 		return "", nil, err
 	}
-	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "")
+	if strings.TrimSpace(text) == "" {
+		return "", nil, errors.New("--ca-cert is empty; give the PEM text, @FILE or @-")
+	}
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
 	roots, err := operator.RootPool(text)
 	if errors.Is(err, operator.ErrNoCertificate) {
 		return "", nil, fmt.Errorf("--ca-cert %w; give the PEM text, @FILE or @-", err)

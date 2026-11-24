@@ -34,16 +34,23 @@ func (b *bus) shortRun(t *testing.T, startBy, endBy time.Duration) (string, task
 }
 
 // result's default bound is the run's recorded task_ended_by plus the grace, at least the floor; a run with no
-// recorded task_ended_by takes the 2h10m fallback.
+// recorded task_ended_by takes the 2h10m fallback from its submission, and one with no record at all from now.
 func TestResultBound(t *testing.T) {
 	shortResultBound(t, 10*time.Second, time.Second)
-	if got := resultBound(time.Time{}); got != defaultWaitTimeout {
-		t.Fatalf("bound without a recorded end-by = %s; want %s", got, defaultWaitTimeout)
+	none := time.Time{}
+	if got := resultBound(none, none); got != defaultWaitTimeout {
+		t.Fatalf("bound without a record = %s; want %s", got, defaultWaitTimeout)
 	}
-	if got := resultBound(time.Now().Add(-time.Hour)); got != resultFloor {
+	if got := resultBound(time.Now().Add(-defaultWaitTimeout+time.Minute), none); got < 59*time.Second || got > time.Minute {
+		t.Fatalf("bound without a recorded end-by, submitted a minute short of the fallback ago = %s; want about a minute", got)
+	}
+	if got := resultBound(time.Now().Add(-defaultWaitTimeout), none); got != resultFloor {
+		t.Fatalf("bound without a recorded end-by, submitted the fallback ago = %s; want the floor %s", got, resultFloor)
+	}
+	if got := resultBound(time.Now(), time.Now().Add(-time.Hour)); got != resultFloor {
 		t.Fatalf("bound of a run long past its end-by = %s; want the floor %s", got, resultFloor)
 	}
-	if got := resultBound(time.Now().Add(time.Minute)); got < 69*time.Second || got > 70*time.Second {
+	if got := resultBound(time.Now(), time.Now().Add(time.Minute)); got < 69*time.Second || got > 70*time.Second {
 		t.Fatalf("bound of a run ending in a minute = %s; want about 70s", got)
 	}
 }
@@ -112,16 +119,9 @@ func TestExplicitTimeoutLongerThanTheBoundWins(t *testing.T) {
 	}
 }
 
-// A record without task_ended_by, as hosts wrote before it was recorded, takes the 2h10m fallback: result with no
-// --timeout exits 6 at the fallback, shortened through its seam, past the bound the run's end-by would give.
-func TestResultWithoutARecordedEndByTakesTheFallback(t *testing.T) {
-	b := newBus(t)
-	shortResultBound(t, 50*time.Millisecond, time.Second)
-	oldFallback := defaultWaitTimeout
-	defaultWaitTimeout = 3 * time.Second
-	t.Cleanup(func() { defaultWaitTimeout = oldFallback })
-	runID, admitted := b.shortRun(t, time.Second, time.Second)
-	b.feed(t, runID, b.echo(t, admitted), b.status(t, admitted, "claimed-1", "claimed", now(wire.TaskStateWorking)))
+// dropRecordedEndBy rewrites runID's record without task_ended_by, as hosts wrote records before it was recorded.
+func (b *bus) dropRecordedEndBy(t *testing.T, runID string) {
+	t.Helper()
 	path := filepath.Join(b.stateDir, "runs", runID+".json")
 	encoded, err := os.ReadFile(path)
 	if err != nil {
@@ -141,17 +141,35 @@ func TestResultWithoutARecordedEndByTakesTheFallback(t *testing.T) {
 	if err := os.WriteFile(path, encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := b.client.RecordedEndBy(runID); !got.IsZero() {
-		t.Fatalf("recorded end-by %s; want none", got)
+	if submitted, endBy := b.client.RecordedBounds(runID); !endBy.IsZero() || submitted.IsZero() {
+		t.Fatalf("recorded submission %s and end-by %s; want the submission alone", submitted, endBy)
 	}
+}
+
+// A record without task_ended_by, as hosts wrote before it was recorded, takes the 2h10m fallback from the run's
+// submission: result with no --timeout exits 6 at the fallback, shortened through its seam, past the bound the run's
+// end-by would give, and names the fallback.
+func TestResultWithoutARecordedEndByTakesTheFallback(t *testing.T) {
+	b := newBus(t)
+	shortResultBound(t, 50*time.Millisecond, time.Second)
+	oldFallback := defaultWaitTimeout
+	defaultWaitTimeout = 3 * time.Second
+	t.Cleanup(func() { defaultWaitTimeout = oldFallback })
+	runID, admitted := b.shortRun(t, time.Second, time.Second)
+	b.feed(t, runID, b.echo(t, admitted), b.status(t, admitted, "claimed-1", "claimed", now(wire.TaskStateWorking)))
+	b.dropRecordedEndBy(t, runID)
+	submitted, _ := b.client.RecordedBounds(runID)
 	started := time.Now()
 	var stdout, stderr bytes.Buffer
-	err = runWait(b.ctx, b.client, []string{runID}, &stdout, &stderr)
+	err := runWait(b.ctx, b.client, []string{runID}, &stdout, &stderr)
 	var exit *exitError
 	if !errors.As(err, &exit) || exit.code != timeoutCode {
 		t.Fatalf("result without a recorded end-by = %v; want exit %d at the fallback", err, timeoutCode)
 	}
-	if elapsed := time.Since(started); elapsed < 2500*time.Millisecond || elapsed > 4*time.Second {
-		t.Fatalf("result ended after %s; want the %s fallback, past the run's own bound", elapsed, defaultWaitTimeout)
+	if elapsed := time.Since(started); elapsed < 2*time.Second || elapsed > 4*time.Second {
+		t.Fatalf("result ended after %s; want the %s fallback from the submission, past the run's own bound", elapsed, defaultWaitTimeout)
+	}
+	if want := resultTimeout(submitted, time.Time{}) + ": "; !strings.HasPrefix(err.Error(), want) || !strings.Contains(want, "no recorded task_ended_by") {
+		t.Fatalf("result without a recorded end-by = %v; want it to start with %q", err, want)
 	}
 }

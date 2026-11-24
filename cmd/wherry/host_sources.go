@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -291,7 +290,9 @@ func localPath(path string) (string, error) {
 	return filepath.Abs(path)
 }
 
-func loadPassword(path string) ([]byte, error) {
+// openPasswordFile opens the file --super-user-password @FILE names: a regular file, opened without blocking, so a
+// FIFO, a device or a directory cannot hold the command or stand in for a file.
+func openPasswordFile(path string) (*os.File, error) {
 	if info, err := os.Stat(path); err == nil && !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
@@ -299,13 +300,14 @@ func loadPassword(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
+		file.Close()
 		return nil, err
 	}
 	if !info.Mode().IsRegular() {
+		file.Close()
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
-	return io.ReadAll(file)
+	return file, nil
 }

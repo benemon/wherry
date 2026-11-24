@@ -951,11 +951,12 @@ func devProfiles(env devEnv, agents []string) []operator.ProfileSettings {
 func devOperator(ctx context.Context, env devEnv, broker string) (*operator.Service, error) {
 	instance := env.instance
 	dir := instance.env("operator")
-	options := map[string]string{"broker": broker, "super-user": devSuperUser, "super-user-password-file": instance.env("kafka", "cfg", "super-user-password"), "ca-cert": env.caCert}
+	options := map[string]string{"broker": broker, "super-user": devSuperUser, "super-user-password": "@" + instance.env("kafka", "cfg", "super-user-password"), "ca-cert": env.caCert}
 	if err := operatorInit(ctx, dir, options, io.Discard); err != nil {
 		return nil, err
 	}
-	return operatorService(dir)
+	service, _, err := operatorService(dir)
+	return service, err
 }
 
 // devBootstrap writes the development instance configuration and bundles.

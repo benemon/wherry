@@ -31,7 +31,7 @@ func operatorAnswers(t *testing.T) map[string]string {
 	if err := os.WriteFile(p, []byte("unique-secret-marker\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	return map[string]string{"broker": "host", "super-user": "root", "super-user-password-file": p}
+	return map[string]string{"broker": "host", "super-user": "root", "super-user-password": "@" + p}
 }
 
 func stopOperatorConnection(t *testing.T, check func(string, string, string)) error {
@@ -77,27 +77,27 @@ func TestOperatorBrokerGrammar(t *testing.T) {
 }
 
 func TestOperatorFormsAndFlags(t *testing.T) {
-	for _, given := range []string{"none", "broker", "super-user", "super-user-password-file", "all"} {
+	for _, given := range []string{"none", "broker", "super-user", "super-user-password", "all"} {
 		t.Run(given, func(t *testing.T) {
 			opts := operatorAnswers(t)
 			full := maps.Clone(opts)
 			t.Chdir(t.TempDir())
 			var steps [][]string
 			var want []string
-			for _, name := range []string{"broker", "super-user", "super-user-password-file"} {
+			for _, name := range []string{"broker", "super-user", "super-user-password"} {
 				if given == "all" || given == name {
 					continue
 				}
 				delete(opts, name)
 				value := full[name]
-				if name == "super-user-password-file" {
+				if name == "super-user-password" {
 					// The prompt takes the password itself, as typed, and prints no answer line.
 					value = typedPassword
 				} else {
 					value = "  " + value + "  "
 				}
 				steps = append(steps, keys(value+"\r"))
-				if name == "super-user-password-file" {
+				if name == "super-user-password" {
 					continue
 				}
 				label := map[string]string{"broker": "Kafka broker address", "super-user": "Kafka super user"}[name]
@@ -105,7 +105,7 @@ func TestOperatorFormsAndFlags(t *testing.T) {
 			}
 			scriptForms(t, steps...)
 			password := "unique-secret-marker\n"
-			if _, fromFile := opts["super-user-password-file"]; !fromFile {
+			if _, fromFile := opts["super-user-password"]; !fromFile {
 				password = typedPassword
 			}
 			stop := stopOperatorConnection(t, func(b, u, p string) {
@@ -136,7 +136,7 @@ func TestOperatorFormsAndFlags(t *testing.T) {
 }
 
 func TestOperatorMissingFlags(t *testing.T) {
-	required := []string{"broker", "super-user", "super-user-password-file"}
+	required := []string{"broker", "super-user", "super-user-password"}
 	for mask := 1; mask < 8; mask++ {
 		t.Run(fmt.Sprint(mask), func(t *testing.T) {
 			opts := operatorAnswers(t)
@@ -168,8 +168,10 @@ func TestOperatorInterruptPreservesFiles(t *testing.T) {
 			opts := operatorAnswers(t)
 			delete(opts, "super-user")
 			dir := t.TempDir()
-			for _, name := range []string{"operator.password", "operator.yaml", ".gitignore"} {
-				os.WriteFile(filepath.Join(dir, name), []byte("original"), 0600)
+			// operator.yaml decodes, since init reads an existing one for the ca_cert it keeps; the others are markers.
+			originals := map[string]string{"operator.password": "original", "operator.yaml": "broker: original\npassword_file: original\n", ".gitignore": "original"}
+			for name, contents := range originals {
+				os.WriteFile(filepath.Join(dir, name), []byte(contents), 0600)
 			}
 			if key != "" {
 				scriptForms(t, keys(key))
@@ -183,9 +185,9 @@ func TestOperatorInterruptPreservesFiles(t *testing.T) {
 			if err := operatorInit(context.Background(), dir, opts, io.Discard); !errors.Is(err, errInterrupted) {
 				t.Fatal("interrupt accepted", err)
 			}
-			for _, name := range []string{"operator.password", "operator.yaml", ".gitignore"} {
+			for name, contents := range originals {
 				b, _ := os.ReadFile(filepath.Join(dir, name))
-				if string(b) != "original" {
+				if string(b) != contents {
 					t.Fatal("changed", name)
 				}
 			}
@@ -201,7 +203,7 @@ func TestOperatorSafePassword(t *testing.T) {
 	for _, kind := range []string{"normal", "large", "symlink", "directory", "fifo", "missing", "unreadable", "replacement", "descriptor"} {
 		t.Run(kind, func(t *testing.T) {
 			opts := operatorAnswers(t)
-			path := opts["super-user-password-file"]
+			path := strings.TrimPrefix(opts["super-user-password"], "@")
 			data := []byte("unique-secret-marker\n\n")
 			if kind == "large" {
 				data = bytes.Repeat([]byte("x"), (1<<20)+1)
@@ -283,7 +285,7 @@ func TestOperatorPasswordFromStandardInput(t *testing.T) {
 		if !strings.Contains(err.Error(), "standard input") {
 			t.Fatal("error does not name standard input:", err)
 		}
-		if strings.Contains(strings.ReplaceAll(err.Error(), "--super-user-password-file", ""), "-") {
+		if strings.Contains(strings.ReplaceAll(err.Error(), "--super-user-password", ""), "-") {
 			t.Fatal("error treats - as a value:", err)
 		}
 	}
@@ -302,7 +304,7 @@ func TestOperatorPasswordFromStandardInput(t *testing.T) {
 		go func() { io.WriteString(w, piped); w.Close() }()
 		stdin = r
 		opts := operatorAnswers(t)
-		opts["super-user-password-file"] = "-"
+		opts["super-user-password"] = "@-"
 		reached := false
 		stop := stopOperatorConnection(t, func(_ string, _, p string) {
 			reached = true
@@ -326,7 +328,7 @@ func TestOperatorPasswordFromStandardInput(t *testing.T) {
 	t.Run("empty", func(t *testing.T) {
 		stdin = strings.NewReader("\r\n")
 		opts := operatorAnswers(t)
-		opts["super-user-password-file"] = "-"
+		opts["super-user-password"] = "@-"
 		stopOperatorConnection(t, func(string, string, string) { t.Error("empty standard input reached connection") })
 		dir := filepath.Join(t.TempDir(), "new")
 		noPath(t, operatorInit(context.Background(), dir, opts, io.Discard))
@@ -356,7 +358,7 @@ func TestOperatorPasswordFromStandardInput(t *testing.T) {
 			defer time.AfterFunc(3*time.Second, func() { master.Close() }).Stop()
 			stdin = tty
 			opts := operatorAnswers(t)
-			opts["super-user-password-file"] = "-"
+			opts["super-user-password"] = "@-"
 			if prompted {
 				// Prompts are available and the broker would be asked for: the refusal comes before any question.
 				delete(opts, "broker")
@@ -399,7 +401,7 @@ func TestOperatorPasswordPromptNeverEchoes(t *testing.T) {
 	}
 	t.Run("success", func(t *testing.T) {
 		opts := operatorAnswers(t)
-		delete(opts, "super-user-password-file")
+		delete(opts, "super-user-password")
 		scriptForms(t, keys(typedPassword+"\r"))
 		reached := false
 		stop := stopOperatorConnection(t, func(_ string, _, p string) {
@@ -424,7 +426,7 @@ func TestOperatorPasswordPromptNeverEchoes(t *testing.T) {
 	})
 	t.Run("validation failure", func(t *testing.T) {
 		opts := operatorAnswers(t)
-		delete(opts, "super-user-password-file")
+		delete(opts, "super-user-password")
 		scriptForms(t, []string{"\r", typedPassword + "\r"})
 		stop := stopOperatorConnection(t, func(_ string, _, p string) {
 			if p != typedPassword {
@@ -443,7 +445,7 @@ func TestOperatorPasswordPromptNeverEchoes(t *testing.T) {
 	})
 	t.Run("cancel", func(t *testing.T) {
 		opts := operatorAnswers(t)
-		delete(opts, "super-user-password-file")
+		delete(opts, "super-user-password")
 		scriptForms(t, []string{typedPassword, "\x03"})
 		stopOperatorConnection(t, func(string, string, string) { t.Error("cancelled prompt reached connection") })
 		var out bytes.Buffer
@@ -545,9 +547,31 @@ func TestSecretPromptOnATerminalShowsNothingTyped(t *testing.T) {
 	}
 }
 
+// A password as the flag's own text is refused before any prompt or dial, with the forms that work and never the value:
+// a command line is visible to every user of the machine.
+func TestOperatorLiteralPasswordIsRefused(t *testing.T) {
+	for _, value := range []string{"unique-secret-marker", "-", "unique-secret-marker@-"} {
+		opts := operatorAnswers(t)
+		opts["super-user-password"] = value
+		stopOperatorConnection(t, func(string, string, string) { t.Error("a literal password reached the connection") })
+		dir := filepath.Join(t.TempDir(), "new")
+		var out bytes.Buffer
+		err := operatorInit(context.Background(), dir, opts, &out)
+		if want := "--super-user-password takes @FILE or @-; a password on the command line is visible to other users"; err == nil || err.Error() != want {
+			t.Fatalf("--super-user-password %q = %v; want %q", value, err, want)
+		}
+		if out.Len() != 0 {
+			t.Fatalf("--super-user-password %q prompted: %q", value, out.String())
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatal("a refused password wrote the operator directory")
+		}
+	}
+}
+
 func TestOperatorPresentation(t *testing.T) {
 	opts := operatorAnswers(t)
-	opts["super-user-password-file"] = "missing\x1b\a"
+	opts["super-user-password"] = "@missing\x1b\a"
 	err := operatorInit(context.Background(), "unused", opts, io.Discard)
 	if err == nil || strings.ContainsAny(err.Error(), "\x1b\a") || errors.Unwrap(err) == nil {
 		t.Fatal("unescaped error", err)
@@ -584,7 +608,7 @@ func TestOperatorRequiredCorrection(t *testing.T) {
 	opts := operatorAnswers(t)
 	delete(opts, "broker")
 	delete(opts, "super-user")
-	delete(opts, "super-user-password-file")
+	delete(opts, "super-user-password")
 	scriptForms(t, []string{"   ", "\r", "\x15", "[::1]:9093\r"}, []string{" ", "\r", "\x15", "root\r"}, []string{"\r", "unique-sec", "\t", "ret-marker\r"})
 	stop := stopOperatorConnection(t, func(b string, u, p string) {
 		if b != "[::1]:9093" || u != "root" || p != "unique-secret-marker" {
@@ -686,7 +710,7 @@ func TestOperatorPromptEligibility(t *testing.T) {
 			}
 			var stdout bytes.Buffer
 			err := runOperator([]string{"init", "--dir", filepath.Join(t.TempDir(), "new")}, &stdout, out)
-			if err == nil || err.Error() != "operator init has no terminal to prompt on; give --broker, --super-user, --super-user-password-file" {
+			if err == nil || err.Error() != "operator init has no terminal to prompt on; give --broker, --super-user, --super-user-password" {
 				t.Fatal(err)
 			}
 			if stdout.Len() != 0 {

@@ -103,7 +103,7 @@ func TestReceiverLocalPrompts(t *testing.T) {
 			if err := writeYAML(path, local); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := loadReceiverLocalConfig(path); err != nil {
+			if _, _, err := loadReceiverLocalConfig(path); err != nil {
 				t.Fatal(err)
 			}
 			encoded, err := os.ReadFile(path)
@@ -160,7 +160,7 @@ func TestReceiverLocalFullFlow(t *testing.T) {
 			if string(data) != want {
 				t.Fatalf("YAML: got\n%s\nwant\n%s", data, want)
 			}
-			if local, err := loadReceiverLocalConfig(path); err != nil || !reflect.DeepEqual(local, expected) {
+			if local, _, err := loadReceiverLocalConfig(path); err != nil || !reflect.DeepEqual(local, expected) {
 				t.Fatalf("read back: %+v, %v", local, err)
 			}
 			lines := collapsedLines(out.String())
@@ -201,7 +201,7 @@ func TestReceiverLocalFile(t *testing.T) {
 	if !strings.Contains(out.String(), "wrote "+path+"\n") {
 		t.Fatal(out.String())
 	}
-	local, err := loadReceiverLocalConfig(path)
+	local, _, err := loadReceiverLocalConfig(path)
 	if err != nil || local.DrainTimeout != 20*time.Second {
 		t.Fatalf("load: %+v %v", local, err)
 	}
@@ -276,7 +276,7 @@ func TestReceiverLocalLiteralNone(t *testing.T) {
 	if err != nil || !strings.Contains(string(data), "metrics_addr: none\n") {
 		t.Fatalf("YAML: %s, %v", data, err)
 	}
-	if local, err := loadReceiverLocalConfig(path); err != nil || local.MetricsAddr != "none" {
+	if local, _, err := loadReceiverLocalConfig(path); err != nil || local.MetricsAddr != "none" {
 		t.Fatalf("read back: %+v, %v", local, err)
 	}
 	lines := strings.Join(collapsedLines(out.String()), "\n")
@@ -415,7 +415,7 @@ func TestReceiverLocalEscape(t *testing.T) {
 	if err := receiverLocalFile(context.Background(), dir, "r", "outside.yaml", false, false, &out, localReceiver()); err != nil {
 		t.Fatal(err)
 	}
-	local, err := loadReceiverLocalConfig(filepath.Join(dir, "receivers", "r.config.yaml"))
+	local, _, err := loadReceiverLocalConfig(filepath.Join(dir, "receivers", "r.config.yaml"))
 	if err != nil || local.Credentials["nomad-token"].File != "/run/\u202etoken" {
 		t.Fatalf("written: %+v, %v", local, err)
 	}

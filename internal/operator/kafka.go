@@ -281,19 +281,49 @@ func RefuseCAFile(path string, encoded []byte) error {
 }
 
 // unknownAuthority reports whether err is a connection the broker's certificate failed because it chains to no CA the
-// connection trusts: Go's x509 error, which franz-go's dial error wraps.
+// connection trusts. crypto/tls wraps every verification failure in a CertificateVerificationError, which franz-go's
+// dial error wraps in turn; inside it Go's own verifier gives x509.UnknownAuthorityError, while the platform verifier
+// of macOS and Windows, which runs alone when no certificate was added to the system roots, gives a plain error for
+// most of its codes. So the wrapper is the signal, and only a name mismatch or an invalid certificate, an expired one
+// among them, which no CA would mend, keep Go's text.
 func unknownAuthority(err error) bool {
-	var unknown x509.UnknownAuthorityError
-	return errors.As(err, &unknown)
+	var verification *tls.CertificateVerificationError
+	if !errors.As(err, &verification) {
+		return false
+	}
+	var hostname x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	return !errors.As(verification.Err, &hostname) && !errors.As(verification.Err, &invalid)
 }
 
-// ExplainUnknownAuthority replaces err, when unknownAuthority, with what failed and the one remedy, naming config, the
-// configuration file whose ca_cert takes the CA, and keeping err at the end; any other err is returned as it is.
-func ExplainUnknownAuthority(err error, config string) error {
-	if !unknownAuthority(err) {
+// CASetting is where a role's ca_cert lives, carried from where the configuration was loaded to where an unknown
+// authority is explained: File, the configuration file, and Set, whether it holds a value. The value itself travels
+// nowhere near a message.
+type CASetting struct {
+	File string
+	Set  bool
+}
+
+// explainedError is an explanation ExplainUnknownAuthority made, so a second pass on the way out of a command leaves it
+// as it is.
+type explainedError struct{ err error }
+
+func (e *explainedError) Error() string { return e.err.Error() }
+func (e *explainedError) Unwrap() error { return e.err }
+
+// ExplainUnknownAuthority replaces err, when unknownAuthority, with what failed and the one remedy, keeping err at the
+// end: with ca's File holding no ca_cert, install the CA in the machine's trust store or set ca_cert there; with one set,
+// the certificate is signed neither by the trust store nor by that CA, so no key is asked for that is already set. Any
+// other err, an explanation already made among them, is returned as it is.
+func ExplainUnknownAuthority(err error, ca CASetting) error {
+	var explained *explainedError
+	if !unknownAuthority(err) || errors.As(err, &explained) {
 		return err
 	}
-	return fmt.Errorf("cannot verify the broker's certificate: install the CA that signed it in this machine's trust store, or set ca_cert in %s (%w)", config, err)
+	if ca.Set {
+		return &explainedError{fmt.Errorf("cannot verify the broker's certificate: it is signed neither by this machine's trust store nor by the CA in ca_cert in %s (%w)", ca.File, err)}
+	}
+	return &explainedError{fmt.Errorf("cannot verify the broker's certificate: install the CA that signed it in this machine's trust store, or set ca_cert in %s (%w)", ca.File, err)}
 }
 
 var yamlLine = regexp.MustCompile(`line \d+`)

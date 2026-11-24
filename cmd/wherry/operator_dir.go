@@ -42,13 +42,16 @@ type operatorConfig struct {
 // operatorInit, connected as the Kafka super user the flags or prompts name, delegates provisioning to wherry.operator
 // with a new password and writes dir's operator.yaml. The super user is written nowhere.
 func operatorInit(ctx context.Context, dir string, options map[string]string, prompts io.Writer) (result error) {
+	// caCert is the PEM operator.yaml gets: --ca-cert's, else the existing operator.yaml's, else none; the hint on an
+	// unknown authority names the file init writes and says whether it holds one.
+	caCert := ""
 	defer func() {
 		if result != nil {
-			result = presentationError{result}
+			result = presentationError{operator.ExplainUnknownAuthority(result, operator.CASetting{File: filepath.Join(dir, "operator.yaml"), Set: caCert != ""})}
 		}
 	}()
 	var err error
-	required := []string{"broker", "super-user", "super-user-password-file"}
+	required := []string{"broker", "super-user", "super-user-password"}
 	mechanism := operator.ScramSHA512
 	if value, given := options["super-user-mechanism"]; given {
 		// The refusal leaves out the value, which may be a password given to the wrong flag.
@@ -57,25 +60,35 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 		}
 		mechanism = value
 	}
-	// `-` reads the password from standard input; checked before loadPassword, whose errors would name `-` as a path, and
-	// before any prompt. One flag at most reads standard input.
-	if options["super-user-password-file"] == "-" {
+	// The password reaches init as @FILE or @-, never as the flag's own text, which every user of the machine can read
+	// from the process list; the refusal leaves the value out. An empty value is no value, as for every flag.
+	if value, given := options["super-user-password"]; given && value != "" && !strings.HasPrefix(value, "@") {
+		return errors.New("--super-user-password takes @FILE or @-; a password on the command line is visible to other users")
+	}
+	// `@-` reads the password from standard input; checked before any prompt. One flag at most reads standard input.
+	if options["super-user-password"] == "@-" {
 		if options["ca-cert"] == "@-" {
-			return errors.New("--super-user-password-file - and --ca-cert @- both read standard input; give one of them a file")
+			return errors.New("--super-user-password @- and --ca-cert @- both read standard input; give one of them a file")
 		}
-		if err := terminalStandardInput("super-user-password-file", "password"); err != nil {
+		if err := terminalStandardInput("super-user-password", "password"); err != nil {
 			return err
 		}
 	}
-	// The CA is resolved first, so a value Go reads no certificate from fails before any prompt or dial.
-	caCert := ""
+	// The CA is resolved first, so a value Go reads no certificate from fails before any prompt or dial: --ca-cert's, or
+	// without the flag the existing operator.yaml's, kept as host init keeps one, so a re-run dials as the last run did
+	// and writes the key back.
 	var roots *x509.CertPool
 	if value, given := options["ca-cert"]; given {
 		if caCert, roots, err = caCertFlag(value); err != nil {
 			return err
 		}
-	} else if roots, err = operator.RootPool(""); err != nil {
-		return err
+	} else {
+		if caCert, err = existingCACert(dir); err != nil {
+			return err
+		}
+		if roots, err = operator.ConfigRootPool(filepath.Join(dir, "operator.yaml"), caCert); err != nil {
+			return err
+		}
 	}
 	onTerminal := promptsEligible(prompts)
 	if !onTerminal {
@@ -97,7 +110,7 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 	for _, question := range [][2]string{
 		{"broker", "Kafka broker address"},
 		{"super-user", "Kafka super user"},
-		{"super-user-password-file", "Kafka super user's password"},
+		{"super-user-password", "Kafka super user's password"},
 	} {
 		value, given := options[question[0]]
 		if !given && onTerminal {
@@ -109,7 +122,7 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 			}
 			var err error
 			switch question[0] {
-			case "super-user-password-file":
+			case "super-user-password":
 				// The password itself, masked and never printed back; it is kept as typed, so a password with spaces at
 				// either end is still that password.
 				var password string
@@ -138,7 +151,7 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 		answers[question[0]] = value
 	}
 	for _, name := range required {
-		if answers[name] == "" && !(name == "super-user-password-file" && superPassword != nil) {
+		if answers[name] == "" && !(name == "super-user-password" && superPassword != nil) {
 			return fmt.Errorf("operator init needs --%s", name)
 		}
 	}
@@ -146,14 +159,16 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 		return err
 	}
 	if superPassword == nil {
-		if answers["super-user-password-file"] == "-" {
-			superPassword, err = secretFromStandardInput("password")
-		} else {
-			superPassword, err = loadPassword(answers["super-user-password-file"])
-		}
+		// @FILE is opened as a password file: a regular file, without blocking. Its contents are the password as they are,
+		// but for the trailing line break the connection trims; standard input that holds none is refused naming no value.
+		text, err := flagValue("--super-user-password", answers["super-user-password"], openPasswordFile, stdin)
 		if err != nil {
 			return err
 		}
+		if answers["super-user-password"] == "@-" && strings.TrimRight(text, "\r\n") == "" {
+			return errors.New("standard input held no password")
+		}
+		superPassword = []byte(text)
 	}
 	superUser, err := superUserKafka(answers["broker"], answers["super-user"], string(superPassword), mechanism, roots)
 	if err != nil {
@@ -441,29 +456,49 @@ func loadOperatorConfig(dir string) (operatorConfig, *x509.CertPool, error) {
 	return config, roots, nil
 }
 
+// existingCACert is the ca_cert of dir's operator.yaml when the file exists, which operator init without --ca-cert keeps;
+// empty when it does not exist or holds none. A file keeping ca_file is refused naming ca_cert.
+func existingCACert(dir string) (string, error) {
+	path := filepath.Join(dir, "operator.yaml")
+	encoded, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	} else if err != nil {
+		return "", err
+	}
+	if err := operator.RefuseCAFile(path, encoded); err != nil {
+		return "", err
+	}
+	var config operatorConfig
+	if err := operator.DecodeYAML(encoded, &config); err != nil {
+		return "", fmt.Errorf("%s: %w", path, err)
+	}
+	return config.CACert, nil
+}
+
 // operatorService connects as wherry.operator through dir's operator.yaml, verifying the broker against the machine's
-// trust store plus its ca_cert.
-func operatorService(dir string) (*operator.Service, error) {
+// trust store plus its ca_cert, and returns the configuration it read, zero when it could not read one.
+func operatorService(dir string) (*operator.Service, operatorConfig, error) {
 	config, roots, err := loadOperatorConfig(dir)
 	if err != nil {
-		return nil, err
+		return nil, operatorConfig{}, err
 	}
 	password, err := os.ReadFile(inDir(dir, config.PasswordFile))
 	if err != nil {
-		return nil, err
+		return nil, config, err
 	}
 	client, err := operatorKafka(config.Broker, operator.OperatorPrincipal, string(password), roots)
 	if err != nil {
-		return nil, err
+		return nil, config, err
 	}
 	service := &operator.Service{Operator: client, Broker: config.Broker, Roots: roots, Storage: func(tenant string) (operator.StorageKeys, error) { return tenantStorageKeys(dir, tenant) }}
 	if config.Tracing {
 		if service.Tracing, err = telemetry.New(context.Background(), telemetry.RoleOperator, telemetry.Names{}, client.Opts(), log.New(os.Stderr, "wherry: ", 0)); err != nil {
 			client.Close()
-			return nil, fmt.Errorf("tracing: %w", err)
+			return nil, config, fmt.Errorf("tracing: %w", err)
 		}
 	}
-	return service, nil
+	return service, config, nil
 }
 
 func inDir(dir, path string) string {

@@ -55,14 +55,14 @@ func (b initBroker) initVia(t *testing.T, dir, route string) error {
 	args := []string{"init", "--dir", dir, "--broker", b.address, "--super-user", b.superUser, "--ca-cert", b.ca}
 	switch route {
 	case "file":
-		args = append(args, "--super-user-password-file", b.superPasswordFile)
+		args = append(args, "--super-user-password", "@"+b.superPasswordFile)
 	case "stdin":
 		password, err := os.ReadFile(b.superPasswordFile)
 		if err != nil {
 			t.Fatal(err)
 		}
 		pipeStandardInput(t, string(password))
-		args = append(args, "--super-user-password-file", "-")
+		args = append(args, "--super-user-password", "@-")
 	case "prompt":
 		password, err := os.ReadFile(b.superPasswordFile)
 		if err != nil {
@@ -440,7 +440,7 @@ func TestOperatorInitRecoversFromAFailure(t *testing.T) {
 	run := func() error {
 		t.Helper()
 		var stdout, stderr bytes.Buffer
-		err := runOperator([]string{"init", "--dir", dir, "--broker", b.address, "--super-user", b.superUser, "--super-user-password-file", b.superPasswordFile, "--ca-cert", b.ca}, &stdout, &stderr)
+		err := runOperator([]string{"init", "--dir", dir, "--broker", b.address, "--super-user", b.superUser, "--super-user-password", "@" + b.superPasswordFile, "--ca-cert", b.ca}, &stdout, &stderr)
 		if err == nil {
 			b.login(t, dir)
 			secrets = append(secrets, operatorPassword(t, dir))
@@ -559,7 +559,7 @@ func TestOperatorInitWithoutATerminalNamesTheFlags(t *testing.T) {
 	noTerminal(t)
 	dir := t.TempDir()
 	err := runOperator([]string{"init", "--dir", dir}, io.Discard, io.Discard)
-	if err == nil || err.Error() != "operator init has no terminal to prompt on; give --broker, --super-user, --super-user-password-file" {
+	if err == nil || err.Error() != "operator init has no terminal to prompt on; give --broker, --super-user, --super-user-password" {
 		t.Fatalf("init without a terminal or flags = %v; want it refused naming the flags", err)
 	}
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
@@ -568,7 +568,7 @@ func TestOperatorInitWithoutATerminalNamesTheFlags(t *testing.T) {
 	b, _ := kfakeInitBroker(t)
 	scriptForms(t, keys(b.address+"\r"), keys(b.superUser+"\r"))
 	var stdout, prompts bytes.Buffer
-	if err := runOperator([]string{"init", "--dir", dir, "--super-user-password-file", b.superPasswordFile, "--ca-cert", b.ca}, &stdout, &prompts); err != nil {
+	if err := runOperator([]string{"init", "--dir", dir, "--super-user-password", "@" + b.superPasswordFile, "--ca-cert", b.ca}, &stdout, &prompts); err != nil {
 		t.Fatal(err)
 	}
 	if stdout.Len() != 0 {
@@ -584,7 +584,7 @@ func TestOperatorInitWithoutATerminalNamesTheFlags(t *testing.T) {
 		}
 	}
 	if strings.Contains(prompts.String(), "password file") {
-		t.Errorf("init asked\n%s\nwant no question --super-user-password-file answered", prompts.String())
+		t.Errorf("init asked\n%s\nwant no question --super-user-password answered", prompts.String())
 	}
 	if err := runOperator([]string{"check", "--dir", dir}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
@@ -1186,7 +1186,7 @@ func TestOperatorInitKeepsItsFilesWhenTheCredentialWaitFails(t *testing.T) {
 		return refusing.Load()
 	})
 	var stdout, stderr bytes.Buffer
-	err := runOperator([]string{"init", "--dir", dir, "--broker", b.address, "--super-user", b.superUser, "--super-user-password-file", b.superPasswordFile, "--ca-cert", b.ca}, &stdout, &stderr)
+	err := runOperator([]string{"init", "--dir", dir, "--broker", b.address, "--super-user", b.superUser, "--super-user-password", "@" + b.superPasswordFile, "--ca-cert", b.ca}, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("init succeeded while every broker refused the new password")
 	}
@@ -1227,7 +1227,7 @@ func TestOperatorInitWithASCRAMSHA256SuperUser(t *testing.T) {
 	}
 	t.Cleanup(root.Close)
 	shareCeilings(t, root)
-	flags := []string{"init", "--broker", cluster.ListenAddrs()[0], "--super-user", "kafka-root", "--super-user-password-file", passwordFile, "--ca-cert", testCA.pem}
+	flags := []string{"init", "--broker", cluster.ListenAddrs()[0], "--super-user", "kafka-root", "--super-user-password", "@" + passwordFile, "--ca-cert", testCA.pem}
 
 	refused := filepath.Join(dir, "refused")
 	var refusing atomic.Bool
@@ -1279,7 +1279,7 @@ func TestOperatorInitReportsAnUnreachableBrokerForTheSuperUser(t *testing.T) {
 	if err := os.WriteFile(passwordFile, []byte("root-secret-value\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err = runOperator([]string{"init", "--dir", filepath.Join(t.TempDir(), "dir"), "--broker", address, "--super-user", "kafka-root", "--super-user-password-file", passwordFile, "--ca-cert", testCA.pem}, io.Discard, io.Discard)
+	err = runOperator([]string{"init", "--dir", filepath.Join(t.TempDir(), "dir"), "--broker", address, "--super-user", "kafka-root", "--super-user-password", "@" + passwordFile, "--ca-cert", testCA.pem}, io.Discard, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "super user kafka-root") || strings.Contains(err.Error(), "login refused") || strings.Contains(err.Error(), operator.OperatorPrincipal) {
 		t.Fatalf("init against a closed port: %v; want the super user's connection error, not a refused login or wherry.operator", err)
 	}

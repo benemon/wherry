@@ -485,21 +485,39 @@ var (
 	resultFloor = time.Minute
 )
 
-// defaultWaitTimeout covers a run at the default task_started_by and task_ended_by; a variable so tests shorten it.
+// defaultWaitTimeout covers a run at the default task_started_by and task_ended_by, from its submission; a variable so
+// tests shorten it.
 var defaultWaitTimeout = busclient.DefaultStartBy + busclient.DefaultEndBy
 
-// resultBound is result's wait with no --timeout: until endBy plus resultGrace, at least resultFloor; a zero endBy, a run
-// this host has no record of or recorded before task_ended_by was, takes defaultWaitTimeout.
-func resultBound(endBy time.Time) time.Duration {
-	if endBy.IsZero() {
-		return defaultWaitTimeout
+// resultDeadline is the bound result waits to without --timeout and the MCP result tool offers retry_after within, from
+// what this host recorded of the run: endBy plus resultGrace; with no task_ended_by recorded, as hosts wrote before it
+// was, submitted plus defaultWaitTimeout; zero with no record of the run.
+func resultDeadline(submitted, endBy time.Time) time.Time {
+	switch {
+	case !endBy.IsZero():
+		return endBy.Add(resultGrace)
+	case !submitted.IsZero():
+		return submitted.Add(defaultWaitTimeout)
 	}
-	return max(time.Until(endBy.Add(resultGrace)), resultFloor)
+	return time.Time{}
 }
 
-// resultTimeout is the timeout result reports, on exit 6 and in the MCP reply, for a run unfinished at its bound: its
-// recorded task_ended_by plus resultGrace.
-func resultTimeout(endBy time.Time) string {
+// resultBound is result's wait with no --timeout: until resultDeadline, at least resultFloor; with no record of the run,
+// defaultWaitTimeout from now.
+func resultBound(submitted, endBy time.Time) time.Duration {
+	deadline := resultDeadline(submitted, endBy)
+	if deadline.IsZero() {
+		return defaultWaitTimeout
+	}
+	return max(time.Until(deadline), resultFloor)
+}
+
+// resultTimeout is the timeout result reports, on exit 6 and in the MCP reply, for a run unfinished at resultDeadline:
+// its recorded task_ended_by plus resultGrace, or, with none recorded, defaultWaitTimeout from its submission.
+func resultTimeout(submitted, endBy time.Time) string {
+	if endBy.IsZero() {
+		return fmt.Sprintf("the run has not ended within %s of its submission, the wait for a run with no recorded task_ended_by (%s)", defaultWaitTimeout, submitted.Add(defaultWaitTimeout).UTC().Format(time.RFC3339))
+	}
 	return fmt.Sprintf("the run has not ended by its task_ended_by plus the upload grace (%s)", endBy.Add(resultGrace).UTC().Format(time.RFC3339))
 }
 
@@ -534,7 +552,7 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 		flags.PrintDefaults()
 	}
 	configFile := flags.String("config-file", "", "host configuration file")
-	timeout := flags.Duration("timeout", 0, "wait timeout (default: the run's task_ended_by plus 10m30s, at least 1m; 2h10m without a record of the run)")
+	timeout := flags.Duration("timeout", 0, "wait timeout (default: the run's task_ended_by plus 10m30s, at least 1m; 2h10m from its submission without a recorded task_ended_by, from now without a record of the run)")
 	outputsDir := flags.String("outputs-dir", "", "directory for the run's outputs (default: <state_dir>/runs/RUN_ID/outputs)")
 	positional, err := parseAnywhere(flags, args)
 	if err != nil {
@@ -553,9 +571,9 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 		return err
 	}
 	defer closeClient()
-	endBy := client.RecordedEndBy(runID)
+	submitted, endBy := client.RecordedBounds(runID)
 	if !explicit {
-		*timeout = resultBound(endBy)
+		*timeout = resultBound(submitted, endBy)
 	}
 	result, err := client.Await(ctx, runID, *timeout)
 	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
@@ -566,8 +584,8 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 				}
 			}
 		}
-		if !explicit && !endBy.IsZero() {
-			err = fmt.Errorf("%s: %w", resultTimeout(endBy), err)
+		if !explicit && !resultDeadline(submitted, endBy).IsZero() {
+			err = fmt.Errorf("%s: %w", resultTimeout(submitted, endBy), err)
 		}
 		return &exitError{timeoutCode, err}
 	}

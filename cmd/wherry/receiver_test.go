@@ -321,7 +321,7 @@ func writeLocalConfig(t *testing.T, content string) string {
 }
 
 func TestReceiverLocalConfigExampleParses(t *testing.T) {
-	config, err := loadReceiverLocalConfig(filepath.Join("testdata", "example-receiver-config.yaml"))
+	config, _, err := loadReceiverLocalConfig(filepath.Join("testdata", "example-receiver-config.yaml"))
 	want := receiverLocalConfig{Bundle: "/etc/wherry/receiver.bundle", StateDir: "/var/lib/wherry/state", PluginDir: defaultPluginDir, CACert: "-----BEGIN CERTIFICATE-----\nMIIBaDCCAQ2gAwIBAgIBATAKBggqhkjOPQQDAjAbMRkwFwYDVQQDExBFeGFtcGxl\nIEthZmthIENBMB4XDTI2MDEwMTAwMDAwMFoXDTM2MDEwMTAwMDAwMFowGzEZMBcG\nA1UEAxMQRXhhbXBsZSBLYWZrYSBDQTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IA\nBFEgy9TOBEc4a9mgnw+3d4qvgVIU0/Fmc8rYHJV3j6w5mDh+2RhsPMfPemvvalyk\nNjkTrsV9YHdVrC23oTKT1+ujQjBAMA4GA1UdDwEB/wQEAwICBDAPBgNVHRMBAf8E\nBTADAQH/MB0GA1UdDgQWBBTk2lyUabR4G7GnUkG5jMjgRppaBDAKBggqhkjOPQQD\nAgNJADBGAiEAhzRsT5hv5IVb4PPTDkywm8ODz0YaOKKW6TVKAqny25ACIQCOs0pI\nXTLjEqjdY8QInPTKgfhfGCVcW/VdIWyidLG0yQ==\n-----END CERTIFICATE-----\n", MetricsAddr: ":9464", DrainTimeout: 20 * time.Second,
 		Credentials: map[string]credential.Source{"nomad-token": {File: "/etc/wherry/nomad-token"}}, Tracing: true}
 	if err != nil || !reflect.DeepEqual(config, want) {
@@ -334,7 +334,7 @@ func TestReceiverLocalConfigExampleParses(t *testing.T) {
 func TestReceiverLocalConfigDefaultsAndExpansion(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	config, err := loadReceiverLocalConfig(writeLocalConfig(t, "bundle: ~/wherry/receiver.bundle\ncredentials:\n  token: {file: ~/token}\n"))
+	config, _, err := loadReceiverLocalConfig(writeLocalConfig(t, "bundle: ~/wherry/receiver.bundle\ncredentials:\n  token: {file: ~/token}\n"))
 	want := receiverLocalConfig{Bundle: filepath.Join(home, "wherry", "receiver.bundle"), StateDir: filepath.Join(home, "wherry", "state"),
 		PluginDir: "/usr/local/libexec/wherry/plugins", Credentials: map[string]credential.Source{"token": {File: filepath.Join(home, "token")}}}
 	if err != nil || !reflect.DeepEqual(config, want) {
@@ -352,7 +352,7 @@ func TestReceiverLocalConfigRefusals(t *testing.T) {
 		"an empty command":     {"bundle: b\ncredentials:\n  token:\n    command: ['']\n", "config credential token: command names no program"},
 		"a literal credential": {"bundle: b\ncredentials:\n  token: nomad-token-value\n", "decode config"},
 	} {
-		_, err := loadReceiverLocalConfig(writeLocalConfig(t, test.content))
+		_, _, err := loadReceiverLocalConfig(writeLocalConfig(t, test.content))
 		if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), "nomad-tok") {
 			t.Errorf("config with %s: %v; want %q and no value", name, err, test.want)
 		}

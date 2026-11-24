@@ -69,7 +69,7 @@ func devConfigsCarryTheCA(t *testing.T, instance devInstance, config string) {
 	if host, err := busclient.LoadConfig(config); err != nil || host.CACert != string(ca) {
 		t.Errorf("host config ca_cert %q, %v; want the instance CA", host.CACert, err)
 	}
-	if local, err := loadReceiverLocalConfig(instance.env("receiver", "config.yaml")); err != nil || local.CACert != string(ca) {
+	if local, _, err := loadReceiverLocalConfig(instance.env("receiver", "config.yaml")); err != nil || local.CACert != string(ca) {
 		t.Errorf("receiver config ca_cert %q, %v; want the instance CA", local.CACert, err)
 	}
 	if operatorFile, _, err := loadOperatorConfig(instance.env("operator")); err != nil || operatorFile.CACert != string(ca) {
@@ -99,7 +99,7 @@ func TestDevKafkaReadinessTrustsTheInstanceCA(t *testing.T) {
 	if err := ping(devEnv{caCert: ca}); err != nil {
 		t.Fatalf("readiness dial with the instance CA: %v", err)
 	}
-	if err := ping(devEnv{}); err == nil || !unknownAuthority(err) {
+	if err := ping(devEnv{}); err == nil || !certificateRefused(err) {
 		t.Fatalf("readiness dial without the instance CA = %v; want the certificate refused", err)
 	}
 }
