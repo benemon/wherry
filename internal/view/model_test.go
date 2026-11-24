@@ -1,6 +1,7 @@
 package view
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -128,14 +129,16 @@ func TestRebuildAuthorisation(t *testing.T) {
 	}
 }
 
-// forge returns the JWS value with its last signature byte changed, so it no longer verifies under the key its kid names.
+// forge returns the JWS value with a character in the middle of its signature changed, so it no longer verifies under
+// the key its kid names: the last character carries padding bits a decoder ignores.
 func forge(value []byte) []byte {
 	forged := slices.Clone(value)
-	last := &forged[len(forged)-1]
-	if *last == 'A' {
-		*last = 'B'
+	start := bytes.LastIndexByte(forged, '.') + 1
+	c := &forged[start+(len(forged)-start)/2]
+	if *c == 'A' {
+		*c = 'B'
 	} else {
-		*last = 'A'
+		*c = 'A'
 	}
 	return forged
 }

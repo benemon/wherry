@@ -1105,6 +1105,15 @@ func (m *model) answer(id, custodian, request, kind, reason string, src source) 
 	return nil
 }
 
+// inItsPool refuses a feed record that names a pool its receiver is not recorded in: a tenant's feed is open to every
+// receiver entitled to the tenant, so the ACL does not bind the pool, and a receiver never changes pool.
+func (m *model) inItsPool(receiver, pool string) error {
+	if config, ok := m.history.State.Receivers[receiver]; !ok || config.Pool != pool {
+		return errors.New("record names a pool its receiver is not in")
+	}
+	return nil
+}
+
 // applyFeed folds a parsed tenant feed record, read from tenant's feed.
 func (m *model) applyFeed(tenant string, p *parsed, record *kgo.Record) error {
 	if p.err != nil {
@@ -1116,6 +1125,9 @@ func (m *model) applyFeed(tenant string, p *parsed, record *kgo.Record) error {
 	case *wire.Echo:
 		echo := *value
 		if err := operator.CheckEcho(echo, tenant); err != nil {
+			return err
+		}
+		if err := m.inItsPool(echo.Receiver, echo.Pool); err != nil {
 			return err
 		}
 		if echo.Run != id || wire.CheckEchoRunID(echo) != nil {
@@ -1146,6 +1158,9 @@ func (m *model) applyFeed(tenant string, p *parsed, record *kgo.Record) error {
 		if err := operator.CheckStatus(*value, "", tenant); err != nil {
 			return err
 		}
+		if err := m.inItsPool(value.Wherry.Receiver, value.Wherry.Pool); err != nil {
+			return err
+		}
 		return m.addStatus(*value, p.digest, src)
 	case *wire.Result:
 		result := *value
@@ -1153,6 +1168,9 @@ func (m *model) applyFeed(tenant string, p *parsed, record *kgo.Record) error {
 			return errors.New("result names another run than its key")
 		}
 		if err := operator.CheckResult(result, tenant); err != nil {
+			return err
+		}
+		if err := m.inItsPool(result.Wherry.Receiver, result.Wherry.Pool); err != nil {
 			return err
 		}
 		r := m.runFor(result.Wherry.Run, result.Wherry.Tenant, result.Wherry.Pool, at)

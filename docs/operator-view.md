@@ -45,6 +45,8 @@ present and one signed with the retired key after it is not. A host cannot sign 
 record whose text names another principal than the one whose key verified it is refused. A record is also checked
 against the topic it was read from: a status, start failure or result names the pool whose events, or the tenant
 whose feed, it was read from, an echo names the tenant whose feed holds it, a cancel the pool and tenant of its run.
+A tenant's feed is open to every receiver entitled to the tenant, so an echo, status or result on it must also name
+the pool its receiver is recorded in.
 Each record is verified once; the copy of a status on the tenant feed is the copy on the pool's events, found by
 digest.
 

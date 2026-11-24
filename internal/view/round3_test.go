@@ -117,6 +117,25 @@ func TestEndedCustodianSnapshotPresent(t *testing.T) {
 	}
 }
 
+// A tenant's feed is open to every receiver entitled to the tenant, so a feed record naming a pool its receiver is not
+// in is refused: the run is not placed in that pool.
+func TestFeedRecordInItsPool(t *testing.T) {
+	f := newFixture(t)
+	if err := f.service.PoolApply(f.ctx, poolB, testTerms(bucketB), false); err != nil {
+		t.Fatal(err)
+	}
+	t0 := f.now.Add(-10 * time.Minute)
+	run := f.echo(t0, receiverA, tenantA, hostA, poolB, "cross-pool")
+	f.produce(operator.TenantTopic(tenantA), run, f.statusRecord(t0.Add(time.Second), st{receiver: receiverA, tenant: tenantA, pool: poolB, run: run, kind: "terminal", state: wire.TaskStateCompleted}), t0.Add(time.Second))
+	v := f.view(time.Hour, testCaps())
+	if d, ok := v.RunDetail(run); ok {
+		t.Errorf("a pool-A receiver's feed records placed a run: pool %q storage %+v", d.Pool, d.Storage)
+	}
+	if s := v.Snapshot(0); s.Counts["refused"] != 2 {
+		t.Errorf("counts %v, want the echo and the status refused", s.Counts)
+	}
+}
+
 // A result shows each output name within the output name grammar and the placeholder for one outside it; a span's
 // output attribute is still dropped.
 func TestOutputNames(t *testing.T) {
