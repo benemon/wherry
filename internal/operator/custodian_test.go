@@ -468,6 +468,9 @@ func TestCheckEnvelope(t *testing.T) {
 		"object form condition": {func(v *signed.EnvelopeValues) {
 			v.S3Policy.Fields["policy"] = base64.StdEncoding.EncodeToString([]byte(`{"expiration":"` + endBy.UTC().Format("2006-01-02T15:04:05.000Z") + `","conditions":[{"bucket":"bucket-a"},["starts-with","$key","wherry/tenant-a/run-b/outputs/"]]}`))
 		}, "not a three-element array"},
+		"expiration with a zone offset": {func(v *signed.EnvelopeValues) {
+			v.S3Policy.Fields["policy"] = base64.StdEncoding.EncodeToString([]byte(`{"expiration":"` + endBy.In(time.FixedZone("", 14*3600)).Format("2006-01-02T15:04:05.000-07:00") + `","conditions":[]}`))
+		}, "expires later than"},
 		"later expiration": {func(v *signed.EnvelopeValues) {
 			*v.S3Policy = testPolicy("https://s3.example.test", "bucket-a", "tenant-a", "run-b", signedAt, endBy.Add(UploadGrace+time.Second))
 		}, "expires later"},

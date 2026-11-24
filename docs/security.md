@@ -219,7 +219,8 @@ admission: a malformed first task can win its run and then fail at open with
   downloads only what the result lists, at the key of its name, and only
   when the bytes match the listed hash and size; it refuses a result whose
   lists it cannot write from before writing anything, and deletes the
-  prefix, listed objects or not, once the run is collected. What a receiver
+  prefix, listed objects or not, once the run is collected with no output
+  rejected; a rejected output leaves the prefix for the bucket's lifecycle rule. What a receiver
   creates and no host collects is bounded by the bucket's quota and removed
   by its lifecycle rule, which the operator sets per pool bucket
   ([Operations](operations-operator.md#add-tenants-and-hosts)).

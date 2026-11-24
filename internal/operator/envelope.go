@@ -128,7 +128,8 @@ func checkPolicy(terms Terms, binding wire.SubmissionBinding, policy signed.S3Po
 	if json.Unmarshal(decoded, &document, signed.Strict) != nil || document.Conditions == nil {
 		return errors.New("the policy does not decode")
 	}
-	expiration, err := time.Parse(time.RFC3339Nano, document.Expiration)
+	// minio-go writes the expiration in UTC with milliseconds; any other spelling, such as a zone offset, is refused.
+	expiration, err := time.Parse("2006-01-02T15:04:05.000Z", document.Expiration)
 	if err != nil || expiration.After(time.Unix(binding.TaskEndedBy, 0).Add(UploadGrace)) {
 		return errors.New("the policy expires later than task_ended_by plus the upload grace")
 	}

@@ -1643,7 +1643,7 @@ func (run *activeRun) hold(lines <-chan pluginsdk.Line) func() []pluginsdk.Line 
 }
 
 // policySecrets are the POST policy's form fields that sign it: delivered for redaction, never logged.
-var policySecrets = []string{"policy", "x-amz-signature", "x-amz-credential"}
+var policySecrets = []string{"policy", "x-amz-signature", "x-amz-credential", "x-amz-security-token"}
 
 // presigned returns the run's fetches and POST policy from its envelope, and delivers them for redaction: each URL under
 // its name with its signature, so a transcript quoting a URL in part is redacted too, with the URL's marker, and the
@@ -1663,7 +1663,9 @@ func (run *activeRun) presigned(values signed.EnvelopeValues, inputs []wire.S3In
 	run.deliver(signatures)
 	if values.S3Policy != nil {
 		for _, field := range policySecrets {
-			run.deliver(map[string][]byte{signed.S3PolicyValue: []byte(values.S3Policy.Fields[field])})
+			if value := values.S3Policy.Fields[field]; value != "" {
+				run.deliver(map[string][]byte{signed.S3PolicyValue: []byte(value)})
+			}
 		}
 	}
 	return fetches, values.S3Policy
