@@ -703,6 +703,14 @@ func TestMCPSubmitNamesTheInvalidRule(t *testing.T) {
 	if failure := callToolError(t, ctx, session, "submit", continued); failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, "continue takes the git input of the run it continues") {
 		t.Fatalf("error %#v, want INVALID_ARGUMENT refusing continue with git", failure)
 	}
+	// git takes remote . and a remote without ref, both of which need git on the host.
+	t.Setenv("PATH", t.TempDir())
+	for _, remote := range []string{".", "https://git.example.test/org/repo.git"} {
+		failure := callToolError(t, ctx, session, "submit", map[string]any{"prompt": "x", "git": map[string]any{"remote": remote}})
+		if failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, "git is not on PATH") {
+			t.Fatalf("remote %s: error %#v, want INVALID_ARGUMENT naming git", remote, failure)
+		}
+	}
 }
 
 func TestMCPErrorsCarryNoSecrets(t *testing.T) {

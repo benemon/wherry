@@ -1129,7 +1129,6 @@ func TestSubmitGitFlags(t *testing.T) {
 		flags []string
 		want  string
 	}{
-		"no ref":                   {[]string{"--git", "https://git.example.test/org/repo.git"}, "--git takes REMOTE@REF"},
 		"path without git":         {[]string{"--git-path", "repo"}, "--git-path and --git-changes need --git"},
 		"changes alone":            {[]string{"--git-changes", "patch"}, "--git-path and --git-changes need --git"},
 		"continue and git":         {[]string{"--continue", "run-1", "--git", "https://git.example.test/org/repo.git@main"}, "--continue takes the git input of the run it continues"},
@@ -1186,6 +1185,17 @@ func TestSubmitGitFlags(t *testing.T) {
 	if git := submission.Wherry.Git; git == nil || git.Credential != "" || git.HostKey != "" || len(submission.Wherry.Credentials) != 0 {
 		t.Fatalf("submitted git %+v and credentials %+v, want an anonymous clone", git, submission.Wherry.Credentials)
 	}
+	// The current repository and a remote without @REF, an ssh user's @ included, need git on the host; a pinned remote
+	// does not.
+	t.Setenv("PATH", t.TempDir())
+	for _, value := range []string{".", "https://git.example.test/org/repo.git", "ssh://git@git.example.test/org/repo.git", "git@git.example.test:org/repo.git"} {
+		var stdout, stderr bytes.Buffer
+		err := runSubmit(b.ctx, client, append(slices.Clone(base), "--git", value), &stdout, &stderr)
+		if err == nil || !strings.Contains(err.Error(), "git is not on PATH") {
+			t.Fatalf("--git %s without git: %v", value, err)
+		}
+	}
+	submit("--git", "ssh://git@git.example.test/org/repo.git@main")
 }
 
 func TestParseAnywhere(t *testing.T) {
