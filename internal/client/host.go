@@ -1017,7 +1017,7 @@ type runRecord struct {
 	S3Inputs  []string `json:"s3_inputs,omitzero"`
 	S3Outputs []string `json:"s3_outputs,omitzero"`
 	// TaskStartedBy and TaskEndedBy are the submission's bounds, in whole seconds; a PUT URL for its S3 outputs expires
-	// at TaskEndedBy.
+	// operator.UploadGrace after TaskEndedBy.
 	TaskStartedBy int64 `json:"task_started_by,omitzero"`
 	TaskEndedBy   int64 `json:"task_ended_by,omitzero"`
 	// FeedOffset is the tenant feed's committed end before the submission was published. Every record about the run

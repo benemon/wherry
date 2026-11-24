@@ -638,7 +638,8 @@ func (h *Host) follow(ctx context.Context) (*follower, error) {
 	now := time.Now().Unix()
 	for _, file := range files {
 		if runID, ok := strings.CutSuffix(file.Name(), ".json"); ok && !file.IsDir() {
-			// A run cannot still be running past its task_ended_by.
+			// A run past its task_ended_by has stopped; a result it publishes within the upload grace lands after the
+			// end listed above.
 			if local, err := h.localRun(runID); err == nil && local != nil && local.TaskEndedBy >= now {
 				start = min(start, local.FeedOffset)
 			}
