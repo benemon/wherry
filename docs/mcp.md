@@ -30,9 +30,15 @@ The defaults are `10m` and `2h`.
   fails with `INVALID_ARGUMENT` naming the model, agent and pool.
   `selector` is an array of `{key, operator, values}`. `git` is
   `{remote, ref, path, changes}`, as `--git`, `--git-path` and `--git-changes`
-  take them, with `remote` and `ref` required and `changes` `bundle` unless
+  take them, with `remote` required and `changes` `bundle` unless
   set to `patch` or `none`; its credential and host key come
-  from the client configuration's `git` entries, as for `submit`. `continue`
+  from the client configuration's `git` entries, as for `submit`. Without
+  `ref`, the task carries the commit the remote's `HEAD` names at submit.
+  A `remote` of `.` is the repository holding the server's working
+  directory, its `origin` at the commit checked out, which must be on the
+  remote, and takes no `ref`. Both run `git` on the host, as
+  [`submit`](commands.md#wherry-host-submit) describes, and fail with
+  `INVALID_ARGUMENT` without it, or naming the step that failed. `continue`
   is a run ID, as `--continue` takes it, and is refused with `git`. `inputs` is
   an array of `{path}`, `credentials` an array of `{name}`,
   `{name, file}` or `{name, env}` and `outputs` an array of `{name, storage}`,

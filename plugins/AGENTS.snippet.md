@@ -17,10 +17,13 @@ clones itself.
    to choose the agent, `--model NAME` to choose one of its `models` in place
    of its `default_model`, and `--selector` with comma-separated terms
    (`key=v1|v2`, `key!=v`, `key`, `!key`) to require labels. Add
-   `--git REMOTE@REF` for a repository the agent clones (its host must be one of
-   the pool's VCS hosts), and `--git-changes patch` to get its commits back as
-   `changes.patch` (`git am` it). The clone's credential and an `ssh` remote's
-   host key come from the `git` entries of your wherry configuration. To build
+   `--git REMOTE[@REF]` for a repository the agent clones (its host must be one
+   of the pool's VCS hosts), pinned without `@REF` to its default branch's
+   commit at submit, or `--git .` for the repository you are in, at its
+   current commit, which must be on its `origin`; and `--git-changes patch` to
+   get its commits back as `changes.patch` (`git am` it). The clone's
+   credential and an `ssh` remote's host key come from the `git` entries of
+   your wherry configuration. To build
    on a finished run's commits after `wherry result` collected its
    `changes.bundle`, use `--continue RUN_ID` in place of `--git`; the pool needs
    storage. Add

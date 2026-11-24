@@ -1404,7 +1404,7 @@ and needs `wherry host init` on a re-provisioned host.
 | `--selector` | empty | [selector](#selectors) over plugin profile labels |
 | `--prompt` | | prompt text |
 | `--prompt-file` | | file holding the prompt; `-` reads standard input |
-| `--git REMOTE@REF` | | repository the agent clones: an `https` or `ssh` URL, or `user@host:path`, at a branch, tag or commit |
+| `--git REMOTE[@REF]` or `--git .` | | repository the agent clones: an `https` or `ssh` URL, or `user@host:path`, at a branch, tag or commit, or without `@REF` at its default branch's commit; `.` is the working directory's repository, its origin at the commit checked out |
 | `--git-path` | the repository name | checkout directory, relative to the agent's working directory |
 | `--git-changes bundle\|patch\|none` | `bundle` | how the agent's commits come back: as the output `changes.bundle`, as `changes.patch`, or not at all |
 | `--continue RUN_ID` | | continue from the `changes.bundle` `result` collected for a run of this host, in that run's repository, and return the next bundle through the pool's bucket |
@@ -1440,7 +1440,11 @@ Exactly one of `--prompt` and `--prompt-file` is required, and an empty
 prompt file fails with `--prompt-file is empty`. `--prompt-file -` reads the
 prompt from standard input, as in `generate-brief | wherry submit
 --prompt-file -`. The other `--git-` flags
-need `--git`, which splits at its last `@`. `submit` writes a
+need `--git`, which takes three forms. `.` is the working directory's
+repository. Otherwise, when the text before the value's last `@` is a remote,
+it is the remote and the rest the ref, so `https://host/a@b` clones `a` at
+`b`; when it is not, the whole value is the remote, so
+`ssh://git@host/repo` and `git@host:repo` need no ref. `submit` writes a
 `user@host:path` remote as `ssh://user@host/path`. The
 [extension](a2a-extension-v1.md#git-input) gives the rules for the remote,
 ref, path and host key. `submit` refuses, before it publishes, a remote
@@ -1449,6 +1453,48 @@ whose host is not one of the pool's [`vcs`](configuration-operator.md#pool-terms
 ```
 invalid input: git remote host github.com is not in pool build's vcs hosts
 ```
+
+A remote without `@REF` is pinned when `submit` runs: the task carries the
+commit the remote's `HEAD` names, read with `git ls-remote --symref`, so the
+run clones what the default branch held at submit. A remote whose `HEAD`
+names no commit, an empty repository's, is refused with `the remote's HEAD
+names no commit: name a branch, tag or commit with @REF`.
+
+`--git .` sends the repository holding the working directory, found by its
+`.git`: the URL of its `origin` remote as the configuration holds it, before
+any `insteadOf` rewrite, validated and written as any remote is, and the
+commit `HEAD` names, which the agent checks out. The commit must be on the
+remote: equal to a branch or tag tip `git ls-remote` advertises, or an
+ancestor of one the repository holds. Anything else is refused, naming the
+branch, or the commit when `HEAD` is detached:
+
+```
+invalid input: commit 0123456789ab is not on https://github.com/acme/app.git: push main first, or git fetch and retry
+```
+
+A remote-tracking ref does not count, since its branch may be gone from the
+remote, and nothing is fetched, so a tip the repository lacks is not
+checked: `git fetch` and retry. A repository without `origin` or without a
+commit is refused with a hint, and uncommitted changes are neither checked
+nor sent. `submit` writes nothing to the repository: it reads it with
+`git config`, `git rev-parse`, `git cat-file` and `git merge-base`, and asks
+the remote with `git ls-remote` from a directory of its own.
+
+Both forms run `git` on the host, from `PATH`, and are refused without it;
+a remote with `@REF` runs none. That `git` reads no system or global
+configuration, no `GIT_*` or `SSH_*` variable and no credential helper,
+runs no hook, file system monitor or gc, never prompts, and inherits only
+`PATH`, `TMPDIR`, `LANG`, `LC_ALL` and the proxy variables; in the
+repository it reads the repository's own configuration, with
+`safe.directory` set to the repository alone. `git ls-remote` uses the
+matched `git` entry's credential: an `https` token as a `Basic`
+`Authorization` header for the user `x-access-token`, passed through the
+environment, which needs `git` 2.31 or later, refused otherwise naming the
+version; an `ssh` key as a `0600` file removed after the call, read by `ssh`
+with no configuration file, agent or other identity, trusting the entry's
+`host_key` file alone. A remote under no entry is asked anonymously. An
+error names the step and the exit status, `git ls-remote failed (exit
+128)`, never git's output.
 
 The clone's credential and host key come from the client configuration's
 [`git`](configuration-host.md#client-configuration) entry whose `url` is the longest prefix of the
