@@ -2,8 +2,6 @@ package operator
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"maps"
 	"slices"
 	"strings"
@@ -66,35 +64,14 @@ func historyFixture(t *testing.T, client *kgo.Client, base, ended, retermed time
 	return history
 }
 
-func TestHistoryKeepsEndTimesAndTerms(t *testing.T) {
+func TestHistoryKeepsTermsAndKeyTopics(t *testing.T) {
 	client := readerCluster(t, OperatorTopic)
 	base := time.Now().Add(-time.Hour).Truncate(time.Millisecond)
 	ended, retermed := base.Add(20*time.Minute), base.Add(40*time.Minute)
 	history := historyFixture(t, client, base, ended, retermed)
-	if !history.State.Ended[ReceiverPrincipal("receiver-b")] || !history.EndedAt[ReceiverPrincipal("receiver-b")].Equal(ended) {
-		t.Fatalf("receiver-b's end: %v, want %v", history.EndedAt, ended)
-	}
-	if !history.EndedAt[TenantPrincipal("tenant-b", "host-b")].Equal(ended) || !history.EntitlementEndedAt["tenant-b"]["pool-a"].Equal(ended) {
-		t.Fatalf("host-b's and tenant-b's ends: %v %v", history.EndedAt, history.EntitlementEndedAt)
-	}
-	before, after := ended.Add(-time.Second), ended.Add(time.Second)
-	for name, got := range map[string]bool{
-		"member before its end": history.MemberAt("receiver-b", "pool-a", before), "live member": history.MemberAt("receiver-a", "pool-a", after),
-		"host before its end": history.HostAt("tenant-b", "host-b", before), "entitled before its end": history.EntitledAt("tenant-b", "pool-a", before),
-		"ever entitled": history.EverEntitled("tenant-b", "pool-a"), "still entitled": history.EntitledAt("tenant-a", "pool-a", after),
-	} {
-		if !got {
-			t.Errorf("%s: false", name)
-		}
-	}
-	for name, got := range map[string]bool{
-		"member after its end": history.MemberAt("receiver-b", "pool-a", after), "member at its end": history.MemberAt("receiver-b", "pool-a", ended),
-		"host after its end": history.HostAt("tenant-b", "host-b", after), "entitled after its end": history.EntitledAt("tenant-b", "pool-a", after),
-		"unknown receiver": history.MemberAt("receiver-z", "pool-a", before), "another pool": history.MemberAt("receiver-a", "pool-b", before),
-	} {
-		if got {
-			t.Errorf("%s: true", name)
-		}
+	// The ends are folded into the state as Load folds them; no end time is kept.
+	if !history.State.Ended[ReceiverPrincipal("receiver-b")] || !history.State.Ended[TenantPrincipal("tenant-b", "host-b")] || history.State.Entitlements["tenant-b"]["pool-a"] || !history.State.EndedEntitlements["tenant-b"]["pool-a"] {
+		t.Fatalf("the ends are not in the state: %+v", history.State)
 	}
 	if terms, ok := history.TermsAt("pool-a", retermed.Add(-time.Second)); !ok || terms.Storage != nil {
 		t.Errorf("terms before the change: %v %+v", ok, terms.Storage)
@@ -120,69 +97,39 @@ func TestHistoryKeepsEndTimesAndTerms(t *testing.T) {
 	}
 }
 
-// The historic authorisers accept what the membership, entitlements and keys in force at a record's append time
-// accept, and refuse a record appended after its signer's end, however it verifies.
-func TestHistoricAuthorisationFollowsAppendTimes(t *testing.T) {
-	client := readerCluster(t, OperatorTopic)
-	base := time.Now().Add(-time.Hour).Truncate(time.Millisecond)
-	ended := base.Add(20 * time.Minute)
-	history := historyFixture(t, client, base, ended, base.Add(40*time.Minute))
-	_, keyA, _ := ed25519.GenerateKey(rand.Reader)
-	_, keyB, _ := ed25519.GenerateKey(rand.Reader)
-	_, keyBOld, _ := ed25519.GenerateKey(rand.Reader)
-	_, hostA, _ := ed25519.GenerateKey(rand.Reader)
-	_, hostB, _ := ed25519.GenerateKey(rand.Reader)
-	rotated := base.Add(10 * time.Minute)
-	keys := signed.Keys{
-		"receiver-a":                           {Current: keyA.Public().(ed25519.PublicKey)},
-		"receiver-b":                           {Current: keyB.Public().(ed25519.PublicKey), Retired: []signed.RetiredKey{{Key: keyBOld.Public().(ed25519.PublicKey), At: rotated}}},
-		signed.HostOwner("tenant-a", "host-a"): {Current: hostA.Public().(ed25519.PublicKey)},
-		signed.HostOwner("tenant-b", "host-b"): {Current: hostB.Public().(ed25519.PublicKey)},
-	}
-	before, after := ended.Add(-time.Second), ended.Add(time.Second)
-	status := func(receiver, tenant, pool string, key ed25519.PrivateKey) []byte {
-		return sign(t, testStatus(receiver, tenant, pool, "run-a"), key)
-	}
-	echo := func(receiver, tenant, pool string, key ed25519.PrivateKey) []byte {
-		return sign(t, &wire.Echo{Receiver: receiver, Tenant: tenant, Host: "host-" + strings.TrimPrefix(tenant, "tenant-"), Pool: pool, Run: "run-a", RunNonce: "nonce", Placement: wire.Placement{Agent: "agent-a"}, TaskHash: strings.Repeat("a", 64), MessageID: "message-a"}, key)
-	}
-	cancel := func(tenant, host, pool string, key ed25519.PrivateKey) []byte {
-		return sign(t, &wire.Cancel{Tenant: tenant, Host: host, Pool: pool, Run: "run-a"}, key)
+// A verified record is held to the topic it was read from: a status, start failure or result naming another pool than
+// the events topic or another tenant than the feed, an echo on another tenant's feed and a cancel naming another pool
+// or tenant than its run are refused. Who signed it, and whether they were a member then, is not asked here.
+func TestRecordTopicConsistency(t *testing.T) {
+	status := func(tenant, pool string) wire.RunStatus { return *testStatus("receiver-a", tenant, pool, "run-a") }
+	binding := func(tenant, pool string) wire.ReceiverBinding {
+		return wire.ReceiverBinding{Receiver: "receiver-a", Tenant: tenant, Pool: pool, Run: "run-a", Attempt: 1}
 	}
 	for _, c := range []struct {
 		name string
 		err  error
 		ok   bool
 	}{
-		{"status from a live member", second(AuthorizeHistoricStatus(history, keys, status("receiver-a", "tenant-a", "pool-a", keyA), "pool-a", "", after, false)), true},
-		{"status from an ended member before its end", second(AuthorizeHistoricStatus(history, keys, status("receiver-b", "tenant-a", "pool-a", keyB), "pool-a", "", before, false)), true},
-		{"status from an ended member after its end", second(AuthorizeHistoricStatus(history, keys, status("receiver-b", "tenant-a", "pool-a", keyB), "pool-a", "", after, false)), false},
-		{"status under a retired key before the rotation", second(AuthorizeHistoricStatus(history, keys, status("receiver-b", "tenant-a", "pool-a", keyBOld), "pool-a", "", rotated.Add(-time.Second), false)), true},
-		{"status under a retired key after the rotation", second(AuthorizeHistoricStatus(history, keys, status("receiver-b", "tenant-a", "pool-a", keyBOld), "pool-a", "", rotated.Add(2*time.Millisecond), false)), false},
-		{"host-signed status", second(AuthorizeHistoricStatus(history, keys, status("receiver-a", "tenant-a", "pool-a", hostA), "pool-a", "", before, false)), false},
-		{"status naming another pool than its topic", second(AuthorizeHistoricStatus(history, keys, status("receiver-a", "tenant-a", "pool-b", keyA), "pool-a", "", before, false)), false},
-		{"status naming another tenant than its feed", second(AuthorizeHistoricStatus(history, keys, status("receiver-a", "tenant-a", "pool-a", keyA), "", "tenant-b", before, false)), false},
-		{"status of an ended entitlement before its end", second(AuthorizeHistoricStatus(history, keys, status("receiver-a", "tenant-b", "pool-a", keyA), "pool-a", "", before, false)), true},
-		{"status of an ended entitlement after its end, unjoined", second(AuthorizeHistoricStatus(history, keys, status("receiver-a", "tenant-b", "pool-a", keyA), "pool-a", "", after, false)), false},
-		{"status of an ended entitlement after its end, joined to its echo", second(AuthorizeHistoricStatus(history, keys, status("receiver-a", "tenant-b", "pool-a", keyA), "pool-a", "", after, true)), true},
-		{"status of a tenant never entitled, joined", second(AuthorizeHistoricStatus(history, keys, status("receiver-a", "tenant-z", "pool-a", keyA), "pool-a", "", after, true)), false},
-		{"echo before the entitlement ended", second(AuthorizeHistoricEcho(history, keys, echo("receiver-a", "tenant-b", "pool-a", keyA), "tenant-b", before)), true},
-		{"echo after the entitlement ended", second(AuthorizeHistoricEcho(history, keys, echo("receiver-a", "tenant-b", "pool-a", keyA), "tenant-b", after)), false},
-		{"echo from an ended member after its end", second(AuthorizeHistoricEcho(history, keys, echo("receiver-b", "tenant-a", "pool-a", keyB), "tenant-a", after)), false},
-		{"echo on another tenant's feed", second(AuthorizeHistoricEcho(history, keys, echo("receiver-a", "tenant-a", "pool-a", keyA), "tenant-b", before)), false},
-		{"cancel by a since-ended host before its end", second(AuthorizeHistoricCancel(history, keys, cancel("tenant-b", "host-b", "pool-a", hostB), "pool-a", "tenant-b", before)), true},
-		{"cancel by an ended host after its end", second(AuthorizeHistoricCancel(history, keys, cancel("tenant-b", "host-b", "pool-a", hostB), "pool-a", "tenant-b", after)), false},
-		{"cancel from a live host of an ended entitlement", second(AuthorizeHistoricCancel(history, keys, cancel("tenant-a", "host-a", "pool-a", hostA), "pool-a", "tenant-a", after)), true},
-		{"cancel naming another tenant than its run", second(AuthorizeHistoricCancel(history, keys, cancel("tenant-a", "host-a", "pool-a", hostA), "pool-a", "tenant-b", after)), false},
-		{"start failure from a live member", second(AuthorizeHistoricStartFailure(history, keys, sign(t, &wire.StartFailure{Wherry: wire.ReceiverBinding{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: "run-a", Attempt: 1}, Profile: "profile-a", Agent: "agent-a", Class: "dispatch", TaskHash: strings.Repeat("a", 64)}, keyA), "pool-a", after, false)), true},
+		{"status on its pool's events", CheckStatus(status("tenant-a", "pool-a"), "pool-a", ""), true},
+		{"status on its tenant's feed", CheckStatus(status("tenant-a", "pool-a"), "", "tenant-a"), true},
+		{"status naming another pool than its topic", CheckStatus(status("tenant-a", "pool-b"), "pool-a", ""), false},
+		{"status naming another tenant than its feed", CheckStatus(status("tenant-a", "pool-a"), "", "tenant-b"), false},
+		{"status of an ended receiver", CheckStatus(*testStatus("receiver-b", "tenant-a", "pool-a", "run-a"), "pool-a", ""), true},
+		{"start failure on its pool's events", CheckStartFailure(wire.StartFailure{Wherry: binding("tenant-a", "pool-a")}, "pool-a"), true},
+		{"start failure naming another pool", CheckStartFailure(wire.StartFailure{Wherry: binding("tenant-a", "pool-b")}, "pool-a"), false},
+		{"result on its tenant's feed", CheckResult(wire.Result{Wherry: wire.ResultBinding{ReceiverBinding: binding("tenant-a", "pool-a")}}, "tenant-a"), true},
+		{"result naming another tenant", CheckResult(wire.Result{Wherry: wire.ResultBinding{ReceiverBinding: binding("tenant-b", "pool-a")}}, "tenant-a"), false},
+		{"echo on its tenant's feed", CheckEcho(wire.Echo{Tenant: "tenant-a", Pool: "pool-a"}, "tenant-a"), true},
+		{"echo on another tenant's feed", CheckEcho(wire.Echo{Tenant: "tenant-a", Pool: "pool-a"}, "tenant-b"), false},
+		{"cancel of its run", CheckCancel(wire.Cancel{Tenant: "tenant-a", Host: "host-a", Pool: "pool-a", Run: "run-a"}, "pool-a", "tenant-a"), true},
+		{"cancel naming another pool", CheckCancel(wire.Cancel{Tenant: "tenant-a", Host: "host-a", Pool: "pool-b", Run: "run-a"}, "pool-a", "tenant-a"), false},
+		{"cancel naming another tenant than its run", CheckCancel(wire.Cancel{Tenant: "tenant-a", Host: "host-a", Pool: "pool-a", Run: "run-a"}, "pool-a", "tenant-b"), false},
 	} {
 		if (c.err == nil) != c.ok {
 			t.Errorf("%s: %v, want accepted %v", c.name, c.err, c.ok)
 		}
 	}
 }
-
-func second[T any](_ T, err error) error { return err }
 
 // ReadRanges keeps at most the bounds over every topic of a call and tells each topic where to resume: just past its
 // last record kept when the bounds cut it short, the last stable offset it listed when it read to it.

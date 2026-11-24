@@ -594,7 +594,8 @@ func (a allowlist) value(key attribute.Key, value *commonpb.AnyValue) (string, b
 		case telemetry.AttrCredentialSource:
 			ok = s == "file" || s == "env" || s == "command"
 		case telemetry.AttrOutput:
-			// Output names are a record's text; the model keeps none to match against.
+			// A result shows its output names, the one exception to the name catalog; a span's output attribute is not a
+			// result's, so it is dropped.
 			ok = false
 		case telemetry.AttrStorageEndpoint:
 			ok = a.names.endpoints[s]

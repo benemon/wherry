@@ -58,12 +58,13 @@ func TestRetiredKeyRetractsFoldedFacts(t *testing.T) {
 	}
 }
 
-// A run admitted before its tenant's entitlement ended takes only records joined to that echo: the same run, tenant,
-// pool and task hash under the run's Kafka key. A different hash is refused, never adopted.
-func TestReviewWrongHashAfterEnd(t *testing.T) {
+// Records appended after the tenant's entitlement ended display, whatever task hash they carry, labelled with their
+// signer: membership and entitlement over time are the ACLs' decision, not re-derived here. A status under another
+// run's Kafka key is still refused, and an echo of another task than the statuses' is counted, never shown.
+func TestReviewRecordsAfterEndDisplay(t *testing.T) {
 	f := newFixture(t)
 	at := f.now.Add(-time.Hour)
-	run := f.echo(at, receiverA, tenantA, hostA, poolA, "wrong-after-end")
+	run := f.echo(at, receiverA, tenantA, hostA, poolA, "after-end")
 	f.operator(at.Add(time.Minute), operator.Record{Kind: "end", Tenant: tenantA, Pool: poolA})
 	f.status(at.Add(2*time.Minute), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: run, kind: "terminal", state: wire.TaskStateCompleted, hash: hashOf("different")})
 	f.resultWith(at.Add(2*time.Minute), receiverA, tenantA, poolA, run, 1, wire.TaskStateCompleted, wire.ResultMetadata{}, "reply", hashOf("different"))
@@ -76,20 +77,18 @@ func TestReviewWrongHashAfterEnd(t *testing.T) {
 	s := v.Snapshot(0)
 	r := summaryOf(t, s, run)
 	d, _ := v.RunDetail(run)
-	if r.Terminal || r.Stage != "echoed" || d.Hash != hashOf(run) || d.Result != nil || len(d.Attempts) != 0 {
-		t.Fatalf("post-entitlement records with a different task hash accepted: %+v hash %s result %+v attempts %+v", r, d.Hash, d.Result, d.Attempts)
+	if !r.Terminal || r.Stage != "completed" || d.Hash != hashOf("different") || d.Result == nil || len(d.Attempts) != 2 || len(d.Echoes) != 0 || d.MismatchedEchoes != 1 {
+		t.Fatalf("post-entitlement records absent or the other task's echo joined: %+v hash %s result %+v attempts %+v echoes %+v", r, d.Hash, d.Result, d.Attempts, d.Echoes)
+	}
+	signer := operator.ReceiverPrincipal(receiverA)
+	if d.Attempts[0].Events[0].Signer != signer || d.Result.Signer != signer || d.Attempts[1].StartFailure == nil || d.Attempts[1].StartFailure.Signer != signer {
+		t.Errorf("labels: %+v %+v", d.Attempts, d.Result)
 	}
 	if hasRun(s, other) {
 		t.Error("a status under another run's key made a run")
 	}
-	if s.Counts["refused"] != 4 || s.Counts["pending"] != 0 {
-		t.Errorf("counts %v; want the four refused and nothing pending", s.Counts)
-	}
-	// The joined record is taken.
-	f.status(at.Add(4*time.Minute), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: run, kind: "terminal", state: wire.TaskStateCompleted})
-	f.tick(v)
-	if r := summaryOf(t, v.Snapshot(0), run); !r.Terminal {
-		t.Errorf("the joined terminal was not taken: %+v", r)
+	if s.Counts["refused"] != 1 || s.Counts["pending"] != 0 {
+		t.Errorf("counts %v; want the mis-keyed status refused and nothing pending", s.Counts)
 	}
 }
 

@@ -1,5 +1,5 @@
 // The placeholder page: the model as plain tables, every value rendered as text through textContent, never as
-// markup. The token arrives in the fragment, is posted once for the session cookie and cleared from the address bar.
+// markup; output names, the one tenant-chosen text shown, go the same way. The token arrives in the fragment, is posted once for the session cookie and cleared from the address bar.
 (function () {
   'use strict';
   var main = document.getElementById('main');
@@ -63,7 +63,7 @@
     main.appendChild(table('Brokers', ['id', 'host', 'port', 'rack', 'controller', 'listeners'], model.brokers));
     main.appendChild(table('Pools', ['name', 'suspended', 'receivers', 'tenants', 'custodian', 'storage', 'delivery_limit', 'group', 'lag', 'runs', 'in_progress', 'by_state', 'by_class', 'no_terminal', 'agents'], model.pools));
     main.appendChild(table('Receivers', ['name', 'pool', 'status', 'ended', 'capacity', 'in_flight', 'gated', 'offers', 'last_advertised', 'profiles', 'runs', 'by_state', 'by_class', 'held', 'stale', 'unidentified'], model.receivers));
-    main.appendChild(table('Custodians', ['pool', 'receiver', 'status', 'key_id', 'reason', 'at', 'suspended'], model.custodians));
+    main.appendChild(table('Custodians', ['pool', 'receiver', 'status', 'key_id', 'reason', 'at', 'suspended', 'signer'], model.custodians));
     main.appendChild(table('Hosts', ['tenant', 'name', 'ended', 'runs', 'by_state'], model.hosts));
     main.appendChild(table('Tenants', ['name', 'ended', 'pools', 'hosts', 'runs'], model.tenants));
     main.appendChild(table('S3 destinations', ['endpoint', 'bucket', 'pools', 'runs', 'outputs', 'bytes', 'unreturned', 'failed_runs'], model.storage));
@@ -81,16 +81,17 @@
       detail.replaceChildren();
       detail.appendChild(text(document.createElement('h2'), 'Run ' + run.id));
       detail.appendChild(table('Path', ['at', 'step', 'actor', 'attempt', 'detail'], run.path));
+      detail.appendChild(table('Echoes', ['receiver', 'host', 'pool', 'agent', 'model', 'at', 'signer'], run.echoes));
       run.attempts.forEach(function (attempt) {
-        detail.appendChild(table('Attempt ' + attempt.number + ' on ' + attempt.receiver, ['at', 'kind', 'state', 'event_id', 'receiver_at', 'log_offset', 'event', 'class'], attempt.events));
+        detail.appendChild(table('Attempt ' + attempt.number + ' on ' + attempt.receiver, ['at', 'kind', 'state', 'event_id', 'receiver_at', 'log_offset', 'event', 'class', 'signer'], attempt.events));
       });
-      detail.appendChild(table('Open exchange', ['attempt', 'receiver', 'at', 'answer', 'custodian', 'reason', 'answered_at'], run.opens));
-      detail.appendChild(table('Cancels', ['host', 'at'], run.cancels));
+      detail.appendChild(table('Open exchange', ['attempt', 'receiver', 'at', 'signer', 'answer', 'custodian', 'reason', 'answered_at', 'answer_signer'], run.opens));
+      detail.appendChild(table('Cancels', ['host', 'at', 'signer'], run.cancels));
       if (run.result) {
-        detail.appendChild(keyValues('Result', { receiver: run.result.receiver, attempt: run.result.attempt, state: run.result.state, at: run.result.at, profile: run.result.profile, reply_size: run.result.reply_size, reply_cut: run.result.reply_cut, artifacts: run.result.artifacts }));
-        detail.appendChild(table('Outputs', ['size', 'sha256'], run.result.outputs));
-        detail.appendChild(table('S3 outputs', ['size', 'sha256'], run.result.s3_outputs));
-        detail.appendChild(table('Not returned', ['size', 'reason'], run.result.not_returned));
+        detail.appendChild(keyValues('Result', { receiver: run.result.receiver, attempt: run.result.attempt, state: run.result.state, at: run.result.at, profile: run.result.profile, reply_size: run.result.reply_size, reply_cut: run.result.reply_cut, artifacts: run.result.artifacts, signer: run.result.signer }));
+        detail.appendChild(table('Outputs', ['name', 'size', 'sha256'], run.result.outputs));
+        detail.appendChild(table('S3 outputs', ['name', 'size', 'sha256'], run.result.s3_outputs));
+        detail.appendChild(table('Not returned', ['name', 'size', 'reason'], run.result.not_returned));
       }
       detail.appendChild(keyValues('Storage', run.storage || { unknown: run.storage_unknown }));
       var button = text(document.createElement('button'), 'Load spans');

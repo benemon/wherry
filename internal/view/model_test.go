@@ -2,6 +2,8 @@ package view
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	json "encoding/json/v2"
 	"errors"
 	"maps"
@@ -21,8 +23,8 @@ import (
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
-// Test 6: hostile records are absent and legitimate history is present, each checked against the membership,
-// entitlements and keys in force at its append time.
+// Test 6: hostile records are absent and history is present, each checked by its signature against the key history
+// and against the topic it was read from, never against the membership or entitlements of its time.
 func TestRebuildAuthorisation(t *testing.T) {
 	f := newFixture(t)
 	t0 := f.now.Add(-2 * time.Hour)
@@ -41,7 +43,8 @@ func TestRebuildAuthorisation(t *testing.T) {
 	f.operator(t0.Add(40*time.Minute), operator.Record{Kind: "end", Tenant: tenantB, Pool: poolA})
 	f.operator(t0.Add(50*time.Minute), operator.Record{Kind: "end", Tenant: tenantB, Host: hostB})
 
-	// Hostile.
+	// Hostile: a host-signed status, a status under a retired key after its rotation, a status naming another pool than
+	// its topic, a forged signature and an unknown key.
 	h1 := runID(tenantA, hostA, "h1")
 	f.status(t0.Add(time.Minute), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: h1, kind: "terminal", state: wire.TaskStateCompleted, key: f.keys[signed.HostOwner(tenantA, hostA)]})
 	h2 := runID(tenantA, hostA, "h2")
@@ -52,14 +55,21 @@ func TestRebuildAuthorisation(t *testing.T) {
 	f.echoWith(t0.Add(time.Minute), receiverA, tenantA, hostA, poolA, "h4", hashOf("another task"))
 	f.status(t0.Add(2*time.Minute), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: h4, kind: "claimed", state: wire.TaskStateWorking})
 	f.status(t0.Add(3*time.Minute), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: h4, kind: "terminal", state: wire.TaskStateCompleted})
-	h5 := runID(tenantA, hostA, "h5")
-	f.status(t0.Add(35*time.Minute), st{receiver: receiverB, tenant: tenantA, pool: poolA, run: h5, kind: "terminal", state: wire.TaskStateCompleted})
+	h6 := runID(tenantA, hostA, "h6")
+	f.produce(operator.PoolEventsTopic(poolA), h6, forge(f.statusRecord(t0.Add(time.Minute), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: h6, kind: "terminal", state: wire.TaskStateCompleted})), t0.Add(time.Minute))
+	h7 := runID(tenantA, hostA, "h7")
+	_, unknown, _ := ed25519.GenerateKey(rand.Reader)
+	f.status(t0.Add(time.Minute), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: h7, kind: "terminal", state: wire.TaskStateCompleted, key: unknown})
 
-	// Legitimate.
+	// History: a run completed by a receiver since removed under its earlier key, one it completed after its end, runs of
+	// an entitlement since ended, cancels by a since-ended host, before a host key rotation and after an entitlement's
+	// end.
 	l1 := runID(tenantA, hostA, "l1")
 	f.echo(t0.Add(4*time.Minute), receiverB, tenantA, hostA, poolA, "l1")
 	f.status(t0.Add(5*time.Minute), st{receiver: receiverB, tenant: tenantA, pool: poolA, run: l1, kind: "claimed", state: wire.TaskStateWorking, key: receiverBOld})
 	f.status(t0.Add(6*time.Minute), st{receiver: receiverB, tenant: tenantA, pool: poolA, run: l1, kind: "terminal", state: wire.TaskStateCompleted, key: receiverBOld})
+	l6 := runID(tenantA, hostA, "l6")
+	f.status(t0.Add(35*time.Minute), st{receiver: receiverB, tenant: tenantA, pool: poolA, run: l6, kind: "terminal", state: wire.TaskStateCompleted})
 	l2 := f.echo(t0.Add(35*time.Minute), receiverA, tenantB, hostB, poolA, "l2")
 	f.status(t0.Add(36*time.Minute), st{receiver: receiverA, tenant: tenantB, pool: poolA, run: l2, kind: "claimed", state: wire.TaskStateWorking})
 	f.status(t0.Add(45*time.Minute), st{receiver: receiverA, tenant: tenantB, pool: poolA, run: l2, kind: "terminal", state: wire.TaskStateCompleted})
@@ -74,11 +84,10 @@ func TestRebuildAuthorisation(t *testing.T) {
 	f.cancel(t0.Add(55*time.Minute), tenantB, "host-c", poolA, l5, nil)
 
 	v := f.view(3*time.Hour, testCaps())
-	// The host-signed status waits for a key read, since its kid names a key its receiver may have rotated to; the
-	// next tick reads the keys again and refuses it.
+	// The status under an unknown key waits for a key read; the next tick reads the keys again and refuses it.
 	f.tick(v)
 	s := v.Snapshot(0)
-	for name, id := range map[string]string{"host-signed status": h1, "status under a retired key after its rotation": h2, "wrong-pool status": h3, "status by an ended receiver's key appended after its end": h5} {
+	for name, id := range map[string]string{"host-signed status": h1, "status under a retired key after its rotation": h2, "wrong-pool status": h3, "forged signature": h6, "status under an unknown key": h7} {
 		if hasRun(s, id) {
 			t.Errorf("%s is present", name)
 		}
@@ -92,6 +101,15 @@ func TestRebuildAuthorisation(t *testing.T) {
 	if r := summaryOf(t, s, l1); r.State != string(wire.TaskStateCompleted) || r.Receiver != receiverB || r.Host != hostA {
 		t.Errorf("run completed by a since-removed receiver under its earlier key: %+v", r)
 	}
+	if d, _ := v.RunDetail(l1); d.Echoes[0].Signer != operator.ReceiverPrincipal(receiverB) || d.Attempts[0].Events[1].Signer != operator.ReceiverPrincipal(receiverB) {
+		t.Errorf("signers of a since-removed receiver's run: %+v %+v", d.Echoes, d.Attempts)
+	}
+	if r := summaryOf(t, s, l6); !r.Terminal || r.Receiver != receiverB {
+		t.Errorf("status an ended receiver signed after its end, the accepted residual: %+v", r)
+	}
+	if d, _ := v.RunDetail(l6); d.Attempts[0].Events[0].Signer != operator.ReceiverPrincipal(receiverB) {
+		t.Errorf("the residual is not labelled with its signer: %+v", d.Attempts)
+	}
 	if r := summaryOf(t, s, l2); r.State != string(wire.TaskStateCompleted) || !r.Terminal {
 		t.Errorf("held run completing after its entitlement ended: %+v", r)
 	}
@@ -100,9 +118,24 @@ func TestRebuildAuthorisation(t *testing.T) {
 			t.Errorf("%s is absent: %+v", name, r)
 		}
 	}
-	if s.Counts["refused"] != 4 || s.Counts["pending"] != 0 {
-		t.Errorf("counts %v; want the hostile four refused and nothing pending", s.Counts)
+	if d, _ := v.RunDetail(l4); d.Cancels[0].Signer != operator.TenantPrincipal(tenantA, hostA) {
+		t.Errorf("cancel signer: %+v", d.Cancels)
 	}
+	if s.Counts["refused"] != 5 || s.Counts["pending"] != 0 {
+		t.Errorf("counts %v; want the hostile five refused and nothing pending", s.Counts)
+	}
+}
+
+// forge returns the JWS value with its last signature byte changed, so it no longer verifies under the key its kid names.
+func forge(value []byte) []byte {
+	forged := slices.Clone(value)
+	last := &forged[len(forged)-1]
+	if *last == 'A' {
+		*last = 'B'
+	} else {
+		*last = 'A'
+	}
+	return forged
 }
 
 // Test 7: exact counts over a recorded workload, the live path across a committed and an aborted transaction, a
@@ -463,13 +496,9 @@ func TestBoundsApplyWhileReadingAndReport(t *testing.T) {
 		f.result(t0.Add(time.Duration(i)*time.Minute+2*time.Second), receiverA, tenantA, poolA, run, 1, wire.TaskStateCompleted, wire.ResultMetadata{Reply: &wire.ReturnedReply{SHA256: hashOf("r"), Size: 1}}, strings.Repeat("reply ", 400))
 		runs = append(runs, run)
 	}
-	// Statuses of a tenant never entitled wait for a join that never comes.
-	if err := f.service.TenantAdd(f.ctx, tenantB); err != nil {
-		t.Fatal(err)
-	}
-	f.addHost(tenantB, hostB)
+	// Cancels of runs the view holds no record of wait for a join that never comes.
 	for i := range 3 {
-		f.poolOnly(t0.Add(10*time.Minute+time.Duration(i)*time.Second), st{receiver: receiverA, tenant: tenantB, pool: poolA, run: runID(tenantB, hostB, "pending-"+string(rune('a'+i))), kind: "claimed", state: wire.TaskStateWorking})
+		f.cancel(t0.Add(10*time.Minute+time.Duration(i)*time.Second), tenantA, hostA, poolA, runID(tenantA, hostA, "pending-"+string(rune('a'+i))), nil)
 	}
 	// Each bounded batch lists the data topics' offsets again; listings counts the listings naming the events topic.
 	var listings atomic.Int32

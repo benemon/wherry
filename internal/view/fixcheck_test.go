@@ -2,7 +2,8 @@ package view
 
 // The reviewer's probes of the first fix round, kept as they were written: each failed on 71de86f and passes at the
 // head. TestFixReviewTaskSpan builds its allowlist from a catalog, as the allowlist now reads one; the last test's
-// assertion names the per-run events cap, since the digests cap never bounded event IDs.
+// assertion names the per-run events cap, since the digests cap never bounded event IDs. TestFixReviewAdmissionRetraction
+// is inverted: since round 3 a terminal stands on its own signature, so the echo's retraction leaves it.
 
 import (
 	json "encoding/json/v2"
@@ -63,8 +64,8 @@ func TestFixReviewAdmissionRetraction(t *testing.T) {
 	f.rotate(receiverA, operator.ReceiverTopic(receiverA), at.Add(-time.Second))
 	f.tick(v)
 	d, ok := v.RunDetail(run)
-	if ok && len(d.Echoes) == 0 && len(d.Attempts) > 0 {
-		t.Fatalf("terminal survives loss of its historic admission: %+v", d)
+	if !ok || len(d.Echoes) != 0 || len(d.Attempts) != 1 || d.Attempts[0].Events[0].Signer != operator.ReceiverPrincipal(receiverB) {
+		t.Fatalf("terminal retracted with the echo, or unlabelled: %+v %v", d, ok)
 	}
 }
 

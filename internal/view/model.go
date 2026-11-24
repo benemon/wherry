@@ -1,7 +1,8 @@
 // Package view is the operator network view: a model of the cluster rebuilt from the records Kafka keeps, kept live
 // by tailing them, served read-only over loopback HTTP as JSON, a Server-Sent Events stream and a placeholder page.
 // The view never produces to Kafka and never holds agent text: every record is projected to named fields, and every
-// name it holds is one the operator's configuration yields or a fixed placeholder.
+// name it holds is one the operator's configuration yields or a fixed placeholder, except a result's output names,
+// kept when they follow the output name grammar.
 package view
 
 import (
@@ -144,8 +145,9 @@ const (
 	StageNotIdentified = "in flight, not identified"
 )
 
-// source is the signer of a folded record and its append time: a rotation seen later that retired the key before
-// the append time retracts the fact.
+// source is the signer of a folded record, the owner and ID of the key that verified it, and its append time: a
+// rotation seen later that retired the key before the append time retracts the fact. The owner labels the fact with its
+// principal.
 type source struct {
 	owner, keyID string
 	at           time.Time
@@ -154,6 +156,15 @@ type source struct {
 // retiredBy reports whether the source signed under owner's keyID at or after since, the time a rotation retired it.
 func (s source) retiredBy(owner, keyID string, since time.Time) bool {
 	return s.owner == owner && s.keyID == keyID && !s.at.Before(since)
+}
+
+// signer is the label of a fact from s: the principal of the owner whose key verified it, built from the state, never
+// from the record's text. A key owner the state has since lost shows as the placeholder.
+func (m *model) signer(s source) string {
+	if principal, ok := m.signers[s.owner]; ok {
+		return principal
+	}
+	return Unknown
 }
 
 // event is a status projected: no message, no metadata. Its kind, state and event are of the fixed sets.
@@ -168,10 +179,7 @@ type event struct {
 	LogOffset  *int64
 	Event      string
 	Class      string
-	// via is the task hash of the echo the event's admission depends on: set when its tenant was not entitled to
-	// the pool when it was appended, so it was taken only joined to that echo.
-	via string
-	src source
+	src        source
 }
 
 type attempt struct {
@@ -197,7 +205,6 @@ type decisionFact struct {
 type startFailureFact struct {
 	Profile, Agent, Class string
 	At                    time.Time
-	via                   string
 	src                   source
 }
 
@@ -228,7 +235,7 @@ type openFact struct {
 	src, answerSrc            source
 }
 
-// resultFact is the Reference facts of a result: output sizes and hashes, never a part's content or an output's name.
+// resultFact is the Reference facts of a result: output names, sizes and hashes, never a part's content.
 type resultFact struct {
 	Receiver    string
 	Attempt     int64
@@ -241,16 +248,19 @@ type resultFact struct {
 	ReplySize   int64
 	ReplyCut    bool
 	Artifacts   int
-	via         string
 	src         source
 }
 
+// outputFact is a returned output. Name is the tenant's own, kept when it follows the output name grammar, else the
+// placeholder: the one name shown that the configuration does not yield.
 type outputFact struct {
+	Name   string
 	Size   int64
 	SHA256 string
 }
 
 type unreturnedFact struct {
+	Name   string
 	Size   int64
 	Reason string
 }
@@ -302,13 +312,13 @@ func (r *run) measure() measure {
 		me.bytes += int64(attemptOverhead + len(a.Receiver) + len(a.TaskTopic) + len(a.ClaimDigest))
 		me.events += len(a.Events)
 		for _, e := range a.Events {
-			me.bytes += int64(eventOverhead + len(e.EventID) + len(e.Receiver) + len(e.via))
+			me.bytes += int64(eventOverhead + len(e.EventID) + len(e.Receiver))
 		}
 		if a.Decision != nil {
 			me.bytes += decisionOverhead
 		}
 		if a.StartFailure != nil {
-			me.bytes += int64(startFailureOverhead + len(a.StartFailure.via))
+			me.bytes += startFailureOverhead
 		}
 	}
 	for _, o := range r.Opens {
@@ -316,7 +326,16 @@ func (r *run) measure() measure {
 	}
 	me.bytes += int64(len(r.Cancels)) * cancelOverhead
 	if f := r.Result; f != nil {
-		me.bytes += int64(resultOverhead + len(f.via) + (len(f.Outputs)+len(f.S3Outputs)+len(f.NotReturned))*outputOverhead)
+		me.bytes += resultOverhead
+		for _, o := range f.Outputs {
+			me.bytes += int64(outputOverhead + len(o.Name))
+		}
+		for _, o := range f.S3Outputs {
+			me.bytes += int64(outputOverhead + len(o.Name))
+		}
+		for _, o := range f.NotReturned {
+			me.bytes += int64(outputOverhead + len(o.Name))
+		}
 	}
 	return me
 }
@@ -540,8 +559,8 @@ type custodianFact struct {
 	src                            source
 }
 
-// pending is a record held for a key its signer rotated or registered since the keys were tailed, or for the echo
-// that admits its run, revalidated on each tick.
+// pending is a record held for a key its signer rotated or registered since the keys were tailed, or for the record it
+// joins, the run of a cancel, the claim of a decision, the request of a wrap or refusal, revalidated on each tick.
 type pending struct {
 	topic  string
 	record *kgo.Record
@@ -584,8 +603,11 @@ type model struct {
 	clock   func() time.Time
 	history operator.History
 	// names is the catalog of the configuration's names, rebuilt when the history extends.
-	names      *catalog
-	keys       signed.Keys
+	names *catalog
+	keys  signed.Keys
+	// signers is each key owner's principal, wherry.rcv.<receiver> or wherry.tnt.<tenant>.<host>, built from the state
+	// as the key topics are tailed: the label of every fact a key of that owner verified.
+	signers    map[string]string
 	runs       map[string]*run
 	progress   map[string]map[string]progressFact // holder -> run
 	custodians map[string]custodianFact
@@ -679,11 +701,11 @@ const (
 	pendingJoin = "join"
 )
 
-var errUnjoined = errors.New("record waits for the echo that admits its run")
+var errUnjoined = errors.New("record waits for the record it joins")
 
 // parsed is a record's work done outside the lock and in parallel: its digest and header, then, once it is known to
-// be new, its verification and decoding under the keys of the moment. The checks against the history and the fold
-// stay in order under the lock.
+// be new, its verification and decoding under the keys of the moment. The checks against the topic and the fold stay
+// in order under the lock.
 type parsed struct {
 	sum               [32]byte
 	digest            string
@@ -849,7 +871,8 @@ func (m *model) revalidate(now time.Time) {
 		switch {
 		case reason == "":
 		case reason == pendingKey && m.keysRead > p.keysRead:
-			// The key topics were tailed again and the record still verifies under none: it is signed by no member.
+			// The key topics were tailed again and the record still verifies under none: it is signed under no key the
+			// state names.
 			m.count("refused", 1)
 		case now.Sub(p.since) >= pendingFor:
 			m.count("expired", 1)
@@ -916,15 +939,13 @@ func (m *model) trim(r *run) bool {
 	}
 }
 
-// dropOldestEcho drops r's oldest echo other than the joined one, with the facts whose admission depended on it.
+// dropOldestEcho drops r's oldest echo other than the joined one.
 func (m *model) dropOldestEcho(r *run) bool {
 	hash, ok := r.oldestEcho()
 	if !ok {
 		return false
 	}
-	if retracted := m.removeEcho(r, hash); retracted > 0 {
-		m.count("retracted", retracted)
-	}
+	m.removeEcho(r, hash)
 	return true
 }
 
@@ -988,65 +1009,12 @@ func (m *model) evict(kept *run) {
 	}
 }
 
-// joined reports whether the record of binding, carrying hash and read under key, joins the echo that admitted its
-// run before the tenant's entitlement ended: the run the key names is the signed one, and it holds an echo of the
-// same tenant, pool and task hash appended while the tenant was entitled. A record of a tenant whose entitlement had
-// ended when it was appended counts only so joined.
-func (m *model) joined(binding wire.ReceiverBinding, hash, key string) bool {
-	r := m.runs[binding.Run]
-	if r == nil || binding.Run != key || r.Tenant != binding.Tenant {
-		return false
-	}
-	e, ok := r.Echoes[hash]
-	return ok && e.Pool == binding.Pool && m.history.EntitledAt(binding.Tenant, binding.Pool, e.At)
-}
-
-// via is the task hash a record's admission depends on: hash when binding's tenant was not entitled to the pool
-// when the record was appended, so it was taken only joined to the echo of that hash; else empty.
-func (m *model) via(binding wire.ReceiverBinding, hash string, at time.Time) string {
-	if m.history.EntitledAt(binding.Tenant, binding.Pool, at) {
-		return ""
-	}
-	return hash
-}
-
-// admits reports whether a fact of r appended at at and taken through the echo of hash is still authorised: the
-// tenant is entitled to the pool now or was then, or r still holds that echo, appended while the tenant was.
-func (m *model) admits(r *run, hash string, at time.Time) bool {
-	if m.history.EntitledAt(r.Tenant, r.Pool, at) {
-		return true
-	}
-	e, ok := r.Echoes[hash]
-	return ok && e.Pool == r.Pool && m.history.EntitledAt(r.Tenant, r.Pool, e.At)
-}
-
-// removeEcho drops r's echo of hash and rechecks every event, start failure and result whose admission depended on
-// it, whatever its signer: one it no longer authorises is retracted. It returns how many were.
-func (m *model) removeEcho(r *run, hash string) int64 {
+// removeEcho drops r's echo of hash and re-derives what followed from it: the run's task hash and its storage. No other
+// fact depends on an echo: each stands on its own signature.
+func (m *model) removeEcho(r *run, hash string) {
 	delete(r.Echoes, hash)
-	var retracted int64
-	for _, a := range r.Attempts {
-		a.Events = slices.DeleteFunc(a.Events, func(e event) bool {
-			if e.via != hash || m.admits(r, hash, e.src.at) {
-				return false
-			}
-			r.forget(a, e)
-			retracted++
-			return true
-		})
-		if f := a.StartFailure; f != nil && f.via == hash && !m.admits(r, hash, f.src.at) {
-			a.StartFailure = nil
-			retracted++
-		}
-	}
-	if f := r.Result; f != nil && f.via == hash && !m.admits(r, hash, f.src.at) {
-		r.Result = nil
-		retracted++
-	}
-	r.prune()
 	r.rehash()
 	m.storage(r)
-	return retracted
 }
 
 // applyEvent folds a parsed pool events record, read from pool's events.
@@ -1061,38 +1029,34 @@ func (m *model) applyEvent(pool string, p *parsed, record *kgo.Record) error {
 		if value.Wherry.Run != id {
 			return errors.New("status names another run than its key")
 		}
-		if err := m.history.CheckStatus(*value, pool, "", at, m.joined(value.Wherry.ReceiverBinding, value.Wherry.TaskHash, id)); err != nil {
-			return m.unjoined(err, id)
+		if err := operator.CheckStatus(*value, pool, ""); err != nil {
+			return err
 		}
 		return m.addStatus(*value, p.digest, src)
 	case *wire.StartFailure:
 		if value.Wherry.Run != id {
 			return errors.New("start failure names another run than its key")
 		}
-		if err := m.history.CheckStartFailure(*value, pool, at, m.joined(value.Wherry, value.TaskHash, id)); err != nil {
-			return m.unjoined(err, id)
+		if err := operator.CheckStartFailure(*value, pool); err != nil {
+			return err
 		}
 		r := m.runFor(value.Wherry.Run, value.Wherry.Tenant, value.Wherry.Pool, at)
 		a := r.attempt(value.Wherry.Attempt)
 		a.Receiver = cmp.Or(a.Receiver, value.Wherry.Receiver)
-		a.StartFailure = &startFailureFact{Profile: names.profile(value.Wherry.Receiver, value.Profile), Agent: names.agent(value.Wherry.Pool, value.Agent), Class: fixed(startClasses, value.Class),
-			At: at, via: m.via(value.Wherry, value.TaskHash, at), src: src}
+		a.StartFailure = &startFailureFact{Profile: names.profile(value.Wherry.Receiver, value.Profile), Agent: names.agent(value.Wherry.Pool, value.Agent), Class: fixed(startClasses, value.Class), At: at, src: src}
 		return nil
 	case *wire.OpenRequest:
-		if !m.history.MemberAt(value.Receiver, pool, at) || value.Run != id {
-			return errors.New("open request is not from a live member for its key's run")
+		if value.Run != id {
+			return errors.New("open request names another run than its key")
 		}
 		r := m.runFor(value.Run, "", pool, at)
 		r.Opens[p.digest] = &openFact{Digest: p.digest, Attempt: value.Attempt, Receiver: value.Receiver, At: at, src: src}
 		return nil
 	case *wire.AttemptWrap:
-		return m.answer(id, pool, value.Custodian, value.Request, "wrap", "", src)
+		return m.answer(id, value.Custodian, value.Request, "wrap", "", src)
 	case *wire.OpenRefusal:
-		return m.answer(id, pool, value.Custodian, value.Request, "refusal", fixed(refuseReasons, value.Reason), src)
+		return m.answer(id, value.Custodian, value.Request, "refusal", fixed(refuseReasons, value.Reason), src)
 	case *wire.ClaimDecision:
-		if !m.history.MemberAt(value.Custodian, pool, at) {
-			return errors.New("claim decision is not from a member")
-		}
 		r := m.runs[id]
 		if r == nil {
 			return errUnjoined
@@ -1106,9 +1070,6 @@ func (m *model) applyEvent(pool string, p *parsed, record *kgo.Record) error {
 		}
 		return errUnjoined
 	case *wire.RekeyWrap:
-		if !m.history.MemberAt(value.Holder, pool, at) {
-			return errors.New("re-key wrap is not from a member")
-		}
 		m.count("rekeys", 1)
 		return nil
 	case *wire.Cancel:
@@ -1116,7 +1077,7 @@ func (m *model) applyEvent(pool string, p *parsed, record *kgo.Record) error {
 		if r == nil || r.Tenant == "" {
 			return errUnjoined
 		}
-		if err := m.history.CheckCancel(*value, pool, r.Tenant, at); err != nil {
+		if err := operator.CheckCancel(*value, pool, r.Tenant); err != nil {
 			return err
 		}
 		if value.Run != id {
@@ -1129,21 +1090,9 @@ func (m *model) applyEvent(pool string, p *parsed, record *kgo.Record) error {
 	return errors.New("record is not a pool event")
 }
 
-// unjoined turns an entitlement refusal of a record of a run without an echo into a pending join; one of a run whose
-// echoes carry another task hash is refused, never adopted, and any other error stands.
-func (m *model) unjoined(err error, id string) error {
-	if r := m.runs[id]; (r == nil || len(r.Echoes) == 0) && strings.Contains(err.Error(), "not entitled") {
-		return errUnjoined
-	}
-	return err
-}
-
 // answer joins a custodian's wrap or refusal to the open request it names, by digest.
-func (m *model) answer(id, pool, custodian, request, kind, reason string, src source) error {
+func (m *model) answer(id, custodian, request, kind, reason string, src source) error {
 	at := src.at
-	if !m.history.MemberAt(custodian, pool, at) {
-		return errors.New("answer is not from a member")
-	}
 	r := m.runs[id]
 	if r == nil || r.Opens[request] == nil {
 		return errUnjoined
@@ -1166,12 +1115,7 @@ func (m *model) applyFeed(tenant string, p *parsed, record *kgo.Record) error {
 	switch value := p.value.(type) {
 	case *wire.Echo:
 		echo := *value
-		if err := m.history.CheckEcho(echo, tenant, at); err != nil {
-			// A tenant the state does not name yet may be in operator records appended since the last read of them;
-			// the echo waits for the next.
-			if _, known := m.history.State.Tenants[tenant]; !known {
-				return errUnjoined
-			}
+		if err := operator.CheckEcho(echo, tenant); err != nil {
 			return err
 		}
 		if echo.Run != id || wire.CheckEchoRunID(echo) != nil {
@@ -1199,8 +1143,8 @@ func (m *model) applyFeed(tenant string, p *parsed, record *kgo.Record) error {
 		if value.Wherry.Run != id {
 			return errors.New("status names another run than its key")
 		}
-		if err := m.history.CheckStatus(*value, "", tenant, at, m.joined(value.Wherry.ReceiverBinding, value.Wherry.TaskHash, id)); err != nil {
-			return m.unjoined(err, id)
+		if err := operator.CheckStatus(*value, "", tenant); err != nil {
+			return err
 		}
 		return m.addStatus(*value, p.digest, src)
 	case *wire.Result:
@@ -1208,8 +1152,8 @@ func (m *model) applyFeed(tenant string, p *parsed, record *kgo.Record) error {
 		if result.Wherry.Run != id {
 			return errors.New("result names another run than its key")
 		}
-		if err := m.history.CheckResult(result, tenant, at, m.joined(result.Wherry.ReceiverBinding, result.Wherry.TaskHash, id)); err != nil {
-			return m.unjoined(err, id)
+		if err := operator.CheckResult(result, tenant); err != nil {
+			return err
 		}
 		r := m.runFor(result.Wherry.Run, result.Wherry.Tenant, result.Wherry.Pool, at)
 		if r.Tenant != result.Wherry.Tenant {
@@ -1238,9 +1182,9 @@ func (m *model) storage(r *run) {
 	}
 }
 
-// addStatus keeps an authorised status under its run and attempt, once per event ID, never a lower attempt over a
-// higher one's terminal: each attempt keeps its own history and the run's state is derived from the highest. Its
-// kind, state and event are taken from the fixed sets, its event ID as wherry issues them or derived from the digest.
+// addStatus keeps a verified status under its run and attempt, once per event ID, never a lower attempt over a higher
+// one's terminal: each attempt keeps its own history and the run's state is derived from the highest. Its kind, state
+// and event are taken from the fixed sets, its event ID as wherry issues them or derived from the digest.
 func (m *model) addStatus(status wire.RunStatus, digest string, src source) error {
 	binding, at := status.Wherry, src.at
 	r := m.runFor(binding.Run, binding.Tenant, binding.Pool, at)
@@ -1265,7 +1209,7 @@ func (m *model) addStatus(status wire.RunStatus, digest string, src source) erro
 	receiverAt, _ := time.Parse(time.RFC3339, status.StatusUpdate.Status.Timestamp)
 	kind, state, named := fixed(statusKinds, binding.Kind), taskState(status.StatusUpdate.Status.State), fixed(statusEvents, binding.Event)
 	e := event{Kind: kind, State: state, EventID: id, Attempt: binding.Attempt, Receiver: binding.Receiver, At: at, ReceiverAt: receiverAt, LogOffset: binding.LogOffset,
-		Event: named, Class: FailureClass(kind, state, named), via: m.via(binding.ReceiverBinding, binding.TaskHash, at), src: src}
+		Event: named, Class: FailureClass(kind, state, named), src: src}
 	// Records of one attempt arrive in log order on each topic; the dual-written copy is the same event.
 	i, _ := slices.BinarySearchFunc(a.Events, e, func(x, y event) int { return x.At.Compare(y.At) })
 	a.Events = slices.Insert(a.Events, i, e)
@@ -1275,22 +1219,19 @@ func (m *model) addStatus(status wire.RunStatus, digest string, src source) erro
 	return nil
 }
 
-// projectResult is the Reference facts of result: where it ran, output sizes and hashes, and the reply's size. The
-// result's text, history, artifact parts, labels and output names are never kept; the profile is kept only as the
-// receiver's configuration names it.
+// projectResult is the Reference facts of result: where it ran, output names, sizes and hashes, and the reply's size.
+// The result's text, history, artifact parts and labels are never kept; the profile is kept only as the receiver's
+// configuration names it.
 func (m *model) projectResult(result wire.Result, src source) *resultFact {
 	binding := result.Wherry
-	fact := &resultFact{Receiver: binding.Receiver, Attempt: binding.Attempt, State: taskState(result.Task.Status.State), At: src.at, Artifacts: len(result.Task.Artifacts),
-		via: m.via(binding.ReceiverBinding, binding.TaskHash, src.at), src: src}
+	fact := &resultFact{Receiver: binding.Receiver, Attempt: binding.Attempt, State: taskState(result.Task.Status.State), At: src.at, Artifacts: len(result.Task.Artifacts), src: src}
 	var metadata wire.ResultMetadata
 	if result.Task.Metadata != nil && json.Unmarshal(result.Task.Metadata, &metadata, signed.Tolerant) == nil {
 		fact.Profile = m.catalog().profile(binding.Receiver, metadata.Profile)
 		fact.Outputs = outputs(metadata.Outputs)
 		fact.S3Outputs = outputs(metadata.S3Outputs)
 		for _, output := range metadata.NotReturned {
-			if wire.ValidOutputName(output.Name) {
-				fact.NotReturned = append(fact.NotReturned, unreturnedFact{Size: output.Size, Reason: unreturnedReason(output.Reason)})
-			}
+			fact.NotReturned = append(fact.NotReturned, unreturnedFact{Name: outputName(output.Name), Size: output.Size, Reason: unreturnedReason(output.Reason)})
 		}
 		if metadata.Reply != nil {
 			fact.ReplySize, fact.ReplyCut = metadata.Reply.Size, metadata.Reply.Cut
@@ -1299,11 +1240,25 @@ func (m *model) projectResult(result wire.Result, src source) *resultFact {
 	return fact
 }
 
+// InvalidName is the placeholder for an output name outside the output name grammar.
+const InvalidName = "(invalid name)"
+
+// outputName is name when wire.ValidOutputName accepts it, segments of letters, digits, '.', '_' and '-', else the
+// placeholder. Output names are the tenant's own: the one name a response carries that the configuration does not
+// yield, shown because the grammar admits nothing that needs escaping on any surface.
+func outputName(name string) string {
+	if wire.ValidOutputName(name) {
+		return name
+	}
+	return InvalidName
+}
+
+// outputs is each returned output whose hash is a SHA-256, with its name through outputName.
 func outputs(returned []wire.ReturnedOutput) []outputFact {
 	var facts []outputFact
 	for _, output := range returned {
-		if wire.ValidOutputName(output.Name) && wire.ValidHash(output.SHA256) {
-			facts = append(facts, outputFact{Size: output.Size, SHA256: output.SHA256})
+		if wire.ValidHash(output.SHA256) {
+			facts = append(facts, outputFact{Name: outputName(output.Name), Size: output.Size, SHA256: output.SHA256})
 		}
 	}
 	return facts
@@ -1377,13 +1332,15 @@ func (m *model) applyProgress(holder string, record *kgo.Record) {
 // custodianReasons are the fixed reasons a snapshot gives.
 var custodianReasons = []string{"bootstrap", "rotation", "takeover", "contested"}
 
-// applyCustodian keeps pool's latest authorised snapshot.
+// applyCustodian keeps pool's latest snapshot: one its custodian signed, naming the pool whose topic it was read from.
+// Whether the custodian is still a member is not asked: an ended custodian's snapshot is history, labelled with its
+// signer.
 func (m *model) applyCustodian(pool string, record *kgo.Record) {
 	if string(record.Key) != wire.CustodianKey || record.Value == nil {
 		return
 	}
-	snapshot, err := operator.AuthorizeSnapshotHistory(m.history.State, m.keys, record.Value, pool, record.Timestamp)
-	if err != nil {
+	snapshot, err := wire.ParseSnapshotHistory(record.Value, m.keys, record.Timestamp)
+	if err != nil || snapshot.Pool != pool {
 		m.count("refused", 1)
 		return
 	}
@@ -1398,8 +1355,8 @@ func (m *model) applyCustodian(pool string, record *kgo.Record) {
 }
 
 // retire retracts every fact folded from a record signed under owner's keyID and appended at or after since, the time
-// a rotation seen since retired it: such a record no longer verifies. An echo so retracted takes with it every fact
-// whose admission depended on it, whatever its signer. A run left with nothing is dropped.
+// a rotation seen since retired it: such a record no longer verifies. Facts under other keys stand, an echo's
+// dependents included. A run left with nothing is dropped.
 func (m *model) retire(owner, keyID string, since time.Time) {
 	gone := func(s source) bool { return s.retiredBy(owner, keyID, since) }
 	var retracted int64
@@ -1448,7 +1405,8 @@ func (m *model) retire(owner, keyID string, since time.Time) {
 		}
 		for _, hash := range slices.Sorted(maps.Keys(r.Echoes)) {
 			if gone(r.Echoes[hash].src) {
-				retracted += 1 + m.removeEcho(r, hash)
+				m.removeEcho(r, hash)
+				retracted++
 			}
 		}
 		r.prune()

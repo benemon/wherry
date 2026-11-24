@@ -24,7 +24,8 @@ const sentinel = "s3cr3t"
 
 // Rule 1: a sentinel planted in every record and span field the view reads, where the wire lets one through, reaches
 // no response, no stream event, no error body and no log line. Each planted record is folded, so the check is of the
-// projection, not of a refusal: the names show as the placeholder.
+// projection, not of a refusal: the names show as the placeholder. The output names planted are outside the output
+// name grammar, the one text a result shows when it is within it.
 func TestNoRecordStringReachesAnySurface(t *testing.T) {
 	f := newFixture(t)
 	at := f.now.Add(-10 * time.Minute)
@@ -52,8 +53,8 @@ func TestNoRecordStringReachesAnySurface(t *testing.T) {
 	f.status(at.Add(5*time.Second), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: run, kind: "terminal", state: wire.TaskStateFailed, text: sentinel + "-failure", eventID: sentinel + "-terminal"})
 	// A result whose metadata, message, artifact and history carry the sentinel, output names included.
 	metadata := wire.ResultMetadata{ReceiverID: receiverA, Pool: poolA, Profile: sentinel + "-profile", Labels: map[string]string{sentinel + "-label-key": sentinel + "-label-value"}, Job: sentinel + "-job",
-		Outputs: []wire.ReturnedOutput{{Name: sentinel + "-output.txt", SHA256: hashOf("out"), Size: 3, Key: sentinel + "-s3-key"}}, S3Outputs: []wire.ReturnedOutput{{Name: sentinel + "-big.tar", SHA256: hashOf("big"), Size: 9, Key: sentinel + "-s3-key"}},
-		NotReturned: []wire.UnreturnedOutput{{Name: sentinel + "-gone.txt", Reason: sentinel + "-reason"}}, Reply: &wire.ReturnedReply{SHA256: hashOf("reply"), Size: 70000}}
+		Outputs: []wire.ReturnedOutput{{Name: sentinel + "/../output.txt", SHA256: hashOf("out"), Size: 3, Key: sentinel + "-s3-key"}}, S3Outputs: []wire.ReturnedOutput{{Name: "/" + sentinel + "-big.tar", SHA256: hashOf("big"), Size: 9, Key: sentinel + "-s3-key"}},
+		NotReturned: []wire.UnreturnedOutput{{Name: "<" + sentinel + ">", Reason: sentinel + "-reason"}}, Reply: &wire.ReturnedReply{SHA256: hashOf("reply"), Size: 70000}}
 	encoded := must(t)(json.Marshal(metadata))
 	encoded = append(encoded[:len(encoded)-1], []byte(`,"`+sentinel+`-extra":"`+sentinel+`-value"}`)...)
 	message := func(id, text string) *wire.Message {
@@ -149,7 +150,8 @@ func TestNoRecordStringReachesAnySurface(t *testing.T) {
 		d.Attempts[0].Decision == nil || d.Attempts[0].Decision.Previous != Unknown || d.Attempts[1].StartFailure == nil || d.Attempts[1].StartFailure.Profile != Unknown || d.Attempts[1].StartFailure.Agent != Unknown {
 		t.Errorf("planted attempts: %+v", d.Attempts)
 	}
-	if d.Result == nil || d.Result.Profile != Unknown || len(d.Result.Outputs) != 1 || d.Result.Outputs[0].SHA256 != hashOf("out") || len(d.Result.S3Outputs) != 1 || len(d.Result.NotReturned) != 1 || d.Result.NotReturned[0].Reason != "other" || len(d.Opens) != 1 || d.Opens[0].Answer != "wrap" {
+	if d.Result == nil || d.Result.Profile != Unknown || len(d.Result.Outputs) != 1 || d.Result.Outputs[0].SHA256 != hashOf("out") || d.Result.Outputs[0].Name != InvalidName || len(d.Result.S3Outputs) != 1 || d.Result.S3Outputs[0].Name != InvalidName ||
+		len(d.Result.NotReturned) != 1 || d.Result.NotReturned[0].Reason != "other" || d.Result.NotReturned[0].Name != InvalidName || len(d.Opens) != 1 || d.Opens[0].Answer != "wrap" || d.Opens[0].AnswerSigner != operator.ReceiverPrincipal(receiverA) {
 		t.Errorf("planted result and open exchange: %+v %+v", d.Result, d.Opens)
 	}
 	b := receiverOf(t, snapshot, receiverB)
@@ -171,13 +173,13 @@ func TestNoRecordStringReachesAnySurface(t *testing.T) {
 	}
 }
 
-// Rule 3: an echo retracted by a rotation read late takes with it every status, result and start failure whose
-// admission depended on it, whatever their signer; a fact admitted on the entitlement alone stays, and so does a
-// cancel, which never depended on the echo.
-func TestEchoRemovalRetractsDependents(t *testing.T) {
+// Rule 3: an echo retracted by a rotation read late takes nothing else with it. Every fact stands on its own
+// signature: the statuses, result and start failure other receivers signed after the entitlement ended stay, labelled
+// with their signers, and so does the cancel.
+func TestEchoRetractionLeavesOtherSigners(t *testing.T) {
 	f := newFixture(t)
 	at := f.now.Add(-time.Minute)
-	// Run A: admitted, then the entitlement ends; receiver-b's terminal, result and start failure join the echo.
+	// Run A: admitted, then the entitlement ends; receiver-b's terminal, result and start failure follow.
 	a := f.echo(at, receiverA, tenantA, hostA, poolA, "dependent")
 	// Run B: admitted and worked while the tenant was entitled.
 	b := f.echo(at, receiverA, tenantA, hostA, poolA, "independent")
@@ -200,20 +202,22 @@ func TestEchoRemovalRetractsDependents(t *testing.T) {
 	f.rotate(receiverA, operator.ReceiverTopic(receiverA), at.Add(-time.Second))
 	f.tick(v)
 	s = v.Snapshot(0)
-	if d, ok := v.RunDetail(a); !ok || len(d.Echoes) != 0 || len(d.Attempts) != 0 || d.Result != nil || len(d.Cancels) != 1 || d.Terminal || d.Stage != "echoed" {
-		t.Errorf("facts admitted through the retracted echo kept, or the cancel lost: %+v %v", d, ok)
+	signer := operator.ReceiverPrincipal(receiverB)
+	if d, ok := v.RunDetail(a); !ok || len(d.Echoes) != 0 || len(d.Attempts) != 2 || d.Result == nil || len(d.Cancels) != 1 || !d.Terminal || d.Host != "" ||
+		d.Attempts[0].Events[0].Signer != signer || d.Result.Signer != signer || d.Attempts[1].StartFailure == nil || d.Attempts[1].StartFailure.Signer != signer || d.Cancels[0].Signer != operator.TenantPrincipal(tenantA, hostA) {
+		t.Errorf("facts under other keys retracted with the echo, or the labels wrong: %+v %v", d, ok)
 	}
 	if d, ok := v.RunDetail(b); !ok || len(d.Echoes) != 0 || len(d.Attempts) != 1 || len(d.Attempts[0].Events) != 1 || d.Attempts[0].Events[0].Kind != "claimed" || d.Host != "" {
-		t.Errorf("facts admitted on the entitlement retracted with the echo: %+v %v", d, ok)
+		t.Errorf("facts under another key retracted with the echo: %+v %v", d, ok)
 	}
-	if s.Counts["retracted"] != 5 {
-		t.Errorf("counts %v; want two echoes and three dependents retracted", s.Counts)
+	if s.Counts["retracted"] != 2 {
+		t.Errorf("counts %v; want the two echoes retracted and nothing else", s.Counts)
 	}
-	// A terminal joined to no echo after the end is refused, not taken.
+	// A terminal after the end, with no echo at all, is taken and labelled.
 	f.status(at.Add(3*time.Second), st{receiver: receiverB, tenant: tenantA, pool: poolA, run: a, kind: "terminal", state: wire.TaskStateFailed})
 	f.tick(v)
-	if r := summaryOf(t, v.Snapshot(0), a); r.Terminal {
-		t.Errorf("a record of an ended entitlement taken without its echo: %+v", r)
+	if r := summaryOf(t, v.Snapshot(0), a); !r.Terminal || r.Class != ClassFailed {
+		t.Errorf("a record of an ended entitlement refused without its echo: %+v", r)
 	}
 }
 

@@ -62,13 +62,14 @@ type Server struct {
 
 // The fixed error texts; nothing of a request reaches a response.
 const (
-	textForbidden   = "forbidden"
-	textNotFound    = "not found"
-	textBadRequest  = "bad request"
-	textTooMany     = "too many requests"
-	textBusy        = "busy"
-	textUnavailable = "unavailable"
-	textTooLarge    = "response over its bound"
+	textForbidden        = "forbidden"
+	textNotFound         = "not found"
+	textBadRequest       = "bad request"
+	textMethodNotAllowed = "method not allowed"
+	textTooMany          = "too many requests"
+	textBusy             = "busy"
+	textUnavailable      = "unavailable"
+	textTooLarge         = "response over its bound"
 )
 
 // csp is the page's Content-Security-Policy: assets from the embedded files alone, no inline script.
@@ -117,20 +118,20 @@ func Serve(v *View, opts ServeOptions) (*Server, error) {
 	s.port = listener.Addr().(*net.TCPAddr).Port
 	s.cookie = "wherry-view-" + strconv.Itoa(s.port)
 	mux := http.NewServeMux()
-	mux.Handle("GET /{$}", s.guard(s.static("index.html", "text/html; charset=utf-8"), false))
-	mux.Handle("GET /app.js", s.guard(s.static("app.js", "text/javascript; charset=utf-8"), false))
-	mux.Handle("GET /app.css", s.guard(s.static("app.css", "text/css; charset=utf-8"), false))
-	mux.Handle("POST /session", s.guard(http.HandlerFunc(s.session), false))
-	mux.Handle("GET /api/model", s.guard(http.HandlerFunc(s.model), true))
-	mux.Handle("GET /api/runs/{id}", s.guard(http.HandlerFunc(s.run), true))
-	mux.Handle("GET /api/runs/{id}/trace", s.guard(http.HandlerFunc(s.trace), true))
-	mux.Handle("GET /api/stream", s.guard(http.HandlerFunc(s.stream), true))
-	mux.Handle("/", s.guard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /{$}", s.static("index.html", "text/html; charset=utf-8"))
+	mux.Handle("GET /app.js", s.static("app.js", "text/javascript; charset=utf-8"))
+	mux.Handle("GET /app.css", s.static("app.css", "text/css; charset=utf-8"))
+	mux.Handle("POST /session", http.HandlerFunc(s.session))
+	mux.Handle("GET /api/model", http.HandlerFunc(s.model))
+	mux.Handle("GET /api/runs/{id}", http.HandlerFunc(s.run))
+	mux.Handle("GET /api/runs/{id}/trace", http.HandlerFunc(s.trace))
+	mux.Handle("GET /api/stream", http.HandlerFunc(s.stream))
+	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusNotFound, textNotFound)
-		s.log(r, http.StatusNotFound)
-	}), false))
-	// WriteTimeout stays 0 for the stream, whose writes carry their own deadline.
-	s.server = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(io.Discard, "", 0)}
+	}))
+	// WriteTimeout stays 0 for the stream, whose writes carry their own deadline. OPTIONS * reaches the guard like any
+	// other request. The server's own 400, 408 and 431 answers to a request it cannot read pass through no handler.
+	s.server = &http.Server{Handler: s.guard(mux), DisableGeneralOptionsHandler: true, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(io.Discard, "", 0)}
 	go func() {
 		s.err = s.server.Serve(listener)
 		close(s.done)
@@ -171,7 +172,7 @@ func (s *Server) Wait() error {
 }
 
 // allowedHost reports whether host, a request's Host, is the bound address, localhost on its port, or the external
-// URL's authority.
+// URL's authority, each compared as sent: a proxy sends the bare Host or the authority exactly.
 func (s *Server) allowedHost(host string) bool {
 	port := strconv.Itoa(s.port)
 	if host == "127.0.0.1:"+port || host == "localhost:"+port {
@@ -189,33 +190,86 @@ func (s *Server) allowedOrigin(origin string) bool {
 	return s.external != nil && origin == s.external.Scheme+"://"+s.external.Host
 }
 
-// guard checks Host, then Origin when present, sets the fixed headers and, with cookie, requires a session cookie.
-// Forwarded headers are ignored. Nothing of the request is logged but its method, route and status.
-func (s *Server) guard(next http.Handler, cookie bool) http.Handler {
+// guard wraps the whole mux, so no request reaches it, its redirects included, before the checks: Host, then Origin
+// when present, then the path, then the session cookie on the routes that need one. The fixed headers go on every
+// response it writes, and each request is logged once, by method, route and status. Forwarded headers are ignored.
+func (s *Server) guard(mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Cache-Control", "no-store")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Content-Security-Policy", csp)
 		h.Set("X-Content-Type-Options", "nosniff")
-		if !s.allowedHost(r.Host) {
-			s.fail(w, http.StatusForbidden, textForbidden)
-			s.log(r, http.StatusForbidden)
-			return
+		rec := &recorder{ResponseWriter: w}
+		defer func() { s.log(r, rec.status) }()
+		switch {
+		case !s.allowedHost(r.Host):
+			s.fail(rec, http.StatusForbidden, textForbidden)
+		case r.Header.Get("Origin") != "" && !s.allowedOrigin(r.Header.Get("Origin")):
+			s.fail(rec, http.StatusForbidden, textForbidden)
+		case r.Method == http.MethodConnect:
+			s.fail(rec, http.StatusMethodNotAllowed, textMethodNotAllowed)
+		case r.RequestURI != "*" && !cleanPath(r.URL.EscapedPath()):
+			s.fail(rec, http.StatusNotFound, textNotFound)
+		case s.needsCookie(mux, r) && !s.authenticated(r):
+			s.fail(rec, http.StatusForbidden, textForbidden)
+		default:
+			mux.ServeHTTP(rec, r)
 		}
-		if origin := r.Header.Get("Origin"); origin != "" && !s.allowedOrigin(origin) {
-			s.fail(w, http.StatusForbidden, textForbidden)
-			s.log(r, http.StatusForbidden)
-			return
-		}
-		if cookie && !s.authenticated(r) {
-			s.fail(w, http.StatusForbidden, textForbidden)
-			s.log(r, http.StatusForbidden)
-			return
-		}
-		next.ServeHTTP(w, r)
 	})
 }
+
+// needsCookie reports whether the route r matches needs a session cookie, by the pattern the mux would match: the path
+// is clean by now, so the mux names the pattern itself, never a redirect. The pattern is kept on r for the log, as the
+// mux sets it. OPTIONS * matches nothing.
+func (s *Server) needsCookie(mux *http.ServeMux, r *http.Request) bool {
+	if r.RequestURI == "*" {
+		return false
+	}
+	_, r.Pattern = mux.Handler(r)
+	return routes[r.Pattern].cookie
+}
+
+// cleanPath reports whether path, a request's escaped path, is one the mux matches as sent rather than redirects: it
+// starts with a slash, and no segment is empty, a dot, two dots or escapes a dot or a slash. The root alone ends in a
+// slash.
+func cleanPath(path string) bool {
+	if path == "/" {
+		return true
+	}
+	if !strings.HasPrefix(path, "/") || strings.Contains(strings.ToLower(path), "%2e") || strings.Contains(strings.ToLower(path), "%2f") {
+		return false
+	}
+	for _, segment := range strings.Split(path[1:], "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// recorder keeps the status a handler wrote for the log. Unwrap hands the server's writer to a ResponseController, so
+// the stream's write deadlines and flushes reach the connection.
+type recorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *recorder) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *recorder) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *recorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // authenticated reports whether r carries the session cookie with an issued session ID.
 func (s *Server) authenticated(r *http.Request) bool {
@@ -229,16 +283,21 @@ func (s *Server) authenticated(r *http.Request) bool {
 	return ok
 }
 
-// routes are the fixed identifiers the log names each matched pattern by; a request matching none is "other".
-var routes = map[string]string{
-	"GET /{$}": "page", "GET /app.js": "asset", "GET /app.css": "asset", "POST /session": "session",
-	"GET /api/model": "model", "GET /api/runs/{id}": "run", "GET /api/runs/{id}/trace": "trace", "GET /api/stream": "stream",
+// routes are the fixed identifiers the log names each matched pattern by, and whether the route needs the session
+// cookie; a request matching none is "other".
+var routes = map[string]struct {
+	name   string
+	cookie bool
+}{
+	"GET /{$}": {"page", false}, "GET /app.js": {"asset", false}, "GET /app.css": {"asset", false}, "POST /session": {"session", false},
+	"GET /api/model": {"model", true}, "GET /api/runs/{id}": {"run", true}, "GET /api/runs/{id}/trace": {"trace", true}, "GET /api/stream": {"stream", true},
 }
 
 // log writes the method as one of the fixed set, the matched route's fixed identifier and the status: nothing of the
-// request line's free text, which a request can fill with anything.
+// request line's free text, which a request can fill with anything. A request refused before the route was matched
+// is "other".
 func (s *Server) log(r *http.Request, status int) {
-	route := routes[r.Pattern]
+	route := routes[r.Pattern].name
 	if route == "" {
 		route = "other"
 	}
@@ -268,7 +327,6 @@ func (s *Server) static(name, contentType string) http.Handler {
 func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 	if !s.take() {
 		s.fail(w, http.StatusTooManyRequests, textTooMany)
-		s.log(r, http.StatusTooManyRequests)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, sessionBodyLimit)
@@ -279,21 +337,18 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 		}
 		if json.UnmarshalRead(r.Body, &body) != nil {
 			s.fail(w, http.StatusBadRequest, textBadRequest)
-			s.log(r, http.StatusBadRequest)
 			return
 		}
 		token = body.Token
 	} else {
 		if err := r.ParseForm(); err != nil {
 			s.fail(w, http.StatusBadRequest, textBadRequest)
-			s.log(r, http.StatusBadRequest)
 			return
 		}
 		token = r.PostForm.Get("token")
 	}
 	if subtle.ConstantTimeCompare([]byte(token), []byte(s.token)) != 1 {
 		s.fail(w, http.StatusForbidden, textForbidden)
-		s.log(r, http.StatusForbidden)
 		return
 	}
 	id := make([]byte, 32)
@@ -324,7 +379,6 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 	// Host-only (no Domain), named with the port since cookies are not port-isolated on loopback.
 	http.SetCookie(w, &http.Cookie{Name: s.cookie, Value: session, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: s.external != nil && s.external.Scheme == "https"})
 	w.WriteHeader(http.StatusNoContent)
-	s.log(r, http.StatusNoContent)
 }
 
 // take spends one of the session endpoint's tokens, refilled at the rate per minute.
@@ -375,7 +429,6 @@ func (s *Server) tooLarge(w http.ResponseWriter, r *http.Request) {
 	s.v.m.count(capResponse, 1)
 	s.v.mu.Unlock()
 	s.fail(w, http.StatusInsufficientStorage, textTooLarge)
-	s.log(r, http.StatusInsufficientStorage)
 }
 
 // writeJSON writes value within the response bound, or the fixed over-bound text.
@@ -384,7 +437,6 @@ func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, value any) bo
 	switch {
 	case err != nil:
 		s.fail(w, http.StatusInternalServerError, textUnavailable)
-		s.log(r, http.StatusInternalServerError)
 		return false
 	case !fits:
 		s.tooLarge(w, r)
@@ -392,7 +444,6 @@ func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, value any) bo
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(encoded)
-	s.log(r, http.StatusOK)
 	return true
 }
 
@@ -404,13 +455,11 @@ func (s *Server) model(w http.ResponseWriter, r *http.Request) {
 		encoded, fits, err := marshalBounded(snapshot, s.v.opts.Caps.ResponseBytes)
 		if err != nil {
 			s.fail(w, http.StatusInternalServerError, textUnavailable)
-			s.log(r, http.StatusInternalServerError)
 			return
 		}
 		if fits {
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(encoded)
-			s.log(r, http.StatusOK)
 			return
 		}
 		s.v.mu.Lock()
@@ -418,7 +467,6 @@ func (s *Server) model(w http.ResponseWriter, r *http.Request) {
 		s.v.mu.Unlock()
 		if maxRuns == 1 || len(snapshot.Runs) == 0 {
 			s.fail(w, http.StatusInsufficientStorage, textTooLarge)
-			s.log(r, http.StatusInsufficientStorage)
 			return
 		}
 		if maxRuns == 0 {
@@ -432,13 +480,11 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !runIDPattern.MatchString(id) {
 		s.fail(w, http.StatusNotFound, textNotFound)
-		s.log(r, http.StatusNotFound)
 		return
 	}
 	detail, ok := s.v.RunDetail(id)
 	if !ok {
 		s.fail(w, http.StatusNotFound, textNotFound)
-		s.log(r, http.StatusNotFound)
 		return
 	}
 	// A detail whose least possible encoding is over the bound is refused before any of it is encoded.
@@ -453,7 +499,6 @@ func (s *Server) trace(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !runIDPattern.MatchString(id) {
 		s.fail(w, http.StatusNotFound, textNotFound)
-		s.log(r, http.StatusNotFound)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), s.v.opts.Caps.TraceScan+10*time.Second)
@@ -462,16 +507,13 @@ func (s *Server) trace(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, errNotFound):
 		s.fail(w, http.StatusNotFound, textNotFound)
-		s.log(r, http.StatusNotFound)
 		return
 	case errors.Is(err, errBusy):
 		s.fail(w, http.StatusServiceUnavailable, textBusy)
-		s.log(r, http.StatusServiceUnavailable)
 		return
 	case err != nil:
 		// The error's text can name a record; the response says only that the read failed.
 		s.fail(w, http.StatusBadGateway, textUnavailable)
-		s.log(r, http.StatusBadGateway)
 		return
 	}
 	s.writeJSON(w, r, forest)
@@ -492,7 +534,6 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	controller := http.NewResponseController(w)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
-	s.log(r, http.StatusOK)
 	versions, unsubscribe := s.v.Subscribe()
 	defer unsubscribe()
 	write := func(text string) bool {

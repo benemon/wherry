@@ -109,13 +109,17 @@ type Offer struct {
 	InFlight int64  `json:"in_flight"`
 }
 
+// HeldRun is a run a receiver's progress records say it holds. Progress records are unsigned, so Source is the
+// progress topic the record was read from, written under the receiver's ACL, not a signer.
 type HeldRun struct {
 	Run     string `json:"run"`
 	Attempt int64  `json:"attempt"`
 	Stage   string `json:"stage"`
 	Stale   bool   `json:"stale,omitzero"`
+	Source  string `json:"source"`
 }
 
+// Custodian is a pool's latest snapshot; Signer is the principal whose key verified it.
 type Custodian struct {
 	Pool         string    `json:"pool"`
 	Receiver     string    `json:"receiver"`
@@ -127,6 +131,7 @@ type Custodian struct {
 	SuspendedFor int64     `json:"suspended_for"`
 	ResumedFor   int64     `json:"resumed_for"`
 	Suspended    bool      `json:"suspended"`
+	Signer       string    `json:"signer"`
 }
 
 type Host struct {
@@ -195,6 +200,8 @@ type RunDetail struct {
 	Path             []PathStep `json:"path"`
 }
 
+// Every fact of a run's detail folded from a signed record carries Signer, the principal of the owner whose key verified
+// it, wherry.rcv.<receiver> or wherry.tnt.<tenant>.<host>: what the record's text names is never the label.
 type Echo struct {
 	Receiver string    `json:"receiver"`
 	Host     string    `json:"host"`
@@ -203,6 +210,7 @@ type Echo struct {
 	Model    string    `json:"model,omitzero"`
 	At       time.Time `json:"at"`
 	Joined   bool      `json:"joined"`
+	Signer   string    `json:"signer"`
 }
 
 type Attempt struct {
@@ -225,6 +233,7 @@ type Event struct {
 	LogOffset  *int64    `json:"log_offset,omitzero"`
 	Event      string    `json:"event,omitzero"`
 	Class      string    `json:"class,omitzero"`
+	Signer     string    `json:"signer"`
 }
 
 type Decision struct {
@@ -233,6 +242,7 @@ type Decision struct {
 	Reason    string    `json:"reason"`
 	Served    bool      `json:"served"`
 	At        time.Time `json:"at"`
+	Signer    string    `json:"signer"`
 }
 
 type StartFailure struct {
@@ -240,21 +250,27 @@ type StartFailure struct {
 	Agent   string    `json:"agent"`
 	Class   string    `json:"class"`
 	At      time.Time `json:"at"`
+	Signer  string    `json:"signer"`
 }
 
+// Open is an open request and its answer; AnswerSigner is the principal whose key verified the wrap or refusal, the
+// custodian's, whatever receiver the wrap names.
 type Open struct {
-	Attempt    int64     `json:"attempt"`
-	Receiver   string    `json:"receiver"`
-	At         time.Time `json:"at"`
-	Answer     string    `json:"answer,omitzero"`
-	Custodian  string    `json:"custodian,omitzero"`
-	Reason     string    `json:"reason,omitzero"`
-	AnsweredAt time.Time `json:"answered_at,omitzero"`
+	Attempt      int64     `json:"attempt"`
+	Receiver     string    `json:"receiver"`
+	At           time.Time `json:"at"`
+	Signer       string    `json:"signer"`
+	Answer       string    `json:"answer,omitzero"`
+	Custodian    string    `json:"custodian,omitzero"`
+	Reason       string    `json:"reason,omitzero"`
+	AnsweredAt   time.Time `json:"answered_at,omitzero"`
+	AnswerSigner string    `json:"answer_signer,omitzero"`
 }
 
 type Cancel struct {
-	Host string    `json:"host"`
-	At   time.Time `json:"at"`
+	Host   string    `json:"host"`
+	At     time.Time `json:"at"`
+	Signer string    `json:"signer"`
 }
 
 type Result struct {
@@ -269,15 +285,19 @@ type Result struct {
 	ReplySize   int64        `json:"reply_size"`
 	ReplyCut    bool         `json:"reply_cut,omitzero"`
 	Artifacts   int          `json:"artifacts"`
+	Signer      string       `json:"signer"`
 }
 
-// Output is a returned output's size and hash; the name a record gives it is never carried.
+// Output is a returned output's name, size and hash. The name is the tenant's own, kept when it follows the output
+// name grammar, else the placeholder.
 type Output struct {
+	Name   string `json:"name"`
 	Size   int64  `json:"size"`
 	SHA256 string `json:"sha256"`
 }
 
 type Unreturned struct {
+	Name   string `json:"name"`
 	Size   int64  `json:"size"`
 	Reason string `json:"reason"`
 }
@@ -442,7 +462,7 @@ func (v *View) Snapshot(maxRuns int) Snapshot {
 		if custodian, ok := m.custodians[pool]; ok {
 			p.Custodian = names.receiver(custodian.Custodian)
 			s.Custodians = append(s.Custodians, Custodian{Pool: pool, Receiver: p.Custodian, Status: operator.ReceiverStatus(state, m.ads, custodian.Custodian, now), KeyID: custodian.KeyID, Reason: custodian.Reason, At: custodian.At,
-				RotatedFor: custodian.RotatedFor, SuspendedFor: custodian.SuspendedFor, ResumedFor: custodian.ResumedFor, Suspended: state.Suspended[pool]})
+				RotatedFor: custodian.RotatedFor, SuspendedFor: custodian.SuspendedFor, ResumedFor: custodian.ResumedFor, Suspended: state.Suspended[pool], Signer: m.signer(custodian.src)})
 		}
 		s.Pools = append(s.Pools, p)
 	}
@@ -464,11 +484,12 @@ func (v *View) Snapshot(maxRuns int) Snapshot {
 				}
 			}
 		}
+		source := operator.ReceiverProgressTopic(receiver)
 		for _, h := range held.Identified {
-			node.Held = append(node.Held, HeldRun(h))
+			node.Held = append(node.Held, HeldRun{Run: h.Run, Attempt: h.Attempt, Stage: h.Stage, Stale: h.Stale, Source: source})
 		}
 		for _, h := range held.Stale {
-			node.Stale = append(node.Stale, HeldRun(h))
+			node.Stale = append(node.Stale, HeldRun{Run: h.Run, Attempt: h.Attempt, Stage: h.Stage, Stale: h.Stale, Source: source})
 		}
 		s.Receivers = append(s.Receivers, node)
 	}
@@ -580,7 +601,7 @@ func (m *model) now() time.Time {
 }
 
 // RunDetail is run id's detail: its echoes, attempts and events, open exchange, cancels, result references and path,
-// every name through the catalog.
+// every name through the catalog and every signed fact labelled with its signer.
 func (v *View) RunDetail(id string) (RunDetail, bool) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
@@ -588,12 +609,12 @@ func (v *View) RunDetail(id string) (RunDetail, bool) {
 	if !ok {
 		return RunDetail{}, false
 	}
-	names := v.m.catalog()
+	names, signer := v.m.catalog(), v.m.signer
 	receiver, host := names.receiver, func(name string) string { return names.host(r.Tenant, name) }
 	d := RunDetail{RunSummary: v.m.summary(r, names), Hash: r.Hash, Echoes: []Echo{}, Attempts: []Attempt{}, Opens: []Open{}, Cancels: []Cancel{}, Path: []PathStep{}}
 	// An echo carrying another task hash than the run's statuses did not admit them; it is counted, never shown.
 	if e, ok := r.echo(); ok {
-		d.Echoes = append(d.Echoes, Echo{Receiver: receiver(e.Receiver), Host: host(e.Host), Pool: names.pool(e.Pool), Agent: names.agent(r.Pool, e.Agent), Model: names.model(r.Pool, e.Model), At: e.At, Joined: true})
+		d.Echoes = append(d.Echoes, Echo{Receiver: receiver(e.Receiver), Host: host(e.Host), Pool: names.pool(e.Pool), Agent: names.agent(r.Pool, e.Agent), Model: names.model(r.Pool, e.Model), At: e.At, Joined: true, Signer: signer(e.src)})
 		d.Path = append(d.Path, PathStep{Step: "admitted", Actor: host(e.Host) + " > " + receiver(e.Receiver), At: e.At})
 	}
 	d.MismatchedEchoes = len(r.Echoes) - len(d.Echoes)
@@ -601,7 +622,7 @@ func (v *View) RunDetail(id string) (RunDetail, bool) {
 		a := r.Attempts[number]
 		attempt := Attempt{Number: number, Receiver: receiver(a.Receiver), TaskTopic: names.taskTopic(a.TaskTopic), TaskOffset: a.TaskOffset, Events: []Event{}}
 		for _, e := range a.Events {
-			attempt.Events = append(attempt.Events, Event{Kind: e.Kind, State: string(e.State), EventID: e.EventID, Receiver: receiver(e.Receiver), At: e.At, ReceiverAt: e.ReceiverAt, LogOffset: e.LogOffset, Event: e.Event, Class: e.Class})
+			attempt.Events = append(attempt.Events, Event{Kind: e.Kind, State: string(e.State), EventID: e.EventID, Receiver: receiver(e.Receiver), At: e.At, ReceiverAt: e.ReceiverAt, LogOffset: e.LogOffset, Event: e.Event, Class: e.Class, Signer: signer(e.src)})
 			step := PathStep{Step: e.Kind, Actor: receiver(e.Receiver), Attempt: number, At: e.At}
 			if e.Kind == "terminal" || e.Kind == "rejected" {
 				step.Detail = stateWord(e.State)
@@ -612,29 +633,33 @@ func (v *View) RunDetail(id string) (RunDetail, bool) {
 			d.Path = append(d.Path, step)
 		}
 		if a.Decision != nil {
-			attempt.Decision = &Decision{Custodian: receiver(a.Decision.Custodian), Previous: receiver(a.Decision.Previous), Reason: a.Decision.Reason, Served: a.Decision.Served, At: a.Decision.At}
+			attempt.Decision = &Decision{Custodian: receiver(a.Decision.Custodian), Previous: receiver(a.Decision.Previous), Reason: a.Decision.Reason, Served: a.Decision.Served, At: a.Decision.At, Signer: signer(a.Decision.src)}
 			d.Path = append(d.Path, PathStep{Step: "claim decided", Actor: receiver(a.Decision.Custodian), Attempt: number, At: a.Decision.At, Detail: a.Decision.Reason})
 		}
 		if f := a.StartFailure; f != nil {
-			attempt.StartFailure = &StartFailure{Profile: names.profile(a.Receiver, f.Profile), Agent: names.agent(r.Pool, f.Agent), Class: f.Class, At: f.At}
+			attempt.StartFailure = &StartFailure{Profile: names.profile(a.Receiver, f.Profile), Agent: names.agent(r.Pool, f.Agent), Class: f.Class, At: f.At, Signer: signer(f.src)}
 			d.Path = append(d.Path, PathStep{Step: "start failed", Actor: receiver(a.Receiver), Attempt: number, At: f.At, Detail: StartFailureClass(f.Class)})
 		}
 		d.Attempts = append(d.Attempts, attempt)
 	}
 	for _, digest := range slices.Sorted(maps.Keys(r.Opens)) {
 		o := r.Opens[digest]
-		d.Opens = append(d.Opens, Open{Attempt: o.Attempt, Receiver: receiver(o.Receiver), At: o.At, Answer: o.Answer, Custodian: receiver(o.Custodian), Reason: o.Reason, AnsweredAt: o.AnsweredAt})
+		open := Open{Attempt: o.Attempt, Receiver: receiver(o.Receiver), At: o.At, Signer: signer(o.src), Answer: o.Answer, Custodian: receiver(o.Custodian), Reason: o.Reason, AnsweredAt: o.AnsweredAt}
+		if o.Answer != "" {
+			open.AnswerSigner = signer(o.answerSrc)
+		}
+		d.Opens = append(d.Opens, open)
 		d.Path = append(d.Path, PathStep{Step: "open requested", Actor: receiver(o.Receiver), Attempt: o.Attempt, At: o.At})
 		if o.Answer != "" {
 			d.Path = append(d.Path, PathStep{Step: "open " + o.Answer, Actor: receiver(o.Custodian), Attempt: o.Attempt, At: o.AnsweredAt, Detail: o.Reason})
 		}
 	}
 	for _, c := range r.Cancels {
-		d.Cancels = append(d.Cancels, Cancel{Host: host(c.Host), At: c.At})
+		d.Cancels = append(d.Cancels, Cancel{Host: host(c.Host), At: c.At, Signer: signer(c.src)})
 		d.Path = append(d.Path, PathStep{Step: "cancelled", Actor: host(c.Host), At: c.At})
 	}
 	if f := r.Result; f != nil {
-		result := &Result{Receiver: receiver(f.Receiver), Attempt: f.Attempt, State: string(f.State), At: f.At, Profile: names.profile(f.Receiver, f.Profile), Outputs: []Output{}, S3Outputs: []Output{}, NotReturned: []Unreturned{}, ReplySize: f.ReplySize, ReplyCut: f.ReplyCut, Artifacts: f.Artifacts}
+		result := &Result{Receiver: receiver(f.Receiver), Attempt: f.Attempt, State: string(f.State), At: f.At, Profile: names.profile(f.Receiver, f.Profile), Outputs: []Output{}, S3Outputs: []Output{}, NotReturned: []Unreturned{}, ReplySize: f.ReplySize, ReplyCut: f.ReplyCut, Artifacts: f.Artifacts, Signer: signer(f.src)}
 		for _, o := range f.Outputs {
 			result.Outputs = append(result.Outputs, Output(o))
 		}

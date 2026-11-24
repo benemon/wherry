@@ -343,7 +343,8 @@ func (v *View) readOperator(ctx context.Context) error {
 
 // readKeys tails every receiver's and host's key topic that exists, each from the offset its last tail reached, in
 // bounded batches to the end it lists, and folds the new records into the keys. A rotation seen for the first time
-// retires a key from its append time: the facts folded from records signed with it after that are retracted.
+// retires a key from its append time: the facts folded from records signed with it after that are retracted. The
+// principal each key owner labels its facts with is rebuilt from the state here, with the owners walked.
 func (v *View) readKeys(ctx context.Context, existing map[string]bool) error {
 	v.mu.RLock()
 	state, caps := v.m.history.State, v.m.caps
@@ -354,6 +355,16 @@ func (v *View) readKeys(ctx context.Context, existing map[string]bool) error {
 		}
 	}
 	v.mu.RUnlock()
+	signers := map[string]string{}
+	for receiver := range state.Receivers {
+		signers[receiver] = operator.ReceiverPrincipal(receiver)
+	}
+	for principal, host := range state.Hosts {
+		signers[signed.HostOwner(host.Tenant, host.Name)] = principal
+	}
+	v.mu.Lock()
+	v.m.signers = signers
+	v.mu.Unlock()
 	for len(offsets) > 0 {
 		ranges, err := v.reader.ReadRanges(ctx, offsets, operator.Bounds{Records: caps.BatchRecords, Bytes: caps.BatchBytes})
 		if err != nil {
