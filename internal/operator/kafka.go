@@ -248,8 +248,8 @@ type TrustSource struct {
 // BundleRefresh is the operator command that rewrites a bundle, and how its holder installs the new one.
 type BundleRefresh struct{ Command, Install string }
 
-// ExplainUnknownAuthority replaces err, when unknownAuthority, with what failed, why for the CA source trusts and the
-// one remedy for it, keeping err at the end; any other err is returned as it is.
+// ExplainUnknownAuthority replaces err, when unknownAuthority, with what failed, why in terms of the CA source names
+// and the one remedy for that CA, keeping err at the end; any other err is returned as it is.
 func ExplainUnknownAuthority(err error, source TrustSource, refresh BundleRefresh) error {
 	if !unknownAuthority(err) {
 		return err
