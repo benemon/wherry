@@ -190,6 +190,15 @@ wherry submit --prompt "Fix the failing test" \
   --git https://github.com/acme/app.git@main --git-changes patch
 ```
 
+Without `@REF`, the task carries the commit the remote's default branch
+holds when `submit` runs. `--git .` sends the repository you are working in:
+its `origin` at the commit checked out, which must be on the remote, pushed
+or already there, or `submit` refuses it naming the branch to push. Both
+forms run `git` on the host, isolated from its configuration and
+environment, and nothing is written to your repository; the
+[command](commands.md#wherry-host-submit) gives the parsing rule, the checks
+and the credentials `git ls-remote` uses.
+
 The host's `git` configuration gives the clone its credential and, for
 `ssh`, its host key:
 
@@ -215,7 +224,8 @@ credential has a source and its `host_key` is a readable file. A task
 credential of the entry's credential name is refused.
 
 The agent runs `git` itself, from its image or host, with the commands the
-prompt gives it; the receiver and the plugin run no git. The
+prompt gives it; the receiver and the plugin run no git, and the host runs
+it only for `--git .` and a remote without `@REF`. The
 [extension](a2a-extension-v1.md#git-input) defines the remote, ref and path
 rules and the commands. For the agent to follow them:
 

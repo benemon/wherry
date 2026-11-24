@@ -93,7 +93,11 @@ Its completion is how you learn the run ended, so you skip the `result` tool
 loop below. Then carry on with other work.
 
 `git` names a repository the agent clones itself: `remote` (an `https` or `ssh`
-URL, or `user@host:path`) and `ref` are required. The clone's credential, and an
+URL, or `user@host:path`) is required, at `ref` when given and otherwise at the
+commit its default branch holds at submit. A `remote` of `.` is the repository
+you are working in, its `origin` at the commit checked out, which must be on the
+remote, pushed or already there, and takes no `ref`; `submit` otherwise returns
+`INVALID_ARGUMENT` naming the branch to push. The clone's credential, and an
 `ssh` remote's host key, come from the `git` entry of the user's wherry
 configuration whose `url` is the longest prefix of the remote; a remote under no
 entry clones anonymously, and an `ssh` one then returns `INVALID_ARGUMENT`. Its
@@ -109,7 +113,9 @@ Pick the route by what this host can reach:
 
 - A public `https` repository: `git` with its `remote` and `ref`.
 - A private one: the same, under a `git` entry for its URL.
-- A private one no `git` entry covers, a host outside the pool's VCS hosts, or local or
+- The repository you are working in, once its commit is pushed: `git` with
+  `remote` `.`.
+- A private one no `git` entry covers, a host outside the pool's VCS hosts, or
   unpushed work: bundle it (`git bundle create repo.bundle <ref>`), send the
   bundle as an input, and tell the agent to clone it from its input directory
   and leave `changes.bundle` in its output directory. Ask for that output and

@@ -327,7 +327,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	selectorText := flags.String("selector", "", "labels the profile must carry: key=v|v, key!=v|v, key, !key, comma-separated")
 	prompt := flags.String("prompt", "", "prompt text")
 	promptFile := flags.String("prompt-file", "", "prompt file, or - for standard input")
-	gitRemote := flags.String("git", "", "REMOTE@REF: git repository the agent clones, an https or ssh URL or user@host:path, at a branch, tag or commit")
+	gitRemote := flags.String("git", "", "REMOTE[@REF] or .: git repository the agent clones, an https or ssh URL or user@host:path, at a branch, tag or commit, or without @REF at its default branch's commit; . is this repository's origin at the current commit, which must be on it")
 	gitPath := flags.String("git-path", "", "checkout directory, relative (default: the repository name)")
 	gitChanges := flags.String("git-changes", "", "bundle, patch or none: the agent's commits come back as changes.bundle (default), as changes.patch, or not at all")
 	continueRun := flags.String("continue", "", "RUN_ID: continue from the changes.bundle result collected for a run of this host, in its repository, and return the next one through the pool's bucket")
@@ -364,7 +364,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry host submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE@REF [--git-path PATH] [--git-changes bundle|patch|none] | --continue RUN_ID] [--input FILE]... [--credential NAME|NAME:file=FILE|NAME:env=VAR]... [--output NAME[:s3]]... [--start-by TIME|DURATION] [--end-by TIME|DURATION] [--wait [--outputs-dir DIR]]")
+		return errors.New("usage: wherry host submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE[@REF]|. [--git-path PATH] [--git-changes bundle|patch|none] | --continue RUN_ID] [--input FILE]... [--credential NAME|NAME:file=FILE|NAME:env=VAR]... [--output NAME[:s3]]... [--start-by TIME|DURATION] [--end-by TIME|DURATION] [--wait [--outputs-dir DIR]]")
 	}
 	if wasSet(flags, "outputs-dir") && !*wait {
 		return errors.New("--outputs-dir requires --wait")
@@ -383,11 +383,11 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return errors.New("--continue takes the git input of the run it continues: drop --git, --git-path and --git-changes")
 	}
 	if *gitRemote != "" {
-		at := strings.LastIndex(*gitRemote, "@")
-		if at < 0 {
-			return errors.New("--git takes REMOTE@REF")
+		remote, ref := busclient.ParseGit(*gitRemote)
+		if ref == "" && remote != *gitRemote {
+			return errors.New("--git REMOTE@ needs a branch, tag or commit after @; drop the @ for the default branch")
 		}
-		git = &wire.GitInput{Remote: (*gitRemote)[:at], Ref: (*gitRemote)[at+1:], Path: *gitPath}
+		git = &wire.GitInput{Remote: remote, Ref: ref, Path: *gitPath}
 	} else if wasSet(flags, "git-path") || wasSet(flags, "git-changes") {
 		return errors.New("--git-path and --git-changes need --git")
 	}
