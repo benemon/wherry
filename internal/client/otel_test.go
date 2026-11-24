@@ -249,7 +249,7 @@ func TestTracedUploadInputsCarryTheTerms(t *testing.T) {
 	receiver.advertise(t, f.ctx, nil)
 	file, _ := randomFile(t, "dataset.bin", 1024)
 	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "upload", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}},
-		Outputs: []wire.ExpectedOutput{{Name: "report.pdf", Required: true, Storage: wire.StorageS3}}, EndBy: time.Now().Add(30 * time.Minute), StartBy: time.Now().Add(10 * time.Minute)})
+		Outputs: []wire.ExpectedOutput{{Name: "report.pdf", Storage: wire.StorageS3}}, EndBy: time.Now().Add(30 * time.Minute), StartBy: time.Now().Add(10 * time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}

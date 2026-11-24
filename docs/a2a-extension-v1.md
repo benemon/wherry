@@ -181,7 +181,7 @@ A submission is the task of one run.
     "task_ended_by": 1790000000,
     "credentials": [{"name": "deploy-key", "file": "git-credential"}, {"name": "vault-token", "env": "VAULT_TOKEN"}],
     "supplied_credentials": ["model-api-key"],
-    "outputs": [{"name": "report.md", "required": true}, {"name": "plot.pdf", "storage": "s3"}],
+    "outputs": [{"name": "report.md"}, {"name": "plot.pdf", "storage": "s3"}],
     "s3_inputs": [{"name": "dataset.parquet", "size": 5242880, "sha256": "4f1c..."}],
     "git": {
       "remote": "ssh://git@git.example.com/team/app.git",
@@ -275,11 +275,13 @@ A submission is the task of one run.
   is unset at resubmit is left out. This field replaces
   `unsupplied_credentials` of earlier versions, which a receiver ignores.
 - `outputs` lists at most 256 files the agent is asked to leave, each
-  `{name, required, storage}`. `name` is a relative path of file names joined by
-  `/`, at most 512 bytes, and appears once. `required` defaults to false.
-  `storage` `s3` returns the output through the pool's bucket
-  ([S3 inputs and outputs](#s3-inputs-and-outputs)); absent, it returns on
-  the transcript topic.
+  `{name, storage}`. `name` is a relative path of file names joined by
+  `/`, at most 512 bytes, and appears once. Every output is required: a run
+  that does not return one fails, except for `changes.bundle` or
+  `changes.patch` on a run with a `git` input, the changes file a run that
+  commits nothing leaves unwritten. `storage` `s3` returns the output
+  through the pool's bucket ([S3 inputs and outputs](#s3-inputs-and-outputs));
+  absent, it returns on the transcript topic.
 - `s3_inputs` lists files the host uploaded to the pool's bucket, each
   `{name, size, sha256}`: a file name distinct from every input file's,
   appearing once, the object's size in bytes, at most 5 GiB, and its
@@ -325,8 +327,9 @@ A submission is the task of one run.
   `s3_input_run` is its own. No value is empty. A host refuses to build an
   envelope that breaks these rules.
 - A host presigns an S3 input's GET until `task_started_by` plus 15
-  minutes, and an S3 output's PUT until `task_ended_by`, each at most 7
-  days.
+  minutes, and an S3 output's PUT until `task_ended_by` plus 10 minutes,
+  the upload grace, each at most 7 days. A host refuses to presign for a
+  `task_ended_by` that has passed, grace or no grace.
 
 A submission whose input names repeat, among its input files, its S3 inputs
 and `known_hosts`, fails to decode, so a receiver drops it at
@@ -460,6 +463,8 @@ base64 does. The fixed texts are:
   `agent ended by <signal>` (each followed by the platform's reason,
   redacted, in parentheses when the plugin gives one, as in
   `agent exited 137 (OOMKilled)`), `agent reported no outcome`,
+  `agent returned no reply` for a completed outcome whose message has no
+  text once trimmed of whitespace and no data part,
   `an S3 input was not fetched, or did not match its size and SHA-256`,
   `cannot be opened: the pool's custodian changed and its key was lost`
   and `envelope invalid` ([Open refusal](#open-refusal)), the reason an opened envelope fails its
@@ -731,7 +736,7 @@ extension reserves its keys ([Encoding](#encoding)):
 | `rejected: symlink`, `rejected: fifo`, `rejected: device`, `rejected: socket`, `rejected: irregular file` | the entry is not a regular file and was not read |
 | `rejected: invalid name` | the path is not a relative path of file names of at most 512 bytes; `name` is the path quoted as ASCII, at most 256 bytes |
 | `rejected: size changed while read` | the plugin read a length other than the size it listed |
-| `rejected: reserved name` | the path is `result` or `transcript`, a result's own [artifact](#reference-artifacts) IDs |
+| `rejected: reserved name` | the path is `result` or `transcript`, a result's own [artifact](#reference-artifacts) IDs, or `reply.txt`, where an MCP host writes the reply |
 | `exceeds the S3 object limit` | an S3 output over 5 GiB |
 | `not streamed by the plugin` | the plugin did not stream an S3 output it found |
 | `not uploaded: no upload URL` | the attempt holds no PUT URL for the S3 output |
@@ -1504,8 +1509,9 @@ succeeds, at that bound or on a cancel, the receiver collects the job's
 outputs as it does when the job ends ([Inputs and outputs](#inputs-and-outputs))
 and the result lists them; the state and message stay the bound's or the
 cancel's, whatever the outcome file says. An S3 output's presigned upload
-expires at `task_ended_by`, so after the bound an S3 output is listed as not
-uploaded.
+lasts 10 minutes past `task_ended_by`, and the collection runs within them,
+so an S3 output the job left uploads; one still uploading when they pass is
+listed as not uploaded.
 
 A claimed run whose job has not started by `task_started_by`, while it
 waits for its open or for the platform to place its job, ends
@@ -1666,8 +1672,8 @@ and is not set otherwise.
 
 The receiver opens the prompt with lines giving the absolute path of each
 directory, of each input file, of each credential file and of each expected
-output, with `(required)` after a required one, so an agent without a shell
-finds them, the environment variables that hold credentials, the commands of
+output, so an agent without a shell finds them, the environment variables
+that hold credentials, the commands of
 the [git input](#git-input), and the
 [outcome contract](configuration-receiver.md#agent-contract) with the run's credential
 names, a credential of the agent in the receiver's terms that the submission's
@@ -1679,7 +1685,9 @@ appears as its variable. The lines hold no credential value.
 `.wherry/` beneath the outputs directory is reserved for the outcome file. No
 output name leads into it, and the receiver collects nothing in it as an
 output. An MCP host writes a reply over 64 KiB among its outputs as
-`reply.txt`, so a submission expecting an output of that name is invalid.
+`reply.txt`, so a submission expecting an output of that name is invalid,
+and the receiver lists a file of that name as not returned,
+`rejected: reserved name`.
 A result's artifacts take the IDs `result` and `transcript`, and A2A
 requires a task's artifact IDs unique, so a submission expecting an output
 of either name is invalid, and the receiver lists an output of either name
@@ -1690,22 +1698,28 @@ outputs, whatever the job's exit. The plugin lists every entry beneath the outpu
 directory without following links, and refuses the whole tree, reading nothing,
 when it holds more than 256 entries. It reads only regular files: one at most
 the pool's `output_limit`, 8 MiB unless its terms set another, and together at
-most that, which the receiver checks again. Every other entry is listed with its
-type and left unread. The receiver gives up on a collection that takes over 2
-minutes. A plugin that cannot collect, or a job that could not be stopped,
+most that, which the receiver checks again. The changes file of a `git` input
+is streamed instead and charged against the limit by the receiver, after
+every other output, so it cannot take a declared output over the limit.
+Every other entry is listed with its type and left unread. The receiver gives
+up on a collection that takes over 2 minutes. A plugin that cannot collect, or a job that could not be stopped,
 leaves the outputs `not collected`; the receiver then asks the plugin for the
 outcome file alone, within another 2 minutes. The outcome file counts against
 neither output limit, and is invalid over the pool's `output_limit`.
 
 The receiver checks every name and publishes each returned file as the
 agent wrote it, as [output chunks](#output-chunk) and in the result's
-[metadata](#metadata). A required output listed in `not_returned` ends
+[metadata](#metadata). An expected output listed in `not_returned` ends
 the run `TASK_STATE_FAILED` with
 `required output <name> not returned: <reason>`, behind the agent's
 `agent exited <code>` or `agent ended by <signal>` and `; ` when it left no
 valid outcome file and ended by a signal or a non-zero exit, as in
-`agent exited 137 (OOMKilled); required output report.md not returned: missing`;
-an optional one leaves the state as the agent's outcome file set it.
+`agent exited 137 (OOMKilled); required output report.md not returned: missing`.
+The changes file of a `git` input is the exception: listed missing, it
+leaves the state as the agent's outcome file set it. With every expected
+output returned, a `TASK_STATE_COMPLETED` outcome whose message has no text
+once trimmed of whitespace and no data part ends the run `TASK_STATE_FAILED`
+with `agent returned no reply`.
 
 A host takes a run's outputs from the attempt and receiver of the result
 that ended it, ignoring every other attempt's chunks. For each output the
@@ -1744,8 +1758,9 @@ claimant check against the pool's storage before use.
   its Content-Length, hashing the bytes it sends. It follows no redirect.
   An S3 output counts against neither `output_limit` nor the run's outputs
   together, but is at most 5 GiB, and among the 256 outputs a submission
-  expects. Collection waits until the run's `task_ended_by`, when the PUT URLs
-  expire, if that is later than 2 minutes. The receiver does not redact an
+  expects. Collection waits until the run's `task_ended_by` plus 10 minutes,
+  when the PUT URLs expire, if that is later than 2 minutes, so a run stopped
+  at the bound or by a cancel still uploads. The receiver does not redact an
   S3 output, as it does not redact a feed output. An attempt that adopted an earlier attempt's job uploads
   to the PUT URLs of the task's envelope.
 - **Continuation.** The host gives a run with `git.base` an expected

@@ -1436,7 +1436,7 @@ func TestEndedAgentNamesItsReason(t *testing.T) {
 			fake := &fakePlugin{stream: noResultStream, ended: test.terminal, outputs: test.outputs}
 			f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": fake})
 			if ack := f.execute(t, f.submit(t, f.host, func(task *wire.Submission) {
-				task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.md", Required: true}}
+				task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.md"}}
 			}), 1); ack != kgo.AckReject {
 				t.Fatalf("ack %v, want reject", ack)
 			}
@@ -1481,7 +1481,7 @@ func TestTimedOutAndCanceledRunsReturnTheirOutputs(t *testing.T) {
 			endBy := time.Now().Add(2 * time.Second).Unix()
 			record := f.submit(t, f.host, func(task *wire.Submission) {
 				task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = endBy, endBy
-				task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.md", Required: true}}
+				task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.md"}}
 			})
 			status, reason := test.end(t, f, record, endBy)
 			if status != test.ack {
@@ -1509,7 +1509,7 @@ func TestOutcomeFileIsNotAnOutput(t *testing.T) {
 		{Name: wire.OutcomeDir + "/notes.md", Size: 5, Data: []byte("notes")}, {Name: "report.md", Size: 6, Data: []byte("report")},
 	}}})
 	f.execute(t, f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.md", Required: true}}
+		task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.md"}}
 	}), 1)
 	task := f.lastTask(t)
 	listed := manifest(t, task)

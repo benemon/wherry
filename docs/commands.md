@@ -311,9 +311,11 @@ It refuses, before it reads the broker, terms whose agent credentials
 break the [pool terms](configuration-operator.md#pool-terms) rules, a
 catalog agent listing a credential the catalog derives for it, and a
 `start_by_limit` above 29 days and 18 hours. For a pool with `storage` it
-refuses a `start_by_limit` that with six hours added exceeds 7 days, the
-longest an S3 SigV4 presigned URL lasts, with `start_by_limit plus the 6h
-run cap exceeds 7 days, the longest an S3 SigV4 presigned URL lasts`. It
+refuses a `start_by_limit` that with six hours and ten minutes added
+exceeds 7 days, the longest an S3 SigV4 presigned URL lasts, with
+`start_by_limit plus the 6h run cap and the 10m upload grace exceeds 7
+days, the longest an S3 SigV4 presigned URL lasts`: a run's upload URLs
+last ten minutes past its `task_ended_by`. It
 refuses a delivery limit above the lowest
 `group.share.max.delivery.count.limit` across the brokers, and terms whose
 [records do not fit the broker](configuration-operator.md#record-limit). Before it
@@ -1404,12 +1406,12 @@ and needs `wherry host init` on a re-provisioned host.
 | `--prompt-file` | | file holding the prompt; `-` reads standard input |
 | `--git REMOTE@REF` | | repository the agent clones: an `https` or `ssh` URL, or `user@host:path`, at a branch, tag or commit |
 | `--git-path` | the repository name | checkout directory, relative to the agent's working directory |
-| `--git-changes patch\|bundle` | | ask for the agent's commits back as the output `changes.patch` or `changes.bundle` |
+| `--git-changes bundle\|patch\|none` | `bundle` | how the agent's commits come back: as the output `changes.bundle`, as `changes.patch`, or not at all |
 | `--continue RUN_ID` | | continue from the `changes.bundle` `result` collected for a run of this host, in that run's repository, and return the next bundle through the pool's bucket |
-| `--input FILE[:s3]` | | file the agent gets in `WHERRY_INPUT_DIR` under its base name; `:s3` uploads it, at most 5 GiB, to the pool's bucket; repeatable |
+| `--input FILE` | | file the agent gets in `WHERRY_INPUT_DIR` under its base name; one over the inline limits goes through the pool's bucket, at most 5 GiB; repeatable |
 | `--credential NAME` | | name an optional credential of the placed agent the task cannot go without, at the target the pool's terms give it: the submit fails when this host cannot resolve it; one the host resolves is delivered without being named; repeatable |
 | `--credential NAME:file=FILE` or `--credential NAME:env=VAR` | | credential `NAME` from `credentials` in the client configuration, which the agent gets as the file `FILE` in `WHERRY_CREDENTIALS_DIR` or in the environment variable `VAR`; repeatable |
-| `--output NAME[:required][:s3]` | | file the agent is asked to leave in `WHERRY_OUTPUT_DIR`; `:required` fails the run without it, and `:s3` returns it through the pool's bucket, in either order; repeatable |
+| `--output NAME[:s3]` | | file the agent must leave in `WHERRY_OUTPUT_DIR`: the run fails without it; `:s3` returns it through the pool's bucket; repeatable |
 | `--start-by` | `10m` | `task_started_by`: an RFC 3339 time, or a Go duration from now, by which the agent's job must start |
 | `--end-by` | `2h` | `task_ended_by`: an RFC 3339 time, or a Go duration from now, by which the run must end |
 | `--wait` | false | collect the result after publishing |
@@ -1457,18 +1459,24 @@ the 8 KiB bound of its host key file. A remote under no entry clones without a
 credential, and an `ssh` remote under no entry with a host key is refused.
 With a host key, no input may be named `known_hosts`.
 
-`--git-changes` adds `changes.patch` or `changes.bundle` to the expected
-outputs, unless `--output` names it already; neither is required. On a pool
-with storage, `--git-changes bundle --output changes.bundle:s3` returns the
-bundle through the pool's bucket, outside the pool's `output_limit`: the route for a first run that later runs continue.
+`--git` adds `changes.bundle` to the expected outputs, unless `--output`
+names it already; `--git-changes patch` adds `changes.patch` instead, and
+`--git-changes none` adds nothing. A receiver never requires a git input's
+changes file, since a run that commits nothing leaves none, and charges it
+against the pool's `output_limit` after every other output, so a large
+bundle is the output that exceeds the limit, never a declared one. On a pool
+with storage, `--output changes.bundle:s3` returns the bundle through the
+pool's bucket, outside the limit: the route for a first run that later runs
+continue. `--output` refuses `:required`, since every declared output is
+required, with `outputs are always required; drop :required`.
 
 The prompt asks the agent to write the bundle after every commit and once
 more before it finishes, so a run that ends early after committing, by an
 exit, a timeout or a cancel, returns the bundle of its commits so far, best
-effort, when the agent followed the instruction. After a timeout this holds
-for outputs returned inline only: an S3 output's upload URL is valid until
-the run's end-by time, so a bundle sent as `changes.bundle:s3` is not uploaded
-when the run is collected after that bound. A patch is written once, at
+effort, when the agent followed the instruction. An S3 output's upload URL
+lasts ten minutes past the run's end-by time, and a run stopped at that
+bound or by a cancel is collected within those ten minutes, so this holds
+for a bundle sent through the bucket too. A patch is written once, at
 the end, and a run that ends before then returns none. A collected bundle is
 checked as bytes, by size and SHA-256; git checks its pack when the bundle is
 fetched. A run killed in the middle of an export may also return
@@ -1486,9 +1494,10 @@ records when it collects it. The new run:
   bucket, and the commands that check out the bundle's base commit, not the
   ref, fetch the bundle and check out its head;
 - returns its own commits since the base as `changes.bundle` through the
-  pool's bucket, so each round needs only the latest bundle. The output is
-  not required: an agent that stops before its fetch leaves none. A round
-  that adds no commit still returns the previous round's bundle;
+  pool's bucket, so each round needs only the latest bundle. As for any git
+  input, the run completes without it: an agent that stops before its fetch
+  leaves none. A round that adds no commit still returns the previous
+  round's bundle;
 - joins the run's A2A context, so every round of a chain shares the first
   run's ID as its `contextId`, and names the run it continues in
   `referenceTaskIds`.
@@ -1581,8 +1590,10 @@ resolves the same source for it, as for every agent credential;
 `--credential github-token` makes the agent's one the task cannot go
 without.
 
-`--input FILE:s3` and `--output NAME:s3` use the pool's [S3 lane](a2a-extension-v1.md#s3-inputs-and-outputs).
-`submit` refuses them, before it uploads or publishes anything, when the
+`--output NAME:s3`, and an `--input` over the inline limits, use the pool's
+[S3 lane](a2a-extension-v1.md#s3-inputs-and-outputs). `--input` refuses a
+`:s3` suffix with `inputs move to S3 by size; drop :s3`.
+`submit` refuses the lane, before it uploads or publishes anything, when the
 host has no storage keys for the pool, neither the pair its bundle carries
 nor a [`storage`](configuration-host.md#client-configuration) mapping in
 its configuration, or the pool's terms no
@@ -1695,7 +1706,8 @@ For `changes.patch` it also prints `apply with: git am <path>`, and for
 and SHA-256, in the run's local record, wherever `--outputs-dir` puts it,
 for [`submit --continue`](#wherry-host-submit). A later `result` that collects
 a bundle replaces the record; one that collects none keeps it.
-No expected output takes the name `reply.txt`.
+No expected output takes the name `reply.txt`, and a file of that name the
+agent leaves is listed as not returned, `rejected: reserved name`.
 
 `result` reads the run's statuses and result from the tenant feed, and its
 output chunks from the tenant's transcript topic, from the first offset at

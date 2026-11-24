@@ -717,7 +717,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 	var submitted client.SubmitResult
 	for ctx.Err() == nil {
 		if submitted, err = host.Submit(ctx, client.SubmitInput{Prompt: "hello", Parts: []wire.Part{{Raw: input, Filename: "data.bin"}},
-			Credentials: []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}, Outputs: []wire.ExpectedOutput{{Name: "report.md", Required: true}},
+			Credentials: []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}, Outputs: []wire.ExpectedOutput{{Name: "report.md"}},
 			EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)}); err == nil {
 			break
 		}

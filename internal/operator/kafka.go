@@ -353,9 +353,9 @@ func (service *Service) PoolApply(ctx context.Context, pool string, terms Terms,
 	if err != nil {
 		return err
 	}
-	// A run's presigned URLs must last from submit to its end.
-	if effective.Storage != nil && effective.StartByLimitMS+MaxRunDurationMS > Millis(MaxPresign.Milliseconds()) {
-		return errors.New("start_by_limit plus the 6h run cap exceeds 7 days, the longest an S3 SigV4 presigned URL lasts")
+	// A run's presigned URLs must last from submit to its end and the upload grace after it.
+	if effective.Storage != nil && effective.StartByLimitMS+MaxRunDurationMS+Millis(UploadGrace.Milliseconds()) > Millis(MaxPresign.Milliseconds()) {
+		return errors.New("start_by_limit plus the 6h run cap and the 10m upload grace exceeds 7 days, the longest an S3 SigV4 presigned URL lasts")
 	}
 	if service.DeliveryCeiling == 0 {
 		ceiling, err := service.brokerSetting(ctx, "group.share.max.delivery.count.limit", func(a, b int64) int64 { return min(a, b) })

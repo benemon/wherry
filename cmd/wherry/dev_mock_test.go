@@ -188,7 +188,7 @@ func TestDevMockReadsTheReceiversPreamble(t *testing.T) {
 	const prompt = "first paragraph\n\nsecond paragraph\n"
 	text := receiver.Preamble(pluginsdk.Directories{Input: dir + "/inputs", Output: dir + "/outputs", Credentials: dir + "/secrets/credentials"},
 		[]string{"data.txt"}, []wire.TaskCredential{{Name: "forge-token", File: "forge-token"}, {Name: "mock-token", Env: "MOCK_TOKEN"}}, []string{"vault-token"},
-		[]wire.ExpectedOutput{{Name: "echo.txt", Required: true}}, &wire.GitInput{Remote: "https://forge.example/org/repo.git", Ref: "main", Credential: "forge-token"},
+		[]wire.ExpectedOutput{{Name: "echo.txt"}}, &wire.GitInput{Remote: "https://forge.example/org/repo.git", Ref: "main", Credential: "forge-token"},
 		"run-a", operator.DefaultReplyLimit)
 	if err := os.WriteFile(filepath.Join(dir, "prompt.txt"), []byte(text+prompt), 0o600); err != nil {
 		t.Fatal(err)

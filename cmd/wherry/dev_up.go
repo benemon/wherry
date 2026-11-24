@@ -1262,7 +1262,7 @@ func smoke(ctx context.Context, env devEnv, hostConfig busclient.Config) error {
 	defer host.Close()
 	const prompt = "mock: smoke"
 	input := busclient.SubmitInput{
-		Agent: "mock", Prompt: prompt, Outputs: []wire.ExpectedOutput{{Name: "echo.txt", Required: true}},
+		Agent: "mock", Prompt: prompt, Outputs: []wire.ExpectedOutput{{Name: "echo.txt"}},
 		StartBy: time.Now().Add(busclient.DefaultStartBy), EndBy: time.Now().Add(busclient.DefaultEndBy),
 	}
 	if env.storage() {

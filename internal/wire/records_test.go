@@ -59,7 +59,7 @@ func testRecords() map[string]Record {
 			Artifact: Artifact{ArtifactID: ReplyArtifact, Parts: []Part{{Raw: StdBytes("x")}}, Extensions: []string{ExtensionURI}}},
 			Wherry: ResultBinding{ReceiverBinding: testBinding(), TaskHash: testHash}},
 		"submission with credentials and outputs": &Submission{Message: testMessage("run-a"), Wherry: SubmissionBinding{Tenant: "tenant-a", Host: "host-a", Pool: "pool-a", Run: "run-a", Placement: placement,
-			Credentials: []TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}, Outputs: []ExpectedOutput{{Name: "out/report.md", Required: true}}}},
+			Credentials: []TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}, Outputs: []ExpectedOutput{{Name: "out/report.md"}}}},
 	}
 }
 

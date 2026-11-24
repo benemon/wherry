@@ -161,8 +161,10 @@ limit (8 MiB by default), without
 following links. The receiver publishes each file as the agent wrote it, in chunks on
 the tenant's transcript topic in the result's transaction, and lists every
 output in the result with the size and SHA-256 it computed, or with the
-reason it was not returned. A required output that is not returned fails
-the run. `wherry result` verifies each output's chunks against the result
+reason it was not returned. An expected output that is not returned fails
+the run, except the changes file of a git input, which a run that commits
+nothing leaves unwritten. A completed run ends with a reply, or fails.
+`wherry result` verifies each output's chunks against the result
 before it writes the file locally.
 
 A pool can also carry files through an S3-compatible bucket its operator

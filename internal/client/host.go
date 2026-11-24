@@ -70,7 +70,8 @@ type SubmitInput struct {
 	Outputs []wire.ExpectedOutput
 	// Git is the repository the agent clones; its credential and host key come from the host's git configuration.
 	Git *wire.GitInput
-	// GitChanges, patch or bundle, asks for the clone's changes back as that output.
+	// GitChanges is how the clone's changes come back: as changes.bundle when empty or bundle, as changes.patch for
+	// patch, and not at all for none.
 	GitChanges string
 	// Continue names a run of this host whose collected changes.bundle the agent continues from: the run takes that
 	// run's git input and context, and returns its own changes.bundle through S3.
@@ -364,7 +365,7 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		previous := continued.last.Task.Wherry.Git
 		input.Git = &wire.GitInput{Remote: previous.Remote, Ref: previous.Ref, Path: previous.Path}
 		input.S3Inputs = append(slices.Clone(input.S3Inputs), S3File{Name: baseBundle, Body: continued.bundle})
-		// Not required: an agent that stops before its fetch leaves no bundle.
+		// Through S3, so the bundle returns whatever its size; a receiver never requires a git input's changes file.
 		input.Outputs = append(slices.Clone(input.Outputs), wire.ExpectedOutput{Name: wire.GitBundle, Storage: wire.StorageS3})
 	}
 	outputs := input.Outputs
@@ -401,10 +402,10 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 		}
 		input.Git = &git
-		changes := map[string]string{"": "", "patch": wire.GitPatch, "bundle": wire.GitBundle}
+		changes := map[string]string{"": wire.GitBundle, "bundle": wire.GitBundle, "patch": wire.GitPatch, "none": ""}
 		name, ok := changes[input.GitChanges]
 		if !ok {
-			return SubmitResult{}, fmt.Errorf("%w: git changes must be patch or bundle", ErrInvalidInput)
+			return SubmitResult{}, fmt.Errorf("%w: git changes must be bundle, patch or none", ErrInvalidInput)
 		}
 		if name != "" && !slices.ContainsFunc(outputs, func(output wire.ExpectedOutput) bool { return output.Name == name }) {
 			outputs = append(slices.Clone(outputs), wire.ExpectedOutput{Name: name})
@@ -635,7 +636,7 @@ func (h *Host) poolKey(ctx context.Context, v view, pool string) (*ecdsa.PublicK
 // enveloped signs submission with an envelope of its credentials, its S3 links and redactionKey, under a fresh content
 // key wrapped to poolKey. The credentials' values come through resolver, which supplied filled for the agent's
 // credentials, so no source runs again here; a task credential's source is the configuration's. GET links last until
-// task_started_by plus getLifetime and PUT links until task_ended_by.
+// task_started_by plus getLifetime and PUT links until task_ended_by plus the upload grace.
 func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms operator.Terms, poolKey *ecdsa.PublicKey, store *store, redactionKey []byte, resolver *resolver) ([]byte, error) {
 	binding := submission.Wherry
 	values := signed.EnvelopeValues{Binding: binding.EnvelopeBinding(), Credentials: map[string][]byte{}, S3Inputs: map[string]string{}, S3Outputs: map[string]string{}, RedactionKey: redactionKey}

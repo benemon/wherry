@@ -370,6 +370,39 @@ Removing the host does not revoke the Claude token.
 
 Check that it worked: `wherry operator tenant list` no longer lists the host under its tenant.
 
+## Outputs are required, `--git` returns a bundle, inputs go to S3 by size
+
+A clean break, as every pre-1.0 change ([ADR-0032](design.md)); no
+compatibility path remains.
+
+- Every declared output is required. `--output NAME:required` and the MCP
+  output member `required` are refused with `outputs are always required;
+  drop :required`; drop the suffix and the member. The wire field
+  `outputs[].required` is gone, and a receiver fails a run that leaves any
+  declared output unwritten. The exception is the changes file of a git
+  input, `changes.bundle` or `changes.patch`, which a run that commits
+  nothing leaves unwritten.
+- Every completed run ends with a reply: a `TASK_STATE_COMPLETED` outcome
+  file with no text and no data part fails the run with `agent returned no
+  reply`. Agents that answered only in files must put a reply in the message.
+- `--git` returns `changes.bundle` by default; `--git-changes patch` returns
+  a patch and `--git-changes none` nothing. A submit that relied on `--git`
+  alone returning nothing must say `--git-changes none`.
+- `--input FILE:s3` and the MCP input member `storage` are refused with
+  `inputs move to S3 by size; drop :s3`; an input over the inline limits
+  goes through the pool's bucket by itself, as it did already.
+- An S3 output's PUT URL lasts ten minutes past `task_ended_by`, so a run
+  stopped at the bound or by a cancel still uploads. `pool apply` now
+  refuses a `start_by_limit` that with six hours and ten minutes added
+  exceeds seven days; a pool at the old bound needs ten minutes less.
+
+Upgrade hosts and receivers together. A host of this release against an
+older receiver gets its bundle, since the receiver reads the same expected
+output and requires none; an older host against a receiver of this release
+has every declared output required. Scripts and skills that use the dropped
+suffixes fail at submit until they drop them; the wherry-plugins end-to-end
+scripts are updated with their next release.
+
 ## `wait` is now `result`
 
 The host command `wherry wait` is now `wherry result`, also under

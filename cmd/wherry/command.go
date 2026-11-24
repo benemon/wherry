@@ -329,19 +329,14 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	promptFile := flags.String("prompt-file", "", "prompt file, or - for standard input")
 	gitRemote := flags.String("git", "", "REMOTE@REF: git repository the agent clones, an https or ssh URL or user@host:path, at a branch, tag or commit")
 	gitPath := flags.String("git-path", "", "checkout directory, relative (default: the repository name)")
-	gitChanges := flags.String("git-changes", "", "patch or bundle: ask for the agent's commits back as changes.patch or changes.bundle")
+	gitChanges := flags.String("git-changes", "", "bundle, patch or none: the agent's commits come back as changes.bundle (default), as changes.patch, or not at all")
 	continueRun := flags.String("continue", "", "RUN_ID: continue from the changes.bundle result collected for a run of this host, in its repository, and return the next one through the pool's bucket")
-	var inputs, s3Inputs []string
-	flags.Func("input", "FILE[:s3]: a file to deliver to the agent's input directory, through the pool's bucket with :s3 (repeatable)", func(value string) error {
-		path, suffix, found := strings.Cut(value, ":")
-		switch {
-		case !found:
-			inputs = append(inputs, path)
-		case suffix == "s3":
-			s3Inputs = append(s3Inputs, path)
-		default:
-			return fmt.Errorf("want FILE[:s3], not %q", value)
+	var inputs []string
+	flags.Func("input", "FILE: a file to deliver to the agent's input directory (repeatable)", func(value string) error {
+		if strings.HasSuffix(value, ":s3") {
+			return errors.New("inputs move to S3 by size; drop :s3")
 		}
+		inputs = append(inputs, value)
 		return nil
 	})
 	var credentials []wire.TaskCredential
@@ -362,14 +357,14 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return nil
 	})
 	var outputs []wire.ExpectedOutput
-	flags.Func("output", "NAME[:required][:s3]: a file the agent is asked to leave in its output directory, returned through the pool's bucket with :s3 (repeatable)", outputFlag(&outputs))
+	flags.Func("output", "NAME[:s3]: a file the agent must leave in its output directory, returned through the pool's bucket with :s3 (repeatable)", outputFlag(&outputs))
 	startBy := flags.String("start-by", busclient.DefaultStartBy.String(), "task_started_by: an RFC 3339 time or a Go duration from now by which the agent's job starts")
 	endBy := flags.String("end-by", busclient.DefaultEndBy.String(), "task_ended_by: an RFC 3339 time or a Go duration from now by which the task ends")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry host submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE@REF [--git-path PATH] [--git-changes patch|bundle] | --continue RUN_ID] [--input FILE[:s3]]... [--credential NAME|NAME:file=FILE|NAME:env=VAR]... [--output NAME[:required][:s3]]... [--start-by TIME|DURATION] [--end-by TIME|DURATION] [--wait [--outputs-dir DIR]]")
+		return errors.New("usage: wherry host submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE@REF [--git-path PATH] [--git-changes bundle|patch|none] | --continue RUN_ID] [--input FILE]... [--credential NAME|NAME:file=FILE|NAME:env=VAR]... [--output NAME[:s3]]... [--start-by TIME|DURATION] [--end-by TIME|DURATION] [--wait [--outputs-dir DIR]]")
 	}
 	if wasSet(flags, "outputs-dir") && !*wait {
 		return errors.New("--outputs-dir requires --wait")
@@ -425,15 +420,6 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	if err != nil {
 		return fmt.Errorf("selector: %w", err)
 	}
-	var stored []busclient.S3File
-	for _, path := range s3Inputs {
-		file, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-		stored = append(stored, busclient.S3File{Name: filepath.Base(path), Body: file})
-	}
 	client, closeClient, err := commandClient(client, *configFile, stderr)
 	if err != nil {
 		return err
@@ -441,7 +427,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	defer closeClient()
 	result, err := client.Submit(ctx, busclient.SubmitInput{
 		Agent: *agent, Model: *model, Selector: selector, Prompt: *prompt, Parts: parts, Credentials: credentials, Requested: requested, Outputs: outputs, Git: git, GitChanges: *gitChanges,
-		Continue: *continueRun, S3Inputs: stored, StartBy: startTime, EndBy: endTime,
+		Continue: *continueRun, StartBy: startTime, EndBy: endTime,
 	})
 	if err != nil {
 		return err
@@ -481,20 +467,19 @@ func inputParts(paths []string) ([]wire.Part, error) {
 	return parts, nil
 }
 
-// outputFlag parses NAME[:required][:s3], its suffixes in either order, into outputs.
+// outputFlag parses NAME[:s3] into outputs.
 func outputFlag(outputs *[]wire.ExpectedOutput) func(string) error {
 	return func(value string) error {
 		fields := strings.Split(value, ":")
 		output := wire.ExpectedOutput{Name: fields[0]}
-		for _, suffix := range fields[1:] {
-			switch {
-			case suffix == "required" && !output.Required:
-				output.Required = true
-			case suffix == "s3" && output.Storage == "":
-				output.Storage = wire.StorageS3
-			default:
-				return fmt.Errorf("want NAME[:required][:s3], not %q", value)
-			}
+		switch {
+		case slices.Contains(fields[1:], "required"):
+			return errors.New("outputs are always required; drop :required")
+		case len(fields) == 1:
+		case len(fields) == 2 && fields[1] == "s3":
+			output.Storage = wire.StorageS3
+		default:
+			return fmt.Errorf("want NAME[:s3], not %q", value)
 		}
 		*outputs = append(*outputs, output)
 		return nil

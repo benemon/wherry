@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,13 +37,29 @@ const (
 	s3Content   = "dataset bytes"
 )
 
-// store is a TLS server standing in for the pool's S3 endpoint: it keeps each object PUT to it, by path.
+// store is a TLS server standing in for the pool's S3 endpoint: it keeps each object PUT to it, by path. A URL that
+// carries X-Amz-Date and X-Amz-Expires is refused once clock, by default the wall clock, is past their sum.
 type store struct {
 	server *httptest.Server
 	mu     sync.Mutex
 	puts   map[string][]byte
 	// handle, when set, answers instead.
 	handle func(http.ResponseWriter, *http.Request)
+	clock  func() time.Time
+}
+
+// expired reports whether a presigned URL's lifetime has passed on the store's clock.
+func (s *store) expired(query url.Values) bool {
+	signedAt, err := time.Parse("20060102T150405Z", query.Get("X-Amz-Date"))
+	seconds, _ := strconv.Atoi(query.Get("X-Amz-Expires"))
+	if err != nil || seconds == 0 {
+		return false
+	}
+	now := time.Now()
+	if s.clock != nil {
+		now = s.clock()
+	}
+	return now.After(signedAt.Add(time.Duration(seconds) * time.Second))
 }
 
 func newStore(t *testing.T) *store {
@@ -54,6 +71,10 @@ func startStore(t *testing.T, start func(http.Handler) *httptest.Server) *store 
 	t.Helper()
 	s := &store{puts: map[string][]byte{}}
 	s.server = start(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.expired(r.URL.Query()) {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
 		if s.handle != nil {
 			s.handle(w, r)
 			return
@@ -89,6 +110,12 @@ func presigned(origin, key string) string {
 	return origin + "/" + s3Bucket + "/" + key + "?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires=900&X-Amz-Signature=" + s3Signature
 }
 
+// presignedUntil is presigned with the URL's signing time and lifetime, which the store enforces.
+func presignedUntil(origin, key string, signedAt time.Time, lifetime time.Duration) string {
+	return origin + "/" + s3Bucket + "/" + key + "?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=" + signedAt.UTC().Format("20060102T150405Z") +
+		"&X-Amz-Expires=" + strconv.Itoa(int(lifetime.Seconds())) + "&X-Amz-Signature=" + s3Signature
+}
+
 func s3Terms(endpoint string) operator.Terms {
 	terms := testTerms()
 	terms.Storage = &operator.Storage{Endpoint: endpoint, Bucket: s3Bucket}
@@ -102,7 +129,7 @@ func s3Fixture(t *testing.T, s *store, stream []string, outputs []pluginsdk.Outp
 
 func withS3(task *wire.Submission) {
 	task.Wherry.S3Inputs = []wire.S3Input{{Name: "dataset.bin", Size: int64(len(s3Content)), SHA256: sha([]byte(s3Content))}}
-	task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.pdf", Required: true, Storage: wire.StorageS3}}
+	task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.pdf", Storage: wire.StorageS3}}
 }
 
 // withURLs is an envelope edit that seals the URLs urls makes for the task's S3 objects.

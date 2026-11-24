@@ -60,6 +60,18 @@ type uploadOracle struct {
 	objects  map[string][]byte
 	ops      []string
 	access   []string
+	// clock, when set, is the time the oracle checks a presigned URL's X-Amz-Date plus X-Amz-Expires against.
+	clock func() time.Time
+}
+
+// expired reports whether a presigned request's lifetime has passed on the oracle's clock.
+func (o *uploadOracle) expired(query url.Values) bool {
+	signedAt, err := time.Parse("20060102T150405Z", query.Get("X-Amz-Date"))
+	seconds, _ := strconv.Atoi(query.Get("X-Amz-Expires"))
+	if err != nil || seconds == 0 || o.clock == nil {
+		return false
+	}
+	return o.clock().After(signedAt.Add(time.Duration(seconds) * time.Second))
 }
 
 func newUploadOracle(t *testing.T) *uploadOracle {
@@ -72,6 +84,10 @@ func newUploadOracle(t *testing.T) *uploadOracle {
 		if _, signature, ok := strings.Cut(r.Header.Get("Authorization"), "Credential="); ok {
 			access, _, _ := strings.Cut(signature, "/")
 			o.access = append(o.access, access)
+		}
+		if o.expired(query) {
+			w.WriteHeader(http.StatusForbidden)
+			return
 		}
 		switch {
 		case r.Method == http.MethodGet && query.Has("location"):
@@ -301,7 +317,7 @@ func submitS3(t *testing.T, f *fixture, receiver *testReceiver, deadline time.Du
 	t.Helper()
 	file, data := randomFile(t, "dataset.bin", 5<<20)
 	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}},
-		Outputs: []wire.ExpectedOutput{{Name: "out/report.pdf", Required: true, Storage: wire.StorageS3}}, EndBy: time.Now().Add(deadline), StartBy: time.Now().Add(time.Minute)})
+		Outputs: []wire.ExpectedOutput{{Name: "out/report.pdf", Storage: wire.StorageS3}}, EndBy: time.Now().Add(deadline), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -527,8 +543,9 @@ func TestTheEnvelopeCarriesPresignedURLsForTheRunsObjects(t *testing.T) {
 	}
 	getDeadline := time.Until(time.Unix(task.submission.Wherry.TaskStartedBy, 0).Add(15 * time.Minute))
 	deadline := time.Until(time.Unix(task.submission.Wherry.TaskEndedBy, 0))
-	if expires(get) < getDeadline-10*time.Second || expires(get) > getDeadline+2*time.Second || expires(put) < deadline-10*time.Second || expires(put) > deadline+2*time.Second {
-		t.Fatalf("GET lives %v and PUT %v; want the turn's task_started_by plus 15m, %v away, and its task_ended_by, %v away", expires(get), expires(put), getDeadline, deadline)
+	putDeadline := deadline + operator.UploadGrace
+	if expires(get) < getDeadline-10*time.Second || expires(get) > getDeadline+2*time.Second || expires(put) < putDeadline-10*time.Second || expires(put) > putDeadline+2*time.Second {
+		t.Fatalf("GET lives %v and PUT %v; want the turn's task_started_by plus 15m, %v away, and its task_ended_by plus the 10m grace, %v away", expires(get), expires(put), getDeadline, putDeadline)
 	}
 	// The store honours each URL for its own object and method alone.
 	response, err := o.client.Get(get)

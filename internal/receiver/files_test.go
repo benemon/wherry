@@ -397,12 +397,12 @@ func TestPreambleNamesFilesAndTheOutcomeContract(t *testing.T) {
 	directories := pluginsdk.Directories{Input: "/local/inputs", Output: "/local/outputs", Credentials: "/secrets/credentials"}
 	inputs := []string{"data.csv"}
 	credentials := []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}, {Name: "github-token", Env: "GH_TOKEN"}}
-	outputs := []wire.ExpectedOutput{{Name: "report.md", Required: true}, {Name: "notes/extra.txt"}}
+	outputs := []wire.ExpectedOutput{{Name: "report.md"}, {Name: "notes/extra.txt"}}
 	got := Preamble(directories, inputs, credentials, []string{"vault-token"}, outputs, nil, "run-a", operator.DefaultReplyLimit)
 	for _, want := range []string{"input directory is /local/inputs", "credentials directory /secrets/credentials", "output directory /local/outputs",
 		"WHERRY_INPUT_DIR", "Input files: /local/inputs/data.csv.", "Credential files: /secrets/credentials/id_ed25519. Never print or copy their contents.",
 		"Credential environment variables: GH_TOKEN. Never print or copy their values.",
-		"/local/outputs/report.md (required), /local/outputs/notes/extra.txt.",
+		"/local/outputs/report.md, /local/outputs/notes/extra.txt.",
 		"write an A2A TaskStatus JSON object to /local/outputs/.wherry/outcome.json", `"TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_AUTH_REQUIRED"`,
 		`"role": "ROLE_AGENT"`, `{"data": {"credential": "<name>"}}`, "This run's credentials are deploy-key, github-token, vault-token (not supplied).",
 		"report your current step in /local/outputs/.wherry/working, creating its directory: write one line of at most 1024 bytes to a temporary file in that directory and rename it over this file. A longer file reports nothing."} {
@@ -688,7 +688,7 @@ func TestLargestResultFitsTheProducerBatch(t *testing.T) {
 }
 
 func TestRequiredOutputMissingFailsTheTurn(t *testing.T) {
-	f, task, status := runWithOutputs(t, []wire.ExpectedOutput{{Name: "report.md", Required: true}, {Name: "notes.md"}}, nil, nil)
+	f, task, status := runWithOutputs(t, []wire.ExpectedOutput{{Name: "report.md"}, {Name: "notes.md"}}, nil, nil)
 	if status != kgo.AckReject || task.Status.State != wire.TaskStateFailed || task.Status.Message.Parts[0].Text != "required output report.md not returned: missing" {
 		t.Fatalf("ended %v %s %+v, want FAILED naming report.md", status, task.Status.State, task.Status.Message)
 	}
@@ -701,28 +701,45 @@ func TestRequiredOutputMissingFailsTheTurn(t *testing.T) {
 	}
 }
 
-func TestOptionalOutputMissingIsListed(t *testing.T) {
-	_, task, status := runWithOutputs(t, []wire.ExpectedOutput{{Name: "report.md", Required: true}, {Name: "notes.md"}}, []pluginsdk.Output{file("report.md", "r")}, nil)
-	if status != kgo.AckAccept || task.Status.State != wire.TaskStateCompleted {
-		t.Fatalf("ended %v %s, want COMPLETED", status, task.Status.State)
+// Every declared output is required: one left unwritten fails the run whatever the others and the outcome file say.
+func TestDeclaredOutputMissingFailsTheTurn(t *testing.T) {
+	_, task, status := runWithOutputs(t, []wire.ExpectedOutput{{Name: "report.md"}, {Name: "notes.md"}}, []pluginsdk.Output{file("report.md", "r")}, nil)
+	if status != kgo.AckReject || task.Status.State != wire.TaskStateFailed || task.Status.Message.Parts[0].Text != "required output notes.md not returned: missing" {
+		t.Fatalf("ended %v %s %+v, want FAILED naming notes.md", status, task.Status.State, task.Status.Message)
 	}
-	if listed := manifest(t, task); !slices.Equal(listed.NotReturned, []wire.UnreturnedOutput{{Name: "notes.md", Reason: "missing"}}) {
-		t.Fatalf("not returned %+v, want notes.md missing", listed.NotReturned)
+	if listed := manifest(t, task); len(listed.Outputs) != 1 || !slices.Equal(listed.NotReturned, []wire.UnreturnedOutput{{Name: "notes.md", Reason: "missing"}}) {
+		t.Fatalf("returned %+v, not returned %+v; want report.md returned and notes.md missing", listed.Outputs, listed.NotReturned)
+	}
+}
+
+// A file the task did not declare is returned beside the declared ones.
+func TestUndeclaredOutputIsReturned(t *testing.T) {
+	_, task, status := runWithOutputs(t, []wire.ExpectedOutput{{Name: "report.md"}}, []pluginsdk.Output{file("report.md", "r"), file("extra/notes.md", "n")}, nil)
+	if status != kgo.AckAccept || task.Status.State != wire.TaskStateCompleted {
+		t.Fatalf("ended %v %s %+v, want COMPLETED", status, task.Status.State, task.Status.Message)
+	}
+	listed := manifest(t, task)
+	if want := []wire.ReturnedOutput{{Name: "extra/notes.md", SHA256: sha([]byte("n")), Size: 1}, {Name: "report.md", SHA256: sha([]byte("r")), Size: 1}}; !slices.Equal(listed.Outputs, want) || len(listed.NotReturned) != 0 {
+		t.Fatalf("returned %+v, not returned %+v; want both files", listed.Outputs, listed.NotReturned)
 	}
 }
 
 // Outputs not collected by a plugin whose every Collect fails leave the outcome file unread too.
 func TestOutputsNotCollected(t *testing.T) {
 	for name, test := range map[string]struct {
-		required bool
+		expected []wire.ExpectedOutput
 		message  string
-	}{"required": {true, "required output report.md not returned: not collected"}, "optional": {false, "agent reported no outcome"}} {
+		listed   []wire.UnreturnedOutput
+	}{
+		"declared":   {[]wire.ExpectedOutput{{Name: "report.md"}}, "required output report.md not returned: not collected", []wire.UnreturnedOutput{{Name: "report.md", Reason: "not collected"}}},
+		"undeclared": {nil, "agent reported no outcome", nil},
+	} {
 		t.Run(name, func(t *testing.T) {
-			_, task, _ := runWithOutputs(t, []wire.ExpectedOutput{{Name: "report.md", Required: test.required}}, []pluginsdk.Output{file("report.md", "r")}, context.DeadlineExceeded)
+			_, task, _ := runWithOutputs(t, test.expected, []pluginsdk.Output{file("report.md", "r")}, context.DeadlineExceeded)
 			if task.Status.State != wire.TaskStateFailed || task.Status.Message.Parts[0].Text != test.message {
 				t.Fatalf("ended %s %+v, want FAILED with %q", task.Status.State, task.Status.Message, test.message)
 			}
-			if listed := manifest(t, task); len(listed.Outputs) != 0 || !slices.Equal(listed.NotReturned, []wire.UnreturnedOutput{{Name: "report.md", Reason: "not collected"}}) {
+			if listed := manifest(t, task); len(listed.Outputs) != 0 || !slices.Equal(listed.NotReturned, test.listed) {
 				t.Fatalf("returned %+v, not returned %+v", listed.Outputs, listed.NotReturned)
 			}
 		})
@@ -733,14 +750,12 @@ func TestOutputsNotCollected(t *testing.T) {
 func TestOutcomeIsReadWhenCollectionFails(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.plugin.outputs, f.plugin.collectFailures = []pluginsdk.Output{file("report.md", "r")}, 1
-	status := f.execute(t, f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.md"}}
-	}), 1)
+	status := f.execute(t, f.submit(t, f.host, nil), 1)
 	if task := f.lastTask(t); status != kgo.AckAccept || task.Status.State != wire.TaskStateCompleted || task.Status.Message.Parts[0].Text != "done" {
 		t.Fatalf("ended %v %s %+v, want COMPLETED with done", status, task.Status.State, task.Status.Message)
 	}
-	if listed := manifest(t, f.lastTask(t)); len(listed.Outputs) != 0 || !slices.Equal(listed.NotReturned, []wire.UnreturnedOutput{{Name: "report.md", Reason: "not collected"}}) {
-		t.Fatalf("returned %+v, not returned %+v; want report.md not collected", listed.Outputs, listed.NotReturned)
+	if listed := manifest(t, f.lastTask(t)); len(listed.Outputs) != 0 || len(listed.NotReturned) != 0 {
+		t.Fatalf("returned %+v, not returned %+v; want nothing listed", listed.Outputs, listed.NotReturned)
 	}
 	if limits := f.plugin.limits; f.plugin.collects != 2 || limits.FileBytes != 0 || !slices.Equal(limits.Stream, []string{wire.OutcomeFile}) {
 		t.Fatalf("%d collects, the last under %+v; want a second reading the outcome file alone", f.plugin.collects, limits)
@@ -823,7 +838,7 @@ func TestAHungCollectionIsNotCollected(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.plugin.collectHangs = true
 	status := f.execute(t, f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.md", Required: true}}
+		task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.md"}}
 	}), 1)
 	if task := f.lastTask(t); status != kgo.AckReject || task.Status.Message.Parts[0].Text != "required output report.md not returned: not collected" {
 		t.Fatalf("ended %v %+v, want FAILED with the output not collected", status, task.Status.Message)

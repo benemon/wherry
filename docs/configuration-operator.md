@@ -395,7 +395,7 @@ See [Tenant onboarding and offboarding](operations-operator.md#tenant-onboarding
 `start_by_limit` sets the minimum retention for pool topics.
 `pool apply` raises retention when needed.
 It never lowers retention.
-For a pool with storage, `start_by_limit` plus six hours must fit within seven days.
-This is the maximum lifetime of an S3 SigV4 presigned URL.
+For a pool with storage, `start_by_limit` plus six hours and ten minutes must fit within seven days.
+Seven days is the maximum lifetime of an S3 SigV4 presigned URL, and the ten minutes are the grace after `task_ended_by` in which a run's S3 outputs may still upload.
 `reply_limit` must be no greater than `output_limit`.
 See [Task bounds](configuration-receiver.md#task-bounds).

@@ -53,8 +53,9 @@ func TestSubmitFileFlags(t *testing.T) {
 		"output escaping":            {[]string{"--output", "../report.md"}, "expected outputs must be unique relative paths of portable file names"},
 		"output in the outcome dir":  {[]string{"--output", ".wherry/outcome.json"}, "expected outputs must be unique relative paths of portable file names"},
 		"credential file escaping":   {[]string{"--credential", "deploy-key:file=../id"}, "credential deploy-key: file must be a portable file name"},
-		"unknown output suffix":      {[]string{"--output", "report.md:needed"}, "want NAME[:required][:s3]"},
-		"repeated output suffix":     {[]string{"--output", "report.md:required:required"}, "want NAME[:required][:s3]"},
+		"unknown output suffix":      {[]string{"--output", "report.md:needed"}, "want NAME[:s3]"},
+		"required output suffix":     {[]string{"--output", "report.md:required"}, "outputs are always required; drop :required"},
+		"s3 input suffix":            {[]string{"--input", input + ":s3"}, "inputs move to S3 by size; drop :s3"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -66,7 +67,7 @@ func TestSubmitFileFlags(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	flags := append(slices.Clone(base), "--input", input, "--credential", "deploy-key:file=id_ed25519", "--credential", "vault-token:env=VAULT_TOKEN",
-		"--output", "report.md:required", "--output", "notes/extra.txt")
+		"--output", "report.md", "--output", "notes/extra.txt")
 	if err := runSubmit(b.ctx, b.client, flags, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +78,7 @@ func TestSubmitFileFlags(t *testing.T) {
 		t.Fatalf("submitted parts %#v", parts)
 	}
 	if !slices.Equal(submission.Wherry.Credentials, []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}, {Name: "vault-token", Env: "VAULT_TOKEN"}}) ||
-		!slices.Equal(submission.Wherry.Outputs, []wire.ExpectedOutput{{Name: "report.md", Required: true}, {Name: "notes/extra.txt"}}) {
+		!slices.Equal(submission.Wherry.Outputs, []wire.ExpectedOutput{{Name: "report.md"}, {Name: "notes/extra.txt"}}) {
 		t.Fatalf("submitted credentials %+v and outputs %+v", submission.Wherry.Credentials, submission.Wherry.Outputs)
 	}
 	if strings.Contains(stdout.String()+stderr.String(), "deploy-key-value") {
@@ -215,12 +216,12 @@ func TestMCPSubmitCarriesFilesAndWaitWritesOutputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	arguments := map[string]any{"prompt": "summarise", "inputs": []map[string]any{{"path": input}},
-		"credentials": []map[string]any{{"name": "deploy-key", "file": "id_ed25519"}}, "outputs": []map[string]any{{"name": "report.md", "required": true}}}
+		"credentials": []map[string]any{{"name": "deploy-key", "file": "id_ed25519"}}, "outputs": []map[string]any{{"name": "report.md"}}}
 	var submitted submitOutput
 	callTool(t, b.ctx, session, "submit", arguments, &submitted)
 	admitted := b.tasks(t, submitted.ID)[0]
 	if submission := admitted.submission; len(submission.Message.Parts) != 2 || submission.Message.Parts[1].Filename != "data.csv" ||
-		len(submission.Wherry.Credentials) != 1 || !slices.Equal(submission.Wherry.Outputs, []wire.ExpectedOutput{{Name: "report.md", Required: true}}) {
+		len(submission.Wherry.Credentials) != 1 || !slices.Equal(submission.Wherry.Outputs, []wire.ExpectedOutput{{Name: "report.md"}}) {
 		t.Fatalf("submission %+v", submission)
 	}
 	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "inputs": []map[string]any{{"path": filepath.Join(t.TempDir(), "absent")}}}); failure.Code != "INVALID_ARGUMENT" {
@@ -505,7 +506,9 @@ func TestGitHostKeyReadIsBounded(t *testing.T) {
 	}
 }
 
-func TestSubmitTakesS3InputsAndOutputs(t *testing.T) {
+// The S3 lane is chosen by size for inputs and by :s3 for outputs; the suffixes this version dropped are refused with
+// a hint, on the command line and in MCP, before anything is read or published.
+func TestSubmitTakesS3OutputsAndRefusesDroppedSuffixes(t *testing.T) {
 	b := newBus(t)
 	work := t.TempDir()
 	data := filepath.Join(work, "dataset.bin")
@@ -513,45 +516,67 @@ func TestSubmitTakesS3InputsAndOutputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	const rule = "this host's configuration has no storage credential for pool pool-a's S3 inputs and outputs"
-	for _, args := range [][]string{{"--input", data + ":s3"}, {"--output", "report.pdf:required:s3"}} {
-		var stdout, stderr bytes.Buffer
-		if err := runSubmit(b.ctx, b.client, append([]string{"--prompt", "x"}, args...), &stdout, &stderr); err == nil || !strings.Contains(err.Error(), rule) {
-			t.Fatalf("submit %v = %v; want the S3 lane refused for want of storage", args, err)
-		}
-	}
 	var stdout, stderr bytes.Buffer
-	if err := runSubmit(b.ctx, b.client, []string{"--prompt", "x", "--input", data}, &stdout, &stderr); err != nil {
-		t.Fatalf("submit of a small input without :s3 = %v; want it sent in the task", err)
+	if err := runSubmit(b.ctx, b.client, []string{"--prompt", "x", "--output", "report.pdf:s3"}, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), rule) {
+		t.Fatalf("submit --output report.pdf:s3 = %v; want the S3 lane refused for want of storage", err)
 	}
-	for _, args := range [][]string{{"--input", data + ":S3"}, {"--input", data + ":required"}} {
-		if err := runSubmit(b.ctx, b.client, append([]string{"--prompt", "x"}, args...), &stdout, &stderr); err == nil || strings.Contains(err.Error(), rule) {
-			t.Fatalf("submit %v = %v; want the arguments refused", args, err)
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--input", data + ":s3"}, "inputs move to S3 by size; drop :s3"},
+		{[]string{"--output", "report.pdf:required"}, "outputs are always required; drop :required"},
+		{[]string{"--output", "report.pdf:required:s3"}, "outputs are always required; drop :required"},
+		{[]string{"--output", "report.pdf:s3:required"}, "outputs are always required; drop :required"},
+		{[]string{"--output", "report.pdf:S3"}, "want NAME[:s3]"},
+		{[]string{"--input", data + ":S3"}, "no such file"},
+	} {
+		if err := runSubmit(b.ctx, b.client, append([]string{"--prompt", "x"}, test.args...), &stdout, &stderr); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("submit %v = %v; want %q", test.args, err, test.want)
 		}
+	}
+	if err := runSubmit(b.ctx, b.client, []string{"--prompt", "x", "--input", data}, &stdout, &stderr); err != nil {
+		t.Fatalf("submit of a small input = %v; want it sent in the task", err)
 	}
 	if err := runSubmit(b.ctx, b.client, []string{"--prompt", "x", "--s3-input", data}, &stdout, &stderr); err == nil || err.Error() != "flag provided but not defined: -s3-input" {
 		t.Fatalf("submit --s3-input = %v; want an unknown flag", err)
 	}
 	session := mcpSessionReading(t, b.connect(t), nil, inputOpener(work, busclient.Config{}))
-	for _, arguments := range []map[string]any{
-		{"prompt": "x", "inputs": []map[string]any{{"path": "dataset.bin", "storage": "s3"}}},
-		{"prompt": "x", "outputs": []map[string]any{{"name": "report.pdf", "storage": "s3"}}},
+	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "outputs": []map[string]any{{"name": "report.pdf", "storage": "s3"}}}); failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, rule) {
+		t.Fatalf("MCP submit of an S3 output = %+v", failure)
+	}
+	for _, test := range []struct {
+		arguments map[string]any
+		want      string
+	}{
+		{map[string]any{"prompt": "x", "inputs": []map[string]any{{"path": "dataset.bin", "storage": "s3"}}}, "inputs move to S3 by size; drop :s3"},
+		{map[string]any{"prompt": "x", "inputs": []map[string]any{{"path": "dataset.bin", "storage": "feed"}}}, "inputs move to S3 by size; drop :s3"},
+		{map[string]any{"prompt": "x", "outputs": []map[string]any{{"name": "report.pdf", "required": true}}}, "outputs are always required; drop :required"},
+		{map[string]any{"prompt": "x", "outputs": []map[string]any{{"name": "report.pdf", "required": false}}}, "outputs are always required; drop :required"},
 	} {
-		if failure := callToolError(t, b.ctx, session, "submit", arguments); failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, rule) {
-			t.Fatalf("MCP submit %v = %+v", arguments, failure)
+		if failure := callToolError(t, b.ctx, session, "submit", test.arguments); failure.Code != "INVALID_ARGUMENT" || failure.Message != test.want {
+			t.Fatalf("MCP submit %v = %+v; want %q", test.arguments, failure, test.want)
 		}
 	}
 	var submitted submitOutput
 	callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "inputs": []map[string]any{{"path": "dataset.bin"}}}, &submitted)
-	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "inputs": []map[string]any{{"path": "dataset.bin", "storage": "feed"}}}); failure.Code != "INVALID_ARGUMENT" ||
-		strings.Contains(failure.Message, rule) {
-		t.Fatalf("MCP submit of an input with storage feed = %+v; want it refused", failure)
-	}
 	result, err := session.CallTool(b.ctx, &mcp.CallToolParams{Name: "submit", Arguments: map[string]any{"prompt": "x", "s3_inputs": []string{"dataset.bin"}}})
 	if err != nil || !result.IsError || !strings.Contains(toolText(result), `unexpected additional properties ["s3_inputs"]`) {
 		t.Fatalf("MCP submit with s3_inputs = %+v, %v; want s3_inputs refused as unknown", result, err)
 	}
-	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "inputs": []map[string]any{{"path": "../outside.bin", "storage": "s3"}}}); failure.Code != "INVALID_ARGUMENT" ||
-		!strings.Contains(failure.Message, "beneath one of the MCP server's input roots") {
-		t.Fatalf("MCP submit of an S3 input outside the working directory = %+v", failure)
+	tools, err := session.ListTools(b.ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range tools.Tools {
+		if tool.Name != "submit" {
+			continue
+		}
+		encoded, _ := json.Marshal(tool.InputSchema)
+		for _, dropped := range []string{`"required":{`, `"storage":{"description":"s3 to upload`} {
+			if strings.Contains(string(encoded), dropped) {
+				t.Fatalf("submit's input schema keeps %s: %s", dropped, encoded)
+			}
+		}
 	}
 }

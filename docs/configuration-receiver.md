@@ -510,8 +510,9 @@ and lists the run's credential names, marking each optional credential the
 host did not supply because it could not resolve it, as in
 `This run's credentials are openai-api-key, github-token (not supplied).`
 It then says that the answer goes in the message text, that long or
-structured content belongs in files in the output directory, and that a reply
-over the pool's `reply_limit` bytes is cut:
+structured content belongs in files in the output directory, that a
+completed run must end with a reply, and that a reply over the pool's
+`reply_limit` bytes is cut:
 
 ```json
 {"state": "TASK_STATE_COMPLETED", "message": {"role": "ROLE_AGENT", "parts": [{"text": "<the answer, or what went wrong>"}]}}
@@ -568,12 +569,17 @@ from a `data` part as a `data` part. That text is the
 64 KiB, and the result's reply chunks carry it up to the pool's `reply_limit`.
 An outcome file reporting `TASK_STATE_AUTH_REQUIRED` ends the run
 `TASK_STATE_FAILED` with the `credential` part. The run is not resumed; the
-tenant supplies the credential and submits again. A required
-output that is not returned fails the run with
+tenant supplies the credential and submits again. Every expected output is
+required: one that is not returned fails the run with
 `required output <name> not returned: <reason>` as the status message,
 whatever the file reports; when the file is missing or invalid and the exit
 is non-zero or a signal, the message keeps that cause in front, as in
 `agent exited 137 (OOMKilled); required output report.md not returned: missing`.
+The changes file of a git input, `changes.bundle` or `changes.patch`, is the
+exception: a run that commits nothing leaves none, and completes without it.
+Every completed run ends with a reply: with every expected output returned,
+a `TASK_STATE_COMPLETED` file whose message has no text once trimmed of
+whitespace and no `data` part fails the run with `agent returned no reply`.
 When the outputs are not collected, the receiver asks the plugin for the
 file alone, within another 2 minutes, reading no other output.
 
