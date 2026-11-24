@@ -201,8 +201,8 @@ func TestConfigureReportsVersion(t *testing.T) {
 		t.Fatalf("version before Configure = %q, want none", version)
 	}
 	configured(t, p, "a", "{}")
-	if version, protocol := p.Version(); version != "v0.0.0-test" || protocol != 12 {
-		t.Fatalf("version = %q, protocol %d; want v0.0.0-test, 12", version, protocol)
+	if version, protocol := p.Version(); version != "v0.0.0-test" || protocol != 13 {
+		t.Fatalf("version = %q, protocol %d; want v0.0.0-test, 13", version, protocol)
 	}
 }
 
@@ -756,9 +756,9 @@ func TestServeHandsTheProfileItsLogger(t *testing.T) {
 	})
 }
 
-// A plugin serving only protocol version 11, the one before this, or only 13, the one after, is refused.
+// A plugin serving only protocol version 12, the one before this, or only 14, the one after, is refused.
 func TestOtherProtocolVersionsAreRefused(t *testing.T) {
-	for _, version := range []int{11, 13} {
+	for _, version := range []int{12, 14} {
 		script := filepath.Join(t.TempDir(), "wherry-plugin-other")
 		if err := os.WriteFile(script, fmt.Appendf(nil, "#!/bin/sh\necho '1|%d|tcp|127.0.0.1:1|grpc'\nsleep 5\n", version), 0o700); err != nil {
 			t.Fatal(err)
@@ -768,15 +768,15 @@ func TestOtherProtocolVersionsAreRefused(t *testing.T) {
 			p.Close()
 			t.Fatalf("launched a version %d plugin", version)
 		}
-		if want := fmt.Sprintf("incompatible API version with plugin. Plugin version: %d, Client versions: [12]", version); !strings.Contains(err.Error(), want) {
+		if want := fmt.Sprintf("incompatible API version with plugin. Plugin version: %d, Client versions: [13]", version); !strings.Contains(err.Error(), want) {
 			t.Fatalf("launch error %v; want %q", err, want)
 		}
 	}
 }
 
 func TestProtocolsAreTheVersionedPluginsAscending(t *testing.T) {
-	if got := Protocols(); !reflect.DeepEqual(got, []int{12}) {
-		t.Fatalf("Protocols() = %v; want [12]", got)
+	if got := Protocols(); !reflect.DeepEqual(got, []int{13}) {
+		t.Fatalf("Protocols() = %v; want [13]", got)
 	}
 	previous := versionedPlugins
 	t.Cleanup(func() { versionedPlugins = previous })
@@ -798,10 +798,10 @@ func TestProtocolsAreTheVersionedPluginsAscending(t *testing.T) {
 }
 
 // A plugin and a receiver built with an earlier SDK are refused by this SDK's, and refuse it, in both directions:
-// protocol 10 named its version through HandshakeConfig.ProtocolVersion, before VersionedPlugins, and protocol 11 had no
-// ReadWorking. Protocols 11 and 12 are each a clean break.
+// protocol 10 named its version through HandshakeConfig.ProtocolVersion, before VersionedPlugins; protocol 11 had no
+// ReadWorking; protocol 12 flattened nested input names. Protocols 11, 12 and 13 are each a clean break.
 func TestEarlierProtocolsAreRefusedBothWays(t *testing.T) {
-	for _, version := range []int{10, 11} {
+	for _, version := range []int{10, 11, 12} {
 		fixture := fmt.Sprintf("protocol%d", version)
 		binary := filepath.Join(t.TempDir(), "wherry-plugin-"+fixture)
 		build := exec.Command("go", "build", "-o", binary, ".")
@@ -815,21 +815,21 @@ func TestEarlierProtocolsAreRefusedBothWays(t *testing.T) {
 				p.Close()
 				t.Fatalf("launched a protocol %d plugin", version)
 			}
-			if want := fmt.Sprintf("incompatible API version with plugin. Plugin version: %d, Client versions: [12]", version); !strings.Contains(err.Error(), want) {
+			if want := fmt.Sprintf("incompatible API version with plugin. Plugin version: %d, Client versions: [13]", version); !strings.Contains(err.Error(), want) {
 				t.Fatalf("launch error %v; want %q", err, want)
 			}
 		})
 		t.Run("this Serve under its Launch/"+fixture, func(t *testing.T) {
 			t.Setenv("WHERRY_TESTPLUGIN_RECORD", filepath.Join(t.TempDir(), "record.jsonl"))
 			output, err := exec.Command(binary, testPlugin).CombinedOutput()
-			if want := fmt.Sprintf("Plugin version: 12, Client versions: [%d]", version); err == nil || !strings.Contains(string(output), want) {
-				t.Fatalf("launch = %q, %v; want the protocol 12 plugin refused", output, err)
+			if want := fmt.Sprintf("Plugin version: 13, Client versions: [%d]", version); err == nil || !strings.Contains(string(output), want) {
+				t.Fatalf("launch = %q, %v; want the protocol 13 plugin refused", output, err)
 			}
 		})
 	}
 }
 
-// A plugin serves protocol version 12 only under the WHERRY_PLUGIN cookie, and refuses to serve without it.
+// A plugin serves protocol version 13 only under the WHERRY_PLUGIN cookie, and refuses to serve without it.
 func TestServeHandshakeUsesThePluginCookie(t *testing.T) {
 	if handshake.MagicCookieKey != "WHERRY_PLUGIN" {
 		t.Fatalf("handshake %+v; want cookie key WHERRY_PLUGIN", handshake)
@@ -860,8 +860,8 @@ func TestServeHandshakeUsesThePluginCookie(t *testing.T) {
 		return line, err
 	}
 	line, err := serve("WHERRY_PLUGIN=" + handshake.MagicCookieValue)
-	if err != nil || !strings.HasPrefix(line, "1|12|") {
-		t.Fatalf("handshake line %q, %v; want core protocol 1 and plugin protocol 12", line, err)
+	if err != nil || !strings.HasPrefix(line, "1|13|") {
+		t.Fatalf("handshake line %q, %v; want core protocol 1 and plugin protocol 13", line, err)
 	}
 	if line, err := serve(); err == nil || line != "" {
 		t.Fatalf("served %q without the cookie", line)

@@ -31,7 +31,18 @@ Restart a pool's receivers one at a time.
 A stopping key custodian needs a live successor to re-key its tasks.
 Follow [Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian).
 
-## The broker CA in the bundle
+## Nested input names and plugin protocol 13
+
+A clean break, as every pre-1.0 change ([ADR-0032](design.md)); no
+compatibility path remains.
+
+- An input file's name may be a relative path of portable segments joined by
+  `/`, as an output's name is, so inputs keep their directory structure. No
+  input name is a directory of another, among input files, S3 inputs and
+  `known_hosts`. `previous/` is reserved for a later non-git continue.
+- The plugin protocol is 13. Receivers and plugins upgrade together: a
+  protocol-12 plugin is refused at launch, and a protocol-13 plugin refuses a
+  protocol-12 receiver. Use plugins built for protocol 13.
 
 Bundles carry the broker's CA as `ca` when `operator.yaml` names a
 `ca_file`, and hosts and receivers trust the broker through their own

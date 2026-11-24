@@ -36,8 +36,10 @@ type Run struct {
 	Model   string
 	Attempt int64
 	Prompt  []byte
-	// Inputs and Fetches go in the directory WHERRY_INPUT_DIR names, each as a file under its name. Credentials are every
-	// credential the agent gets, each at its target; the core has validated every name and target.
+	// Inputs and Fetches go in the directory WHERRY_INPUT_DIR names, each as a file under its name. A name may be a
+	// relative path, so the plugin creates its parent directories under the input directory without following symbolic
+	// links; the core has validated every name as a relative path whose segments are portable, none nesting under
+	// another. Credentials are every credential the agent gets, each at its target; the core has validated every target.
 	Inputs      []File
 	Credentials []Secret
 	Fetches     []Fetch

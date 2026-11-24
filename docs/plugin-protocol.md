@@ -32,9 +32,9 @@ The receiver logs your plugin's version at startup.
 
 The receiver and plugin use gRPC over [go-plugin](https://github.com/hashicorp/go-plugin).
 Each start creates a certificate pair for mutual TLS.
-The protocol version is 12.
+The protocol version is 13.
 The receiver refuses other protocol versions and plugins without a TLS certificate.
-A protocol 12 plugin refuses a protocol 11 receiver, so upgrade a receiver and its plugins together.
+A protocol 13 plugin refuses a protocol 12 receiver, so upgrade a receiver and its plugins together.
 Every call names its profile.
 The maximum plugin message size is 64 MiB.
 
