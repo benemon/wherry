@@ -61,6 +61,9 @@ type SubmitInput struct {
 	Prompt   string
 	// Parts follow the prompt's text part.
 	Parts []wire.Part
+	// Files are input files read into raw parts after Parts, except that on a pool with storage one over the pool's
+	// record limit, which can never travel inline, uploads from its Body as an S3 input.
+	Files []S3File
 	// Credentials name credentials this host configures, each delivered to the agent at its target.
 	Credentials []wire.TaskCredential
 	// Requested names the placed agent's credentials the task asks for: an optional one named here fails the submission
@@ -348,7 +351,7 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 				names = append(names, wire.InputName(part))
 			}
 		}
-		for _, file := range input.S3Inputs {
+		for _, file := range slices.Concat(input.Files, input.S3Inputs) {
 			names = append(names, file.Name)
 		}
 		for _, output := range input.Outputs {
@@ -494,10 +497,30 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, fmt.Errorf("%w: task credential %s takes the %s of one of agent %s's credentials", ErrInvalidInput, credential.Name, credential.Target(), agent.Name)
 		}
 	}
+	storable := v.state.Pools[pool].Storage != nil && h.credentialed(pool)
+	input.Parts = slices.Clone(input.Parts)
+	for _, file := range input.Files {
+		size, err := file.Body.Seek(0, io.SeekEnd)
+		if err != nil {
+			return SubmitResult{}, err
+		}
+		if storable && size > v.state.Pools[pool].RecordLimit {
+			input.S3Inputs = append(slices.Clone(input.S3Inputs), file)
+			stored = true
+			continue
+		}
+		if _, err := file.Body.Seek(0, io.SeekStart); err != nil {
+			return SubmitResult{}, err
+		}
+		data, err := io.ReadAll(file.Body)
+		if err != nil {
+			return SubmitResult{}, err
+		}
+		input.Parts = append(input.Parts, wire.Part{Raw: data, Filename: file.Name})
+	}
 	if err := wire.ValidateInputs(input.Parts, math.MaxInt64); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
-	storable := v.state.Pools[pool].Storage != nil && h.credentialed(pool)
 	if continued.last != nil && !storable {
 		return SubmitResult{}, fmt.Errorf("%w: continue needs a pool with storage and a host storage credential: the bundles travel through S3", ErrInvalidInput)
 	}

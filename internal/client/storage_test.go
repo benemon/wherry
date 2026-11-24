@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -450,6 +451,51 @@ func TestSubmitOverTheRecordLimitMovesInputsToS3(t *testing.T) {
 	}
 	if task := receiver.claim(t, f.ctx, result.RunID)[0].submission; !slices.Equal(task.Wherry.S3Inputs, []wire.S3Input{{Name: "data.bin", Size: 60000, SHA256: hexSum(data)}}) {
 		t.Fatalf("submission S3 inputs %+v; want the uploaded input", task.Wherry.S3Inputs)
+	}
+}
+
+type transportFunc func(*http.Request) (*http.Response, error)
+
+func (f transportFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
+
+func TestSubmitUploadsAFileOverTheRecordLimitFromDisk(t *testing.T) {
+	f, _, receiver := recordLimitFixture(t, true)
+	big, err := os.Create(filepath.Join(t.TempDir(), "big.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer big.Close()
+	const size = 64 << 20
+	if err := big.Truncate(size); err != nil {
+		t.Fatal(err)
+	}
+	small, _ := randomFile(t, "small.bin", 100)
+	var before, during runtime.MemStats
+	previous := storageTransport
+	storageTransport = transportFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method == http.MethodPut && strings.HasSuffix(request.URL.Path, "/big.bin") {
+			runtime.GC()
+			runtime.ReadMemStats(&during)
+		}
+		return previous.RoundTrip(request)
+	})
+	t.Cleanup(func() { storageTransport = previous })
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Files: []S3File{{Name: "big.bin", Body: big}, {Name: "small.bin", Body: small}},
+		EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if during.HeapAlloc == 0 {
+		t.Fatal("big.bin was never uploaded")
+	}
+	if growth := int64(during.HeapAlloc) - int64(before.HeapAlloc); growth > size/4 {
+		t.Fatalf("the heap grew %d bytes by the upload of a %d-byte file; want it streamed from disk", growth, size)
+	}
+	task := receiver.claim(t, f.ctx, result.RunID)[0].submission
+	if len(task.Message.Parts) != 2 || task.Message.Parts[1].Filename != "small.bin" || len(task.Wherry.S3Inputs) != 1 || task.Wherry.S3Inputs[0].Name != "big.bin" || task.Wherry.S3Inputs[0].Size != size {
+		t.Fatalf("submission has parts %+v and S3 inputs %+v; want small.bin inline and big.bin through S3", task.Message.Parts, task.Wherry.S3Inputs)
 	}
 }
 

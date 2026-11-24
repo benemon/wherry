@@ -369,9 +369,14 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	if wasSet(flags, "outputs-dir") && !*wait {
 		return errors.New("--outputs-dir requires --wait")
 	}
-	parts, err := inputParts(inputs)
-	if err != nil {
-		return err
+	var files []busclient.S3File
+	for _, path := range inputs {
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		files = append(files, busclient.S3File{Name: filepath.Base(path), Body: file})
 	}
 	var git *wire.GitInput
 	if *continueRun != "" && (wasSet(flags, "git") || wasSet(flags, "git-path") || wasSet(flags, "git-changes")) {
@@ -426,7 +431,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	}
 	defer closeClient()
 	result, err := client.Submit(ctx, busclient.SubmitInput{
-		Agent: *agent, Model: *model, Selector: selector, Prompt: *prompt, Parts: parts, Credentials: credentials, Requested: requested, Outputs: outputs, Git: git, GitChanges: *gitChanges,
+		Agent: *agent, Model: *model, Selector: selector, Prompt: *prompt, Files: files, Credentials: credentials, Requested: requested, Outputs: outputs, Git: git, GitChanges: *gitChanges,
 		Continue: *continueRun, StartBy: startTime, EndBy: endTime,
 	})
 	if err != nil {
@@ -452,19 +457,6 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	return nil
-}
-
-// inputParts reads each input file into a raw part named by its base name.
-func inputParts(paths []string) ([]wire.Part, error) {
-	var parts []wire.Part
-	for _, path := range paths {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, err
-		}
-		parts = append(parts, wire.Part{Raw: append(wire.StdBytes{}, data...), Filename: filepath.Base(path)})
-	}
-	return parts, nil
 }
 
 // outputFlag parses NAME[:s3] into outputs.

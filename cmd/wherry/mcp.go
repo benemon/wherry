@@ -68,7 +68,7 @@ func runMCP(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return newMCPServer(connect, inputReader(open), wait, logger).Run(ctx, &mcp.StdioTransport{})
+	return newMCPServer(connect, open, wait, logger).Run(ctx, &mcp.StdioTransport{})
 }
 
 // waitCommand returns the shell command that waits for a run and prints its reply, naming the config configFile, else
@@ -346,7 +346,7 @@ type logsReply struct {
 
 // newMCPServer serves the wherry tools. Every call uses the host connect returns, so the process runs one tenant-feed
 // follower.
-func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error), waitCommand func(id string) string, logger *log.Logger) *mcp.Server {
+func newMCPServer(connect func() (*busclient.Host, error), openInput func(string) (*os.File, error), waitCommand func(id string) string, logger *log.Logger) *mcp.Server {
 	// The model sees an UNAVAILABLE's class alone; the server's log, which only the host's user reads, keeps its cause
 	// with every credential value the host resolved redacted.
 	failure := func(err error) error {
@@ -450,7 +450,8 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		Description: fmt.Sprintf("Sign and publish a task to the task topic of a signature, an agent and all the labels of the profiles that carry it, that live receivers offer matching the selector, preferring the default agent, then the greatest spare capacity, then the lowest topic name. Returns the run id; set wait only for runs expected to finish within %d seconds, otherwise collect the result with result, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR or in environment variables, or, by name alone, the placed agent's own optional credentials the task cannot go without: every agent credential this host can resolve is delivered at its target, required or optional, named or not, and unsupplied lists the optional ones it could not resolve, which the run goes without; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which result writes locally. Submit encrypts the agent's and the task's configured credentials into the task's envelope under the pool's key; the run needs nothing more from this host. Submit refuses with auth required when this host has no source for a credential the agent requires or the task names, when none of a catalog agent's model credentials resolves, and refuses a name that is not one of the placed agent's credentials.", int(waitBound.Seconds())),
 	}, func(ctx context.Context, request *mcp.CallToolRequest, input submitInput) (*mcp.CallToolResult, submitOutput, error) {
 		started := time.Now()
-		submission, err := submitFromInput(input, readInput)
+		submission, err := submitFromInput(input, openInput)
+		defer closeFiles(submission.Files)
 		if err != nil {
 			return nil, submitOutput{}, err
 		}
@@ -677,12 +678,12 @@ func droppedFields(next mcp.MethodHandler) mcp.MethodHandler {
 	}
 }
 
-func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part, error)) (busclient.SubmitInput, error) {
+func submitFromInput(input submitInput, openInput func(string) (*os.File, error)) (busclient.SubmitInput, error) {
 	if (input.Prompt == "") == (input.PromptFile == "") {
 		return busclient.SubmitInput{}, invalidArgument("exactly one of prompt and prompt_file is required")
 	}
 	if input.PromptFile != "" {
-		part, err := readInput(input.PromptFile, math.MaxInt64)
+		part, err := inputReader(openInput)(input.PromptFile, math.MaxInt64)
 		if err != nil {
 			return busclient.SubmitInput{}, err
 		}
@@ -695,20 +696,12 @@ func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part
 	if selector == nil {
 		selector = []wire.Requirement{}
 	}
-	var parts []wire.Part
-	for _, file := range input.Inputs {
-		part, err := readInput(file.Path, math.MaxInt64)
-		if err != nil {
-			return busclient.SubmitInput{}, err
-		}
-		parts = append(parts, part)
-	}
 	startBy, endBy, err := bounds(input.StartBy, input.EndBy, time.Now())
 	if err != nil {
 		return busclient.SubmitInput{}, err
 	}
 	submission := busclient.SubmitInput{
-		Agent: input.Agent, Model: input.Model, Selector: selector, Prompt: input.Prompt, Parts: parts,
+		Agent: input.Agent, Model: input.Model, Selector: selector, Prompt: input.Prompt,
 		Continue: input.Continue, StartBy: startBy, EndBy: endBy,
 	}
 	if input.Git != nil {
@@ -724,6 +717,14 @@ func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part
 	}
 	for _, output := range input.Outputs {
 		submission.Outputs = append(submission.Outputs, wire.ExpectedOutput{Name: output.Name, Storage: output.Storage})
+	}
+	for _, inputFile := range input.Inputs {
+		file, err := openInput(inputFile.Path)
+		if err != nil {
+			closeFiles(submission.Files)
+			return busclient.SubmitInput{}, err
+		}
+		submission.Files = append(submission.Files, busclient.S3File{Name: filepath.Base(inputFile.Path), Body: file})
 	}
 	return submission, nil
 }
@@ -895,6 +896,13 @@ func inputReader(open func(string) (*os.File, error)) func(string, int64) (wire.
 			return wire.Part{}, invalidArgument("inputs must be readable regular files beneath one of the MCP server's input roots, outside the wherry configuration")
 		}
 		return wire.Part{Raw: append(wire.StdBytes{}, data...), Filename: filepath.Base(path)}, nil
+	}
+}
+
+// closeFiles closes the input files a submission opened.
+func closeFiles(files []busclient.S3File) {
+	for _, file := range files {
+		file.Body.(io.Closer).Close()
 	}
 }
 
