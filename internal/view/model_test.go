@@ -43,10 +43,12 @@ func TestRebuildAuthorisation(t *testing.T) {
 	f.operator(t0.Add(40*time.Minute), operator.Record{Kind: "end", Tenant: tenantB, Pool: poolA})
 	f.operator(t0.Add(50*time.Minute), operator.Record{Kind: "end", Tenant: tenantB, Host: hostB})
 
-	// Hostile: a host-signed status, a status under a retired key after its rotation, a status naming another pool than
-	// its topic, a forged signature and an unknown key.
+	// Hostile: a status signed by a host under its own kid, a status under a retired key after its rotation, a status
+	// naming another pool than its topic, a forged signature and an unknown key.
 	h1 := runID(tenantA, hostA, "h1")
-	f.status(t0.Add(time.Minute), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: h1, kind: "terminal", state: wire.TaskStateCompleted, key: f.keys[signed.HostOwner(tenantA, hostA)]})
+	hostSigned, _ := f.statusValue(t0.Add(time.Minute), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: h1, kind: "terminal", state: wire.TaskStateCompleted})
+	hostSigned.V = 1
+	f.produce(operator.PoolEventsTopic(poolA), h1, must(t)(signed.Sign(wire.StatusType, signed.HostOwner(tenantA, hostA), hostSigned, f.keys[signed.HostOwner(tenantA, hostA)])), t0.Add(time.Minute))
 	h2 := runID(tenantA, hostA, "h2")
 	f.status(t0.Add(10*time.Minute+5*time.Millisecond), st{receiver: receiverB, tenant: tenantA, pool: poolA, run: h2, kind: "terminal", state: wire.TaskStateCompleted, key: receiverBOld})
 	h3 := runID(tenantA, hostA, "h3")

@@ -191,6 +191,13 @@ type st struct {
 
 func (f *fixture) statusRecord(at time.Time, s st) []byte {
 	f.t.Helper()
+	status, key := f.statusValue(at, s)
+	return f.sign(status, key)
+}
+
+// statusValue is the status s describes, unsigned, with the key s names or its receiver's.
+func (f *fixture) statusValue(at time.Time, s st) (*wire.RunStatus, ed25519.PrivateKey) {
+	f.t.Helper()
 	if s.attempt == 0 {
 		s.attempt = 1
 	}
@@ -219,7 +226,7 @@ func (f *fixture) statusRecord(at time.Time, s st) []byte {
 		}
 		status.Wherry.TaskTopic, status.Wherry.TaskOffset = operator.SignatureTopic(s.pool, agentA, map[string]string{"zone": "dc1"}), &offset
 	}
-	return f.sign(status, s.key)
+	return status, s.key
 }
 
 // status dual-writes a status to the pool's events and the tenant's feed, as a receiver does, and returns its digest.
