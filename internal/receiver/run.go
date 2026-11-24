@@ -2300,9 +2300,10 @@ func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stop
 	}
 }
 
-// changesFile reports whether name is the changes file of the run's git input.
+// changesFile reports whether name is the changes file of the run's git input: the one among its expected outputs.
 func (run *activeRun) changesFile(name string) bool {
-	return run.task.Wherry.Git != nil && wire.GitChangesFile(name)
+	return run.task.Wherry.Git != nil && wire.GitChangesFile(name) &&
+		slices.ContainsFunc(run.expected, func(expected wire.ExpectedOutput) bool { return expected.Name == name })
 }
 
 // required reports whether the run fails without expected: every declared output, except the changes file of a git

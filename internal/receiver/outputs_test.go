@@ -157,6 +157,31 @@ func TestAGitRunsBundleIsChargedLast(t *testing.T) {
 	}
 }
 
+// A changes file other than the one the run's git mode expects is an ordinary output, charged in the output total.
+func TestAnUnexpectedChangesFileIsChargedInOrder(t *testing.T) {
+	report, changes := strings.Repeat("r", 60), strings.Repeat("c", 60)
+	for name, test := range map[string]struct {
+		expected []wire.ExpectedOutput
+		left     string
+	}{
+		"changes.patch under bundle": {[]wire.ExpectedOutput{{Name: wire.GitBundle}}, wire.GitPatch},
+		"changes.bundle under patch": {[]wire.ExpectedOutput{{Name: wire.GitPatch}}, wire.GitBundle},
+		"changes.bundle under none":  {nil, wire.GitBundle},
+		"changes.patch under none":   {nil, wire.GitPatch},
+	} {
+		t.Run(name, func(t *testing.T) {
+			terms := vcsTerms("git.example.test")
+			terms.OutputLimit = 100
+			f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, outputs: []pluginsdk.Output{file("report.md", report), file(test.left, changes)}}})
+			f.execute(t, f.submit(t, f.host, gitTask(append([]wire.ExpectedOutput{{Name: "report.md"}}, test.expected...)...)), 1)
+			task := f.lastTask(t)
+			if task.Status.State != wire.TaskStateFailed || task.Status.Message.Parts[0].Text != "required output report.md not returned: not collected" {
+				t.Fatalf("ended %s %+v, want FAILED with %s charged in the output total", task.Status.State, task.Status.Message, test.left)
+			}
+		})
+	}
+}
+
 func continuedTask(outputs ...wire.ExpectedOutput) func(*wire.Submission) {
 	return func(task *wire.Submission) {
 		gitTask(outputs...)(task)
