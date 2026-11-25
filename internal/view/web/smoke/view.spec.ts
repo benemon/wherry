@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import type { Page } from '@playwright/test';
 import { expect, test } from '@playwright/test';
 
 declare global {
@@ -12,15 +13,13 @@ const fixture = (name: string) => JSON.parse(readFileSync(new URL('../fixtures/'
 const failedRun: string = fixture('run-failed.json').id;
 const policy: { page: string; placeholder: string } = fixture('csp.json');
 
-// The page under its policy: the map, a push drawer, a popover, the transcript and an overlay flyout each render
-// without a securitypolicyviolation and without a request off the origin. The four style injectors each show up
-// here: a drawer and the colour-mode class through EUI's caches, the popover's focus trap through
-// react-remove-scroll-bar, the overlay's mask through the package-default @emotion/css.
-test('the page renders every surface under its Content-Security-Policy', async ({ page, baseURL }) => {
+// watch collects what fails the smoke: a securitypolicyviolation, a request off the origin, a console or page error,
+// and a response of 400 or over.
+async function watch(page: Page, baseURL: string) {
   const offOrigin: string[] = [];
   const errors: string[] = [];
   page.on('request', (r) => {
-    if (!r.url().startsWith(baseURL!)) {
+    if (!r.url().startsWith(baseURL)) {
       offOrigin.push(r.url());
     }
   });
@@ -41,6 +40,19 @@ test('the page renders every surface under its Content-Security-Policy', async (
       window.__csp!.push(e.violatedDirective + ' ' + e.blockedURI + ' ' + e.sourceFile + ':' + e.lineNumber);
     });
   });
+  return async () => {
+    expect(await page.evaluate(() => window.__csp)).toEqual([]);
+    expect(offOrigin).toEqual([]);
+    expect(errors).toEqual([]);
+  };
+}
+
+// The page under its policy: the map, a push drawer, a popover, the transcript and an overlay flyout each render
+// without a securitypolicyviolation and without a request off the origin. The four style injectors each show up
+// here: a drawer and the colour-mode class through EUI's caches, the popover's focus trap through
+// react-remove-scroll-bar, the overlay's mask through the package-default @emotion/css.
+test('the page renders every surface under its Content-Security-Policy', async ({ page, baseURL }) => {
+  const check = await watch(page, baseURL!);
 
   const response = await page.goto('/#t=' + token);
   // The policy served is the Go server's, from its own constants through the fixture.
@@ -83,7 +95,28 @@ test('the page renders every surface under its Content-Security-Policy', async (
   await page.getByRole('button', { name: 'Load trace' }).click();
   await expect(page.getByRole('button', { name: /^task\.claim, receiver/ })).toBeVisible();
 
-  expect(await page.evaluate(() => window.__csp)).toEqual([]);
-  expect(offOrigin).toEqual([]);
-  expect(errors).toEqual([]);
+  await check();
+});
+
+// Under forced colours and more contrast EUI takes its high-contrast palette, so the trace's colours and the
+// theme-driven custom properties come from that palette too; the surfaces render with no violation.
+test.describe('high contrast', () => {
+  test.use({ forcedColors: 'active', contrast: 'more' });
+
+  test('the page renders under the high-contrast palette', async ({ page, baseURL }) => {
+    const check = await watch(page, baseURL!);
+    await page.goto('/#t=' + token);
+    await expect(page.getByRole('button', { name: 'Receiver nomad-1' })).toBeVisible();
+    await page.getByRole('button', { name: 'Pool nomad' }).click();
+    await expect(page.getByRole('heading', { name: 'Pool nomad' })).toBeVisible();
+    await page.getByRole('button', { name: /^Runs \(/ }).click();
+    await page.getByRole('row', { name: new RegExp(failedRun.slice(0, 16)) }).click();
+    await page.getByRole('tab', { name: 'Trace' }).click();
+    await page.getByRole('button', { name: 'Load trace' }).click();
+    await expect(page.getByRole('button', { name: /^task\.run, receiver/ })).toBeVisible();
+    const bar = page.getByRole('button', { name: /^task\.submit, host/ }).locator('.w-bar');
+    // The host bar's colour is the theme's vis token, not a hex value the page carries.
+    expect(await bar.evaluate((el) => getComputedStyle(el).backgroundColor)).not.toBe('rgb(97, 162, 255)');
+    await check();
+  });
 });

@@ -170,6 +170,11 @@ export function App() {
     '--w-text-primary': colors.textPrimary,
     '--w-text-danger': colors.textDanger,
     '--w-hover': colors.backgroundBaseInteractiveHover,
+    '--w-vis-host': colors.vis.euiColorVis2,
+    '--w-vis-receiver': colors.vis.euiColorVis0,
+    '--w-vis-plugin': colors.vis.euiColorVis4,
+    '--w-font-sans': euiTheme.font.family,
+    '--w-font-code': euiTheme.font.familyCode,
   } as CSSProperties;
 
   if (!view) {

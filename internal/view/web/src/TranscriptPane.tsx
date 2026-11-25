@@ -142,7 +142,7 @@ export function TranscriptPane({ view, run, attempts, wide }: Props) {
       </div>
       <div ref={box} className="w-transcript" style={{ height: wide ? 560 : 440 }} onScroll={onScroll}>
         {loading && (
-          <div style={{ padding: '24px 16px', display: 'flex', flexDirection: 'column', gap: 4, fontFamily: 'Inter, sans-serif', fontSize: 13, lineHeight: '20px', color: 'var(--w-text-subdued)' }}>
+          <div style={{ padding: '24px 16px', display: 'flex', flexDirection: 'column', gap: 4, fontFamily: 'var(--w-font-sans)', fontSize: 13, lineHeight: '20px', color: 'var(--w-text-subdued)' }}>
             <b style={{ color: 'var(--w-text-heading)', fontWeight: 500 }}>Reading this run's transcript</b>
             <span>The first open scans the run's span of the tenant's transcript topic once. Later pages are fast.</span>
           </div>

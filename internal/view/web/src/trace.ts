@@ -67,4 +67,5 @@ export function markerText(marker: string): string {
   return '[other]';
 }
 
-export const serviceColors: Record<string, string> = { host: '#61A2FF', receiver: '#16C5C0', plugin: '#EE72A6' };
+// The services' colours are the theme's vis tokens, set on the root by App, so high contrast gets its palette.
+export const serviceColors: Record<string, string> = { host: 'var(--w-vis-host)', receiver: 'var(--w-vis-receiver)', plugin: 'var(--w-vis-plugin)' };

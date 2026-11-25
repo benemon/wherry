@@ -36,7 +36,7 @@ body {
   color: var(--w-text-subdued);
 }
 .w-mono {
-  font-family: 'Roboto Mono', Menlo, monospace;
+  font-family: var(--w-font-code);
   overflow-wrap: anywhere;
 }
 .w-map {
@@ -142,7 +142,7 @@ body {
   border-radius: 10px;
   font-size: 11px;
   color: var(--w-text-subdued);
-  font-family: 'Roboto Mono', Menlo, monospace;
+  font-family: var(--w-font-code);
 }
 .w-flow {
   position: absolute;
@@ -304,7 +304,7 @@ body {
   border: 1px solid var(--w-border-subdued);
   border-radius: 8px;
   background: var(--w-plain);
-  font-family: 'Roboto Mono', Menlo, monospace;
+  font-family: var(--w-font-code);
   font-size: 12px;
   line-height: 18px;
 }
@@ -329,7 +329,7 @@ body {
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
-  font-family: Inter, sans-serif;
+  font-family: var(--w-font-sans);
   font-size: 12px;
   font-weight: 600;
   color: var(--w-text-subdued);
@@ -345,7 +345,7 @@ body {
   padding: 2px 10px;
   border-bottom: 1px solid var(--w-border-subdued);
   background: var(--w-subdued);
-  font-family: Inter, sans-serif;
+  font-family: var(--w-font-sans);
 }
 .w-waterfall-head {
   display: grid;
@@ -373,7 +373,7 @@ body {
   background: var(--w-primary-bg);
 }
 .w-span .w-spanname {
-  font-family: 'Roboto Mono', Menlo, monospace;
+  font-family: var(--w-font-code);
   font-size: 12px;
   color: var(--w-text-heading);
   overflow: hidden;
