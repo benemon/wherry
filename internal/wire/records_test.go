@@ -7,6 +7,8 @@ import (
 	"crypto/rand"
 	json "encoding/json/v2"
 	"fmt"
+	"math"
+	"slices"
 	"strings"
 	"testing"
 
@@ -825,5 +827,57 @@ func TestFileNames(t *testing.T) {
 		if ValidOutputName(name) != valid {
 			t.Errorf("ValidOutputName(%q) = %v", name, !valid)
 		}
+	}
+}
+
+// The attempt rule, as the host reader and the operator view apply it: the highest attempt's lines, and below its
+// first seq the earlier attempt's; the empty final chunk is no line; an attempt the statuses name with no line yet
+// shows every earlier line.
+func TestAttemptRule(t *testing.T) {
+	line := func(attempt, seq int64) ChunkKey { return ChunkKey{Attempt: attempt, Seq: seq, Line: true} }
+	last := func(attempt, seq int64) ChunkKey { return ChunkKey{Attempt: attempt, Seq: seq} }
+	for _, c := range []struct {
+		name          string
+		highest       int64
+		keys          []ChunkKey
+		attempt       int64
+		first         int64
+		shown, hidden []ChunkKey
+	}{
+		{"one attempt", 1, []ChunkKey{line(1, 0), line(1, 10), last(1, 20)}, 1, 0, []ChunkKey{line(1, 0), line(1, 10)}, []ChunkKey{last(1, 20)}},
+		{"adopter resumes at 20", 2, []ChunkKey{line(1, 0), line(1, 10), line(1, 20), line(1, 30), line(2, 20), line(2, 40)}, 2, 20,
+			[]ChunkKey{line(1, 0), line(1, 10), line(2, 20), line(2, 40)}, []ChunkKey{line(1, 20), line(1, 30)}},
+		{"adopter's empty last chunk hides nothing", 2, []ChunkKey{line(1, 0), line(1, 10), last(2, 0)}, 2, math.MaxInt64, []ChunkKey{line(1, 0), line(1, 10)}, []ChunkKey{last(2, 0)}},
+		{"statuses name an attempt with no chunk", 3, []ChunkKey{line(1, 0), line(2, 0), line(2, 10)}, 3, math.MaxInt64, []ChunkKey{line(1, 0), line(2, 0), line(2, 10)}, nil},
+		{"chunks beyond the statuses", 1, []ChunkKey{line(1, 0), line(2, 5)}, 2, 5, []ChunkKey{line(1, 0), line(2, 5)}, nil},
+		{"third attempt below the second's first", 3, []ChunkKey{line(1, 0), line(1, 10), line(2, 10), line(2, 20), line(3, 5), line(3, 30)}, 3, 5,
+			[]ChunkKey{line(1, 0), line(3, 5), line(3, 30)}, []ChunkKey{line(1, 10), line(2, 10), line(2, 20)}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rule := NewAttemptRule(c.highest, c.keys...)
+			if rule.Attempt != c.attempt || rule.First != c.first {
+				t.Fatalf("rule %+v, want attempt %d first %d", rule, c.attempt, c.first)
+			}
+			for _, key := range c.shown {
+				if !rule.Shown(key) {
+					t.Errorf("%+v hidden", key)
+				}
+			}
+			for _, key := range c.hidden {
+				if rule.Shown(key) {
+					t.Errorf("%+v shown", key)
+				}
+			}
+			// The fold is order-free.
+			shuffled := slices.Clone(c.keys)
+			slices.Reverse(shuffled)
+			if again := NewAttemptRule(c.highest, shuffled...); again != rule {
+				t.Errorf("reversed: %+v", again)
+			}
+		})
+	}
+	chunk := &Chunk{ArtifactUpdate: TaskArtifactUpdateEvent{Artifact: Artifact{Parts: []Part{{Text: "x"}}}}, Wherry: ChunkBinding{ReceiverBinding: ReceiverBinding{Attempt: 2}, Seq: 7}}
+	if chunk.Key() != line(2, 7) || (&Chunk{}).Key().Line {
+		t.Errorf("keys: %+v %+v", chunk.Key(), (&Chunk{}).Key())
 	}
 }
