@@ -108,13 +108,22 @@ func TestDirInputsRefusesWhatIsNotARegularFile(t *testing.T) {
 			}
 		}, "docs/fifo is not a regular file"},
 		"a socket": {func(t *testing.T, dir string) {
-			// A listener's socket needs no privilege, on Linux or macOS; it stays on disk once the listener closes.
-			listener, err := net.Listen("unix", filepath.Join(dir, "sock"))
+			// A listener's socket needs no privilege, on Linux or macOS; it stays on disk once the listener closes. It is
+			// bound under a short directory, since macOS limits a socket path to 104 bytes, and renamed into place.
+			short, err := os.MkdirTemp("", "s")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.RemoveAll(short) })
+			listener, err := net.Listen("unix", filepath.Join(short, "sock"))
 			if err != nil {
 				t.Fatal(err)
 			}
 			listener.(*net.UnixListener).SetUnlinkOnClose(false)
 			listener.Close()
+			if err := os.Rename(filepath.Join(short, "sock"), filepath.Join(dir, "sock")); err != nil {
+				t.Fatal(err)
+			}
 		}, "docs/sock is not a regular file"},
 		"no file": {func(t *testing.T, dir string) {
 			if err := os.RemoveAll(filepath.Join(dir, "a")); err != nil {
