@@ -336,9 +336,9 @@ func (t *transcripts) scan(ctx context.Context, idx *transcriptIndex, budget *sc
 		}
 		if !idx.started {
 			idx.started = true
-			// The span's start is at or below the log start, and the earliest retained record is newer than it: retention
-			// removed the span's start.
-			if idx.listed >= 0 && idx.listed <= rng.Start && (len(rng.Records) == 0 && rng.End > rng.Start || len(rng.Records) > 0 && rng.Records[0].Timestamp.After(from)) {
+			// Records were deleted, the span's start is at or below the log start, and the earliest retained record is
+			// newer than it: retention removed the span's start. A topic whose first record is after the start is intact.
+			if rng.Start > 0 && idx.listed >= 0 && idx.listed <= rng.Start && (len(rng.Records) == 0 && rng.End > rng.Start || len(rng.Records) > 0 && rng.Records[0].Timestamp.After(from)) {
 				idx.predatesLog = true
 			}
 		}

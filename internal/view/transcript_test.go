@@ -72,7 +72,7 @@ func TestTranscriptPaging(t *testing.T) {
 	runtime.ReadMemStats(&after)
 	t.Logf("baseline: first open of %d lines (tail=1000) took %s, scan read %d records and %d bytes, seek read %d records and %d bytes, heap grew %d KiB, index %d entries of %d bytes",
 		n, opened.Truncate(time.Millisecond), tail.Read.Records, tail.Read.Bytes, tail.Seek.Records, tail.Seek.Bytes, (int64(after.HeapAlloc)-int64(before.HeapAlloc))/1024, tail.Indexed, tail.Indexed*24)
-	if len(tail.Lines) != 1000 || tail.Lines[0].Seq != (n-1000)*10 || tail.Lines[999].Seq != (n-1)*10 || tail.Prev == nil || *tail.Prev != (n-1000)*10 || tail.Next != nil || !tail.Complete || tail.Attempt != 1 || tail.First == nil || *tail.First != 0 || tail.Indexed != n {
+	if len(tail.Lines) != 1000 || tail.Lines[0].Seq != (n-1000)*10 || tail.Lines[999].Seq != (n-1)*10 || tail.Prev == nil || *tail.Prev != (n-1000)*10 || tail.Next != nil || !tail.Complete || tail.Attempt != 1 || tail.First == nil || *tail.First != 0 || tail.Indexed != n || tail.PredatesLog {
 		t.Fatalf("tail: %d lines %v..%v prev %v next %v complete %v attempt %d first %v indexed %d", len(tail.Lines), seqs(tail.Lines[:min(2, len(tail.Lines))]), seqs(tail.Lines[max(len(tail.Lines)-2, 0):]), tail.Prev, tail.Next, tail.Complete, tail.Attempt, tail.First, tail.Indexed)
 	}
 	if text := tail.Lines[0].Text; text == nil || *text != "line "+strconv.FormatInt((n-1000)*10, 10) || tail.Lines[0].Receiver != operator.ReceiverPrincipal(receiverA) || tail.Lines[0].Attempt != 1 {
@@ -192,7 +192,7 @@ func TestTranscriptAdoptionResets(t *testing.T) {
 	}
 	v := f.view(time.Hour, transcriptCaps())
 	tail := page(t, v, run, Page{Tail: 100})
-	if got := seqs(tail.Lines); !slices.Equal(got, []int64{0, 10, 20, 30}) || tail.Attempt != 1 || tail.Complete || tail.Next == nil || *tail.Next != 31 {
+	if got := seqs(tail.Lines); !slices.Equal(got, []int64{0, 10, 20, 30}) || tail.Attempt != 1 || tail.Complete || tail.Next == nil || *tail.Next != 31 || tail.PredatesLog {
 		t.Fatalf("attempt 1: %v attempt %d complete %v next %v", got, tail.Attempt, tail.Complete, tail.Next)
 	}
 	// Following: nothing new.
