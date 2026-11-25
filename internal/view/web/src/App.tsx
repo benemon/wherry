@@ -22,7 +22,7 @@ import { getModel, postSession } from './api';
 import { Drawer } from './Drawer';
 import { ClusterMap } from './ClusterMap';
 import { Scrubber } from './Scrubber';
-import { abs, clock, rel, stateColor, stateOrder, stateWord } from './format';
+import { abs, clock, grouped, rel, stateColor, stateOrder, stateWord } from './format';
 import type { Filters } from './model';
 import { replay, tally, windowNote } from './model';
 import type { Custodian, Model, Pool, Receiver, RunSummary, StreamEvent } from './types';
@@ -41,7 +41,7 @@ export interface View {
   scrubbing: boolean;
   runs: RunSummary[];
   tally: Tally;
-  version: number;
+  windowStart: number;
   poolOf: Record<string, Pool>;
   receiverOf: Record<string, Receiver>;
   custodianOf: Record<string, Custodian>;
@@ -145,7 +145,7 @@ export function App() {
     model.pools.forEach((p) => (poolOf[p.name] = p));
     model.receivers.forEach((r) => (receiverOf[r.name] = r));
     model.custodians.forEach((c) => (custodianOf[c.pool] = c));
-    return { model, now, t, scrubbing: scrub !== null, runs, tally: tally(runs, t), version: model.version, poolOf, receiverOf, custodianOf, sel, filters, hideEnded, open, openList, close };
+    return { model, now, t, scrubbing: scrub !== null, runs, tally: tally(runs, t), windowStart: w0, poolOf, receiverOf, custodianOf, sel, filters, hideEnded, open, openList, close };
   }, [model, scrub, sel, filters, hideEnded, open, openList, close]);
 
   const colors = euiTheme.colors;
@@ -223,7 +223,7 @@ export function App() {
                     { title: 'Version', description: String(m.version) },
                     { title: 'Window', description: abs(m.window_start) + ' to now' },
                     { title: 'Rebuilt', description: m.rebuilt ? rel(view.now, m.rebuilt_at) : 'in progress' },
-                    { title: 'Runs kept', description: m.runs_total.toLocaleString('en-GB') + (m.truncated ? ', list cut to ' + m.runs.length : '') },
+                    { title: 'Runs kept', description: grouped(m.runs_total) + (m.truncated ? ', list cut to ' + m.runs.length : '') },
                     { title: 'Counts', description: Object.keys(m.counts).sort().map((k) => k + ' ' + m.counts[k]).join(', ') || 'none' },
                     { title: 'Bounds hit', description: m.bounds.length ? m.bounds.map((b) => b.name + ' × ' + b.hits).join(', ') : 'none' },
                     { title: 'Recent errors', description: m.errors?.length ? m.errors.join(', ') : 'none' },
@@ -234,7 +234,7 @@ export function App() {
           </EuiHeaderSectionItem>
           <EuiHeaderSectionItem>
             <EuiButtonEmpty iconType="listBullet" size="s" onClick={() => openList({})}>
-              Runs ({view.runs.length.toLocaleString('en-GB')})
+              Runs ({grouped(view.runs.length)})
             </EuiButtonEmpty>
           </EuiHeaderSectionItem>
         </EuiHeaderSection>
@@ -248,16 +248,16 @@ export function App() {
           <div className="w-row" style={{ gap: '8px 16px' }}>
             <span className="w-row" style={{ gap: 6, color: colors.textHeading, fontWeight: 500 }}>
               <EuiIcon type="clock" color="subdued" />
-              Last {Math.round((view.now - Date.parse(m.window_start)) / 3600000)} h
+              Last {Math.round((view.now - view.windowStart) / 3600000)} h
             </span>
             <span className="w-subdued" title={abs(updatedAt)}>
               updated {rel(view.now, updatedAt)}
             </span>
             <span style={{ width: 1, height: 20, background: colors.borderBaseSubdued }} />
-            <span className="w-subdued">{view.runs.length.toLocaleString('en-GB')} runs</span>
+            <span className="w-subdued">{grouped(view.runs.length)} runs</span>
             {totals.map((b) => (
               <EuiBadge key={b.state} color={stateColor(b.state)} onClick={() => openList({ state: b.state })} onClickAriaLabel={'Show ' + stateWord(b.state) + ' runs'}>
-                {b.count.toLocaleString('en-GB') + ' ' + stateWord(b.state)}
+                {grouped(b.count) + ' ' + stateWord(b.state)}
               </EuiBadge>
             ))}
             <span style={{ flexGrow: 1 }} />

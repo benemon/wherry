@@ -1,5 +1,6 @@
 import type { BoundHit, Custodian, Model, Pool, Receiver, RunSummary } from './types';
 import type { HealthColor } from './format';
+import { grouped } from './format';
 
 // recentMs is the design setting for a red ring: a failure on the node within this long of the moment shown.
 export const recentMs = 15 * 60 * 1000;
@@ -150,7 +151,7 @@ export function windowNote(m: Model): string {
     parts.push('The window is cut short: runs were dropped under ' + b.cutBy.join(', ') + '. Counts cover the kept runs.');
   }
   if (m.truncated) {
-    parts.push('Only the newest ' + m.runs.length.toLocaleString('en-GB') + ' of ' + m.runs_total.toLocaleString('en-GB') + ' runs are listed: the list was cut to fit the response.');
+    parts.push('Only the newest ' + grouped(m.runs.length) + ' of ' + grouped(m.runs_total) + ' runs are listed: the list was cut to fit the response.');
   }
   if (b.other.length) {
     parts.push('Limits hit: ' + b.other.join(', ') + '.');

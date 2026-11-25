@@ -9,7 +9,7 @@ const bins = 96;
 // band before which the window is incomplete. The range is in minutes from the window's start.
 export function Scrubber({ view, onScrub }: { view: View; onScrub: (t: number | null) => void }) {
   const m = view.model;
-  const w0 = Date.parse(m.window_start);
+  const w0 = view.windowStart;
   const span = Math.max(1, view.now - w0);
   const counts = new Array<number>(bins).fill(0);
   const fails = new Array<number>(bins).fill(0);

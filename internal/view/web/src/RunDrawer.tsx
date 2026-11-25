@@ -5,8 +5,7 @@ import { ApiError, getRun, getTrace } from './api';
 import { Section } from './Drawer';
 import { TranscriptPane } from './TranscriptPane';
 import { abs, bytes, dur, or, rel, signedBy, stateColor, stateWord } from './format';
-import type { Filters } from './model';
-import { activeFilters } from './model';
+import { activeFilters, admittedAt } from './model';
 import { flatten, markerText, serviceColors, spanStatus } from './trace';
 import { segments } from './transcript';
 import type { Attempt, Forest, RunDetail, RunSummary } from './types';
@@ -39,7 +38,6 @@ export function RunDrawer({ view, id, fromList, setFromList, wide, setWide }: Pr
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab | null>(null);
   const working = summary ? !summary.terminal : false;
-  const version = view.version;
   useEffect(() => {
     let cancelled = false;
     getRun(id)
@@ -58,16 +56,17 @@ export function RunDrawer({ view, id, fromList, setFromList, wide, setWide }: Pr
       cancelled = true;
     };
     // The detail is fetched again on each model version only while the run works.
-  }, [id, working ? version : 0]);
+  }, [id, working ? view.model.version : 0]);
   useEffect(() => setTab(null), [id]);
 
   if (!summary) {
     return <EuiText size="s">This run is no longer in the model.</EuiText>;
   }
   const r = summary;
-  const t0 = Date.parse(r.admitted || r.first);
+  const t0 = admittedAt(r);
   const shown: Tab = tab ?? (working ? 'transcript' : 'overview');
-  const filterNote = activeFilters(view.filters) ? ' (' + activeFilters(view.filters) + (activeFilters(view.filters) === 1 ? ' filter)' : ' filters)') : '';
+  const active = activeFilters(view.filters);
+  const filterNote = active ? ' (' + active + (active === 1 ? ' filter)' : ' filters)') : '';
   return (
     <>
       {fromList && (
@@ -76,7 +75,7 @@ export function RunDrawer({ view, id, fromList, setFromList, wide, setWide }: Pr
             iconType="chevronSingleLeft"
             size="s"
             onClick={() => {
-              view.openList(view.filters as Filters);
+              view.openList(view.filters);
               setFromList(false);
             }}
           >

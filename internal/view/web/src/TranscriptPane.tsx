@@ -5,7 +5,7 @@ import { ApiError, getTranscript } from './api';
 import { Segments } from './RunDrawer';
 import { abs, grouped } from './format';
 import type { Query, State, Where } from './transcript';
-import { cursor, fail, follow, initial, rows, stateText, statusMessages, take } from './transcript';
+import { cursor, fail, follow, initial, pageSize, rows, stateText, statusMessages, take } from './transcript';
 import type { Attempt, RunSummary } from './types';
 
 interface Props {
@@ -25,7 +25,6 @@ export function TranscriptPane({ view, run, attempts, wide }: Props) {
   const [q, setQ] = useState('');
   const box = useRef<HTMLDivElement>(null);
   const pending = useRef(false);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const stateRef = useRef(state);
   stateRef.current = state;
   const runRef = useRef(run.id);
@@ -72,7 +71,7 @@ export function TranscriptPane({ view, run, attempts, wide }: Props) {
     setState(fresh);
     setFollowing(true);
     pending.current = false;
-    ask({ tail: 200 }, 'tail');
+    ask({ tail: pageSize }, 'tail');
   }, [run.id, ask]);
 
   // The follow asks at most every two seconds, the bound docs/operator-view.md states.
@@ -87,13 +86,9 @@ export function TranscriptPane({ view, run, attempts, wide }: Props) {
       }
     };
     tick();
-    timer.current = setInterval(tick, 2000);
-    return () => {
-      if (timer.current) {
-        clearInterval(timer.current);
-      }
-    };
-  }, [working, view.version, ask]);
+    const interval = setInterval(tick, 2000);
+    return () => clearInterval(interval);
+  }, [working, view.model.version, ask]);
 
   const shown = rows(state.lines, statusMessages(attempts), state.prev !== null)
     .filter((r) => !statusOnly || r.kind !== 'line')
@@ -123,6 +118,7 @@ export function TranscriptPane({ view, run, attempts, wide }: Props) {
   const statusN = shown.filter((r) => r.kind === 'status').length;
   const chunks = attempts.length && attempts.every((a) => a.transcript_chunks) ? attempts.reduce((n, a) => n + (a.transcript_chunks || 0), 0) : null;
   const loading = !state.opened;
+  const status = stateText(state, working);
   return (
     <div className="w-section">
       <div className="w-row" style={{ justifyContent: 'space-between' }}>
@@ -131,7 +127,7 @@ export function TranscriptPane({ view, run, attempts, wide }: Props) {
       </div>
       <div className="w-row" style={{ justifyContent: 'space-between', minHeight: 32 }}>
         <span className="w-subdued">
-          {(statusOnly || q ? shown.length + ' shown · ' : '') + grouped(agentN) + ' lines loaded, ' + statusN + ' status' + (state.evicted ? ' · ' + state.evicted + ' other indexes evicted' : '') + (view.scrubbing ? ' · as at ' + abs(new Date(view.t).toISOString()).slice(11, 19) + ' UTC' : stateText(state, working) ? ' · ' + stateText(state, working) : '')}
+          {(statusOnly || q ? shown.length + ' shown · ' : '') + grouped(agentN) + ' lines loaded, ' + statusN + ' status' + (state.evicted ? ' · ' + state.evicted + ' other indexes evicted' : '') + (view.scrubbing ? ' · as at ' + abs(new Date(view.t).toISOString()).slice(11, 19) + ' UTC' : status ? ' · ' + status : '')}
         </span>
         {working && !view.scrubbing && (
           <span className="w-row">
@@ -153,7 +149,7 @@ export function TranscriptPane({ view, run, attempts, wide }: Props) {
         )}
         {!loading && state.prev !== null && (
           <div className="w-earlier">
-            <EuiButtonEmpty size="xs" iconType="sortUp" onClick={() => ask({ before: state.prev!, limit: 200 }, 'before')}>
+            <EuiButtonEmpty size="xs" iconType="sortUp" onClick={() => ask({ before: state.prev!, limit: pageSize }, 'before')}>
               Load earlier lines
             </EuiButtonEmpty>
             <span className="w-subdued" style={{ fontSize: 11 }}>

@@ -21,9 +21,9 @@ import type { Dispatch, ReactNode, SetStateAction } from 'react';
 import { useState } from 'react';
 import type { View } from './App';
 import { RunDrawer } from './RunDrawer';
-import { abs, bytes, grouped, healthOf, rel, signedBy, stateColor, stateOrder, stateWord } from './format';
+import { abs, bytes, clock, grouped, healthOf, rel, signedBy, stateColor, stateOrder, stateWord } from './format';
 import type { FilterKey, Filters } from './model';
-import { activeFilters, byClassOf, byStateOf, filterKeys, filterValue, lagText, matches, none, poolHealth, receiverHealth } from './model';
+import { activeFilters, admittedAt, byClassOf, byStateOf, filterKeys, filterValue, lagText, matches, none, poolHealth, receiverHealth } from './model';
 import type { Offer, Receiver, RunSummary } from './types';
 
 interface DrawerProps {
@@ -448,7 +448,7 @@ function RunList({ view, setFromList, setFilters }: DrawerProps) {
     setFilters((prev) => ({ ...prev, [k]: v || undefined }));
     setPage(0);
   };
-  const listed = view.runs.filter((r) => matches(r, f)).sort((a, b) => Date.parse(b.admitted || b.first) - Date.parse(a.admitted || a.first));
+  const listed = view.runs.filter((r) => matches(r, f)).sort((a, b) => admittedAt(b) - admittedAt(a));
   const options = (k: FilterKey) => {
     const counts: Record<string, number> = {};
     view.runs.filter((r) => matches(r, f, k)).forEach((r) => {
@@ -540,7 +540,7 @@ function RunList({ view, setFromList, setFilters }: DrawerProps) {
       <div className="w-row" style={{ justifyContent: 'space-between' }}>
         <span className="w-subdued">
           {(listed.length === view.runs.length ? grouped(listed.length) + ' runs' : grouped(listed.length) + ' of ' + grouped(view.runs.length) + ' runs') +
-            (view.scrubbing ? ', as they stood at ' + abs(new Date(view.t).toISOString()).slice(11, 16) : ', newest first')}
+            (view.scrubbing ? ', as they stood at ' + clock(view.t) : ', newest first')}
         </span>
         {active > 0 && (
           <EuiButtonEmpty

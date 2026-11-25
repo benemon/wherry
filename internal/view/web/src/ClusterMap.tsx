@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { View } from './App';
 import { bytes, grouped } from './format';
 import type { Health } from './model';
-import { lagShort, noHost, receiverHealth, recentMs } from './model';
+import { activeFilters, lagShort, matches, noHost, none, receiverHealth, recentMs } from './model';
 import type { RunSummary } from './types';
 
 // The stage is laid out at a fixed width and scaled to the space the section has, so a drawer never makes the map
@@ -237,13 +237,13 @@ function fullLayout(view: View): Layout {
   if (sel?.k === 'list') {
     const hs = new Set<string>();
     const rs = new Set<string>();
-    view.runs.filter((r) => matchesFilters(view, r)).forEach((r) => {
+    view.runs.filter((r) => matches(r, view.filters)).forEach((r) => {
       hs.add(r.host || noHost);
       if (r.receiver) {
         rs.add(r.receiver);
       }
     });
-    if (Object.keys(view.filters).some((k) => view.filters[k as keyof typeof view.filters])) {
+    if (activeFilters(view.filters) > 0) {
       highlight = [...hs].map((x) => hostLink(hostCy[x] ?? hostCy[noHost])).join('') + [...rs].filter((x) => recCy[x]).map((x) => recLink(recCy[x])).join('');
     }
   }
@@ -286,11 +286,6 @@ function fullLayout(view: View): Layout {
   const height = Math.max(700, 40 + m.pools.length * 220 + 60, unknownTop + 80);
   return { height, base, dashed: unknownRuns ? hostLink(hostCy[noHost]) : '', highlight, dots, nodes, brokerTop: 324, legendTop: height - 36 };
 }
-
-const matchesFilters = (view: View, r: RunSummary) => {
-  const f = view.filters;
-  return (!f.state || r.state === f.state) && (!f.tenant || r.tenant === f.tenant) && (!f.pool || r.pool === f.pool) && (!f.receiver || (r.receiver || '__none') === f.receiver) && (!f.host || (r.host || '__none') === f.host) && (!f.agent || (r.agent || '__none') === f.agent) && (!f.q || r.id.includes(f.q.trim()));
-};
 
 // compactLayout collapses hosts into one row per tenant and receivers into rings inside their pool; links run
 // tenant to broker to pool to storage.
@@ -341,7 +336,7 @@ function compactLayout(view: View): Layout {
     tCy[noHost] = top + 16;
     tenants.push(
       <div key="t?" className="w-box" style={{ left: 16, top, width: 300, minHeight: 32, display: 'flex', alignItems: 'center', gap: 10, padding: '4px 10px', borderRadius: 8, border: '1px dashed var(--w-border-prominent)', color: 'var(--w-text-disabled)', fontStyle: 'italic' }}>
-        <button type="button" className="w-textbutton" onClick={() => view.openList({ host: '__none' })} style={{ fontSize: 12 }}>
+        <button type="button" className="w-textbutton" onClick={() => view.openList({ host: none })} style={{ fontSize: 12 }}>
           <b>unknown host</b> {unknownRuns} runs
         </button>
       </div>,
@@ -440,10 +435,10 @@ function compactLayout(view: View): Layout {
   if (selRun) {
     highlight = tLink(tCy[hostTenant[selRun.host || '']] ?? tCy[noHost] ?? centre) + (poolCy[selRun.pool] !== undefined ? pLink(poolCy[selRun.pool]) : '');
   }
-  if (sel?.k === 'list' && Object.keys(view.filters).some((k) => view.filters[k as keyof typeof view.filters])) {
+  if (sel?.k === 'list' && activeFilters(view.filters) > 0) {
     const ts = new Set<string>();
     const ps = new Set<string>();
-    view.runs.filter((r) => matchesFilters(view, r)).forEach((r) => {
+    view.runs.filter((r) => matches(r, view.filters)).forEach((r) => {
       ts.add(hostTenant[r.host || ''] || noHost);
       ps.add(r.pool);
     });
