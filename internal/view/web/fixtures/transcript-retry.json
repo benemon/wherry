@@ -1,0 +1,20 @@
+{
+  "run": "run-06adb71b13c69028ce654d659761fcad",
+  "attempt": 1,
+  "first": null,
+  "lines": [],
+  "complete": false,
+  "retry": true,
+  "indexed": 0,
+  "read": {
+    "bytes": 0,
+    "records": 0
+  },
+  "seek": {
+    "bytes": 0,
+    "records": 0
+  },
+  "truncated": [
+    "transcript_scan"
+  ]
+}

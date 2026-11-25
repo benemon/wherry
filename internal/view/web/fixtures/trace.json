@@ -1,0 +1,110 @@
+{
+  "run": "run-24a373cef0aaf32ea0d792f359533ffd",
+  "tenant": "acme",
+  "topic": "wherry.traces.acme",
+  "traces": [
+    {
+      "id": "8d7c740e0894eb4950645b67456a8341",
+      "roots": [
+        {
+          "id": "b77c6436e5170111",
+          "name": "task.submit",
+          "kind": "producer",
+          "service": "host",
+          "start": "2026-11-24T17:39:00Z",
+          "end": "2026-11-24T17:39:00.012Z",
+          "duration_ms": 12,
+          "status": "ok",
+          "attributes": {
+            "host": "laptop-1"
+          },
+          "children": []
+        },
+        {
+          "id": "ec740ec5b7ee35e9",
+          "name": "task.claim",
+          "kind": "consumer",
+          "service": "receiver",
+          "start": "2026-11-24T17:39:06Z",
+          "end": "2026-11-24T17:39:06.061Z",
+          "duration_ms": 61,
+          "attributes": {},
+          "links": [
+            "b77c6436e5170111"
+          ],
+          "children": [
+            {
+              "id": "463d46f85f9ea453",
+              "parent": "ec740ec5b7ee35e9",
+              "name": "key.open",
+              "kind": "client",
+              "service": "receiver",
+              "start": "2026-11-24T17:39:06.6Z",
+              "end": "2026-11-24T17:39:06.95Z",
+              "duration_ms": 350,
+              "attributes": {},
+              "children": []
+            },
+            {
+              "id": "b7257a92fdff77b5",
+              "parent": "ec740ec5b7ee35e9",
+              "name": "task.run",
+              "kind": "internal",
+              "service": "receiver",
+              "start": "2026-11-24T17:39:07.2Z",
+              "end": "2026-11-24T17:46:27.2Z",
+              "duration_ms": 440000,
+              "status": "error: failed",
+              "attributes": {
+                "attempt": "2"
+              },
+              "events": 3,
+              "children": [
+                {
+                  "id": "cdc6907da0ce59fe",
+                  "parent": "b7257a92fdff77b5",
+                  "name": "[other]",
+                  "kind": "client",
+                  "service": "plugin",
+                  "start": "2026-11-24T17:39:07.8Z",
+                  "end": "2026-11-24T17:39:09.17Z",
+                  "duration_ms": 1370,
+                  "status": "ok",
+                  "attributes": {},
+                  "children": [],
+                  "marker": "attribute filtered"
+                },
+                {
+                  "id": "3bf8272f137c7f9e",
+                  "parent": "b7257a92fdff77b5",
+                  "name": "agent.exec",
+                  "kind": "internal",
+                  "service": "plugin",
+                  "start": "2026-11-24T17:39:12Z",
+                  "end": "2026-11-24T17:46:29Z",
+                  "duration_ms": 437000,
+                  "status": "error: [other]",
+                  "attributes": {
+                    "exit.code": "1"
+                  },
+                  "children": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "spans": 6,
+  "markers": [
+    "cycle cut",
+    "truncated: trace_spans"
+  ],
+  "read": {
+    "bytes": 6210,
+    "records": 10
+  },
+  "next": 10,
+  "complete": false
+}

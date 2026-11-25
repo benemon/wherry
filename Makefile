@@ -67,8 +67,29 @@ check-names: ## Fail on the old provisioning-role and command names in tracked f
 	fi; \
 	echo "no old provisioning-role or command names in tracked files"
 
+.PHONY: check-ui-source
+# The operator view renders tenant and agent text as React text nodes alone; the pattern is assembled from fragments
+# so this recipe never contains the string it hunts.
+check-ui-source: ## Fail on raw HTML rendering in the operator view's app source
+	@p="dangerously""SetInnerHTML"; \
+	if hits=$$(git grep -n -E "$$p" -- internal/view/web/src); then \
+		echo "$$hits"; echo "FAIL: raw HTML rendering in the operator view's app source"; exit 1; \
+	fi; \
+	echo "no raw HTML rendering in the operator view's app source"
+
 .PHONY: check
-check: check-fmt vet test check-licenses check-markers check-names ## Run every CI gate
+check: check-fmt vet test check-licenses check-markers check-names check-ui-source ## Run every CI gate
+
+.PHONY: ui
+# The build also writes internal/view/static/THIRD_PARTY_NOTICES. The lockfile is regenerated on Linux from
+# package.json alone (docker run node:22 npm install --package-lock-only), since one made beside an installed
+# node_modules records that platform's bindings only (npm/cli#4828).
+ui: ## Rebuild the operator view's page into internal/view/static (needs Node 22)
+	cd internal/view/web && npm ci && npm run check && npm run build
+
+.PHONY: ui-smoke
+ui-smoke: ## Run the operator view's browser smoke against the committed page (needs npx playwright install chromium)
+	cd internal/view/web && npm run smoke
 
 .PHONY: docs
 docs: ## Build the documentation site into docs-site/.vitepress/dist (npm ci in docs-site first)

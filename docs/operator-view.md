@@ -4,8 +4,8 @@
 host, tenant and S3 destination the records name, the runs of a window with their path, state, status messages,
 failure class and reason, what each receiver holds, each pool's share-group lag, and for a selected run the spans its
 tenant's trace topic holds and the live transcript its tenant's transcript topic holds. It rebuilds the window from
-the records Kafka keeps, then tails them, and serves JSON, a Server-Sent Events stream and a placeholder page of plain
-tables on loopback. It never produces to Kafka.
+the records Kafka keeps, then tails them, and serves JSON, a Server-Sent Events stream and the page, a map of the
+cluster with a drawer for each node and run, on loopback. It never produces to Kafka.
 
 ```sh
 wherry operator view [--dir DIR] [--window 24h] [--port N] [--external-url URL]
@@ -194,8 +194,9 @@ cancels and 64 open requests with the oldest dropped; a run so cut lists the cap
 whose joined echo and result alone are over a bound is dropped. The model keeps at most 2,000,000 events, 1,000,000
 attempts, 200,000 echoes, 200,000 cancels, 200,000 open requests and 512 MiB over every run, the oldest runs dropped
 beyond them as under the runs cap and the growing run too when it alone exceeds a cap, and 200,000 progress records
-over every receiver. Each cap reports under its name: `run_events`, `run_attempts`, `run_echoes`, `run_cancels`,
-`run_opens`, `run_bytes`, `events`, `attempts`, `echoes`, `cancels`, `opens`, `bytes`, `progress`, `sessions`. A
+over every receiver. Each cap reports under its name: `record_bytes`, `runs`, `digests`, `pending`, `cursors`,
+`run_events`, `run_attempts`, `run_echoes`, `run_cancels`, `run_opens`, `run_bytes`, `events`, `attempts`,
+`echoes`, `cancels`, `opens`, `bytes`, `progress`, `response_bytes`, `event_bytes`, `sessions`. A
 JSON response is encoded into a buffer that stops at the response bound, so no larger encoding is built, and a run
 detail whose element counts alone put it over the bound is refused before encoding. The drill-down scans at most
 32 MiB, 20,000 records and 5,000 spans per refresh, keeps 16 links per span, builds a forest of at most 5,000 nodes,
@@ -214,7 +215,7 @@ connection resumes from the same offsets on the next tick.
 ## The API
 
 Every endpoint is read-only, answers JSON built from named fields, and needs the session cookie except the page, its
-two assets and `POST /session`.
+assets under `/assets/` and `POST /session`.
 
 | Endpoint | Returns |
 | --- | --- |
@@ -290,16 +291,63 @@ The cookie is named `wherry-view-<port>`, is host-only with no `Domain`, has `Pa
 `SameSite=Strict`, and is `Secure` when `--external-url` is https. Its value is a session ID the server issued,
 never the token. Cookies are not isolated by port, so on the same browser every other service on `127.0.0.1` or on
 the external host receives it too: that residual is why the value is a session ID good for this view alone and why
-the name carries the port. The page sets a Content-Security-Policy that allows its own assets only, no inline script
-and no framing, and every response is `Cache-Control: no-store` with `Referrer-Policy: no-referrer`.
+the name carries the port. Every response carries a Content-Security-Policy that allows the page's own assets only, no
+inline script and no framing: `default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src
+'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'`. The page's own response adds a nonce to
+`style-src`, 128 bits from `crypto/rand` drawn for each response and written into `<meta name="csp-nonce">` as well,
+since the page's components inject their styles at runtime; `script-src` never carries a nonce or `'unsafe-inline'`.
+Every response is `Cache-Control: no-store` with `Referrer-Policy: no-referrer`, except the files under `/assets/`,
+whose names carry a hash of their content and which are `Cache-Control: public, max-age=31536000, immutable`; the page
+itself and every API response stay `no-store`.
 
-## The placeholder page
+## The page
 
-The page renders the model as plain tables, every value as text, output names, messages and lines included. Click a
-run for its path, echo, attempts with their messages, failure reason, open exchange, cancels, result references and
-storage, each signed fact with its signer, the tail of its transcript with older pages on request, following while it
-works, and load its spans from there. The page applies a transcript response only to the run it was asked for, follows
-again after any error, a 503 included, and asks at once on a model event; each line's attempt and seq sit in their own
-elements and its text in a `bdi`, so a bidi control or line break in agent text cannot imitate a neighbouring row's
-prefix. It is the surface slices 1 to 4 are accepted on; the designed interface follows
-against the same API.
+The page is a map of the cluster. Hosts sit on the left, grouped by tenant. The broker sits in the centre. Each pool
+is a box on the right holding its receivers, with the custodian named under them. Each S3 destination sits beside the
+pools that use it. Every node is shown, idle or not. A run in flight is a dot moving along its link. Older failures
+show as a count on the link.
+
+Each receiver's ring takes one colour, the first that applies:
+
+| Ring | Meaning |
+| --- | --- |
+| grey | the receiver has ended |
+| red | the receiver is `silent` (never advertised) or `stale`, or a run on it failed in the last 15 minutes |
+| amber | the receiver is live but gated, its pool is suspended, or its custodian key is suspended |
+| green | the receiver is live |
+| grey | any other status |
+
+A host's ring is red for a failure on it in the last 15 minutes, green while it has a run in flight, grey when idle.
+The broker and each destination have no health of their own and stay grey; a destination with outputs not returned
+carries a warning badge.
+
+The strip above the map shows the window, when the model was last updated and the runs by state. A scrubber runs
+along the window. Dragging it replays the runs as they stood at that moment, recomputed in the page from the runs
+listed, and pauses live updates until `Back to live`. Receiver status, capacity, custodian state and lag have no
+history, so they show as now. When a cap that drops runs cut the window short, the band before the oldest kept run
+is marked incomplete; a topic that predates the window marks the whole band.
+
+Every other screen is a drawer beside the map.
+
+| Drawer | Shows |
+| --- | --- |
+| pool | its health; whether it is suspended; tenants, storage, delivery limit, share-group state, lag and runs in progress; each receiver with a capacity ring; the custodian's receiver, key ID, last rotation and suspension, with its signer; offers by profile; runs by state and failure class; runs released without a terminal |
+| receiver | its status and last advertisement, or `never advertised`; its gate; capacity and in flight; its pool; offers by profile; the runs it holds, stale ones marked, with the unidentified remainder counted; runs by state and failure class |
+| host | its tenant; whether it has ended; its runs in the window, newest first, with each run's state |
+| broker | each node's address, role and listeners; the wherry topics with their offsets, each marked when missing, predating the window or in error |
+| destination | endpoint, bucket, pools, runs, outputs, bytes, outputs not returned and failed runs |
+| run list | the runs of the window, newest first, filtered by state, tenant, pool, receiver, host and agent and searched by run ID |
+| run | its state, attempt, duration, class and failure reason; its path from admission through claim decision, key request and answer or refusal, start failure, start, working updates, terminal, cancels and result, each step with its signer and any message in line; its outputs tagged inline or S3, with the files declared but not returned; its transcript; on request, its trace as a waterfall of spans with each marker explained |
+
+The transcript opens at its tail. It pages back on request and follows a working run. The receiver's status messages
+sit in line at their times. A line cut at 16 KiB, a binary line, an oversize line and an empty line are each
+marked. An attempt change is a divider. A reset reloads from the tail. Every value is rendered as text, output names,
+messages and lines included. Each line's text sits in a `bdi`, so a bidi control or line break in agent text cannot
+imitate a neighbouring row's prefix. A redaction marker is shown muted. The header's `Model` button lists the model's
+version, counts, bounds hit and recent errors.
+
+The page is built from `internal/view/web` with Elastic's EUI components and embedded in the binary; it loads nothing
+from outside its own origin. `@elastic/eui`, `@elastic/eui-theme-borealis` and `@elastic/eui-theme-common` are used
+under the Elastic License 2.0; every other bundled package is under the MIT, BSD, ISC, Apache 2.0, MPL 2.0 or, for the
+Inter and Roboto Mono fonts, SIL Open Font License. The licence and notice texts of every bundled package are in
+`THIRD_PARTY_NOTICES` in each release archive, generated by the build.

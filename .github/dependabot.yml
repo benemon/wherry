@@ -1,3 +1,6 @@
+# No npm entry: the operator view's page under internal/view/web is built and committed by make ui, and ci.yml's ui job
+# fails when the committed page differs from a rebuild, so a dependency bump without that rebuild would fail. npm bumps
+# are made by hand through make ui.
 version: 2
 updates:
   - package-ecosystem: github-actions

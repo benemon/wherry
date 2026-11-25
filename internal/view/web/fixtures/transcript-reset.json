@@ -1,0 +1,17 @@
+{
+  "run": "run-06adb71b13c69028ce654d659761fcad",
+  "attempt": 2,
+  "first": 4096,
+  "reset": true,
+  "lines": [],
+  "complete": false,
+  "indexed": 40,
+  "read": {
+    "bytes": 0,
+    "records": 0
+  },
+  "seek": {
+    "bytes": 0,
+    "records": 0
+  }
+}

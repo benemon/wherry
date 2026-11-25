@@ -8,6 +8,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -142,12 +145,9 @@ func TestServing(t *testing.T) {
 		t.Fatalf("listening on %s, want loopback", s.server.Addr())
 	}
 	port := strconv.Itoa(s.server.Port())
-	// The bootstrap page and POST /session work without a cookie; the API and the stream do not.
-	if response, body := s.request(t, http.MethodGet, "/", nil, nil, nil); response.StatusCode != http.StatusOK || !strings.Contains(body, "app.js") || response.Header.Get("Content-Security-Policy") != csp {
+	// The page and POST /session work without a cookie; the API and the stream do not.
+	if response, body := s.request(t, http.MethodGet, "/", nil, nil, nil); response.StatusCode != http.StatusOK || !strings.Contains(body, `src="/assets/`) || !strings.HasPrefix(response.Header.Get("Content-Security-Policy"), "default-src 'none'; script-src 'self'; style-src 'self' 'nonce-") {
 		t.Errorf("page: %d, CSP %q", response.StatusCode, response.Header.Get("Content-Security-Policy"))
-	}
-	if response, _ := s.request(t, http.MethodGet, "/app.js", nil, nil, nil); response.StatusCode != http.StatusOK || !strings.HasPrefix(response.Header.Get("Content-Type"), "text/javascript") {
-		t.Errorf("app.js: %d", response.StatusCode)
 	}
 	for _, path := range []string{"/api/model", "/api/stream", "/api/runs/" + s.run, "/api/runs/" + s.run + "/trace"} {
 		if response, _ := s.request(t, http.MethodGet, path, nil, nil, nil); response.StatusCode != http.StatusForbidden {
@@ -224,6 +224,95 @@ func TestServing(t *testing.T) {
 	}
 	if !refused {
 		t.Error("POST /session is not rate-limited")
+	}
+}
+
+// Each page response carries a fresh nonce, the same in its one Content-Security-Policy header and its meta tag, and
+// only there: script-src has neither a nonce nor 'unsafe-inline', and the API and asset responses carry no nonce.
+func TestPageNonce(t *testing.T) {
+	s := newServed(t, ServeOptions{})
+	headerNonce := regexp.MustCompile(`'nonce-([A-Za-z0-9+/=]+)'`)
+	metaNonce := regexp.MustCompile(`<meta name="csp-nonce" content="([^"]*)">`)
+	seen := map[string]bool{}
+	for range 3 {
+		response, body := s.request(t, http.MethodGet, "/", nil, nil, nil)
+		policies := response.Header.Values("Content-Security-Policy")
+		if len(policies) != 1 {
+			t.Fatalf("page: %d CSP headers", len(policies))
+		}
+		policy := policies[0]
+		inHeader, inMeta := headerNonce.FindAllStringSubmatch(policy, -1), metaNonce.FindStringSubmatch(body)
+		if len(inHeader) != 1 || inMeta == nil || inHeader[0][1] != inMeta[1] || len(inMeta[1]) != 24 {
+			t.Fatalf("page: header %q, meta %v", policy, inMeta)
+		}
+		if seen[inMeta[1]] {
+			t.Errorf("page: the nonce %s repeated", inMeta[1])
+		}
+		seen[inMeta[1]] = true
+		if want := "default-src 'none'; script-src 'self'; style-src 'self' 'nonce-" + inMeta[1] + "'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"; policy != want {
+			t.Errorf("page: CSP %q, want %q", policy, want)
+		}
+		if strings.Contains(body, noncePlaceholder) {
+			t.Error("page: the placeholder is still in the body")
+		}
+	}
+	cookie := s.session(t)
+	for _, path := range []string{"/api/model", "/api/runs/" + s.run, "/assets/" + s.asset(t), "/nowhere", "/api/stream"} {
+		response, _ := s.request(t, http.MethodGet, path, nil, cookie, nil)
+		if policies := response.Header.Values("Content-Security-Policy"); len(policies) != 1 || policies[0] != csp || strings.Contains(policies[0], "nonce") || strings.Contains(policies[0], "unsafe-inline") {
+			t.Errorf("%s: CSP %v", path, policies)
+		}
+	}
+}
+
+// docs/operator-view.md quotes the policy; the quote is the server's constant, read from the page with its line
+// break joined.
+func TestDocsQuoteThePolicy(t *testing.T) {
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "operator-view.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, after, found := strings.Cut(string(doc), "no framing: `")
+	if !found {
+		t.Fatal("docs/operator-view.md no longer introduces the policy with \"no framing: `\"")
+	}
+	quoted, _, found := strings.Cut(after, "`")
+	if !found {
+		t.Fatal("docs/operator-view.md: the policy quote is not closed")
+	}
+	if got := strings.Join(strings.Fields(quoted), " "); got != csp {
+		t.Errorf("docs/operator-view.md quotes %q; the server sends %q", got, csp)
+	}
+}
+
+// asset is the name of one script the page references.
+func (s *served) asset(t *testing.T) string {
+	t.Helper()
+	_, body := s.request(t, http.MethodGet, "/", nil, nil, nil)
+	match := regexp.MustCompile(`src="/assets/([^"]+\.js)"`).FindStringSubmatch(body)
+	if match == nil {
+		t.Fatalf("the page names no script: %.300s", body)
+	}
+	return match[1]
+}
+
+// /assets serves the build's files by exact name, cacheable for good; a directory, a name outside the assets
+// directory, a traversal and an encoded slash get the fixed 404, and the page's other files are not served elsewhere.
+func TestAssets(t *testing.T) {
+	s := newServed(t, ServeOptions{})
+	name := s.asset(t)
+	response, body := s.request(t, http.MethodGet, "/assets/"+name, nil, nil, nil)
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "text/javascript; charset=utf-8" || response.Header.Get("Cache-Control") != "public, max-age=31536000, immutable" || !strings.Contains(body, "csp-nonce") {
+		t.Errorf("asset: %d %q %q", response.StatusCode, response.Header.Get("Content-Type"), response.Header.Get("Cache-Control"))
+	}
+	for _, path := range []string{"/assets/", "/assets", "/assets/missing.js", "/assets/index.html", "/assets/../index.html", "/assets/..%2findex.html", "/assets/%2e%2e/index.html", "/assets/" + name + "/", "/assets/sub/" + name, "/index.html", "/static/index.html", "/THIRD_PARTY_NOTICES", "/assets/THIRD_PARTY_NOTICES"} {
+		response, body := s.request(t, http.MethodGet, path, nil, nil, nil)
+		if response.StatusCode != http.StatusNotFound || body != textNotFound+"\n" || response.Header.Get("Cache-Control") != "no-store" {
+			t.Errorf("%s: %d %q %q", path, response.StatusCode, body, response.Header.Get("Cache-Control"))
+		}
+	}
+	if response, _ := s.request(t, http.MethodGet, "/", nil, nil, nil); response.Header.Get("Cache-Control") != "no-store" {
+		t.Errorf("page: Cache-Control %q", response.Header.Get("Cache-Control"))
 	}
 }
 

@@ -1,0 +1,14 @@
+{
+  "run": "run-06adb71b13c69028ce654d659761fcad",
+  "tenant": "acme",
+  "topic": "wherry.traces.acme",
+  "traces": [],
+  "spans": 0,
+  "markers": [],
+  "read": {
+    "bytes": 0,
+    "records": 0
+  },
+  "next": 0,
+  "complete": true
+}

@@ -181,22 +181,6 @@ func TestOutputNames(t *testing.T) {
 	}
 }
 
-// The page writes every value as text: its script sets no markup.
-func TestPageRendersText(t *testing.T) {
-	script, err := static.ReadFile("static/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, sink := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"} {
-		if strings.Contains(string(script), sink) {
-			t.Errorf("app.js uses %s", sink)
-		}
-	}
-	if !strings.Contains(string(script), "textContent") {
-		t.Error("app.js does not render through textContent")
-	}
-}
-
 // Every request passes the guard before the router: a path the router would redirect, CONNECT, OPTIONS * and a
 // foreign Host each get a fixed status and body with every header, nothing of the request reflected, and one log
 // line naming no route; an allowed Host with its port passes, and the stream still flushes through the wrapper.

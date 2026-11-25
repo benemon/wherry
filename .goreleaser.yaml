@@ -36,6 +36,10 @@ archives:
       - LICENSE
       - README.md
       - contrib/observability/*
+      # The licences and notices of the npm packages bundled into the operator view's page, EUI's Elastic License 2.0
+      # among them; make ui generates it beside the page.
+      - src: internal/view/static/THIRD_PARTY_NOTICES
+        dst: THIRD_PARTY_NOTICES
 
 checksum:
   name_template: checksums.txt
@@ -94,5 +98,6 @@ brews:
     skip_upload: "true"
     install: |
       bin.install "wherry"
+      prefix.install "THIRD_PARTY_NOTICES"
     test: |
       assert_match "version=v#{version}", shell_output("#{bin}/wherry version")

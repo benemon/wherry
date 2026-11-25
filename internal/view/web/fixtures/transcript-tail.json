@@ -1,0 +1,85 @@
+{
+  "run": "run-24a373cef0aaf32ea0d792f359533ffd",
+  "attempt": 2,
+  "first": 120,
+  "lines": [
+    {
+      "at": "2026-11-24T17:41:06Z",
+      "attempt": 1,
+      "receiver": "wherry.rcv.nomad-1",
+      "seq": 0,
+      "text": "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-sonnet-5-5\"}"
+    },
+    {
+      "at": "2026-11-24T17:41:12Z",
+      "attempt": 1,
+      "receiver": "wherry.rcv.nomad-1",
+      "seq": 64,
+      "text": "Running the integration tests first."
+    },
+    {
+      "at": "2026-11-24T17:42:00Z",
+      "attempt": 2,
+      "receiver": "wherry.rcv.nomad-1",
+      "seq": 120,
+      "text": "Starting again: running the integration tests."
+    },
+    {
+      "at": "2026-11-24T17:42:30Z",
+      "attempt": 2,
+      "receiver": "wherry.rcv.nomad-1",
+      "seq": 168,
+      "raw": true,
+      "size": 4096
+    },
+    {
+      "at": "2026-11-24T17:42:36Z",
+      "attempt": 2,
+      "receiver": "wherry.rcv.nomad-1",
+      "seq": 4265,
+      "oversize": true,
+      "size": 734003
+    },
+    {
+      "at": "2026-11-24T17:43:00Z",
+      "attempt": 2,
+      "receiver": "wherry.rcv.nomad-1",
+      "seq": 4266,
+      "text": "origin\thttps://x-access-token:[redacted:Zm9vYmFyYmF6cXV4]@git.example.com/acme/app.git (fetch)"
+    },
+    {
+      "at": "2026-11-24T17:44:00Z",
+      "attempt": 2,
+      "receiver": "wherry.rcv.nomad-1",
+      "seq": 4400,
+      "text": ""
+    },
+    {
+      "at": "2026-11-24T17:45:00Z",
+      "attempt": 2,
+      "receiver": "wherry.rcv.nomad-1",
+      "seq": 4401,
+      "text": "dial tcp kafka-1.example.com:9093: i/o timeout",
+      "truncated": true,
+      "size": 20000
+    },
+    {
+      "at": "2026-11-24T17:47:54Z",
+      "attempt": 2,
+      "receiver": "wherry.rcv.nomad-1",
+      "seq": 24402,
+      "text": "The tests cannot reach the broker from this allocation."
+    }
+  ],
+  "prev": 0,
+  "complete": true,
+  "indexed": 11,
+  "read": {
+    "bytes": 4096,
+    "records": 20
+  },
+  "seek": {
+    "bytes": 2048,
+    "records": 9
+  }
+}
