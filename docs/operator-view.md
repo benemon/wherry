@@ -70,8 +70,8 @@ The model keeps named fields and, of what an agent wrote, the text that says wha
 it did: from a status its kind, state, event ID, attempt, receiver, append time, log offset, event, a failure class
 and its message; from a result the output names, sizes and hashes, the reply's size and where it ran. The message kept
 is the status's text as the receiver redacted it: a working status's line, at most 512 bytes, and a failed, canceled
-or rejected terminal's reason, cut at 1 KiB and marked `truncated`. A completed terminal's text is the agent's reply
-and is not kept, nor is a reply, an artifact or a task's text, nor a result's labels or its job name. Message bytes
+or rejected terminal's reason, cut at 1 KiB and marked `truncated`; a start failure carries a class and no text, so it
+has no message. A completed terminal's text is the agent's reply and is not kept, nor is a reply, an artifact or a task's text, nor a result's labels or its job name. Message bytes
 count in the run's retained size, so the `run_bytes` cap bounds them as it does every other fact, the oldest events
 dropped first. The run's detail carries each message on its event and the failure reason, the highest attempt's
 terminal message, as `reason`. The transcript's lines are not held in the model; they are read from the tenant's
@@ -131,24 +131,36 @@ more or the page was cut; `attempt` and `first` are the attempt shown and the lo
 true` says either differs from the cursor's: an adopted run's new attempt hides the earlier attempt's lines at or above
 its first seq, so the page reloads from the tail. `complete` is set once the attempt's last chunk was read, or the run
 is terminal and the scan reached the end listed after its terminal; `predates_log` when retention removed the span's
-start; `missing` when the tenant has no transcript topic. `read` and `seek` report the records and bytes the request's
-scan and seek read, and `truncated` names each cap that cut it.
+start; `missing` when the tenant has no transcript topic. `retry: true` says a request budget cut a `tail` request's
+scan before the run's span was indexed: the response has no lines, since the lines indexed so far are not the tail,
+and the page asks `tail` again until the scan ends. `read` and `seek` report the records and bytes the request's scan
+and seek read, `truncated` names each cap that cut it, and `evicted` counts the other runs' indexes dropped to make
+room for this run's lines. A whole older page's `next` is the seq asked `before`, so the page tells a cut older page,
+whose `next` is lower, from a whole one.
 
 Which lines a run shows is the attempt rule every reader follows, the host's `wherry host logs` included: the highest
 attempt's lines, and below that attempt's first seq the lines of earlier attempts, since an adopter resumes the job's
 output past the run's latest committed offset and a seq can repeat across attempts; of chunks sharing a seq the
 highest attempt's is the line, and the empty final chunk is no line. A chunk counts when it is a chunk by its JWS
 type, an output chunk on the same topic being dropped before it is verified; verifies under the key history, as every
-signed record does; and names the run's tenant, its recorded pool and task hash, with the receiver it names as its
-signer. A removed receiver's chunks stay, shown with their signer, as the view's other facts do: that is the same
-residual as elsewhere in the model. When a rotation read later retires a key, the indexes of the runs holding that
+signed record does, which binds the receiver it names to its signer; names the run's tenant, its recorded pool and
+task hash; and is signed by a receiver recorded in the run's pool. The last rule is the model's own for the feed: the
+tenant's topics are open to every receiver entitled to the tenant, so the ACL does not bind the pool, and a receiver of
+another pool could otherwise claim the run's pool in a chunk of its own. A removed receiver's chunks stay, shown with
+their signer, as the view's other facts do: that is the same residual as elsewhere in the model. The index is bound
+to the pool and task hash the model records for the run and is rebuilt when either changes. When a rotation read later retires a key, the indexes of the runs holding that
 owner's chunks are dropped and rebuilt on the next request, so a chunk signed with the retired key after its retirement
-is gone with them; `transcript_retracted` counts the indexes dropped.
+is gone with them; `transcript_retracted` counts the indexes dropped. A rotation read while a request was indexing is
+told from the request's key snapshot, and the index is dropped at the request's end; a line whose record no longer
+verifies when a page seeks it leaves the index and the page passes it.
 
 No tick tails the transcript topics. The first request for a run scans its span of the tenant's topic, from one minute
 before the earlier of its first record and its admission, as the trace drill-down does, and keeps seq to offset for
-each of the run's chunks; a later request resumes the scan where the last stopped, then seeks the records of the lines
-selected, so a request for lines already indexed reads nothing for its scan. A working run's page asks `from=<next>`
+each of the run's chunks; a later request resumes the scan where the last stopped, then seeks the lines selected, so a
+request for lines already indexed reads nothing for its scan. The seek reads the topic's span between the lowest and
+the highest offset of the lines selected, other runs' records interleaved with them included, so its cost follows the
+tenant's traffic over the page's span rather than the page's line count; on a busy tenant a page can come in parts,
+each with `next` at the cut. A working run's page asks `from=<next>`
 on each `model` event and at most every 2 seconds; there is no new stream event type. The chunks and the terminal
 status commit in one transaction but are read from two topics, so a terminal on the feed can show before its attempt's
 last chunks are stable on the transcript topic; `complete` waits for them, and an open transaction pins the last
@@ -158,11 +170,16 @@ carries; it counts the empty final chunk, so the page treats it as an estimate.
 
 Scans and seeks run under caps, each reported by name in the response's `truncated` and the model's `bounds` when
 hit: 32 MiB and 20,000 records per request over its scan and seek together, `transcript_bytes` and
-`transcript_records`; 5 seconds per request, `transcript_scan`; two requests at once, `transcript_scans`, a third
-answered 503; 500,000 lines indexed per run and 2,000,000 over every run, `transcript_lines`, a scan stopping at
-either; the indexes of 32 runs kept, the least recently used dropped beyond them, `transcript_runs`. A response stops
-at a byte budget under the 8 MiB response bound, returning fewer lines with `next` at the cut and `response_bytes`
-named. Index state is guarded by a lock per run, so concurrent requests for one run take turns.
+`transcript_records`; 15 seconds per request, `transcript_scan`; two requests at once, `transcript_scans`, a third
+answered 503; 500,000 lines indexed per run and 2,000,000 over every run, `transcript_lines`; the indexes of 32 runs
+kept, the least recently used dropped beyond them, `transcript_runs`. A quarter of the bytes, records and time is the
+seek's share, kept from the scan, so a scan that spends the rest never starves the page's seek. A scan cut by its
+request's bytes, records or time resumes on the next request, and a `tail` so cut is answered with `retry`; a scan
+stopped by the lines cap per run is final. When the total over every run is reached, the least recently used indexes
+other than the one being built are evicted to make room, counted as `transcript_evicted` and reported in the
+response's `evicted`, before the scan is stopped. A response stops at a byte budget under the 8 MiB response bound,
+returning fewer lines with `next` at the cut and `response_bytes` named. Index state is guarded by a lock per run,
+taken before a scan slot, so concurrent requests for one run take turns and a request waiting its turn holds no slot.
 
 ## Bounds
 
@@ -281,5 +298,8 @@ and no framing, and every response is `Cache-Control: no-store` with `Referrer-P
 The page renders the model as plain tables, every value as text, output names, messages and lines included. Click a
 run for its path, echo, attempts with their messages, failure reason, open exchange, cancels, result references and
 storage, each signed fact with its signer, the tail of its transcript with older pages on request, following while it
-works, and load its spans from there. It is the surface slices 1 to 4 are accepted on; the designed interface follows
+works, and load its spans from there. The page applies a transcript response only to the run it was asked for, follows
+again after any error, a 503 included, and asks at once on a model event; each line's attempt and seq sit in their own
+elements and its text in a `bdi`, so a bidi control or line break in agent text cannot imitate a neighbouring row's
+prefix. It is the surface slices 1 to 4 are accepted on; the designed interface follows
 against the same API.
