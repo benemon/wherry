@@ -411,10 +411,11 @@ done
 case "$sub" in
   version) if [ -f "$d/versionfail" ]; then rm "$d/versionfail"; exit 1; fi; echo "git version ` + version + `";;
   config) cat "$d/origin";;
-  rev-parse) case "$*" in *abbrev-ref*) cat "$d/branch";; *) cat "$d/commit";; esac;;
+  rev-parse) case "$*" in *abbrev-ref*) cat "$d/branch";; *refs/heads/wherry/*) [ -f "$d/wherryref" ] && cat "$d/wherryref" || exit 1;; *) cat "$d/commit";; esac;;
   ls-remote) case "$*" in *--symref*) cat "$d/symref";; *) cat "$d/heads";; esac;;
   cat-file) exit $(cat "$d/catfile" 2>/dev/null || echo 0);;
   merge-base) exit $(cat "$d/mergebase" 2>/dev/null || echo 1);;
+  fetch) exit $(cat "$d/fetch" 2>/dev/null || echo 0);;
   *) exit 1;;
 esac
 `
@@ -565,6 +566,9 @@ func TestSubmitGitCurrentRepo(t *testing.T) {
 	if git := task.Wherry.Git; git == nil || *git != want {
 		t.Fatalf("git %+v, want %+v", git, want)
 	}
+	if local, err := f.host.localRun(submitted.RunID); err != nil || local == nil || local.Repo != top {
+		t.Fatalf("the run's record holds repo %q, %v; want %s", local.Repo, err, top)
+	}
 	calls := shim.calls(t)
 	var subs []string
 	for i, c := range calls {
@@ -604,8 +608,8 @@ func TestSubmitGitCurrentRepo(t *testing.T) {
 		if c.env["GIT_NO_LAZY_FETCH"] != "1" {
 			t.Errorf("call %d %q: environment lacks GIT_NO_LAZY_FETCH=1", i, c.sub())
 		}
-		if _, ceiling := c.env["GIT_CEILING_DIRECTORIES"]; ceiling == inRepo {
-			t.Errorf("call %d %q: GIT_CEILING_DIRECTORIES %v, want it outside the repository alone", i, c.sub(), ceiling)
+		if ceiling := c.env["GIT_CEILING_DIRECTORIES"]; ceiling == "" || inRepo && ceiling != filepath.Dir(top) {
+			t.Errorf("call %d %q: GIT_CEILING_DIRECTORIES %q, want the parent of the command's directory", i, c.sub(), ceiling)
 		}
 		if c.env["GIT_CONFIG_GLOBAL"] != "/dev/null" || c.env["GIT_CONFIG_KEY_0"] != "http.extraHeader" || c.env["GIT_CONFIG_VALUE_0"] != "" {
 			t.Errorf("call %d %q: environment %v lacks the global config and the header reset", i, c.sub(), c.env)

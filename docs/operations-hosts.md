@@ -336,12 +336,31 @@ apply with: git am /home/me/.local/state/wherry/runs/run-.../outputs/changes.pat
 ```
 
 On a pool with storage, a bundle over the pool's output limit returns
-through the pool's bucket by itself. To
+through the pool's bucket by itself.
+
+For a run submitted with `--git .`, `result`, and `submit --wait`, fetch the
+bundle into the repository `submit` read, as the branch `wherry/<run>`,
+leaving the working tree, the index and `HEAD` as they are, and print the
+next step:
+
+```
+fetched into wherry/run-...: git merge wherry/run-...
+```
+
+Review the branch, merge it, and delete it. The branch is never moved: a
+`wherry/<run>` at another commit is left, with
+`not fetched (exists); fetch with: git fetch <path> HEAD`, and so is a
+repository that is gone or a bundle git refuses, each with its reason, while
+the bundle stays at its output path
+([`result`](commands.md#wherry-host-result-run-id)). The MCP `result` tool
+and `submit` with `wait` report the same in `fetched_ref` and `not_fetched`.
+To
 build on a run's commits in a new run, `wherry host submit --continue RUN_ID`
 reuses its repository and continues from the `changes.bundle` that `result`
 collected; each round carries the base bundle through the pool's bucket, so
 the pool needs storage and the host a storage credential for it
-([`submit`](commands.md#wherry-host-submit)).
+([`submit`](commands.md#wherry-host-submit)). A continuation of a `--git .`
+run is fetched into its own `wherry/<run>` in the same repository.
 
 The agent pushes only when the prompt asks it to and the credential allows
 it, and then only to the branch `wherry/<run>`; verify the commit it

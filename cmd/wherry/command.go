@@ -609,7 +609,14 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 			case wire.GitPatch:
 				fmt.Fprintf(stderr, "apply with: git am %s\n", output.Path)
 			case wire.GitBundle:
-				fmt.Fprintf(stderr, "fetch with: git fetch %s HEAD\n", output.Path)
+				switch {
+				case collected.Fetched != "":
+					fmt.Fprintf(stderr, "fetched into %s: git merge %s\n", collected.Fetched, collected.Fetched)
+				case collected.NotFetched != "":
+					fmt.Fprintf(stderr, "not fetched (%s); fetch with: git fetch %s HEAD\n", collected.NotFetched, output.Path)
+				default:
+					fmt.Fprintf(stderr, "fetch with: git fetch %s HEAD\n", output.Path)
+				}
 			}
 		}
 		for _, output := range append(result.NotReturned, collected.Rejected...) {

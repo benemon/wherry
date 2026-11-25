@@ -949,7 +949,11 @@ machine's trust store or set `ca_cert` there; with one set, that the
 certificate is signed neither by the trust store nor by the CA in `ca_cert`
 ([Broker and S3 trust](security.md#broker-and-s3-trust)). Go's x509 error
 ends the message.
-`--config-file` defaults to `/etc/wherry/config.yaml`. It creates the
+`--config-file` defaults to `/etc/wherry/config.yaml`; without the flag and
+without that file, the receiver runs [without a
+file](configuration-receiver.md#without-a-file), reading its bundle where
+its platform puts it, and refuses to start naming the path when nothing is
+there. It creates the
 configuration's `state_dir` with mode 0700 and keeps `signing.key`, a
 private JWK with mode 0600, in it, and in `pool-keys/` one file with mode
 0600 per pool key it holds: the private JWK, its creation time, the append
@@ -1429,7 +1433,7 @@ and needs `wherry host init` on a re-provisioned host.
 | `--output NAME` | | file the agent must leave in `WHERRY_OUTPUT_DIR`: the run fails without it; one over the pool's output limit returns through the pool's bucket, at most 5 GiB; repeatable |
 | `--start-by` | `10m` | `task_started_by`: an RFC 3339 time, or a Go duration from now, by which the agent's job must start |
 | `--end-by` | `2h` | `task_ended_by`: an RFC 3339 time, or a Go duration from now, by which the run must end |
-| `--wait` | false | collect the result after publishing |
+| `--wait` | false | collect the result after publishing, as [`result`](#wherry-host-result-run-id) does, the fetch of a `--git .` run's bundle included |
 | `--outputs-dir` | `<state_dir>/runs/<run>/outputs/` | where the run's outputs go; requires `--wait` |
 
 An input's delivered name, like an output's, is a relative path of file names
@@ -1502,7 +1506,10 @@ nor sent. `submit` writes nothing to the repository: it reads it with
 lazy fetching off, so a partial clone fetches nothing, and asks the remote
 with `git ls-remote` from a directory of its own, the only call that carries
 a credential. `--git .` needs `git` 2.45 or later, refused otherwise naming
-the version.
+the version. The run's local record keeps the repository's top level, and
+[`result`](#wherry-host-result-run-id) fetches the returned `changes.bundle`
+into its branch `wherry/<run>`; a `--continue` of the run, and a
+resubmission, keep the repository.
 
 Both forms run `git` on the host, from `PATH`, and are refused without it;
 a remote with `@REF` runs none. That `git` reads no system or global
@@ -1804,6 +1811,31 @@ For `changes.patch` it also prints `apply with: git am <path>`, and for
 and SHA-256, in the run's local record, wherever `--outputs-dir` puts it,
 for [`submit --continue`](#wherry-host-submit). A later `result` that collects
 a bundle replaces the record; one that collects none keeps it.
+
+For a run submitted with `--git .`, or a `--continue` of one, `result` also
+fetches the bundle into that repository, whose top level the run's record
+holds, as the branch `wherry/<run>`, and prints
+`fetched into wherry/<run>: git merge wherry/<run>` in place of the
+`fetch with` line; `<run>` is the run whose bundle it is, the last of a
+resubmitted run's replacements. The working tree, the index and `HEAD` are
+untouched, and `git merge wherry/<run>`, from the directory `submit` ran in,
+is the next step. The fetch is
+`git -c fetch.fsckObjects=true -c maintenance.auto=false fetch --no-tags
+--no-recurse-submodules <path> HEAD:refs/heads/wherry/<run>`, run as
+[`--git .`](#wherry-host-submit) runs git, with the repository alone as a
+safe directory and no repository above it found, so it imports the one ref,
+checks every object whatever the repository's own `fetch.fsckObjects` says,
+and runs no hook. A `wherry/<run>` that exists is created once and never
+moved: at the bundle's head there is nothing to do, and `result` prints the
+same line; at any other commit, an ancestor of the head included, it is left
+and `result` prints `not fetched (exists); fetch with: git fetch <path> HEAD`
+and exits as it would have. Any other failure prints the same line with its
+reason, `no git` (none on `PATH`, or older than 2.45), `no repository` (the
+recorded directory gone, or no longer a repository), `git refused` (a
+prerequisite the repository lacks, a corrupt object, the branch checked out)
+or `unreadable bundle`, never git's output; the collect still succeeds, and
+the bundle at `<path>` is fetched by hand. A run submitted with `--git URL`
+records no repository, and `result` prints the `fetch with` line alone.
 No expected output takes the name `reply.txt`, and a file of that name the
 agent leaves is listed as not returned, `rejected: reserved name`.
 

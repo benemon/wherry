@@ -276,6 +276,8 @@ type waitReply struct {
 	Artifacts   []resultArtifact        `json:"artifacts,omitempty"`
 	Outputs     []outputReply           `json:"outputs,omitempty" jsonschema:"the run's outputs, verified and written locally"`
 	NotReturned []wire.UnreturnedOutput `json:"not_returned,omitempty" jsonschema:"outputs the run did not return or this host could not verify, each with its reason"`
+	FetchedRef  string                  `json:"fetched_ref,omitempty" jsonschema:"for a run submitted with git remote . whose changes.bundle came back: the branch, wherry/<run>, the bundle was fetched into in that repository, to merge from; the working tree, index and HEAD are untouched"`
+	NotFetched  string                  `json:"not_fetched,omitempty" jsonschema:"for such a run, why the bundle was not fetched: exists (wherry/<run> names another commit and was left alone), no git, no repository, git refused or unreadable bundle; the bundle at its output path can be fetched by hand with git fetch <path> HEAD"`
 	Redacted    map[string]int          `json:"redacted,omitempty" jsonschema:"redaction markers in the message and artifacts by the credential or S3 object each names"`
 	Skipped     int                     `json:"skipped,omitempty"`
 	Runs        []string                `json:"runs,omitempty" jsonschema:"set when the run lost its pool key before it started and was resubmitted: every run followed, the run whose outcome this is last"`
@@ -421,6 +423,7 @@ func newMCPServer(connect func() (*busclient.Host, error), openInput func(string
 			output.Outputs = append(output.Outputs, outputReply{Name: written.Name, Path: written.Path, SHA256: written.SHA256, Size: written.Size})
 		}
 		output.NotReturned = append(result.NotReturned, collected.Rejected...)
+		output.FetchedRef, output.NotFetched = collected.Fetched, collected.NotFetched
 		if reply := result.Reply; reply != nil {
 			output.Reply = &replyFile{Rejected: reply.Rejected}
 			if reply.Rejected == "" {
@@ -524,6 +527,7 @@ func newMCPServer(connect func() (*busclient.Host, error), openInput func(string
 			"task_ended_by past 2h10m from its submission, an unfinished run returns no retry_after and message reports the timeout, as wherry result's exit 6 does. "+
 			"A run whose task_started_by passed with no receiver claiming it returns its state and a message saying so, without retry_after. "+
 			"A finished run's outputs are verified and written under this host's state directory; outputs lists their paths and hashes. "+
+			"For a run submitted with git remote ., a returned changes.bundle is also fetched into that repository's branch wherry/<run>, named in fetched_ref; not_fetched says why it was not. "+
 			"Use status to check a run without waiting.", int(waitBound.Seconds())),
 	}, func(ctx context.Context, request *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, waitReply, error) {
 		return collectResult(ctx, request, input, waitBound)

@@ -7,7 +7,8 @@ Install the plugins named in the receiver record.
 Configure a source for every platform credential its profiles need.
 For Nomad, follow the plugin's [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy).
 
-1. Write the [local configuration](configuration-receiver.md#receiver-local-configuration).
+1. Put the bundle where the receiver [looks for it](configuration-receiver.md#without-a-file), or write a
+   [local configuration](configuration-receiver.md#receiver-local-configuration) that names it.
    Keep the bundle readable by the receiver alone.
 2. Keep the state directory across restarts and reschedules.
    It holds the receiver's signing key and any retained pool keys.
@@ -16,8 +17,8 @@ For Nomad, follow the plugin's [receiver policy](https://github.com/benemon/wher
    Fix or remove revoked credentials to stop repeated failed starts.
 4. Set the supervisor's stop window above `drain_timeout` plus five seconds.
    Use `drain_timeout: 20s` with a 30-second stop window.
-5. Run `wherry receiver run --config-file FILE` through the supervisor.
-   Without the flag, it reads `/etc/wherry/config.yaml`.
+5. Run `wherry receiver run` through the supervisor, with `--config-file FILE` when the receiver keeps a file.
+   Without the flag, it reads `/etc/wherry/config.yaml` when that exists, and runs without a file otherwise.
 6. Check the logs for `registered key: signing=<key id>` and `configured: pool=<pool> profiles=<n> replicas=<n>`.
    `waiting for configuration` means the configuration record is missing.
 7. Run `wherry operator receiver show RECEIVER` and check `status: live`

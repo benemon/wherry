@@ -2,7 +2,9 @@
 
 ## Receiver local configuration
 
-A receiver reads local YAML configuration when it starts.
+A receiver's local configuration file is optional.
+Without one, the receiver reads its bundle where its platform puts it and takes the [defaults below](#without-a-file).
+A receiver that needs a platform credential source, a `ca_cert`, tracing, another plugin directory, no metrics listener or another drain timeout keeps a file.
 
 ### Generate or provide the local configuration
 
@@ -13,79 +15,76 @@ A receiver reads local YAML configuration when it starts.
    The directory's file takes precedence.
    With `-f FILE`, the local configuration still lives under `receivers/`.
    Wherry validates a provided file and preserves its bytes, permissions and modification time.
-3. If neither file exists, answer the questions below in a terminal.
+   A provided file must give every platform credential the merged profiles name a source.
+3. If neither file exists and the merged profiles name no platform credential, Wherry writes nothing and says the receiver runs without a file.
+4. If neither file exists and a profile names a platform credential, answer the questions below in a terminal.
    Wherry asks when standard input and standard error are terminals and `TERM` is not `dumb`.
    Wherry writes `receivers/NAME.config.yaml` with mode `0600`.
    Without a terminal, you must provide the file yourself.
-4. Supply the receiver with its bundle and local configuration at the paths your platform uses.
+5. Supply the receiver with its bundle, and its local configuration when it has one, at the paths your platform uses.
    The local configuration stays in your working directory.
    It is not recorded on `wherry.operator`.
    A provisioning failure keeps the generated file for your next apply.
 
-The paths you enter are on the receiver's host, so Wherry does not complete or check them.
+Wherry asks only for the credential sources.
+The values you enter are on the receiver's host, so Wherry does not complete or check them.
 
 | Question | Choices or default | Field |
 | --- | --- | --- |
-| Bundle path | `/etc/wherry/receiver.bundle` | `bundle` |
-| State directory (must survive restarts) | `/var/lib/wherry/state` | `state_dir` |
-| Plugin directory | `/usr/local/libexec/wherry/plugins` | `plugin_dir` |
-| Stop window (how long its platform waits before killing it) | `30s` | `drain_timeout`, calculated below |
-| Metrics | **Listen on an address**, then **Metrics address** (default `:9464`), or **No listener** | `metrics_addr` |
 | Credential NAME | **Environment variable**, then **Variable**, or **File**, then **File path** | `credentials` |
 
-Wherry asks nothing about the broker's CA and writes no CA setting: the receiver's machine trusts the broker through its trust store.
-Choose No listener to serve no metrics; Wherry writes an empty `metrics_addr`.
-After you choose an address, `none` is an ordinary value.
+Wherry asks once per credential named by the merged profiles, in sorted order.
+A profile can remove an inherited credential with `credential: null`.
 The Variable default is the credential name in upper case, with characters outside `[A-Z0-9_]` replaced by `_`, prefixed with `_` if it starts with a digit.
 File path has no default.
 Wherry shows why it refuses an answer on the same page, and you correct it and continue.
 Ctrl-C or end of input writes no local configuration and records no receiver; a receiver file generated before these questions remains.
-Keep the state directory across restarts.
-Wherry subtracts `max(10s, 6s + 2s × plugin types)` from the stop window.
-The margin covers the receiver's 5-second step-down, up to 2 seconds per plugin process and 1 second spare.
-Your answer must leave at least 5 seconds to drain.
-Raise Nomad's `kill_timeout`, Kubernetes' `terminationGracePeriodSeconds` or systemd's `TimeoutStopSec` if it does not.
-Wherry asks once per credential named by the merged profiles, in sorted order.
-A profile can remove an inherited credential with `credential: null`.
-Only the file can set `drain_timeout: 0s` or a `command` credential source.
+The written file holds the sources, with `metrics_addr: ":9464"` and `drain_timeout: 20s`, the values a receiver without a file takes, so it changes nothing else; its bundle, state and plugin directories are the [defaults](#without-a-file).
+Wherry asks nothing about the broker's CA and writes no CA setting: the receiver's machine trusts the broker through its trust store.
+Only the file can set `drain_timeout: 0s`, an empty `metrics_addr` or a `command` credential source.
 Every credential named by a profile must have a source.
-With `--dry-run`, standard error names the provided file or says apply will ask.
+With `--dry-run`, standard error names the provided file, says apply will ask for the sources, or says the receiver runs without a file.
 Standard output keeps the receiver record format.
 
-### Answers for the plugin examples
+### The plugin examples
 
-These answers follow the `config.yaml` files on
-[wherry-plugins main](https://github.com/benemon/wherry-plugins/tree/main/examples).
-For Nomad exec, use `examples/nomad/config-host.yaml`.
-You can provide those files to skip the questions.
-Replace `<version>` with the version you installed.
-
-| Answer | Nomad docker | Nomad exec | Kubernetes | systemd |
-| --- | --- | --- | --- | --- |
-| Bundle | `/secrets/receiver.bundle` | `/secrets/receiver.bundle` | `/etc/wherry/bundle/bundle.yaml` | `/run/credentials/wherry-receiver.service/bundle` |
-| State | `/var/lib/wherry/state` | `/var/lib/wherry/state` | `/var/lib/wherry/state` | `/var/lib/wherry/state` |
-| Plugins | `/usr/local/libexec/wherry/plugins` | `/usr/local/libexec/wherry/<version>/plugins` | `/usr/local/libexec/wherry/plugins` | `/usr/local/libexec/wherry/plugins` |
-| Stop window | `30s` | `30s` | `30s` | `30s` |
-| Metrics | `:9464` | `:9464` | `:9464` | `:9464` |
-| Credentials | none; workload identity supplies `NOMAD_TOKEN` | none; workload identity supplies `NOMAD_TOKEN` | none; service account | none |
-
-Each example sets `drain_timeout: 20s`.
+The Kubernetes and Nomad docker examples on
+[wherry-plugins main](https://github.com/benemon/wherry-plugins/tree/main/examples)
+run without a file: their bundle and state paths are the defaults, and their receivers name no platform credential.
+The systemd example and Nomad exec's `examples/nomad/config-host.yaml` keep a file for their `plugin_dir`, `/usr/local/libexec/wherry/<version>/plugins`; replace `<version>` with the version you installed.
 A receiver verifies the broker and its pool's bucket against its machine's trust store plus the `ca_cert` of this file
 ([Broker and S3 trust](security.md#broker-and-s3-trust)); on OpenShift the CA goes in this file as `ca_cert`.
 
 ### Where wherry looks for the file
 
-1. Use the path passed with `wherry receiver run --config-file FILE`.
-2. Otherwise, use `/etc/wherry/config.yaml`.
+1. Use the path passed with `wherry receiver run --config-file FILE`, which must exist.
+2. Otherwise, use `/etc/wherry/config.yaml` when it exists.
+3. Otherwise, run without a file.
 
 Unknown and duplicate fields are errors.
 Decode errors report line numbers without field values.
 A leading `~/` expands in the flag and configuration paths.
 
+### Without a file
+
+A receiver without a file takes these values.
+A file that leaves `bundle` out takes the bundle path below, and one that leaves `bundle` and `state_dir` out takes the state directory below; every other field a file leaves out keeps its own default, so a file without `metrics_addr` starts no listener.
+
+| Setting | Value |
+| --- | --- |
+| Bundle | `$CREDENTIALS_DIRECTORY/bundle` when systemd's `CREDENTIALS_DIRECTORY` is set; else `$NOMAD_SECRETS_DIR/receiver.bundle` when Nomad's `NOMAD_SECRETS_DIR` is set; else `/etc/wherry/bundle/bundle.yaml`, the Kubernetes example's Secret mount |
+| State directory | `state` under the first path of systemd's `STATE_DIRECTORY` when set; else `/var/lib/wherry/state` |
+| Plugin directory | `/usr/local/libexec/wherry/plugins` |
+| Drain timeout | `20s`, which ends a stop within 25 seconds of the signal, inside a 30-second stop window |
+| Metrics | `/metrics` on `:9464` |
+| Credentials, `ca_cert`, tracing | none |
+
+The variable that is set decides the bundle path, and the receiver refuses to start when nothing is there, naming the path and `--config-file`; it does not try another platform's path.
+
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `bundle` | path | required | Read the receiver's bundle from this file. |
-| `state_dir` | path | `state` beside the bundle | Store the signing key and retained pool keys here. |
+| `bundle` | path | where the platform puts it, [above](#without-a-file) | Read the receiver's bundle from this file. |
+| `state_dir` | path | `state` beside a named `bundle`; without one, where the platform puts it, [above](#without-a-file) | Store the signing key and retained pool keys here. |
 | `plugin_dir` | path | `/usr/local/libexec/wherry/plugins` | Find the `wherry-plugin-<type>` binaries here. |
 | `ca_cert` | string | none | Trust this CA's PEM, or several concatenated, beside the machine's trust store for the receiver's Kafka and S3 connections ([Broker and S3 trust](security.md#broker-and-s3-trust)). |
 | `metrics_addr` | string | none | Serve `/metrics` at this `HOST:PORT`. |
@@ -99,7 +98,7 @@ Pool keys live under `state_dir/pool-keys/`.
 Keep the state directory across restarts.
 Plugin binaries can be symbolic links.
 Their SHA-256 must match the pins in the receiver record.
-Without `metrics_addr`, no metrics listener starts.
+Without `metrics_addr` in a file, no metrics listener starts; without a file, one listens on `:9464`.
 Set `drain_timeout` together with the platform's stop window.
 Credential sources use the same validation and resolution rules as host sources.
 

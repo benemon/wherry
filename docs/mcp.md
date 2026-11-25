@@ -13,7 +13,7 @@ The defaults are `10m` and `2h`.
 | `receivers` | none | `receivers`, the objects `wherry host receivers --json` prints |
 | `submit` | `prompt`, `agent`, `model`, `selector`, `git`, `continue`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by`, `wait` | `id`, `pool`, `command`, `unsupplied`, `result`, `error` |
 | `status` | `id`, optional | `runs`, `skipped` |
-| `result` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `reply`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped`, `runs` |
+| `result` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `reply`, `artifacts`, `outputs`, `not_returned`, `fetched_ref`, `not_fetched`, `redacted`, `skipped`, `runs` |
 | `cancel` | `id` | `id`, `cancel`, `skipped` |
 | `events` | `id` | `id`, `events`, `chunks`, `redacted`, `skipped` |
 | `logs` | `id`, `offset`, `limit` | `id`, `attempt`, `total`, `next_offset`, `lines`, `redacted`, `skipped` |
@@ -160,7 +160,11 @@ and writes nothing.
 
 Once the run ends, `result` writes the run's verified outputs as `wherry result`
 does, to the default outputs directory. It downloads and verifies the S3
-outputs, then deletes the run's prefix, as `wherry result` does. It returns no
+outputs, then deletes the run's prefix, as `wherry result` does. For a run
+submitted with `git` `remote` `.`, or a `continue` of one, it fetches a
+returned `changes.bundle` into that repository's branch `wherry/<run>` as
+`wherry result` does, and reports it in `fetched_ref`, or why it did not in
+`not_fetched` ([`result`](commands.md#wherry-host-result-run-id)). It returns no
 transcript; `logs` pages it.
 
 | Field | Content |
@@ -174,6 +178,8 @@ transcript; `logs` pages it.
 | `artifacts` | the result's: `result`, then a [reference](a2a-extension-v1.md#reference-artifacts) for each returned output, the reply over 64 KiB and the transcript; each is `{artifact_id, parts}`, and each part has one of `text`, `data`, `url` or `raw_bytes` (the size of a binary part, which is not included), with `media_type` |
 | `outputs` | `{name, path, sha256, size}` for each output written, S3 outputs included |
 | `not_returned` | `{name, size, reason}` for each output the result lists as not returned and each one that fails verification |
+| `fetched_ref` | for a run of the current repository whose `changes.bundle` came back, the branch it was fetched into, or already stood at, `wherry/<run>`, `<run>` the run whose bundle it is; the working tree, index and `HEAD` are untouched, and `git merge wherry/<run>` is the next step |
+| `not_fetched` | for such a run, why the bundle was not fetched: `exists`, the branch names another commit and was left; `no git`; `no repository`; `git refused`; or `unreadable bundle`; the bundle at its output path can be fetched by hand with `git fetch <path> HEAD` |
 | `redacted` | each redaction marker's name and its count |
 | `skipped` | the run's records that failed verification |
 | `runs` | for a run resubmitted after `key-lost`, every run followed, the run whose outcome this is last |

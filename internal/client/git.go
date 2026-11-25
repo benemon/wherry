@@ -40,11 +40,12 @@ func isRemote(remote string) bool {
 	return err == nil && (parsed.Scheme == "https" || parsed.Scheme == "ssh") && parsed.Path != "" && wire.ValidVCSHost(wire.GitInput{Remote: remote}.VCSHost())
 }
 
-// hostGit runs git on the host for a submission: --git . reads the working directory's repository with it, and both
-// that form and an unpinned remote ask the remote for its heads. It reads no system or global configuration, inherits
-// gitInherited alone and never prompts. Commands run in repo, the current repository's top level, or in scratch, a
-// directory of its own that holds nothing but an ssh key. header is an http.extraHeader value sent with ls-remote, ssh
-// the ssh command it runs; both are empty for an anonymous remote.
+// hostGit runs git on the host: --git . reads the working directory's repository with it, both that form and an
+// unpinned remote ask the remote for its heads, and result fetches a collected bundle into a recorded repository. It
+// reads no system or global configuration, inherits gitInherited alone and never prompts. Commands run in repo, the
+// current or recorded repository's top level, or in scratch, a directory of its own that holds nothing but an ssh key.
+// header is an http.extraHeader value sent with ls-remote, ssh the ssh command it runs; both are empty for an
+// anonymous remote.
 type hostGit struct {
 	ctx     context.Context
 	scratch string
@@ -65,13 +66,28 @@ func newHostGit(ctx context.Context) (*hostGit, error) {
 	return &hostGit{ctx: ctx, scratch: scratch}, nil
 }
 
+// recordedGit is a runner whose repository is repo, the top level a run's record holds, checked as --git . checks git.
+func recordedGit(ctx context.Context, repo string) (*hostGit, error) {
+	g, err := newHostGit(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := g.checkVersion(); err != nil {
+		g.close()
+		return nil, err
+	}
+	g.repo = repo
+	return g, nil
+}
+
 func (g *hostGit) close() {
 	os.RemoveAll(g.scratch)
 }
 
 // environment is git's environment for a command in dir. Only commands in scratch reach the remote, so only they get
 // the header and ssh command; in the repository a promisor remote could otherwise fetch missing objects with them.
-// GIT_NO_LAZY_FETCH stops that fetch, and the ceiling keeps scratch's commands from finding an enclosing repository.
+// GIT_NO_LAZY_FETCH stops that fetch, and the ceiling keeps a command from finding a repository above its directory: a
+// recorded repository whose .git is gone is no repository, not its parent's.
 func (g *hostGit) environment(dir string) []string {
 	env := []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0", "GIT_NO_LAZY_FETCH=1"}
 	for _, name := range gitInherited {
@@ -89,11 +105,9 @@ func (g *hostGit) environment(dir string) []string {
 	for i, value := range values {
 		env = append(env, fmt.Sprintf("GIT_CONFIG_KEY_%d=http.extraHeader", i), fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, value))
 	}
-	if dir == g.scratch {
-		env = append(env, "GIT_CEILING_DIRECTORIES="+filepath.Dir(g.scratch))
-		if g.ssh != "" {
-			env = append(env, "GIT_SSH_COMMAND="+g.ssh)
-		}
+	env = append(env, "GIT_CEILING_DIRECTORIES="+filepath.Dir(dir))
+	if dir == g.scratch && g.ssh != "" {
+		env = append(env, "GIT_SSH_COMMAND="+g.ssh)
 	}
 	return env
 }
@@ -132,11 +146,22 @@ func (g *hostGit) run(dir string, args ...string) (string, error) {
 	var exit *exec.ExitError
 	switch {
 	case errors.As(err, &exit):
-		return "", &gitExit{step: args[0], code: exit.ExitCode()}
+		return "", &gitExit{step: subcommand(args), code: exit.ExitCode()}
 	case err != nil:
-		return "", fmt.Errorf("git %s: %w", args[0], err)
+		return "", fmt.Errorf("git %s: %w", subcommand(args), err)
 	}
 	return stdout.String(), nil
+}
+
+// subcommand is the git subcommand in args, after any -c settings of its own.
+func subcommand(args []string) string {
+	for i := 0; i < len(args); i++ {
+		if args[i] != "-c" {
+			return args[i]
+		}
+		i++
+	}
+	return ""
 }
 
 // currentRepo is the working directory's repository as --git . reads it: origin's URL as the configuration holds it,
@@ -147,11 +172,8 @@ type currentRepo struct {
 
 // current finds the repository holding the working directory, by its .git, and reads it. Nothing is written to it.
 func (g *hostGit) current() (currentRepo, error) {
-	// GIT_NO_LAZY_FETCH, which keeps a partial clone from fetching objects into the repository, needs git 2.45.
-	if major, minor, err := g.version(); err != nil {
+	if err := g.checkVersion(); err != nil {
 		return currentRepo{}, err
-	} else if major < 2 || major == 2 && minor < 45 {
-		return currentRepo{}, fmt.Errorf("git %d.%d is older than 2.45, which --git . needs so that it writes nothing to the repository", major, minor)
 	}
 	top, err := os.Getwd()
 	if err != nil {
@@ -245,6 +267,19 @@ func (g *hostGit) defaultHead(remote string) (string, error) {
 		}
 	}
 	return "", errors.New("the remote's HEAD names no commit: name a branch, tag or commit with @REF")
+}
+
+// checkVersion refuses a git older than 2.45, whose GIT_NO_LAZY_FETCH keeps a partial clone from fetching objects into
+// the repository, before anything runs in one.
+func (g *hostGit) checkVersion() error {
+	major, minor, err := g.version()
+	if err != nil {
+		return err
+	}
+	if major < 2 || major == 2 && minor < 45 {
+		return fmt.Errorf("git %d.%d is older than 2.45, which --git . needs so that it writes nothing to the repository", major, minor)
+	}
+	return nil
 }
 
 // version is git's major and minor version.

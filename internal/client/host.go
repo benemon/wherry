@@ -350,6 +350,8 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	}
 	asked := input.Outputs
 	var continued continuation
+	// repo is the repository --git . read, or the one the continued run recorded.
+	var repo string
 	if input.Continue != "" {
 		if input.Git != nil || input.GitChanges != "" {
 			return SubmitResult{}, fmt.Errorf("%w: continue takes the git input of the run it continues, so not git or git changes", ErrInvalidInput)
@@ -376,6 +378,7 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		defer continued.bundle.Close()
 		previous := continued.last.Task.Wherry.Git
 		input.Git = &wire.GitInput{Remote: previous.Remote, Ref: previous.Ref, Path: previous.Path}
+		repo = continued.last.Repo
 		input.S3Inputs = append(slices.Clone(input.S3Inputs), S3File{Name: baseBundle, Body: continued.bundle})
 		// A plain expected output: over the inline budget it goes through the pool's bucket, and a receiver never
 		// requires a git input's changes file.
@@ -410,7 +413,7 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			if local, err = runner.current(); err != nil {
 				return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 			}
-			git.Remote, git.Ref = local.origin, local.commit
+			git.Remote, git.Ref, repo = local.origin, local.commit, runner.repo
 		}
 		git.Remote = sshRemote(git.Remote)
 		// The entry whose URL is the longest prefix of the remote gives the clone its credential and host key.
@@ -682,7 +685,7 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		err = fmt.Errorf("%w: with its envelope the submission is a %d-byte record, over pool %s's %d-byte record limit", ErrInvalidInput, len(encoded), pool, limit)
 	}
 	if err == nil {
-		err = h.publish(ctx, submission, topic, encoded, now, redactionKey, store != nil)
+		err = h.publish(ctx, submission, topic, encoded, now, redactionKey, store != nil, repo)
 	}
 	if err != nil {
 		if stored {
@@ -960,13 +963,14 @@ func (h *Host) submission(runID, nonce, pool string, placement wire.Placement, p
 	}, nil
 }
 
-// publish records the run locally, then writes encoded, the signed submission, to topic, its signature's task topic. A
-// failed write removes the record.
-func (h *Host) publish(ctx context.Context, submission *wire.Submission, topic string, encoded []byte, now time.Time, redactionKey []byte, policy bool) error {
+// publish records the run locally, with repo, the repository a --git . submission read, then writes encoded, the signed
+// submission, to topic, its signature's task topic. A failed write removes the record.
+func (h *Host) publish(ctx context.Context, submission *wire.Submission, topic string, encoded []byte, now time.Time, redactionKey []byte, policy bool, repo string) error {
 	record, err := h.newRecord(ctx, submission, topic, encoded, now, redactionKey, policy)
 	if err != nil {
 		return err
 	}
+	record.Repo = repo
 	if err := h.writeRun(record); err != nil {
 		return err
 	}
@@ -1138,6 +1142,9 @@ type runRecord struct {
 	CancelRequestedMS int64 `json:"cancel_requested_at_ms,omitzero"`
 	// Bundle is the run's changes.bundle as result last collected and verified it.
 	Bundle *collectedBundle `json:"bundle,omitzero"`
+	// Repo is the absolute top level of the repository a --git . submission read, which a continuation and a
+	// resubmission keep; result fetches the collected bundle into its wherry/<run>.
+	Repo string `json:"repo,omitzero"`
 	// TraceParent is the submit span's context as a traceparent header, which a cancel is parented to and a
 	// resubmission links to; empty when tracing was off.
 	TraceParent string `json:"trace_parent,omitzero"`
