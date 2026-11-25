@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -260,6 +262,26 @@ func TestPageNonce(t *testing.T) {
 		if policies := response.Header.Values("Content-Security-Policy"); len(policies) != 1 || policies[0] != csp || strings.Contains(policies[0], "nonce") || strings.Contains(policies[0], "unsafe-inline") {
 			t.Errorf("%s: CSP %v", path, policies)
 		}
+	}
+}
+
+// docs/operator-view.md quotes the policy; the quote is the server's constant, read from the page with its line
+// break joined.
+func TestDocsQuoteThePolicy(t *testing.T) {
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "operator-view.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, after, found := strings.Cut(string(doc), "no framing: `")
+	if !found {
+		t.Fatal("docs/operator-view.md no longer introduces the policy with \"no framing: `\"")
+	}
+	quoted, _, found := strings.Cut(after, "`")
+	if !found {
+		t.Fatal("docs/operator-view.md: the policy quote is not closed")
+	}
+	if got := strings.Join(strings.Fields(quoted), " "); got != csp {
+		t.Errorf("docs/operator-view.md quotes %q; the server sends %q", got, csp)
 	}
 }
 

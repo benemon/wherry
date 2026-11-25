@@ -127,8 +127,8 @@ export function poolHealth(pool: Pool, receivers: Receiver[], custodian: Custodi
   return { color: 'success', label: 'ready' };
 }
 
-// The caps that drop whole runs from the window, as docs/operator-view.md lists them; the run_* caps cut one run and
-// show on its truncated, the rest cut a response or a scan.
+// The caps that drop whole runs from the window, of the names internal/view/snapshot.go capNames holds; the run_* caps
+// cut one run and show on its truncated, the rest cut a response or a scan.
 const runDroppingCaps = ['runs', 'events', 'attempts', 'echoes', 'cancels', 'opens', 'bytes'];
 
 export interface Bounds {

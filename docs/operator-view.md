@@ -194,8 +194,9 @@ cancels and 64 open requests with the oldest dropped; a run so cut lists the cap
 whose joined echo and result alone are over a bound is dropped. The model keeps at most 2,000,000 events, 1,000,000
 attempts, 200,000 echoes, 200,000 cancels, 200,000 open requests and 512 MiB over every run, the oldest runs dropped
 beyond them as under the runs cap and the growing run too when it alone exceeds a cap, and 200,000 progress records
-over every receiver. Each cap reports under its name: `run_events`, `run_attempts`, `run_echoes`, `run_cancels`,
-`run_opens`, `run_bytes`, `events`, `attempts`, `echoes`, `cancels`, `opens`, `bytes`, `progress`, `sessions`. A
+over every receiver. Each cap reports under its name: `record_bytes`, `runs`, `digests`, `pending`, `cursors`,
+`run_events`, `run_attempts`, `run_echoes`, `run_cancels`, `run_opens`, `run_bytes`, `events`, `attempts`,
+`echoes`, `cancels`, `opens`, `bytes`, `progress`, `response_bytes`, `event_bytes`, `sessions`. A
 JSON response is encoded into a buffer that stops at the response bound, so no larger encoding is built, and a run
 detail whose element counts alone put it over the bound is refused before encoding. The drill-down scans at most
 32 MiB, 20,000 records and 5,000 spans per refresh, keeps 16 links per span, builds a forest of at most 5,000 nodes,
@@ -301,33 +302,49 @@ itself and every API response stay `no-store`.
 
 ## The page
 
-The page is a map of the cluster: hosts grouped by tenant on the left, the broker in the centre, each pool as a box
-holding its receivers with the custodian marked, and each S3 destination beside the pools that use it. Every node is
-shown, idle or not; a run in flight is a dot moving along its link. A ring is green for a live receiver, amber for a
-live receiver that is gated, in a suspended pool or whose custodian key is suspended, red for a receiver that is stale
-or silent or has a failed run in the last 15 minutes, grey when idle, ended or without a health of its own. Older
-failures show as a count on the link. The strip above the map shows the window, when the model was last updated, the
-runs by state, and a scrubber along the window: dragging it replays the runs as they stood at that moment, recomputed
-in the page from the runs listed, and pauses live updates until `Back to live`; receiver status, capacity, custodian
-state and lag have no history, so they show as now. When the window was cut short by a cap that drops runs, the band
-before the oldest kept run is marked incomplete, as it is when a topic predates the window.
+The page is a map of the cluster. Hosts sit on the left, grouped by tenant. The broker sits in the centre. Each pool
+is a box on the right holding its receivers, with the custodian named under them. Each S3 destination sits beside the
+pools that use it. Every node is shown, idle or not. A run in flight is a dot moving along its link. Older failures
+show as a count on the link.
 
-Every other screen is a drawer beside the map. A pool shows its receivers with a capacity ring each, its custodian
-with the key ID and when it last rotated, its offers by profile, share-group state and lag, tenants, storage,
-delivery limit, runs by state and failure class and the runs released without a terminal; a receiver its status and
-last advertisement, gate, capacity, offers, the runs it holds, stale ones marked and the unidentified remainder
-counted, and its runs by state and class; a host its tenant and runs; the broker its nodes, listeners and the wherry
-topics with their offsets, each marked when missing, predating the window or in error; a destination its runs, outputs,
-bytes, outputs not returned and failed runs. The run list, filterable by state, tenant, pool, receiver, host and agent
-and searchable by run ID, opens a run drawer: the run's state, attempt, class and failure reason, its path from
-admission through claim, key request and answer or refusal, start, working updates, terminal, cancels and result, each
-step with its signer, its outputs tagged inline or S3 with the files declared but not returned, its transcript and,
-on request, its trace as a waterfall of spans with each marker explained. The transcript opens at its tail, pages back
-on request and follows a working run, with the receiver's status messages in line at their times; a line cut at
-16 KiB, a binary or oversize line and an empty one are marked, an attempt change is a divider, and a reset reloads
-from the tail. Every value is rendered as text, output names, messages and lines included; each line's text sits in a
-`bdi`, so a bidi control or line break in agent text cannot imitate a neighbouring row's prefix, and a redaction
-marker is shown muted. The header's `Model` button lists the model's version, counts, bounds hit and recent errors.
+Each receiver's ring takes one colour, the first that applies:
+
+| Ring | Meaning |
+| --- | --- |
+| grey | the receiver has ended |
+| red | the receiver is `silent` (never advertised) or `stale`, or a run on it failed in the last 15 minutes |
+| amber | the receiver is live but gated, its pool is suspended, or its custodian key is suspended |
+| green | the receiver is live |
+| grey | any other status |
+
+A host's ring is red for a failure on it in the last 15 minutes, green while it has a run in flight, grey when idle.
+The broker and each destination have no health of their own and stay grey; a destination with outputs not returned
+carries a warning badge.
+
+The strip above the map shows the window, when the model was last updated and the runs by state. A scrubber runs
+along the window. Dragging it replays the runs as they stood at that moment, recomputed in the page from the runs
+listed, and pauses live updates until `Back to live`. Receiver status, capacity, custodian state and lag have no
+history, so they show as now. When a cap that drops runs cut the window short, the band before the oldest kept run
+is marked incomplete; a topic that predates the window marks the whole band.
+
+Every other screen is a drawer beside the map.
+
+| Drawer | Shows |
+| --- | --- |
+| pool | its health; whether it is suspended; tenants, storage, delivery limit, share-group state, lag and runs in progress; each receiver with a capacity ring; the custodian's receiver, key ID, last rotation and suspension, with its signer; offers by profile; runs by state and failure class; runs released without a terminal |
+| receiver | its status and last advertisement, or `never advertised`; its gate; capacity and in flight; its pool; offers by profile; the runs it holds, stale ones marked, with the unidentified remainder counted; runs by state and failure class |
+| host | its tenant; whether it has ended; its runs in the window, newest first, with each run's state |
+| broker | each node's address, role and listeners; the wherry topics with their offsets, each marked when missing, predating the window or in error |
+| destination | endpoint, bucket, pools, runs, outputs, bytes, outputs not returned and failed runs |
+| run list | the runs of the window, newest first, filtered by state, tenant, pool, receiver, host and agent and searched by run ID |
+| run | its state, attempt, duration, class and failure reason; its path from admission through claim decision, key request and answer or refusal, start failure, start, working updates, terminal, cancels and result, each step with its signer and any message in line; its outputs tagged inline or S3, with the files declared but not returned; its transcript; on request, its trace as a waterfall of spans with each marker explained |
+
+The transcript opens at its tail. It pages back on request and follows a working run. The receiver's status messages
+sit in line at their times. A line cut at 16 KiB, a binary line, an oversize line and an empty line are each
+marked. An attempt change is a divider. A reset reloads from the tail. Every value is rendered as text, output names,
+messages and lines included. Each line's text sits in a `bdi`, so a bidi control or line break in agent text cannot
+imitate a neighbouring row's prefix. A redaction marker is shown muted. The header's `Model` button lists the model's
+version, counts, bounds hit and recent errors.
 
 The page is built from `internal/view/web` with Elastic's EUI components and embedded in the binary; it loads nothing
 from outside its own origin. `@elastic/eui`, `@elastic/eui-theme-borealis` and `@elastic/eui-theme-common` are used
