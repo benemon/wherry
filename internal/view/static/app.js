@@ -54,8 +54,12 @@
   }
 
   // The transcript of the run shown: its cursor, and while the run works, a follow that asks from the cursor on each
-  // model event and at most every two seconds.
-  var transcript = { run: null, attempt: 0, first: null, next: null, complete: false, timer: null, pending: false, lines: null };
+  // model event and at most every two seconds. generation counts the runs opened, so a response that arrives after
+  // another run, or the same run again, was opened is dropped rather than applied to the view now open.
+  var transcript = { run: null, generation: 0, attempt: 0, first: null, next: null, prev: null, complete: false, retry: false, timer: null, pending: false, lines: [] };
+
+  // pageSize is the lines one request asks for.
+  var pageSize = 200;
 
   function render(model) {
     // The run shown stays across re-renders, so its transcript can follow.
@@ -134,107 +138,159 @@
     var section = document.getElementById('transcript');
     if (!section) { return; }
     section.replaceChildren();
-    var state = { attempt: transcript.attempt, first: transcript.first, lines: transcript.lines.length, complete: transcript.complete, predates_log: transcript.predates_log, truncated: transcript.truncated, read: transcript.read };
+    var state = { attempt: transcript.attempt, first: transcript.first, lines: transcript.lines.length, complete: transcript.complete, retry: transcript.retry, predates_log: transcript.predates_log, truncated: transcript.truncated, read: transcript.read, evicted: transcript.evicted };
     section.appendChild(keyValues('Transcript', state));
     if (transcript.prev !== null) {
       var older = text(document.createElement('button'), 'Older lines');
       older.addEventListener('click', function () { olderLines(); });
       section.appendChild(older);
     }
-    var pre = document.createElement('pre');
+    // Each line's attempt and seq sit in their own elements and its text in a bdi, so a bidi control or a line break in
+    // the text cannot reorder or imitate a neighbouring row's prefix.
+    var lines = document.createElement('div');
+    lines.className = 'lines';
     transcript.lines.forEach(function (line) {
       var row = document.createElement('div');
-      text(row, line.attempt + ' ' + line.seq + ' ' + lineText(line));
-      pre.appendChild(row);
+      row.className = 'line';
+      var attempt = text(document.createElement('span'), line.attempt);
+      attempt.className = 'attempt';
+      row.appendChild(attempt);
+      var seq = text(document.createElement('span'), line.seq);
+      seq.className = 'seq';
+      row.appendChild(seq);
+      row.appendChild(text(document.createElement('bdi'), lineText(line)));
+      lines.appendChild(row);
     });
-    section.appendChild(pre);
+    section.appendChild(lines);
   }
 
-  // take folds a response in: a reset reloads the tail, lines before or after the known ones extend them.
+  // ask requests the page query names for the run open now and applies the response through apply, only while that
+  // run, at the same generation, is still the one open; whatever happened, an error included, the transcript is
+  // rendered again and the follow rescheduled. One request is in flight at a time.
+  function ask(query, apply) {
+    var run = transcript.run, generation = transcript.generation;
+    var same = function () { return transcript.run === run && transcript.generation === generation; };
+    transcript.pending = true;
+    return api(transcriptPath(run, query)).then(function (response) {
+      // apply may ask again, a reset's reload or a gap's next page: the follow waits for that too.
+      if (same()) { return apply(response); }
+    }).catch(function (err) {
+      if (same()) { text(status, 'transcript: ' + err.message); }
+    }).then(function () {
+      if (!same()) { return; }
+      transcript.pending = false;
+      renderTranscript();
+      scheduleFollow();
+    });
+  }
+
+  // merge folds fresh lines into the known ones by seq, in seq order without duplicates, a fresh line replacing a
+  // known one at its seq.
+  function merge(fresh) {
+    var bySeq = {};
+    transcript.lines.forEach(function (line) { bySeq[line.seq] = line; });
+    fresh.forEach(function (line) { bySeq[line.seq] = line; });
+    transcript.lines = Object.keys(bySeq).map(function (seq) { return bySeq[seq]; }).sort(function (a, b) { return a.seq - b.seq; });
+  }
+
+  // take folds a response in: a reset reloads the tail; a retry says the tail is not indexed yet, so nothing is shown
+  // and the follow asks tail again; lines before or after the known ones are merged in.
   function take(response, where) {
-    if (response.reset) { return loadTail(); }
+    if (response.reset) { transcript.next = null; return loadTail(); }
     transcript.attempt = response.attempt;
     transcript.first = response.first;
     transcript.complete = response.complete;
+    transcript.retry = response.retry === true;
     transcript.predates_log = response.predates_log;
     transcript.truncated = response.truncated;
     transcript.read = response.read;
+    transcript.evicted = response.evicted;
+    if (response.retry) {
+      transcript.lines = [];
+      transcript.prev = null;
+      transcript.next = null;
+      transcript.complete = false;
+      return;
+    }
     if (where === 'tail') {
       transcript.lines = response.lines;
       transcript.prev = response.prev === undefined ? null : response.prev;
       transcript.next = response.next === undefined ? null : response.next;
-    } else if (where === 'before') {
-      transcript.lines = response.lines.concat(transcript.lines);
-      transcript.prev = response.prev === undefined ? null : response.prev;
-      // A page cut short leaves lines between it and the known ones: they are asked from next.
-      if (response.next !== undefined && transcript.lines.length && response.next <= transcript.lines[transcript.lines.length - 1].seq) {
-        return fillGap(response.next);
-      }
-    } else {
-      transcript.lines = transcript.lines.concat(response.lines);
-      transcript.next = response.next === undefined ? null : response.next;
+      return;
     }
-    renderTranscript();
-    scheduleFollow();
+    var first = transcript.lines.length ? transcript.lines[0].seq : null;
+    merge(response.lines);
+    if (where === 'before') {
+      transcript.prev = response.prev === undefined ? null : response.prev;
+      // A whole older page's next is the first known seq, the one asked before; a page cut short has a lower next,
+      // and the lines between it and the first known one are asked from there.
+      if (response.next !== undefined && first !== null && response.next < first) { return fillGap(response.next); }
+      return;
+    }
+    transcript.next = response.next === undefined ? null : response.next;
   }
 
   function loadTail() {
     var query = new URLSearchParams();
-    query.set('tail', '200');
-    return api(transcriptPath(transcript.run, query)).then(function (response) { take(response, 'tail'); }).catch(function (err) { text(status, 'transcript: ' + err.message); });
+    query.set('tail', pageSize);
+    return ask(query, function (response) { return take(response, 'tail'); });
   }
 
   function olderLines() {
-    if (transcript.prev === null) { return; }
+    if (transcript.prev === null || transcript.pending) { return; }
     var query = cursorQuery(new URLSearchParams());
     query.set('before', transcript.prev);
-    query.set('limit', '200');
-    api(transcriptPath(transcript.run, query)).then(function (response) { take(response, 'before'); }).catch(function (err) { text(status, 'transcript: ' + err.message); });
+    query.set('limit', pageSize);
+    return ask(query, function (response) { return take(response, 'before'); });
   }
 
-  // fillGap asks the lines from seq up to the first known one after a cut older page.
+  // fillGap asks the lines from seq up to the first known one at or above it, after a cut older page, merging them in
+  // seq order; it asks again from the response's next while the lines returned reached no known one, and moves the
+  // cursor on when the page reached past the known lines.
   function fillGap(seq) {
     var known = transcript.lines.filter(function (line) { return line.seq >= seq; });
     var query = cursorQuery(new URLSearchParams());
     query.set('from', seq);
-    query.set('limit', '200');
-    api(transcriptPath(transcript.run, query)).then(function (response) {
-      if (response.reset) { return loadTail(); }
-      var fresh = response.lines.filter(function (line) { return !known.some(function (k) { return k.seq === line.seq; }); });
-      var before = transcript.lines.filter(function (line) { return line.seq < seq; });
-      transcript.lines = before.concat(fresh, known);
-      if (response.next !== undefined && known.length && response.next < known[0].seq) { return fillGap(response.next); }
-      renderTranscript();
-    }).catch(function (err) { text(status, 'transcript: ' + err.message); });
+    query.set('limit', pageSize);
+    return ask(query, function (response) {
+      if (response.reset) { transcript.next = null; return loadTail(); }
+      var reached = response.lines.some(function (line) { return known.some(function (k) { return k.seq === line.seq; }); });
+      merge(response.lines);
+      if (response.next !== undefined && (transcript.next === null || response.next > transcript.next)) { transcript.next = response.next; }
+      if (!reached && response.next !== undefined && known.length && response.next < known[0].seq) { return fillGap(response.next); }
+    });
   }
 
-  // follow asks from the cursor while the run is not complete; a reset reloads the tail.
+  // follow asks from the cursor while the run is not complete, or the tail again while none is indexed; a reset
+  // reloads the tail. A request in flight is left to reschedule it.
   function follow() {
     transcript.timer = null;
     if (!document.getElementById('transcript')) { transcript.run = null; }
     if (transcript.complete || transcript.pending || transcript.run === null) { return; }
+    if (transcript.next === null) { return loadTail(); }
     var query = cursorQuery(new URLSearchParams());
-    if (transcript.next === null) {
-      return loadTail();
-    }
     query.set('from', transcript.next);
     query.set('limit', '1000');
-    transcript.pending = true;
-    api(transcriptPath(transcript.run, query)).then(function (response) {
-      transcript.pending = false;
-      take(response, 'from');
-    }).catch(function (err) { transcript.pending = false; text(status, 'transcript: ' + err.message); });
+    return ask(query, function (response) { return take(response, 'from'); });
   }
 
-  // scheduleFollow asks again within two seconds while the run is not complete; a model event asks at once.
+  // scheduleFollow asks again within two seconds while the run is not complete.
   function scheduleFollow() {
     if (transcript.complete || transcript.timer !== null || transcript.run === null) { return; }
     transcript.timer = setTimeout(follow, 2000);
   }
 
-  function showTranscript(run, detail) {
+  // followNow asks at once, on a model event: the timer is cleared and follow runs, or waits for the request in flight
+  // to reschedule it.
+  function followNow() {
+    if (transcript.run === null || transcript.complete) { return; }
     if (transcript.timer !== null) { clearTimeout(transcript.timer); transcript.timer = null; }
-    transcript = { run: run.id, attempt: 0, first: null, next: null, prev: null, complete: false, timer: null, pending: false, lines: [] };
+    follow();
+  }
+
+  function showTranscript(run, detail) {
+    if (transcript.timer !== null) { clearTimeout(transcript.timer); }
+    transcript = { run: run.id, generation: transcript.generation + 1, attempt: 0, first: null, next: null, prev: null, complete: false, retry: false, timer: null, pending: false, lines: [] };
     var section = document.createElement('section');
     section.id = 'transcript';
     detail.appendChild(section);
@@ -271,7 +327,7 @@
     var source = new EventSource('/api/stream');
     source.addEventListener('model', function () {
       load();
-      if (transcript.run !== null && !transcript.complete && transcript.timer === null) { follow(); }
+      followNow();
     });
     source.onerror = function () { text(status, 'stream closed; reload the page'); };
   }

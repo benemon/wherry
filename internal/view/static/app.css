@@ -8,3 +8,9 @@ tr.run { cursor: pointer; }
 tr.run:hover td { background: #f4f4f4; }
 #detail { border: 1px solid #888; padding: .5rem 1rem; margin-top: 1rem; }
 button { font: inherit; }
+.lines { margin-bottom: 1rem; }
+.line { display: flex; gap: .5rem; align-items: baseline; }
+.line .attempt, .line .seq { flex: none; text-align: right; color: #666; }
+.line .attempt { min-width: 3ch; }
+.line .seq { min-width: 9ch; }
+.line bdi { unicode-bidi: isolate; white-space: pre-wrap; overflow-wrap: anywhere; flex: 1; min-width: 0; }
