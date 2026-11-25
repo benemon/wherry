@@ -174,7 +174,15 @@ func TestDirInputsOpenRefusesAFIFOSwappedInAfterTheWalk(t *testing.T) {
 func TestDirInputsOpenRefusesAFileSwappedInAfterTheWalk(t *testing.T) {
 	for name, swap := range map[string]func(path string) error{
 		"a link to a hidden file": func(path string) error { return os.Symlink(".secret/key", path) },
-		"another file":            func(path string) error { return os.WriteFile(path, []byte("SECRET"), 0o600) },
+		// The original deleted frees its inode, which the new file can take on Linux, so the size and time must refuse it.
+		"another file, original deleted": func(path string) error {
+			if err := os.Remove(path + ".aside"); err != nil {
+				return err
+			}
+			return os.WriteFile(path, []byte("SECRET"), 0o600)
+		},
+		// The original kept aside holds its inode, so only the identity check can refuse the new file.
+		"another file, original kept": func(path string) error { return os.WriteFile(path, []byte("SECRET"), 0o600) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := writeTree(t, t.TempDir(), "a.txt", ".secret/key")
@@ -183,7 +191,7 @@ func TestDirInputsOpenRefusesAFileSwappedInAfterTheWalk(t *testing.T) {
 				t.Fatal(err)
 			}
 			path := filepath.Join(dir, "a.txt")
-			if err := os.Remove(path); err != nil || swap(path) != nil {
+			if err := os.Rename(path, path+".aside"); err != nil || swap(path) != nil {
 				t.Fatal(err)
 			}
 			body, err := files[0].Open()

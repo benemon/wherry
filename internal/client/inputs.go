@@ -137,7 +137,9 @@ func openInRoot(root *os.Root, relative string, walked fs.FileInfo, check func(s
 		file.Close()
 		return nil, errors.New("not a regular file")
 	}
-	if named, err := root.Lstat(relative); err != nil || !os.SameFile(named, info) || !os.SameFile(walked, info) {
+	// A file removed and rewritten after the walk can take the freed inode, so the walk's size and time are compared too.
+	if named, err := root.Lstat(relative); err != nil || !os.SameFile(named, info) || !os.SameFile(walked, info) ||
+		walked.Size() != info.Size() || !walked.ModTime().Equal(info.ModTime()) {
 		file.Close()
 		return nil, errNotWalked
 	}
