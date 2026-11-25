@@ -407,8 +407,9 @@ func TestMCPInputsStayInTheRootAfterResolution(t *testing.T) {
 	}
 }
 
-// A file swapped for a link into the state directory after the input's path resolves is refused: the link stays inside
-// the root, which os.Root follows, and the ancestor check over the resolved path alone would miss the state directory.
+// A file swapped for a link into the state directory after the input's path resolves is refused: a link with a relative
+// target stays inside the root, which os.Root follows, and the ancestor check over the resolved path alone would miss
+// the state directory.
 func TestMCPInputsRefuseALinkSwappedInAfterResolution(t *testing.T) {
 	work := t.TempDir()
 	writeFiles(t, work, "sub/data.csv", "state/runs/run-a.json")
@@ -418,7 +419,7 @@ func TestMCPInputsRefuseALinkSwappedInAfterResolution(t *testing.T) {
 	resolveInput = func(path string) (string, error) {
 		resolved, err := previous(path)
 		if err == nil {
-			err = errors.Join(os.Remove(filepath.Join(work, "sub", "data.csv")), os.Symlink(filepath.Join(work, "state", "runs", "run-a.json"), filepath.Join(work, "sub", "data.csv")))
+			err = errors.Join(os.Remove(filepath.Join(work, "sub", "data.csv")), os.Symlink(filepath.Join("..", "state", "runs", "run-a.json"), filepath.Join(work, "sub", "data.csv")))
 		}
 		return resolved, err
 	}
