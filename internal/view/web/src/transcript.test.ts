@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { cursor, fail, follow, initial, rows, segments, stateText, statusMessages, take } from './transcript';
+import { cursor, fail, follow, initial, rows, segments, settle, stateText, statusMessages, take } from './transcript';
 import type { RunDetail, Transcript } from './types';
 
 const read = <T>(name: string): T => JSON.parse(readFileSync(new URL('../fixtures/' + name, import.meta.url), 'utf8')) as T;
@@ -86,6 +86,23 @@ describe('the transcript cursor', () => {
     expect(more.next).toBe(30006);
     expect(more.lines[more.lines.length - 1].seq).toBe(30000);
     expect(follow(more)).toEqual({ from: 30006, limit: 1000 });
+  });
+});
+
+describe('a response for another run', () => {
+  it('is dropped when the run shown changed while the request was in flight', () => {
+    // Run A's tail was asked, then run B was opened: A's response arrives against B's fresh state.
+    const a = tail.run;
+    const b = caps.run;
+    expect(a).not.toBe(b);
+    const opened = settle(a, initial(), tail, 'tail');
+    expect(opened?.state.lines).toHaveLength(9);
+    const fresh = initial();
+    expect(settle(b, fresh, tail, 'tail')).toBeNull();
+    expect(fresh.lines).toEqual([]);
+    // The reverse: B's page arriving while A is shown is dropped too, and B's own is applied.
+    expect(settle(a, opened!.state, caps, 'from')).toBeNull();
+    expect(settle(b, fresh, caps, 'tail')?.state.lines).toHaveLength(1);
   });
 });
 

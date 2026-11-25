@@ -114,6 +114,15 @@ export function take(s: State, r: Transcript, where: Where, asked = 0): Step {
   return { state };
 }
 
+// settle applies a response to the run shown, or drops it: a response names its run, and one that arrives after
+// another run was opened is for a transcript no longer on the page.
+export function settle(shown: string, s: State, r: Transcript, where: Where, asked = 0): Step | null {
+  if (r.run !== shown) {
+    return null;
+  }
+  return take(s, r, where, asked);
+}
+
 // fail records a request's failure; a 503 is the server's scan slots all taken, asked again on the next follow.
 export const fail = (s: State, status: number): State => ({ ...s, opened: true, error: status === 503 ? 'busy' : 'error' });
 

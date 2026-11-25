@@ -5,7 +5,7 @@ import { ApiError, getTranscript } from './api';
 import { Segments } from './RunDrawer';
 import { abs, grouped } from './format';
 import type { Query, State, Where } from './transcript';
-import { cursor, fail, follow, initial, pageSize, rows, stateText, statusMessages, take } from './transcript';
+import { cursor, fail, follow, initial, pageSize, rows, settle, stateText, statusMessages } from './transcript';
 import type { Attempt, RunSummary } from './types';
 
 interface Props {
@@ -39,10 +39,10 @@ export function TranscriptPane({ view, run, attempts, wide }: Props) {
       pending.current = true;
       getTranscript(id, cursor(stateRef.current, query))
         .then((response) => {
-          if (runRef.current !== id) {
+          const step = settle(runRef.current, stateRef.current, response, where, query.from ?? 0);
+          if (!step) {
             return;
           }
-          const step = take(stateRef.current, response, where, query.from ?? 0);
           stateRef.current = step.state;
           setState(step.state);
           if (step.ask) {
