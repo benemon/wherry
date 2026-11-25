@@ -72,7 +72,7 @@ var DefaultCaps = Caps{
 	Events: 2000000, Attempts: 1000000, Echoes: 200000, Cancels: 200000, Opens: 200000, Bytes: 512 << 20, Progress: 200000,
 	ResponseBytes: 8 << 20, EventBytes: 64 << 10,
 	TraceBytes: 32 << 20, TraceRecords: 20000, TraceSpans: 5000, TraceForest: 5000, TraceScans: 2, TraceScan: 5 * time.Second, TraceRuns: 32,
-	TranscriptBytes: 32 << 20, TranscriptRecords: 20000, TranscriptLines: 500000, TranscriptTotalLines: 2000000, TranscriptScans: 2, TranscriptScan: 5 * time.Second, TranscriptRuns: 32,
+	TranscriptBytes: 32 << 20, TranscriptRecords: 20000, TranscriptLines: 500000, TranscriptTotalLines: 2000000, TranscriptScans: 2, TranscriptScan: 15 * time.Second, TranscriptRuns: 32,
 }
 
 // The names a cap is reported under.
@@ -666,10 +666,22 @@ type model struct {
 	progressed int
 	// topics holds what the reads report of each topic followed.
 	topics map[string]*topicState
-	// keyNext is the offset each key topic's tail resumes at; keysRead counts the tails.
-	keyNext  map[string]int64
-	keysRead int
-	changed  bool
+	// keyNext is the offset each key topic's tail resumes at; keysRead counts the tails and retirements the keys
+	// retired by them, so a request verifying outside the lock can tell a retirement read meanwhile.
+	keyNext     map[string]int64
+	keysRead    int
+	retirements int64
+	changed     bool
+}
+
+// receiverPools is each receiver's recorded pool, removed receivers included, the rule inItsPool applies, copied for
+// a request that verifies outside the lock.
+func (m *model) receiverPools() map[string]string {
+	pools := make(map[string]string, len(m.history.State.Receivers))
+	for receiver, config := range m.history.State.Receivers {
+		pools[receiver] = config.Pool
+	}
+	return pools
 }
 
 // topicState is what the view knows of a topic it follows.

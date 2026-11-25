@@ -390,9 +390,10 @@ func (v *View) readKeys(ctx context.Context, existing map[string]bool) error {
 			}
 			for _, retired := range after.Retired[min(len(before.Retired), len(after.Retired)):] {
 				v.m.retire(owner, signed.KeyID(retired.Key), retired.At)
+				v.m.retirements++
 				// An index holds offsets, not sources: the runs holding the owner's chunks are indexed again on request.
 				if dropped := v.transcripts.retire(owner); dropped > 0 {
-					v.m.count("transcript_retracted", int64(dropped))
+					v.m.count(countTranscriptRetracted, int64(dropped))
 				}
 			}
 			if !after.Current.Equal(before.Current) || len(after.Retired) != len(before.Retired) {

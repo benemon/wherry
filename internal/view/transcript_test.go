@@ -89,6 +89,10 @@ func TestTranscriptPaging(t *testing.T) {
 		if len(older.Lines) == 0 {
 			t.Fatalf("before %d: no lines", *last.Prev)
 		}
+		// A whole older page's next is the seq asked before, so the page tells it from a cut one.
+		if older.Next == nil || *older.Next != *last.Prev {
+			t.Fatalf("before %d: next %v", *last.Prev, older.Next)
+		}
 		collected = append(seqs(older.Lines), collected...)
 		last = older
 	}
@@ -267,7 +271,8 @@ func TestTranscriptBounds(t *testing.T) {
 		{capTranscriptLines, func(c *Caps) { c.TranscriptLines = 100 }, func(p Transcript) bool { return p.Indexed == 100 }},
 		// The first record, the 512 KiB line, is over the budget alone and is still read, as the first of a batch.
 		{capTranscriptBytes, func(c *Caps) { c.TranscriptBytes = 200 << 10 }, func(p Transcript) bool { return p.Read.Records < 20 && p.Indexed < 20 }},
-		{capTranscriptRecords, func(c *Caps) { c.TranscriptRecords = 50 }, func(p Transcript) bool { return p.Read.Records == 50 }},
+		// The scan spends the budget less the seek's share.
+		{capTranscriptRecords, func(c *Caps) { c.TranscriptRecords = 50 }, func(p Transcript) bool { return p.Read.Records == 50-50/seekShare }},
 	} {
 		small := transcriptCaps()
 		c.set(&small)
@@ -279,6 +284,11 @@ func TestTranscriptBounds(t *testing.T) {
 		p := page(t, w, run, Page{Tail: 10})
 		if !slices.Contains(p.Truncated, c.name) || !c.ok(p) || p.Complete {
 			t.Errorf("%s: truncated %v, indexed %d, read %+v, complete %v", c.name, p.Truncated, p.Indexed, p.Read, p.Complete)
+		}
+		// A tail cut by the request's own budget is not the tail: the response says to retry with no lines; one cut by
+		// the lines cap is the tail of what the index will hold.
+		if budget := c.name != capTranscriptLines; p.Retry != budget || budget && (len(p.Lines) != 0 || p.Next != nil) || !budget && len(p.Lines) == 0 {
+			t.Errorf("%s: retry %v, %d lines, next %v", c.name, p.Retry, len(p.Lines), p.Next)
 		}
 		if hits := w.Snapshot(0).Counts[c.name]; hits == 0 {
 			t.Errorf("%s did not report", c.name)

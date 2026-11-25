@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -879,5 +880,35 @@ func TestAttemptRule(t *testing.T) {
 	chunk := &Chunk{ArtifactUpdate: TaskArtifactUpdateEvent{Artifact: Artifact{Parts: []Part{{Text: "x"}}}}, Wherry: ChunkBinding{ReceiverBinding: ReceiverBinding{Attempt: 2}, Seq: 7}}
 	if chunk.Key() != line(2, 7) || (&Chunk{}).Key().Line {
 		t.Errorf("keys: %+v %+v", chunk.Key(), (&Chunk{}).Key())
+	}
+}
+
+// A chunk naming one receiver and signed by another receiver's registered key is refused by the parse as signed by
+// another owner than it names, so a reader that has parsed a chunk need not compare the receiver it names with the
+// signer again.
+func TestChunkSignedByAnotherReceiverIsRefused(t *testing.T) {
+	keys, _, receiver := testKeys(t)
+	_, other, _ := ed25519.GenerateKey(rand.Reader)
+	keys["receiver-b"] = signed.KeyState{Current: other.Public().(ed25519.PublicKey)}
+	chunk := testRecords()["chunk"].(*Chunk)
+	chunk.V = 1
+	// Signed under receiver-b's own kid, as its key verifies: the payload names receiver-a.
+	forged, err := signed.Sign(ChunkType, "receiver-b", chunk, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ParseRecord(forged, keys, &Chunk{}); !errors.Is(err, errOtherOwner) {
+		t.Fatalf("a chunk naming %s signed by receiver-b: %v; want %v", chunk.Wherry.Receiver, err, errOtherOwner)
+	}
+	// Signed under receiver-a's kid with receiver-b's key, the signature does not verify at all.
+	if err := ParseRecord(must(SignRecord(chunk, other)), keys, &Chunk{}); err == nil || errors.Is(err, errOtherOwner) {
+		t.Fatalf("a chunk under receiver-a's kid signed with receiver-b's key: %v; want a verification failure", err)
+	}
+	own, err := SignRecord(chunk, receiver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ParseRecord(own, keys, &Chunk{}); err != nil {
+		t.Fatalf("the same chunk signed by its receiver: %v", err)
 	}
 }

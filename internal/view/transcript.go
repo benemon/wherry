@@ -30,6 +30,21 @@ const (
 	capTranscriptRuns    = "transcript_runs"
 )
 
+// The transcript's counts besides its caps: records dropped by type before verifying, chunks refused, indexes
+// retracted by a rotation, indexes evicted to make room under the total-lines cap, and indexes rebuilt because the
+// model's pool or task hash for the run changed.
+const (
+	countTranscriptSkipped   = "transcript_skipped"
+	countTranscriptRefused   = "transcript_refused"
+	countTranscriptRetracted = "transcript_retracted"
+	countTranscriptEvicted   = "transcript_evicted"
+	countTranscriptRebound   = "transcript_rebound"
+)
+
+// seekShare is the seek's share of a request's budget: one part in seekShare of its bytes, records and time is kept
+// out of the scan's reach, so a scan that spends the rest never starves the page's seek.
+const seekShare = 4
+
 // MaxLineText bounds a line's text in a response; a longer line is cut at a rune boundary and marked with its size.
 const MaxLineText = 16 << 10
 
@@ -67,12 +82,17 @@ type Transcript struct {
 	Complete    bool `json:"complete"`
 	PredatesLog bool `json:"predates_log,omitzero"`
 	Missing     bool `json:"missing,omitzero"`
+	// Retry is set when a request budget cut a tail request's scan before the span was indexed: the response has no
+	// lines, since the lines indexed so far are not the tail, and the page asks tail again.
+	Retry bool `json:"retry,omitzero"`
 	// Indexed is the lines indexed for the run; Read what this request's scan read and Seek what its seek read;
-	// Truncated names each cap that cut it.
+	// Truncated names each cap that cut it; Evicted is the other runs' indexes dropped, least recently used first, to
+	// make room for this run's lines under the total-lines cap.
 	Indexed   int      `json:"indexed"`
 	Read      Read     `json:"read"`
 	Seek      Read     `json:"seek"`
 	Truncated []string `json:"truncated,omitzero"`
+	Evicted   int      `json:"evicted,omitzero"`
 }
 
 // Line is one line of the transcript: Text as the receiver redacted it, Raw with Size for one that is not valid
@@ -129,11 +149,17 @@ func newTranscripts(v *View) *transcripts {
 }
 
 // indexFor is the index of run id, made on first sight within the cap on runs kept, the least recently used dropped
-// beyond it.
+// beyond it. An index bound to another pool or task hash than the model now records for the run, after a status
+// supplied the hash or a retraction changed it, is dropped and made again, so it never refuses the run's chunks for
+// a binding the model no longer holds.
 func (t *transcripts) indexFor(id, tenant, pool, hash string, caps Caps) *transcriptIndex {
 	t.mu.Lock()
 	idx := t.indexes[id]
-	dropped := 0
+	dropped, rebound := 0, 0
+	if idx != nil && (idx.pool != pool || idx.hash != hash) {
+		delete(t.indexes, id)
+		idx, rebound = nil, 1
+	}
 	if idx == nil {
 		idx = &transcriptIndex{run: id, tenant: tenant, pool: pool, hash: hash, topic: operator.TenantTranscriptTopic(tenant), rule: wire.NewAttemptRule(0), ended: map[int64]bool{}, terminalEnd: -1, owners: map[string]bool{}}
 		t.indexes[id] = idx
@@ -150,23 +176,72 @@ func (t *transcripts) indexFor(id, tenant, pool, hash string, caps Caps) *transc
 	}
 	idx.used = t.v.opts.Now()
 	t.mu.Unlock()
-	if dropped > 0 {
+	if dropped > 0 || rebound > 0 {
 		t.v.mu.Lock()
-		t.v.m.count(capTranscriptRuns, int64(dropped))
+		if dropped > 0 {
+			t.v.m.count(capTranscriptRuns, int64(dropped))
+		}
+		if rebound > 0 {
+			t.v.m.count(countTranscriptRebound, int64(rebound))
+		}
 		t.v.mu.Unlock()
 	}
 	return idx
 }
 
-// total is the lines indexed over every run kept.
-func (t *transcripts) total() int64 {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+// sum is the lines indexed over every run kept. The caller holds t.mu.
+func (t *transcripts) sum() int64 {
 	var n int64
 	for _, idx := range t.indexes {
 		n += idx.count.Load()
 	}
 	return n
+}
+
+// room reports whether the line caps leave room for one more of idx's lines. While the total over every run is
+// reached, the least recently used indexes other than idx are evicted to make it, each counted and reported in the
+// response: a few huge runs filling the total must not leave every other run empty.
+func (t *transcripts) room(idx *transcriptIndex, caps Caps, response *Transcript) bool {
+	if idx.count.Load() >= int64(caps.TranscriptLines) {
+		return false
+	}
+	total := int64(caps.TranscriptTotalLines)
+	t.mu.Lock()
+	evicted := 0
+	for t.sum() >= total {
+		oldest := ""
+		for id, other := range t.indexes {
+			if other != idx && (oldest == "" || other.used.Before(t.indexes[oldest].used)) {
+				oldest = id
+			}
+		}
+		if oldest == "" {
+			break
+		}
+		delete(t.indexes, oldest)
+		evicted++
+	}
+	room := t.sum() < total
+	t.mu.Unlock()
+	if evicted > 0 {
+		response.Evicted += evicted
+		t.v.mu.Lock()
+		t.v.m.count(countTranscriptEvicted, int64(evicted))
+		t.v.mu.Unlock()
+	}
+	return room
+}
+
+// drop forgets idx as run id's index when it still is, so the next request rebuilds it; it reports whether it did.
+// The caller holds v.mu.
+func (t *transcripts) drop(id string, idx *transcriptIndex) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.indexes[id] != idx {
+		return false
+	}
+	delete(t.indexes, id)
+	return true
 }
 
 // retire drops the indexes holding chunks owner signed, so the next request for each run rebuilds it without the
@@ -203,12 +278,18 @@ func (t *transcripts) Transcript(ctx context.Context, id string, page Page) (Tra
 		}
 		_, terminal = r.terminal()
 	}
-	// The keys are cloned: the tick replaces entries under the lock while a request verifies outside it.
-	caps, keys, signers := v.m.caps, maps.Clone(v.m.keys), v.m.signers
+	// The keys are cloned: the tick replaces entries under the lock while a request verifies outside it. The pools are
+	// each receiver's recorded pool, snapshotted with the keys; the epoch tells a retirement read during the request.
+	caps, keys, signers, pools, epoch := v.m.caps, maps.Clone(v.m.keys), v.m.signers, v.m.receiverPools(), v.m.retirements
 	v.mu.RUnlock()
 	if !ok || tenant == "" {
 		return Transcript{}, errNotFound
 	}
+	idx := t.indexFor(id, tenant, pool, hash, caps)
+	// The run's lock is taken before a scan slot, so a request waiting its turn for the run holds no slot: one page's
+	// older-lines request and its follow cannot take both.
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
 	select {
 	case t.running <- struct{}{}:
 		defer func() { <-t.running }()
@@ -218,9 +299,6 @@ func (t *transcripts) Transcript(ctx context.Context, id string, page Page) (Tra
 		v.mu.Unlock()
 		return Transcript{}, errBusy
 	}
-	idx := t.indexFor(id, tenant, pool, hash, caps)
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
 	// The statuses' highest attempt counts as the host's does: an attempt with no line yet shows every earlier line.
 	idx.rule.Add(wire.ChunkKey{Attempt: highest, Line: false})
 	admin, err := v.reader.Admin()
@@ -257,44 +335,84 @@ func (t *transcripts) Transcript(ctx context.Context, id string, page Page) (Tra
 			idx.terminalEnd = end.Offset
 		}
 	}
-	budget := &scanBudget{bytes: caps.TranscriptBytes, records: caps.TranscriptRecords, deadline: v.opts.Now().Add(caps.TranscriptScan)}
-	if err := t.scan(ctx, idx, budget, &response, keys, caps, from.Add(-scanSkew)); err != nil {
+	budget := newScanBudget(caps, v.opts.Now())
+	cut, err := t.scan(ctx, idx, budget, &response, keys, pools, caps, from.Add(-scanSkew))
+	if err != nil {
 		return Transcript{}, err
 	}
 	response.Complete = idx.ended[idx.rule.Attempt] || idx.terminalEnd >= 0 && idx.next >= idx.terminalEnd
 	response.Read = budget.read
-	if err := t.seek(ctx, idx, budget, &response, page, keys, signers, caps); err != nil {
-		return Transcript{}, err
+	if page.Tail > 0 && budget.retries(cut) {
+		// The request's budget cut the scan before the span was indexed: the lines indexed so far are not the tail, so
+		// none is returned, and the page asks tail again until the scan ends. A line cap is final, so a tail cut by one
+		// is the tail of what the index will hold.
+		response.Retry, response.Complete = true, false
+	} else {
+		budget.release()
+		if err := t.seek(ctx, idx, budget, &response, page, keys, signers, caps); err != nil {
+			return Transcript{}, err
+		}
 	}
 	response.Seek = Read{Bytes: budget.read.Bytes - response.Read.Bytes, Records: budget.read.Records - response.Read.Records}
+	// A retirement read during the request may have left chunks a rebuild would refuse in the index, signed with the
+	// retired key after its retirement and indexed under the keys snapshotted before the rotation was read: the index
+	// is dropped, and the next request rebuilds it.
+	v.mu.Lock()
+	if v.m.retirements != epoch && t.drop(id, idx) {
+		v.m.count(countTranscriptRetracted, 1)
+	}
+	v.mu.Unlock()
 	return t.finish(idx, response), nil
 }
 
 // scanBudget is one request's budget: the bytes and records it may read and the time it may take, over its scan and
-// seek together, and what it read.
+// seek together, and what it read. reserved is the seek's share, kept out of the scan's reach until release.
 type scanBudget struct {
 	bytes    int64
 	records  int
 	deadline time.Time
-	read     Read
+	reserved struct {
+		bytes   int64
+		records int
+		time    time.Duration
+	}
+	read Read
+}
+
+// newScanBudget is the budget of one request starting at now under caps, the seek's share reserved.
+func newScanBudget(caps Caps, now time.Time) *scanBudget {
+	b := &scanBudget{bytes: caps.TranscriptBytes, records: caps.TranscriptRecords, deadline: now.Add(caps.TranscriptScan)}
+	b.reserved.bytes, b.reserved.records, b.reserved.time = caps.TranscriptBytes/seekShare, caps.TranscriptRecords/seekShare, caps.TranscriptScan/seekShare
+	return b
+}
+
+// release gives the seek's share to what follows.
+func (b *scanBudget) release() {
+	b.reserved.bytes, b.reserved.records, b.reserved.time = 0, 0, 0
 }
 
 // spent is the cap the budget hit, or empty while it has room; now is the clock.
 func (b *scanBudget) spent(now time.Time) string {
 	switch {
-	case b.records-int(b.read.Records) <= 0:
+	case b.records-b.reserved.records-int(b.read.Records) <= 0:
 		return capTranscriptRecords
-	case b.bytes-b.read.Bytes <= 0:
+	case b.bytes-b.reserved.bytes-b.read.Bytes <= 0:
 		return capTranscriptBytes
-	case now.After(b.deadline):
+	case now.After(b.deadline.Add(-b.reserved.time)):
 		return capTranscriptScan
 	}
 	return ""
 }
 
+// retries reports whether cap, the one that cut a scan, is one of the request's own: bytes, records or time, which
+// another request has afresh, as a line cap does not.
+func (b *scanBudget) retries(cap string) bool {
+	return cap == capTranscriptBytes || cap == capTranscriptRecords || cap == capTranscriptScan
+}
+
 // bounds is the budget's room for one read within the batch caps.
 func (b *scanBudget) bounds(caps Caps) operator.Bounds {
-	return operator.Bounds{Records: min(b.records-int(b.read.Records), caps.BatchRecords), Bytes: min(b.bytes-b.read.Bytes, caps.BatchBytes)}
+	return operator.Bounds{Records: min(b.records-b.reserved.records-int(b.read.Records), caps.BatchRecords), Bytes: min(b.bytes-b.reserved.bytes-b.read.Bytes, caps.BatchBytes)}
 }
 
 func (b *scanBudget) take(record *kgo.Record) {
@@ -314,25 +432,25 @@ func (t *transcripts) cut(response *Transcript, cap string) {
 }
 
 // scan resumes the run's scan at idx.next under the budget and the line caps, indexing each chunk of the run that
-// verifies; it stops at a cap, named in the response, or at the end it listed.
-func (t *transcripts) scan(ctx context.Context, idx *transcriptIndex, budget *scanBudget, response *Transcript, keys signed.Keys, caps Caps, from time.Time) error {
+// verifies; it stops at a cap, named in the response and returned, or at the end it listed.
+func (t *transcripts) scan(ctx context.Context, idx *transcriptIndex, budget *scanBudget, response *Transcript, keys signed.Keys, pools map[string]string, caps Caps, from time.Time) (string, error) {
 	v := t.v
 	for {
 		if cap := budget.spent(v.opts.Now()); cap != "" {
 			t.cut(response, cap)
-			return nil
+			return cap, nil
 		}
-		if idx.count.Load() >= int64(caps.TranscriptLines) || t.total() >= int64(caps.TranscriptTotalLines) {
+		if !t.room(idx, caps, response) {
 			t.cut(response, capTranscriptLines)
-			return nil
+			return capTranscriptLines, nil
 		}
 		ranges, err := v.reader.ReadRanges(ctx, map[string]int64{idx.topic: idx.next}, budget.bounds(caps))
 		if err != nil {
-			return err
+			return "", err
 		}
 		rng := ranges[idx.topic]
 		if rng.Err != nil {
-			return rng.Err
+			return "", rng.Err
 		}
 		if !idx.started {
 			idx.started = true
@@ -344,27 +462,29 @@ func (t *transcripts) scan(ctx context.Context, idx *transcriptIndex, budget *sc
 		}
 		for _, record := range rng.Records {
 			budget.take(record)
-			if full := t.index(idx, record, keys, caps); full {
+			if full := t.index(idx, record, keys, pools, caps, response); full {
 				idx.next = record.Offset
 				t.cut(response, capTranscriptLines)
-				return nil
+				return capTranscriptLines, nil
 			}
 		}
 		if idx.next == math.MaxInt64 && rng.Next == rng.End || rng.Next <= idx.next && len(rng.Records) == 0 {
 			idx.next = rng.End
-			return nil
+			return "", nil
 		}
 		idx.next = rng.Next
 		if rng.Next >= rng.End {
-			return nil
+			return "", nil
 		}
 	}
 }
 
 // index folds one record of the topic: the run's own, by key; a chunk by its JWS type, an output chunk dropped before
-// verifying; verified under the key history; naming the run's tenant, pool and task hash with its signer as receiver.
-// It reports true when the line caps leave no room for the record's line, which then stops the scan before it.
-func (t *transcripts) index(idx *transcriptIndex, record *kgo.Record, keys signed.Keys, caps Caps) bool {
+// verifying; verified under the key history, which binds the receiver it names to its signer; naming the run's tenant,
+// pool and task hash; and signed by a receiver recorded in the run's pool, since the tenant's topic is open to every
+// receiver entitled to the tenant and the ACL does not bind the pool, as the model's inItsPool says of the feed. It
+// reports true when the line caps leave no room for the record's line, which then stops the scan before it.
+func (t *transcripts) index(idx *transcriptIndex, record *kgo.Record, keys signed.Keys, pools map[string]string, caps Caps, response *Transcript) bool {
 	if string(record.Key) != idx.run {
 		return false
 	}
@@ -378,20 +498,23 @@ func (t *transcripts) index(idx *transcriptIndex, record *kgo.Record, keys signe
 	typ, owner, _, ok := header(record.Value)
 	if !ok || typ != wire.ChunkType {
 		v.mu.Lock()
-		v.m.count("transcript_skipped", 1)
+		v.m.count(countTranscriptSkipped, 1)
 		v.mu.Unlock()
 		return false
 	}
+	// The parse refuses a chunk naming another receiver than its signer, so the receiver named is the signer.
 	var chunk wire.Chunk
 	err := wire.ParseHistory(record.Timestamp)(record.Value, keys, &chunk)
 	if err == nil {
-		if b := chunk.Wherry; b.Run != idx.run || b.Tenant != idx.tenant || b.Pool != idx.pool || b.TaskHash != idx.hash || b.Receiver != owner {
+		if b := chunk.Wherry; b.Run != idx.run || b.Tenant != idx.tenant || b.Pool != idx.pool || b.TaskHash != idx.hash {
 			err = errOtherRun
+		} else if recorded, member := pools[owner]; !member || recorded != idx.pool {
+			err = errOtherPool
 		}
 	}
 	if err != nil {
 		v.mu.Lock()
-		v.m.count("transcript_refused", 1)
+		v.m.count(countTranscriptRefused, 1)
 		v.mu.Unlock()
 		return false
 	}
@@ -413,12 +536,20 @@ func (t *transcripts) index(idx *transcriptIndex, record *kgo.Record, keys signe
 		}
 		return false
 	}
-	if idx.count.Load() >= int64(caps.TranscriptLines) || t.total() >= int64(caps.TranscriptTotalLines) {
+	if !t.room(idx, caps, response) {
 		return true
 	}
 	idx.lines = slices.Insert(idx.lines, i, lineRef{seq: key.Seq, attempt: key.Attempt, offset: record.Offset})
 	idx.count.Store(int64(len(idx.lines)))
 	return false
+}
+
+// forget drops the line at seq from the index.
+func (idx *transcriptIndex) forget(seq int64) {
+	if i, found := slices.BinarySearchFunc(idx.lines, seq, func(l lineRef, seq int64) int { return cmp.Compare(l.seq, seq) }); found {
+		idx.lines = slices.Delete(idx.lines, i, i+1)
+		idx.count.Store(int64(len(idx.lines)))
+	}
 }
 
 // window is the page's window of lines under the rule: the last Tail, the Limit before Before, or the Limit from From,
@@ -472,12 +603,15 @@ func (idx *transcriptIndex) window(page Page) (window []lineRef, below, above bo
 	return window, below, above
 }
 
-var errOtherRun = errors.New("chunk names another run, tenant, pool, task or receiver than its signer's")
+var (
+	errOtherRun  = errors.New("chunk names another run, tenant, pool or task than the index's")
+	errOtherPool = errors.New("chunk is signed by a receiver not recorded in the run's pool")
+)
 
-// seek reads the records of the page's window, from the lowest offset among them, under what is left of the budget and
-// the response bound, and decodes each into a line; the lines returned are a seq-prefix of the window, so a cut leaves
-// Next at the first line not returned. A cursor whose attempt or first differs from the rule's is answered with a
-// reset and no lines.
+// seek reads the records of the page's window, the interleaved span of the topic between the lowest and the highest
+// offset among them, under what is left of the budget and the response bound, and decodes each into a line; the lines
+// returned are a seq-prefix of the window, so a cut leaves Next at the first line not returned. A cursor whose attempt
+// or first differs from the rule's is answered with a reset and no lines.
 func (t *transcripts) seek(ctx context.Context, idx *transcriptIndex, budget *scanBudget, response *Transcript, page Page, keys signed.Keys, signers map[string]string, caps Caps) error {
 	rule := idx.rule
 	if (page.Before != nil || page.From != nil) && (page.Attempt != rule.Attempt || page.First == nil != (rule.First == math.MaxInt64) || page.First != nil && *page.First != rule.First) {
@@ -553,24 +687,48 @@ read:
 		}
 		next = rng.Next
 	}
-	// The lines returned are the window's seq-prefix of those decoded; a cut or a record missing at its offset ends it.
+	// The lines returned are the window's seq-prefix of those decoded; a cut ends it at the first line not returned. A
+	// line whose record was not found or no longer verifies when the read was not cut is gone: retention removed it, or
+	// a rotation read since it was indexed retired its key; it leaves the index, so paging passes it rather than
+	// stopping at it.
 	var unread *int64
+	gone := 0
 	for _, l := range window {
 		line, ok := lines[l.seq]
-		if !ok {
+		switch {
+		case ok:
+			response.Lines = append(response.Lines, line)
+			continue
+		case cut:
 			seq := l.seq
 			unread = &seq
-			break
+		default:
+			idx.forget(l.seq)
+			gone++
+			continue
 		}
-		response.Lines = append(response.Lines, line)
+		break
 	}
-	if len(response.Lines) > 0 && below {
-		seq := response.Lines[0].Seq
+	if gone > 0 {
+		v.mu.Lock()
+		v.m.count(countTranscriptRefused, int64(gone))
+		v.mu.Unlock()
+	}
+	if below {
+		seq := window[0].seq
+		if len(response.Lines) > 0 {
+			seq = response.Lines[0].Seq
+		}
 		response.Prev = &seq
 	}
 	switch {
 	case unread != nil:
 		response.Next = unread
+	case len(response.Lines) > 0 && page.Before != nil && (above || !response.Complete):
+		// An older page's later lines are the cursor's own, so next is the seq asked before: the page tells a cut page,
+		// whose next is lower, from a whole one.
+		seq := *page.Before
+		response.Next = &seq
 	case len(response.Lines) > 0 && (above || !response.Complete || cut):
 		seq := response.Lines[len(response.Lines)-1].Seq + 1
 		response.Next = &seq
