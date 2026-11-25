@@ -59,6 +59,7 @@ type View struct {
 	lastRefresh time.Time
 	errs        []string
 	traces      *traces
+	transcripts *transcripts
 }
 
 type brokerFact struct {
@@ -115,6 +116,7 @@ func New(client *kgo.Client, opts Options) *View {
 	v := &View{reader: operator.NewReader(client), opts: opts, m: newModel(opts.Caps), lag: map[string]lagFact{}, groups: map[string]groupFact{}, subscribers: map[chan uint64]struct{}{}}
 	v.m.clock = opts.Now
 	v.traces = newTraces(v)
+	v.transcripts = newTranscripts(v)
 	return v
 }
 
@@ -388,6 +390,11 @@ func (v *View) readKeys(ctx context.Context, existing map[string]bool) error {
 			}
 			for _, retired := range after.Retired[min(len(before.Retired), len(after.Retired)):] {
 				v.m.retire(owner, signed.KeyID(retired.Key), retired.At)
+				v.m.retirements++
+				// An index holds offsets, not sources: the runs holding the owner's chunks are indexed again on request.
+				if dropped := v.transcripts.retire(owner); dropped > 0 {
+					v.m.count(countTranscriptRetracted, int64(dropped))
+				}
 			}
 			if !after.Current.Equal(before.Current) || len(after.Retired) != len(before.Retired) {
 				v.m.changed = true

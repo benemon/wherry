@@ -11,6 +11,7 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"math"
 	"path"
 	"regexp"
 	"slices"
@@ -264,6 +265,54 @@ type ChunkBinding struct {
 	ReceiverBinding
 	TaskHash string `json:"task_hash"`
 	Seq      int64  `json:"seq"`
+}
+
+// ChunkKey is what the attempt rule reads of a chunk: its attempt and seq, and whether it holds a line. The empty
+// final chunk holds none.
+type ChunkKey struct {
+	Attempt, Seq int64
+	Line         bool
+}
+
+// Key is the chunk's key for the attempt rule.
+func (value *Chunk) Key() ChunkKey {
+	return ChunkKey{Attempt: value.Wherry.Attempt, Seq: value.Wherry.Seq, Line: len(value.ArtifactUpdate.Artifact.Parts) != 0}
+}
+
+// AttemptRule is the rule every reader of a run's transcript follows: the lines of the highest attempt, and below
+// that attempt's first seq the lines of earlier attempts, since an adopter resumes the job's output past the run's
+// latest committed offset and a seq can repeat across attempts. Of chunks sharing a seq the highest attempt's is the
+// line. The rule is folded from the run's chunks, in any order, with Add; each reader filters the chunks it folds
+// first.
+type AttemptRule struct {
+	// Attempt is the highest attempt the chunks or the run's statuses name; First the lowest seq of its lines,
+	// math.MaxInt64 while it has none.
+	Attempt, First int64
+}
+
+// NewAttemptRule is the rule over keys, one run's chunks, with highest the highest attempt the run's statuses name.
+func NewAttemptRule(highest int64, keys ...ChunkKey) AttemptRule {
+	r := AttemptRule{Attempt: highest, First: math.MaxInt64}
+	for _, key := range keys {
+		r.Add(key)
+	}
+	return r
+}
+
+// Add folds one chunk's key into the rule.
+func (r *AttemptRule) Add(key ChunkKey) {
+	if key.Attempt > r.Attempt {
+		r.Attempt, r.First = key.Attempt, math.MaxInt64
+	}
+	if key.Attempt == r.Attempt && key.Line {
+		r.First = min(r.First, key.Seq)
+	}
+}
+
+// Shown reports whether key's chunk is a line the transcript shows: a line of the attempt, or one of an earlier
+// attempt below the attempt's first seq.
+func (r AttemptRule) Shown(key ChunkKey) bool {
+	return key.Line && (key.Attempt == r.Attempt || key.Seq < r.First)
 }
 
 // Output is one chunk of an output file, as the A2A artifact the file names, on the tenant transcript topic.

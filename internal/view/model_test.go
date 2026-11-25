@@ -386,9 +386,9 @@ func TestModelCompleteness(t *testing.T) {
 		Outputs: []wire.ReturnedOutput{{Name: "notes.md", SHA256: hashOf("notes"), Size: 42}}, S3Outputs: []wire.ReturnedOutput{{Name: "big.tar", SHA256: hashOf("big"), Size: 5000, Key: "k"}},
 		NotReturned: []wire.UnreturnedOutput{{Name: "missing.txt", Reason: "missing"}}, Reply: &wire.ReturnedReply{SHA256: hashOf("reply"), Size: 70000}}, "the reply")
 	keyLost := f.echo(t0.Add(3*time.Minute), receiverB, tenantA, hostA, poolA, "key-lost")
-	f.status(t0.Add(3*time.Minute+time.Second), st{receiver: receiverB, tenant: tenantA, pool: poolA, run: keyLost, kind: "terminal", state: wire.TaskStateFailed, event: wire.EventKeyLost, text: "s3cr3t-key-lost-message"})
+	f.status(t0.Add(3*time.Minute+time.Second), st{receiver: receiverB, tenant: tenantA, pool: poolA, run: keyLost, kind: "terminal", state: wire.TaskStateFailed, event: wire.EventKeyLost, text: "shown-key-lost-message"})
 	failed := f.echo(t0.Add(4*time.Minute), receiverB, tenantA, hostA, poolA, "failed")
-	f.status(t0.Add(4*time.Minute+time.Second), st{receiver: receiverB, tenant: tenantA, pool: poolA, run: failed, kind: "terminal", state: wire.TaskStateFailed, text: "s3cr3t-failure-message"})
+	f.status(t0.Add(4*time.Minute+time.Second), st{receiver: receiverB, tenant: tenantA, pool: poolA, run: failed, kind: "terminal", state: wire.TaskStateFailed, text: "shown-failure-message"})
 	cancelled := f.echo(t0.Add(5*time.Minute), receiverB, tenantA, hostA, poolA, "cancelled")
 	f.cancel(t0.Add(5*time.Minute+time.Second), tenantA, hostA, poolA, cancelled, nil)
 	f.status(t0.Add(5*time.Minute+2*time.Second), st{receiver: receiverB, tenant: tenantA, pool: poolA, run: cancelled, kind: "terminal", state: wire.TaskStateCanceled})
@@ -477,7 +477,7 @@ func TestModelCompleteness(t *testing.T) {
 	if a.Runs != 1 || receiverOf(t, s, receiverB).Runs != 5 || a.ByState[string(wire.TaskStateCompleted)] != 1 {
 		t.Errorf("runs per receiver: a %+v b %+v", a, receiverOf(t, s, receiverB))
 	}
-	// Nothing of the message texts reaches the JSON.
+	// Nothing of the reply reaches the JSON; the failure reasons do.
 	encoded, err := json.Marshal(s)
 	if err != nil {
 		t.Fatal(err)

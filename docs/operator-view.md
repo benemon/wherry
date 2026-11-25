@@ -1,10 +1,11 @@
 # Operator view
 
 `wherry operator view` is a read-only map of one cluster for its operator: every broker, pool, receiver, custodian,
-host, tenant and S3 destination the records name, the runs of a window with their path, state and failure class, what
-each receiver holds, each pool's share-group lag, and for a selected run the spans its tenant's trace topic holds. It
-rebuilds the window from the records Kafka keeps, then tails them, and serves JSON, a Server-Sent Events stream and a
-placeholder page of plain tables on loopback. It never produces to Kafka.
+host, tenant and S3 destination the records name, the runs of a window with their path, state, status messages,
+failure class and reason, what each receiver holds, each pool's share-group lag, and for a selected run the spans its
+tenant's trace topic holds and the live transcript its tenant's transcript topic holds. It rebuilds the window from
+the records Kafka keeps, then tails them, and serves JSON, a Server-Sent Events stream and a placeholder page of plain
+tables on loopback. It never produces to Kafka.
 
 ```sh
 wherry operator view [--dir DIR] [--window 24h] [--port N] [--external-url URL]
@@ -65,23 +66,36 @@ rotation is seen within a tick. A rotation retires a key from its append time; a
 after that no longer verifies, and when the rotation is read after such records were folded, the facts taken from
 them are retracted and counted as `retracted`. Facts under other keys stand, an echo's dependents included.
 
-The model keeps named fields and nothing of what an agent wrote: from a status its kind, state, event ID, attempt,
-receiver, append time, log offset, event and a failure class; from a result the output names, sizes and hashes, the
-reply's size and where it ran. The text of a status message, a reply, an artifact or a task never enters the model,
-so no response carries it; nor do a result's labels or its job name. No string a record or span carries reaches a
-response, the stream or the log unless it is rebuilt from the operator's configuration or a fixed set, with one
-exception, a result's output names: a tenant, pool, receiver, host, agent, model, profile or topic is shown when the
-configuration, the pool's terms over the window or the topic names wherry derives from them name it, and as `unknown`
-otherwise; a status kind, task state, start failure class, claim or refusal reason, advertisement gate, share-group
-state and HTTP method come from their fixed sets, anything else showing as `other`; a run ID, event ID, task hash,
-key ID or SHA-256 is shown when it follows the grammar wherry issues, an event ID outside it being replaced by one
-derived from the record's digest and a record keyed by anything but a run ID refused. Output names are the tenant's
-own: a result shows each name when it is slash-separated segments of letters, digits, `.`, `_` and `-`, the grammar
-receivers and hosts enforce, and `(invalid name)` otherwise; that alphabet needs no escaping on any surface, and the
-page renders it as text like everything else. The failure class comes from a fixed table, since the records carry
-no class but a start failure's: `start-failure:dispatch`, `start-failure:platform` and `start-failure:input-too-large`
-from a start failure; `key-lost`, `failed` and `canceled` from a failed or canceled terminal status; `rejected` from
-a rejection; `unclassified` for a terminal status in another state. The reason text in the record is never shown.
+The model keeps named fields and, of what an agent wrote, the text that says what is going on and why a run ended as
+it did: from a status its kind, state, event ID, attempt, receiver, append time, log offset, event, a failure class
+and its message; from a result the output names, sizes and hashes, the reply's size and where it ran. The message kept
+is the status's text as the receiver redacted it: a working status's line, at most 512 bytes, and a failed, canceled
+or rejected terminal's reason, cut at 1 KiB and marked `truncated`; a start failure carries a class and no text, so it
+has no message. A completed terminal's text is the agent's reply and is not kept, nor is a reply, an artifact or a task's text, nor a result's labels or its job name. Message bytes
+count in the run's retained size, so the `run_bytes` cap bounds them as it does every other fact, the oldest events
+dropped first. The run's detail carries each message on its event and the failure reason, the highest attempt's
+terminal message, as `reason`. The transcript's lines are not held in the model; they are read from the tenant's
+transcript topic on request, as [The transcript](#the-transcript) describes. No other string a record or span carries
+reaches a response, the stream or the log unless it is rebuilt from the operator's configuration or a fixed set: a
+tenant, pool, receiver, host, agent, model, profile or topic is shown when the configuration, the pool's terms over
+the window or the topic names wherry derives from them name it, and as `unknown` otherwise; a status kind, task state,
+start failure class, claim or refusal reason, advertisement gate, share-group state and HTTP method come from their
+fixed sets, anything else showing as `other`; a run ID, event ID, task hash, key ID or SHA-256 is shown when it follows
+the grammar wherry issues, an event ID outside it being replaced by one derived from the record's digest and a record
+keyed by anything but a run ID refused. Output names are the tenant's own: a result shows each name when it is
+slash-separated segments of letters, digits, `.`, `_` and `-`, the grammar receivers and hosts enforce, and
+`(invalid name)` otherwise; that alphabet needs no escaping on any surface. Messages, lines and output names are JSON
+strings, and the page renders them with `textContent` like everything else, under a Content-Security-Policy that
+allows no inline script. The failure class comes from a fixed table, since the records carry no class but a start
+failure's: `start-failure:dispatch`, `start-failure:platform` and `start-failure:input-too-large` from a start
+failure; `key-lost`, `failed` and `canceled` from a failed or canceled terminal status; `rejected` from a rejection;
+`unclassified` for a terminal status in another state.
+
+What the messages and lines can hold is what the receiver let through: it redacts each credential of 8 bytes or more
+that it delivered to the agent, every key, presigned URL and signature it holds, from everything it publishes for the
+attempt except output files ([Credential envelopes](security.md#credential-envelopes)). A value shorter than 8 bytes is not
+redacted, nor is a value the agent transformed before writing it, so the view shows what the tenant's own hosts and
+calling agents read on the same topics, nothing the operator could not read with `wherry.operator`'s grant.
 
 A receiver's runs in flight come from its progress records and its advertised count: a record of a run whose terminal
 the model holds at the same or a higher attempt, or naming another tenant or task than the run's echo, is discarded;
@@ -101,6 +115,72 @@ A topic the state calls for but the cluster lacks is listed as missing and skipp
 record of a topic is newer than the window's start, the topic is marked as predating the window: retention cut the
 window short.
 
+## The transcript
+
+`GET /api/runs/{id}/transcript` serves a page of a run's transcript, the lines the agent wrote to standard output as
+its receiver published them, one chunk each on `wherry.tenant.<T>.transcript`
+([Chunk](a2a-extension-v1.md#chunk)). The query names exactly one of `tail=N`, the last N lines; `before=<seq>&limit=N`,
+the N lines below a seq; and `from=<seq>&limit=N`, the N lines at or above one; N is 1 to 1,000. A request with
+`before` or `from` also carries the cursor's `attempt` and, when the last response had one, its `first`. The response
+holds `lines`, each with `at`, the record's append time, `attempt`, `receiver`, the signer's principal, `seq`, the
+line's byte offset in the agent's output, and `text`; a line that is not valid UTF-8 has `raw: true` and its `size`
+instead, and one the receiver did not store, over 512 KiB, `oversize: true` with its `size`; a raw part that is valid
+UTF-8, an empty line included, is `text`; a line over 16 KiB is cut with `truncated: true` and its `size`. `prev` is
+the seq to ask `before` for older lines and `next` the seq to ask `from` for later ones, present while the run may have
+more or the page was cut; `attempt` and `first` are the attempt shown and the lowest seq of its lines, and `reset:
+true` says either differs from the cursor's: an adopted run's new attempt hides the earlier attempt's lines at or above
+its first seq, so the page reloads from the tail. `complete` is set once the attempt's last chunk was read, or the run
+is terminal and the scan reached the end listed after its terminal; `predates_log` when retention removed the span's
+start; `missing` when the tenant has no transcript topic. `retry: true` says a request budget cut a `tail` request's
+scan before the run's span was indexed: the response has no lines, since the lines indexed so far are not the tail,
+and the page asks `tail` again until the scan ends. `read` and `seek` report the records and bytes the request's scan
+and seek read, `truncated` names each cap that cut it, and `evicted` counts the other runs' indexes dropped to make
+room for this run's lines. A whole older page's `next` is the seq asked `before`, so the page tells a cut older page,
+whose `next` is lower, from a whole one.
+
+Which lines a run shows is the attempt rule every reader follows, the host's `wherry host logs` included: the highest
+attempt's lines, and below that attempt's first seq the lines of earlier attempts, since an adopter resumes the job's
+output past the run's latest committed offset and a seq can repeat across attempts; of chunks sharing a seq the
+highest attempt's is the line, and the empty final chunk is no line. A chunk counts when it is a chunk by its JWS
+type, an output chunk on the same topic being dropped before it is verified; verifies under the key history, as every
+signed record does, which binds the receiver it names to its signer; names the run's tenant, its recorded pool and
+task hash; and is signed by a receiver recorded in the run's pool. The last rule is the model's own for the feed: the
+tenant's topics are open to every receiver entitled to the tenant, so the ACL does not bind the pool, and a receiver of
+another pool could otherwise claim the run's pool in a chunk of its own. A removed receiver's chunks stay, shown with
+their signer, as the view's other facts do: that is the same residual as elsewhere in the model. The index is bound
+to the pool and task hash the model records for the run and is rebuilt when either changes. When a rotation read later retires a key, the indexes of the runs holding that
+owner's chunks are dropped and rebuilt on the next request, so a chunk signed with the retired key after its retirement
+is gone with them; `transcript_retracted` counts the indexes dropped. A rotation read while a request was indexing is
+told from the request's key snapshot, and the index is dropped at the request's end; a line whose record no longer
+verifies when a page seeks it leaves the index and the page passes it.
+
+No tick tails the transcript topics. The first request for a run scans its span of the tenant's topic, from one minute
+before the earlier of its first record and its admission, as the trace drill-down does, and keeps seq to offset for
+each of the run's chunks; a later request resumes the scan where the last stopped, then seeks the lines selected, so a
+request for lines already indexed reads nothing for its scan. The seek reads the topic's span between the lowest and
+the highest offset of the lines selected, other runs' records interleaved with them included, so its cost follows the
+tenant's traffic over the page's span rather than the page's line count; on a busy tenant a page can come in parts,
+each with `next` at the cut. A working run's page asks `from=<next>`
+on each `model` event and at most every 2 seconds; there is no new stream event type. The chunks and the terminal
+status commit in one transaction but are read from two topics, so a terminal on the feed can show before its attempt's
+last chunks are stable on the transcript topic; `complete` waits for them, and an open transaction pins the last
+stable offset as [Freshness](#freshness) describes, for the whole tenant's transcript topic, for up to the broker's
+transaction timeout. Each finished attempt's `transcript_chunks` in the run detail is the count its terminal status
+carries; it counts the empty final chunk, so the page treats it as an estimate.
+
+Scans and seeks run under caps, each reported by name in the response's `truncated` and the model's `bounds` when
+hit: 32 MiB and 20,000 records per request over its scan and seek together, `transcript_bytes` and
+`transcript_records`; 15 seconds per request, `transcript_scan`; two requests at once, `transcript_scans`, a third
+answered 503; 500,000 lines indexed per run and 2,000,000 over every run, `transcript_lines`; the indexes of 32 runs
+kept, the least recently used dropped beyond them, `transcript_runs`. A quarter of the bytes, records and time is the
+seek's share, kept from the scan, so a scan that spends the rest never starves the page's seek. A scan cut by its
+request's bytes, records or time resumes on the next request, and a `tail` so cut is answered with `retry`; a scan
+stopped by the lines cap per run is final. When the total over every run is reached, the least recently used indexes
+other than the one being built are evicted to make room, counted as `transcript_evicted` and reported in the
+response's `evicted`, before the scan is stopped. A response stops at a byte budget under the 8 MiB response bound,
+returning fewer lines with `next` at the cut and `response_bytes` named. Index state is guarded by a lock per run,
+taken before a scan slot, so concurrent requests for one run take turns and a request waiting its turn holds no slot.
+
 ## Bounds
 
 The caps apply while reading, not after, and each reports in the model's `bounds` list when hit: a record count and
@@ -108,7 +188,7 @@ byte budget per read, a record over 2 MiB skipped before decoding, 50,000 runs k
 dropped, 400,000 digests, 10,000 records pending a key or an echo, 10,000 topics, 8 MiB per JSON response with the
 runs list cut by halves to fit, 64 KiB per stream event, 1,024 sessions with the oldest dropped. The retained state is
 bounded as each record is folded, every collection per run and over every run: one run keeps at most 1,000 events
-and 512 KiB, its oldest events dropped first from its lowest attempt so its state stands, 64 attempts with the lowest
+and 512 KiB, its message bytes counted, its oldest events dropped first from its lowest attempt so its state stands, 64 attempts with the lowest
 dropped, a newly arriving lower one included, 16 echoes with the oldest other than the joined one dropped, 16
 cancels and 64 open requests with the oldest dropped; a run so cut lists the caps in its `truncated` field, and one
 whose joined echo and result alone are over a bound is dropped. The model keeps at most 2,000,000 events, 1,000,000
@@ -119,7 +199,8 @@ over every receiver. Each cap reports under its name: `run_events`, `run_attempt
 JSON response is encoded into a buffer that stops at the response bound, so no larger encoding is built, and a run
 detail whose element counts alone put it over the bound is refused before encoding. The drill-down scans at most
 32 MiB, 20,000 records and 5,000 spans per refresh, keeps 16 links per span, builds a forest of at most 5,000 nodes,
-runs at most 5 seconds and two scans at once, and keeps the scan state of 32 runs.
+runs at most 5 seconds and two scans at once, and keeps the scan state of 32 runs. The transcript's caps are listed
+under [The transcript](#the-transcript).
 
 ## Freshness
 
@@ -140,6 +221,7 @@ two assets and `POST /session`.
 | `GET /api/model` | the model: nodes of every kind, idle ones included, the runs of the window newest first, the topics followed, counters and the bounds hit |
 | `GET /api/runs/{id}` | one run: its echo, attempts and events, open requests and answers, claim decisions, cancels, result references and path, each signed fact with its signer |
 | `GET /api/runs/{id}/trace` | the run's spans from its tenant's trace topic as a forest per trace ID, with markers for what was cut; a second call resumes where the first stopped |
+| `GET /api/runs/{id}/transcript` | a page of the run's transcript from its tenant's transcript topic, by `tail`, `before` or `from`, as [The transcript](#the-transcript) describes |
 | `GET /api/stream` | Server-Sent Events: one `model` event per change of the model, with its version |
 | `POST /session` | takes `token` in a form or JSON body, compared in constant time and rate-limited, and sets the session cookie |
 
@@ -163,7 +245,7 @@ one too slow to arrive, is answered 400, 431 or 408 by the server itself and pas
 Errors carry a fixed text. Request bodies, the token, the cookie and the request path are never logged; the log
 holds one line per request, the method as one of the fixed set (`GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`,
 `OPTIONS` or `other`), a fixed identifier of the route matched (`page`, `asset`, `session`, `model`, `run`, `trace`,
-`stream` or `other`) and the status, written when the response is complete, so a stream is logged when it ends. A
+`transcript`, `stream` or `other`) and the status, written when the response is complete, so a stream is logged when it ends. A
 failed tick logs its error class alone, a Kafka error's name, `timeout`, `canceled` or `error`.
 
 ## Behind a reverse proxy
@@ -197,9 +279,10 @@ backend view
     server local 127.0.0.1:8440
 ```
 
-The token is one shared secret for everyone who opens the printed address. When more than one person uses the view,
-authenticate at the proxy, with its own user accounts or single sign-on, and hand the printed address only to them;
-the cookie the view issues says a browser has presented the token, nothing more.
+The token is one shared secret for everyone who opens the printed address, and it now guards every tenant's agent
+output: the status messages and transcript lines of every run in the window. When more than one person uses the
+view, authenticate at the proxy, with its own user accounts or single sign-on, and hand the printed address only to
+them; the cookie the view issues says a browser has presented the token, nothing more.
 
 ## The cookie
 
@@ -212,7 +295,11 @@ and no framing, and every response is `Cache-Control: no-store` with `Referrer-P
 
 ## The placeholder page
 
-The page renders the model as plain tables, every name as text, output names included. Click a run for its path,
-echo, attempts, open exchange, cancels, result references and storage, each signed fact with its signer, and load its
-spans from there. It is the surface slices 1 to 3 are accepted
-on; the designed interface follows against the same API.
+The page renders the model as plain tables, every value as text, output names, messages and lines included. Click a
+run for its path, echo, attempts with their messages, failure reason, open exchange, cancels, result references and
+storage, each signed fact with its signer, the tail of its transcript with older pages on request, following while it
+works, and load its spans from there. The page applies a transcript response only to the run it was asked for, follows
+again after any error, a 503 included, and asks at once on a model event; each line's attempt and seq sit in their own
+elements and its text in a `bdi`, so a bidi control or line break in agent text cannot imitate a neighbouring row's
+prefix. It is the surface slices 1 to 4 are accepted on; the designed interface follows
+against the same API.

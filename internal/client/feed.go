@@ -2,6 +2,7 @@ package client
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -1068,48 +1068,45 @@ func (h *Host) Transcript(ctx context.Context, runID string) (TranscriptResult, 
 	return r.transcript(), nil
 }
 
-// transcript is the run's transcript as Transcript returns it, from the chunks derived so far.
+// transcript is the run's transcript as Transcript returns it, from the chunks derived so far, under the attempt rule.
 func (r *runView) transcript() TranscriptResult {
-	attempt, first := r.current()
-	result := TranscriptResult{Attempt: attempt, Redacted: map[string]int{}, Skipped: r.skipped}
-	var chunks []*wire.Chunk
-	for _, chunk := range r.chunks {
-		// The empty last chunk holds no line.
-		if len(chunk.ArtifactUpdate.Artifact.Parts) != 0 {
-			chunks = append(chunks, chunk)
-		}
-	}
-	sort.SliceStable(chunks, func(i, j int) bool { return chunks[i].Wherry.Attempt > chunks[j].Wherry.Attempt })
+	rule := r.current()
+	result := TranscriptResult{Attempt: rule.Attempt, Redacted: map[string]int{}, Skipped: r.skipped}
 	markers := r.h.markers(r.local)
-	seen := map[int64]bool{}
-	for _, chunk := range chunks {
-		if seen[chunk.Wherry.Seq] || chunk.Wherry.Attempt != attempt && chunk.Wherry.Seq >= first {
-			continue
-		}
-		seen[chunk.Wherry.Seq] = true
+	for _, chunk := range r.shown(rule) {
 		result.Lines = append(result.Lines, transcriptLine(chunk, markers, result.Redacted))
 	}
-	sort.Slice(result.Lines, func(i, j int) bool { return result.Lines[i].Seq < result.Lines[j].Seq })
 	return result
 }
 
-// current returns the run's highest attempt and the lowest seq of that attempt's lines, math.MaxInt64 while it has
-// none.
-func (r *runView) current() (int64, int64) {
-	var attempt int64
+// current is the attempt rule over the run's statuses and chunks: its highest attempt and the lowest seq of that
+// attempt's lines, math.MaxInt64 while it has none.
+func (r *runView) current() wire.AttemptRule {
+	var highest int64
 	for _, status := range r.statuses {
-		attempt = max(attempt, status.Wherry.Attempt)
+		highest = max(highest, status.Wherry.Attempt)
 	}
+	rule := wire.NewAttemptRule(highest)
 	for _, chunk := range r.chunks {
-		attempt = max(attempt, chunk.Wherry.Attempt)
+		rule.Add(chunk.Key())
 	}
-	first := int64(math.MaxInt64)
+	return rule
+}
+
+// shown is the chunks rule shows of the run's, one per seq, the highest attempt's of those sharing one, in seq order.
+func (r *runView) shown(rule wire.AttemptRule) []*wire.Chunk {
+	bySeq := map[int64]*wire.Chunk{}
 	for _, chunk := range r.chunks {
-		if chunk.Wherry.Attempt == attempt && len(chunk.ArtifactUpdate.Artifact.Parts) != 0 {
-			first = min(first, chunk.Wherry.Seq)
+		if !rule.Shown(chunk.Key()) {
+			continue
+		}
+		if kept := bySeq[chunk.Wherry.Seq]; kept == nil || kept.Wherry.Attempt < chunk.Wherry.Attempt {
+			bySeq[chunk.Wherry.Seq] = chunk
 		}
 	}
-	return attempt, first
+	chunks := slices.Collect(maps.Values(bySeq))
+	slices.SortFunc(chunks, func(a, b *wire.Chunk) int { return cmp.Compare(a.Wherry.Seq, b.Wherry.Seq) })
+	return chunks
 }
 
 // transcriptLine is chunk's line, its markers named and counted in counts.
@@ -1213,41 +1210,31 @@ func (s *TranscriptStream) Next(ctx context.Context) (TranscriptResult, error) {
 // lines returns the transcript's lines at seqs Next has not returned, unredacting only theirs, or the whole transcript
 // when the lines returned may no longer be its own.
 func (s *TranscriptStream) lines() TranscriptResult {
-	attempt, first := s.r.current()
+	rule := s.r.current()
 	whole := func() TranscriptResult {
 		result := s.r.transcript()
-		s.attempt, s.first, s.returned, s.redacted = attempt, first, map[int64]int64{}, maps.Clone(result.Redacted)
+		s.attempt, s.first, s.returned, s.redacted = rule.Attempt, rule.First, map[int64]int64{}, maps.Clone(result.Redacted)
 		for _, line := range result.Lines {
 			s.returned[line.Seq] = line.Attempt
 		}
 		return result
 	}
-	if s.returned == nil || attempt != s.attempt || first != s.first {
+	if s.returned == nil || rule.Attempt != s.attempt || rule.First != s.first {
 		return whole()
 	}
-	chunks := map[int64]*wire.Chunk{}
-	for _, chunk := range s.r.chunks {
+	markers := s.r.h.markers(s.r.local)
+	result := TranscriptResult{Attempt: rule.Attempt, Skipped: s.r.skipped}
+	for _, chunk := range s.r.shown(rule) {
 		seq := chunk.Wherry.Seq
-		if len(chunk.ArtifactUpdate.Artifact.Parts) == 0 || chunk.Wherry.Attempt != attempt && seq >= first {
-			continue
-		}
 		if returned, ok := s.returned[seq]; ok {
 			if returned < chunk.Wherry.Attempt {
 				return whole()
 			}
 			continue
 		}
-		if kept := chunks[seq]; kept == nil || kept.Wherry.Attempt < chunk.Wherry.Attempt {
-			chunks[seq] = chunk
-		}
-	}
-	markers := s.r.h.markers(s.r.local)
-	result := TranscriptResult{Attempt: attempt, Skipped: s.r.skipped}
-	for seq, chunk := range chunks {
 		result.Lines = append(result.Lines, transcriptLine(chunk, markers, s.redacted))
 		s.returned[seq] = chunk.Wherry.Attempt
 	}
-	sort.Slice(result.Lines, func(i, j int) bool { return result.Lines[i].Seq < result.Lines[j].Seq })
 	result.Redacted = maps.Clone(s.redacted)
 	return result
 }

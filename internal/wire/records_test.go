@@ -6,7 +6,10 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
+	"math"
+	"slices"
 	"strings"
 	"testing"
 
@@ -825,5 +828,87 @@ func TestFileNames(t *testing.T) {
 		if ValidOutputName(name) != valid {
 			t.Errorf("ValidOutputName(%q) = %v", name, !valid)
 		}
+	}
+}
+
+// The attempt rule, as the host reader and the operator view apply it: the highest attempt's lines, and below its
+// first seq the earlier attempt's; the empty final chunk is no line; an attempt the statuses name with no line yet
+// shows every earlier line.
+func TestAttemptRule(t *testing.T) {
+	line := func(attempt, seq int64) ChunkKey { return ChunkKey{Attempt: attempt, Seq: seq, Line: true} }
+	last := func(attempt, seq int64) ChunkKey { return ChunkKey{Attempt: attempt, Seq: seq} }
+	for _, c := range []struct {
+		name          string
+		highest       int64
+		keys          []ChunkKey
+		attempt       int64
+		first         int64
+		shown, hidden []ChunkKey
+	}{
+		{"one attempt", 1, []ChunkKey{line(1, 0), line(1, 10), last(1, 20)}, 1, 0, []ChunkKey{line(1, 0), line(1, 10)}, []ChunkKey{last(1, 20)}},
+		{"adopter resumes at 20", 2, []ChunkKey{line(1, 0), line(1, 10), line(1, 20), line(1, 30), line(2, 20), line(2, 40)}, 2, 20,
+			[]ChunkKey{line(1, 0), line(1, 10), line(2, 20), line(2, 40)}, []ChunkKey{line(1, 20), line(1, 30)}},
+		{"adopter's empty last chunk hides nothing", 2, []ChunkKey{line(1, 0), line(1, 10), last(2, 0)}, 2, math.MaxInt64, []ChunkKey{line(1, 0), line(1, 10)}, []ChunkKey{last(2, 0)}},
+		{"statuses name an attempt with no chunk", 3, []ChunkKey{line(1, 0), line(2, 0), line(2, 10)}, 3, math.MaxInt64, []ChunkKey{line(1, 0), line(2, 0), line(2, 10)}, nil},
+		{"chunks beyond the statuses", 1, []ChunkKey{line(1, 0), line(2, 5)}, 2, 5, []ChunkKey{line(1, 0), line(2, 5)}, nil},
+		{"third attempt below the second's first", 3, []ChunkKey{line(1, 0), line(1, 10), line(2, 10), line(2, 20), line(3, 5), line(3, 30)}, 3, 5,
+			[]ChunkKey{line(1, 0), line(3, 5), line(3, 30)}, []ChunkKey{line(1, 10), line(2, 10), line(2, 20)}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rule := NewAttemptRule(c.highest, c.keys...)
+			if rule.Attempt != c.attempt || rule.First != c.first {
+				t.Fatalf("rule %+v, want attempt %d first %d", rule, c.attempt, c.first)
+			}
+			for _, key := range c.shown {
+				if !rule.Shown(key) {
+					t.Errorf("%+v hidden", key)
+				}
+			}
+			for _, key := range c.hidden {
+				if rule.Shown(key) {
+					t.Errorf("%+v shown", key)
+				}
+			}
+			// The fold is order-free.
+			shuffled := slices.Clone(c.keys)
+			slices.Reverse(shuffled)
+			if again := NewAttemptRule(c.highest, shuffled...); again != rule {
+				t.Errorf("reversed: %+v", again)
+			}
+		})
+	}
+	chunk := &Chunk{ArtifactUpdate: TaskArtifactUpdateEvent{Artifact: Artifact{Parts: []Part{{Text: "x"}}}}, Wherry: ChunkBinding{ReceiverBinding: ReceiverBinding{Attempt: 2}, Seq: 7}}
+	if chunk.Key() != line(2, 7) || (&Chunk{}).Key().Line {
+		t.Errorf("keys: %+v %+v", chunk.Key(), (&Chunk{}).Key())
+	}
+}
+
+// A chunk naming one receiver and signed by another receiver's registered key is refused by the parse as signed by
+// another owner than it names, so a reader that has parsed a chunk need not compare the receiver it names with the
+// signer again.
+func TestChunkSignedByAnotherReceiverIsRefused(t *testing.T) {
+	keys, _, receiver := testKeys(t)
+	_, other, _ := ed25519.GenerateKey(rand.Reader)
+	keys["receiver-b"] = signed.KeyState{Current: other.Public().(ed25519.PublicKey)}
+	chunk := testRecords()["chunk"].(*Chunk)
+	chunk.V = 1
+	// Signed under receiver-b's own kid, as its key verifies: the payload names receiver-a.
+	forged, err := signed.Sign(ChunkType, "receiver-b", chunk, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ParseRecord(forged, keys, &Chunk{}); !errors.Is(err, errOtherOwner) {
+		t.Fatalf("a chunk naming %s signed by receiver-b: %v; want %v", chunk.Wherry.Receiver, err, errOtherOwner)
+	}
+	// Signed under receiver-a's kid with receiver-b's key, the signature does not verify at all.
+	if err := ParseRecord(must(SignRecord(chunk, other)), keys, &Chunk{}); err == nil || errors.Is(err, errOtherOwner) {
+		t.Fatalf("a chunk under receiver-a's kid signed with receiver-b's key: %v; want a verification failure", err)
+	}
+	own, err := SignRecord(chunk, receiver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ParseRecord(own, keys, &Chunk{}); err != nil {
+		t.Fatalf("the same chunk signed by its receiver: %v", err)
 	}
 }
