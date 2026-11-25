@@ -15,9 +15,9 @@ const port = Number(process.argv[2] || 4317);
 // placeholder the nonce replaces.
 const policy = JSON.parse(readFileSync(join(fixtures, 'csp.json'), 'utf8'));
 const csp = policy.csp;
-const types = { '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.woff2': 'font/woff2', '.svg': 'image/svg+xml', '.png': 'image/png' };
+const types = { '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.woff2': 'font/woff2' };
 
-export const token = 'a'.repeat(64);
+const token = 'a'.repeat(64);
 const session = 'smoke-session';
 const fixture = (name) => readFileSync(join(fixtures, name));
 

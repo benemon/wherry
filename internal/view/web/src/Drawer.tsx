@@ -19,7 +19,7 @@ import {
 import type { Criteria, EuiBasicTableColumn } from '@elastic/eui';
 import type { Dispatch, ReactNode, SetStateAction } from 'react';
 import { useState } from 'react';
-import type { Sel, View } from './App';
+import type { View } from './App';
 import { RunDrawer } from './RunDrawer';
 import { abs, bytes, grouped, healthOf, rel, signedBy, stateColor, stateOrder, stateWord } from './format';
 import type { FilterKey, Filters } from './model';
@@ -575,5 +575,3 @@ function RunList({ view, setFromList, setFilters }: DrawerProps) {
     </div>
   );
 }
-
-export type { Sel };

@@ -2,12 +2,10 @@ import { defineConfig } from '@playwright/test';
 
 // The smoke runs the committed bundle against smoke/server.mjs, a fixture server with the Go server's policy and
 // routes; make ui must have built ../static first.
-const port = Number(process.env.SMOKE_PORT || 4317);
+const port = 4317;
 
 export default defineConfig({
   testDir: 'smoke',
-  fullyParallel: false,
-  retries: 0,
   reporter: 'list',
   use: {
     baseURL: 'http://127.0.0.1:' + port,

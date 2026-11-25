@@ -32,10 +32,7 @@ function packageOf(id: string): Pkg | undefined {
   const name = rest[0].startsWith('@') ? rest[0] + '/' + rest[1] : rest[0];
   const dir = id.slice(0, at + '/node_modules/'.length) + name;
   const meta = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-  let license = typeof meta.license === 'string' ? meta.license : meta.license?.type ?? '';
-  if (Array.isArray(meta.licenses) && meta.licenses.length) {
-    license = meta.licenses.map((l: { type: string }) => l.type).join(' OR ');
-  }
+  const license = typeof meta.license === 'string' ? meta.license : meta.license?.type ?? '';
   return { name, version: meta.version, license, dir };
 }
 
