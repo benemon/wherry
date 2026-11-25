@@ -11,8 +11,8 @@
       "port": 9094,
       "controller": true,
       "listeners": [
-        "LAN-9094://10.0.0.17:9094",
-        "TLS-9093://wherry-kafka-0.svc:9093"
+        "INTERNAL-9092://kafka-1.example.com:9092",
+        "TLS-9093://kafka-1.example.com:9093"
       ]
     }
   ],
@@ -25,13 +25,13 @@
         "nomad-2"
       ],
       "tenants": [
-        "ben",
+        "acme",
         "ops"
       ],
       "custodian": "nomad-1",
       "storage": {
         "endpoint": "https://s3.example.com",
-        "bucket": "wherry-runs"
+        "bucket": "runs-example"
       },
       "delivery_limit": 5,
       "group": {
@@ -69,11 +69,11 @@
         "openshift-1"
       ],
       "tenants": [
-        "ben"
+        "acme"
       ],
       "storage": {
         "endpoint": "https://s3.example.com",
-        "bucket": "wherry-runs"
+        "bucket": "runs-example"
       },
       "delivery_limit": 3,
       "group": {
@@ -106,12 +106,12 @@
         "systemd-1"
       ],
       "tenants": [
-        "ben"
+        "acme"
       ],
       "custodian": "systemd-1",
       "storage": {
         "endpoint": "https://s3.example.com",
-        "bucket": "wherry-runs"
+        "bucket": "runs-example"
       },
       "delivery_limit": 5,
       "group": {
@@ -177,7 +177,7 @@
       },
       "held": [
         {
-          "run": "run-b04ce912bceb7864b872adaaa9c74f9c",
+          "run": "run-06adb71b13c69028ce654d659761fcad",
           "attempt": 1,
           "stage": "working",
           "source": "wherry.receiver.nomad-1.progress"
@@ -185,7 +185,7 @@
       ],
       "stale": [
         {
-          "run": "run-5555555555555555555555555555555e",
+          "run": "run-70d8ac40e9b3698697931f97558420d5",
           "attempt": 1,
           "stage": "working",
           "stale": true,
@@ -266,7 +266,7 @@
       "pool": "nomad",
       "receiver": "nomad-1",
       "status": "live",
-      "key_id": "k3JvQmFzZTY0VXJsS2V5SWRfNDNfY2hhcnNfbG9uZ18",
+      "key_id": "RTU_wOKjh-8Ky9NbbZIl0n9ik6vDQP_MGUb_ADRpyRY",
       "reason": "rotation",
       "at": "2026-11-24T14:51:00Z",
       "rotated_for": 3,
@@ -279,7 +279,7 @@
       "pool": "systemd",
       "receiver": "systemd-1",
       "status": "live",
-      "key_id": "k3JvQmFzZTY0VXJsS2V5SWRfNDNfY2hhcnNfbG9uZ18",
+      "key_id": "h4oXrvGZ9_MrDwjtRgqI3QCLyYpGMPoijljcT5IMqOE",
       "reason": "rotation",
       "at": "2026-11-24T07:51:00Z",
       "rotated_for": 1,
@@ -291,8 +291,8 @@
   ],
   "hosts": [
     {
-      "tenant": "ben",
-      "name": "mbp",
+      "tenant": "acme",
+      "name": "laptop-1",
       "ended": false,
       "runs": 4,
       "by_state": {
@@ -302,8 +302,8 @@
       }
     },
     {
-      "tenant": "ben",
-      "name": "mini",
+      "tenant": "acme",
+      "name": "workstation-2",
       "ended": true,
       "runs": 1,
       "by_state": {
@@ -312,7 +312,7 @@
     },
     {
       "tenant": "ops",
-      "name": "ci",
+      "name": "ci-1",
       "ended": false,
       "runs": 1,
       "by_state": {
@@ -322,7 +322,7 @@
   ],
   "tenants": [
     {
-      "name": "ben",
+      "name": "acme",
       "ended": false,
       "pools": [
         "nomad",
@@ -330,8 +330,8 @@
         "systemd"
       ],
       "hosts": [
-        "mbp",
-        "mini"
+        "laptop-1",
+        "workstation-2"
       ],
       "runs": 5
     },
@@ -342,7 +342,7 @@
         "nomad"
       ],
       "hosts": [
-        "ci"
+        "ci-1"
       ],
       "runs": 2
     }
@@ -350,7 +350,7 @@
   "storage": [
     {
       "endpoint": "https://s3.example.com",
-      "bucket": "wherry-runs",
+      "bucket": "runs-example",
       "pools": [
         "nomad",
         "openshift",
@@ -365,9 +365,9 @@
   ],
   "runs": [
     {
-      "id": "run-b04ce912bceb7864b872adaaa9c74f9c",
-      "tenant": "ben",
-      "host": "mbp",
+      "id": "run-06adb71b13c69028ce654d659761fcad",
+      "tenant": "acme",
+      "host": "laptop-1",
       "pool": "nomad",
       "receiver": "nomad-1",
       "agent": "claude",
@@ -378,7 +378,7 @@
       "terminal": false,
       "storage": {
         "endpoint": "https://s3.example.com",
-        "bucket": "wherry-runs"
+        "bucket": "runs-example"
       },
       "admitted": "2026-11-24T17:14:00Z",
       "first": "2026-11-24T17:14:00Z",
@@ -386,9 +386,9 @@
       "outputs": 0
     },
     {
-      "id": "run-49f960713214457a3e21d20ece496b85",
-      "tenant": "ben",
-      "host": "mbp",
+      "id": "run-24a373cef0aaf32ea0d792f359533ffd",
+      "tenant": "acme",
+      "host": "laptop-1",
       "pool": "nomad",
       "receiver": "nomad-1",
       "agent": "claude",
@@ -409,9 +409,9 @@
       ]
     },
     {
-      "id": "run-1111111111111111111111111111111a",
-      "tenant": "ben",
-      "host": "mini",
+      "id": "run-352da885f9456964f7e46bed3c8e40eb",
+      "tenant": "acme",
+      "host": "workstation-2",
       "pool": "openshift",
       "receiver": "openshift-1",
       "agent": "codex",
@@ -422,7 +422,7 @@
       "terminal": true,
       "storage": {
         "endpoint": "https://s3.example.com",
-        "bucket": "wherry-runs"
+        "bucket": "runs-example"
       },
       "admitted": "2026-11-24T15:41:00Z",
       "first": "2026-11-24T15:41:00Z",
@@ -430,9 +430,9 @@
       "outputs": 0
     },
     {
-      "id": "run-2222222222222222222222222222222b",
-      "tenant": "ben",
-      "host": "mbp",
+      "id": "run-eae239679a11e1f0af4641e0974022fc",
+      "tenant": "acme",
+      "host": "laptop-1",
       "pool": "systemd",
       "receiver": "systemd-1",
       "agent": "claude",
@@ -443,7 +443,7 @@
       "terminal": true,
       "storage": {
         "endpoint": "https://s3.example.com",
-        "bucket": "wherry-runs"
+        "bucket": "runs-example"
       },
       "admitted": "2026-11-24T17:01:00Z",
       "first": "2026-11-24T17:01:00Z",
@@ -451,9 +451,9 @@
       "outputs": 2
     },
     {
-      "id": "run-3333333333333333333333333333333c",
+      "id": "run-9b66545a51787df18fa1a1ab3d262bf1",
       "tenant": "ops",
-      "host": "ci",
+      "host": "ci-1",
       "pool": "nomad",
       "receiver": "nomad-1",
       "agent": "claude",
@@ -464,7 +464,7 @@
       "terminal": true,
       "storage": {
         "endpoint": "https://s3.example.com",
-        "bucket": "wherry-runs"
+        "bucket": "runs-example"
       },
       "cancelled": true,
       "admitted": "2026-11-24T12:51:00Z",
@@ -473,7 +473,7 @@
       "outputs": 0
     },
     {
-      "id": "run-4444444444444444444444444444444d",
+      "id": "run-6dc3e7c5d1a43e2469556f7fbdf645bd",
       "tenant": "ops",
       "pool": "nomad",
       "receiver": "nomad-1",
@@ -484,7 +484,7 @@
       "terminal": true,
       "storage": {
         "endpoint": "https://s3.example.com",
-        "bucket": "wherry-runs"
+        "bucket": "runs-example"
       },
       "admitted": "2026-11-24T11:11:00Z",
       "first": "2026-11-24T11:11:00Z",
@@ -492,9 +492,9 @@
       "outputs": 0
     },
     {
-      "id": "run-5555555555555555555555555555555e",
-      "tenant": "ben",
-      "host": "mbp",
+      "id": "run-70d8ac40e9b3698697931f97558420d5",
+      "tenant": "acme",
+      "host": "laptop-1",
       "pool": "nomad",
       "receiver": "nomad-1",
       "agent": "claude",
@@ -504,7 +504,7 @@
       "terminal": false,
       "storage": {
         "endpoint": "https://s3.example.com",
-        "bucket": "wherry-runs"
+        "bucket": "runs-example"
       },
       "admitted": "2026-11-24T06:11:00Z",
       "first": "2026-11-24T06:11:00Z",

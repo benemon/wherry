@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 
 declare global {
@@ -7,7 +8,9 @@ declare global {
 }
 
 const token = 'a'.repeat(64);
-const failedRun = 'run-49f960713214457a3e21d20ece496b85';
+const fixture = (name: string) => JSON.parse(readFileSync(new URL('../fixtures/' + name, import.meta.url), 'utf8'));
+const failedRun: string = fixture('run-failed.json').id;
+const policy: { page: string; placeholder: string } = fixture('csp.json');
 
 // The page under its policy: the map, a push drawer, a popover, the transcript and an overlay flyout each render
 // without a securitypolicyviolation and without a request off the origin. The four style injectors each show up
@@ -39,7 +42,9 @@ test('the page renders every surface under its Content-Security-Policy', async (
     });
   });
 
-  await page.goto('/#t=' + token);
+  const response = await page.goto('/#t=' + token);
+  // The policy served is the Go server's, from its own constants through the fixture.
+  expect(response!.headers()['content-security-policy']).toMatch(new RegExp('^' + policy.page.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(policy.placeholder, '[A-Za-z0-9+/=]{24}') + '$'));
   await expect(page).toHaveURL(baseURL + '/');
   await expect(page.getByRole('button', { name: 'Receiver nomad-1' })).toBeVisible();
   await expect(page.getByText('Live · model v7')).toBeVisible();

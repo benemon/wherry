@@ -93,8 +93,9 @@ func pageCSP(nonce string) string {
 	return strings.Replace(csp, "style-src 'self'", "style-src 'self' 'nonce-"+nonce+"'", 1)
 }
 
-// assetTypes are the content types of the files the build emits; anything else is served as bytes.
-var assetTypes = map[string]string{".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".woff2": "font/woff2", ".svg": "image/svg+xml", ".png": "image/png"}
+// assetTypes are the content types of the files the build emits: scripts, one stylesheet and the fonts; anything else
+// is served as bytes.
+var assetTypes = map[string]string{".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".woff2": "font/woff2"}
 
 // sessionBodyLimit bounds a POST /session body.
 const sessionBodyLimit = 1024

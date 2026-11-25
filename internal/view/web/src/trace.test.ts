@@ -7,7 +7,6 @@ const read = <T>(name: string): T => JSON.parse(readFileSync(new URL('../fixture
 
 const trace = read<Forest>('trace.json');
 const empty = read<Forest>('trace-empty.json');
-const sample = read<Forest>('sample-trace.json');
 
 describe('spans', () => {
   it('flattens the forest in order with depths', () => {
@@ -15,7 +14,6 @@ describe('spans', () => {
     expect(flat.map((f) => f.span.name)).toEqual(['task.submit', 'task.claim', 'key.open', 'task.run', '[other]', 'agent.exec']);
     expect(flat.map((f) => f.depth)).toEqual([0, 0, 1, 1, 2, 2]);
     expect(flatten(empty)).toEqual([]);
-    expect(flatten(sample)).toEqual([]);
   });
 
   it('reads an absent status as unset, a normal span, never as open', () => {
@@ -25,7 +23,11 @@ describe('spans', () => {
     expect(claim.end).toBeTruthy();
     expect(spanStatus(claim)).toEqual({ label: 'unset', color: 'subdued', error: false });
     expect(spanStatus(flat[0].span)).toEqual({ label: 'ok', color: 'success', error: false });
-    expect(spanStatus(flat[3].span)).toEqual({ label: 'error', color: 'danger', error: true });
+    // The server writes "error: <class>", never a bare "error" (internal/view/trace.go, allowlist.status).
+    expect(flat[3].span.status).toBe('error: failed');
+    expect(spanStatus(flat[3].span)).toEqual({ label: 'error: failed', color: 'danger', error: true });
+    expect(flat[5].span.status).toBe('error: [other]');
+    expect(spanStatus(flat[5].span).error).toBe(true);
     for (const f of flat) {
       expect(spanStatus(f.span).label).not.toMatch(/open|running/);
     }

@@ -11,16 +11,18 @@ const staticDir = join(here, '..', '..', 'static');
 const fixtures = join(here, '..', 'fixtures');
 const port = Number(process.argv[2] || 4317);
 
-// The same policy the Go server sends, with the nonce on the page alone.
-const csp = "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'";
+// The Go server's policies, written by TestWebFixtures from the server's own constants: the page's carries the
+// placeholder the nonce replaces.
+const policy = JSON.parse(readFileSync(join(fixtures, 'csp.json'), 'utf8'));
+const csp = policy.csp;
 const types = { '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.woff2': 'font/woff2', '.svg': 'image/svg+xml', '.png': 'image/png' };
 
 export const token = 'a'.repeat(64);
 const session = 'smoke-session';
 const fixture = (name) => readFileSync(join(fixtures, name));
 
-const workingRun = 'run-b04ce912bceb7864b872adaaa9c74f9c';
-const failedRun = 'run-49f960713214457a3e21d20ece496b85';
+const workingRun = JSON.parse(fixture('run-working.json')).id;
+const failedRun = JSON.parse(fixture('run-failed.json')).id;
 
 const fail = (res, status, text) => {
   res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -35,9 +37,9 @@ const server = createServer((req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   if (req.method === 'GET' && url.pathname === '/') {
     const nonce = randomBytes(16).toString('base64');
-    res.setHeader('Content-Security-Policy', csp.replace("style-src 'self'", "style-src 'self' 'nonce-" + nonce + "'"));
+    res.setHeader('Content-Security-Policy', policy.page.replace(policy.placeholder, nonce));
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.end(readFileSync(join(staticDir, 'index.html'), 'utf8').replace('__CSP_NONCE__', nonce));
+    res.end(readFileSync(join(staticDir, 'index.html'), 'utf8').replace(policy.placeholder, nonce));
     return;
   }
   const asset = /^\/assets\/([^/]+)$/.exec(url.pathname);

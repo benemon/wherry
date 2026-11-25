@@ -3,7 +3,7 @@ import { grouped } from './format';
 
 // pageSize is the lines one request asks for; followSize the lines a follow asks from the cursor.
 export const pageSize = 200;
-export const followSize = 1000;
+const followSize = 1000;
 
 // Query is one transcript request: tail=N, or before or from with limit and the cursor's attempt and first.
 export interface Query {
@@ -57,7 +57,7 @@ export function cursor(s: State, q: Query): URLSearchParams {
 
 // merge folds fresh lines into the known ones by seq, in seq order without duplicates, a fresh line replacing a
 // known one at its seq.
-export function merge(known: Line[], fresh: Line[]): Line[] {
+function merge(known: Line[], fresh: Line[]): Line[] {
   const bySeq = new Map<number, Line>();
   for (const l of known) {
     bySeq.set(l.seq, l);
@@ -131,11 +131,11 @@ export function follow(s: State): Query | null {
 }
 
 // receiverName strips the principal prefix a line's receiver carries.
-export const receiverName = (principal: string): string => principal.replace(/^wherry\.rcv\./, '');
+const receiverName = (principal: string): string => principal.replace(/^wherry\.rcv\./, '');
 
 // Shown is one row of the transcript: an agent line, a status message from the run's events, or a divider where
 // the agent lines move to another attempt.
-export interface Shown {
+interface Shown {
   kind: 'line' | 'status' | 'divider';
   at: string;
   attempt: number;
@@ -148,7 +148,7 @@ export interface Shown {
 }
 
 // mutedText is the marker shown for a line that is not text: binary, not stored, or empty.
-export function mutedText(l: Line): string {
+function mutedText(l: Line): string {
   if (l.oversize) {
     return 'line not stored, ' + grouped(l.size || 0) + ' bytes (over 512 KiB)';
   }
@@ -190,7 +190,7 @@ export function rows(lines: Line[], status: Shown[], olderUnloaded: boolean): Sh
   return all;
 }
 
-export interface Segment {
+interface Segment {
   text: string;
   kind: 'text' | 'redacted' | 'hit';
 }

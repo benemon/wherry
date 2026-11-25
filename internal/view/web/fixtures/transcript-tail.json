@@ -1,5 +1,5 @@
 {
-  "run": "run-49f960713214457a3e21d20ece496b85",
+  "run": "run-24a373cef0aaf32ea0d792f359533ffd",
   "attempt": 2,
   "first": 120,
   "lines": [
@@ -45,7 +45,7 @@
       "attempt": 2,
       "receiver": "wherry.rcv.nomad-1",
       "seq": 4266,
-      "text": "origin\thttps://x-access-token:[redacted:Zm9vYmFyYmF6cXV4]@git.example.com/ben/wherry.git (fetch)"
+      "text": "origin\thttps://x-access-token:[redacted:Zm9vYmFyYmF6cXV4]@git.example.com/acme/app.git (fetch)"
     },
     {
       "at": "2026-11-24T17:44:00Z",
@@ -59,7 +59,7 @@
       "attempt": 2,
       "receiver": "wherry.rcv.nomad-1",
       "seq": 4401,
-      "text": "dial tcp 10.0.0.17:9094: i/o timeout",
+      "text": "dial tcp kafka-1.example.com:9093: i/o timeout",
       "truncated": true,
       "size": 20000
     },

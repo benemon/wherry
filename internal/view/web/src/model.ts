@@ -130,7 +130,7 @@ export function poolHealth(pool: Pool, receivers: Receiver[], custodian: Custodi
 
 // The caps that drop whole runs from the window, as docs/operator-view.md lists them; the run_* caps cut one run and
 // show on its truncated, the rest cut a response or a scan.
-export const runDroppingCaps = ['runs', 'events', 'attempts', 'echoes', 'cancels', 'opens', 'bytes'];
+const runDroppingCaps = ['runs', 'events', 'attempts', 'echoes', 'cancels', 'opens', 'bytes'];
 
 export interface Bounds {
   cut: boolean;

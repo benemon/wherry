@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { cursor, fail, follow, initial, mutedText, rows, segments, stateText, statusMessages, take } from './transcript';
+import { cursor, fail, follow, initial, rows, segments, stateText, statusMessages, take } from './transcript';
 import type { RunDetail, Transcript } from './types';
 
 const read = <T>(name: string): T => JSON.parse(readFileSync(new URL('../fixtures/' + name, import.meta.url), 'utf8')) as T;
@@ -99,7 +99,7 @@ describe('transcript rows', () => {
     expect(lines.find((l) => l.seq === 4400)?.muted).toBe('(empty line)');
     expect(lines.find((l) => l.seq === 4401)).toMatchObject({ truncated: true, size: 20000 });
     expect(shown.filter((r) => r.kind === 'divider').map((r) => r.text)).toEqual(['attempt 2 on nomad-1 continues from here']);
-    expect(mutedText({ at: '', attempt: 1, receiver: '', seq: 0, text: 'x' })).toBe('');
+    expect(lines.find((l) => l.seq === 64)?.muted).toBeUndefined();
   });
 
   it('interleaves the status messages by time and keeps the terminal message in line', () => {
@@ -115,7 +115,7 @@ describe('transcript rows', () => {
 
   it('splits redaction markers and search hits as segments', () => {
     const line = tail.lines.find((l) => l.seq === 4266)!.text!;
-    const segs = segments(line, 'wherry');
+    const segs = segments(line, 'acme');
     expect(segs.map((s) => s.kind)).toEqual(['text', 'redacted', 'text', 'hit', 'text']);
     expect(segs[1].text).toBe('[redacted:Zm9vYmFyYmF6cXV4]');
     expect(segments('see [redacted-url] now', '')).toEqual([{ text: 'see ', kind: 'text' }, { text: '[redacted-url]', kind: 'redacted' }, { text: ' now', kind: 'text' }]);

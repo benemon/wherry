@@ -1,7 +1,7 @@
 {
-  "run": "run-b04ce912bceb7864b872adaaa9c74f9c",
-  "tenant": "ben",
-  "topic": "wherry.traces.ben",
+  "run": "run-06adb71b13c69028ce654d659761fcad",
+  "tenant": "acme",
+  "topic": "wherry.traces.acme",
   "traces": [],
   "spans": 0,
   "markers": [],

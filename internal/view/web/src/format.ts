@@ -48,13 +48,13 @@ export const grouped = (n: number): string => n.toLocaleString('en-GB');
 export const clock = (ms: number): string => abs(new Date(ms).toISOString()).slice(11, 16);
 
 // signerName is the receiver or host a principal names: wherry.rcv.<receiver> or wherry.tnt.<tenant>.<host>.
-export const signerName = (principal: string): string =>
+const signerName = (principal: string): string =>
   principal.replace(/^wherry\.rcv\./, '').replace(/^wherry\.tnt\.[^.]+\./, '');
 
 export const signedBy = (principal: string | undefined): string =>
   principal ? 'signed by ' + signerName(principal) : 'unsigned';
 
-export type BadgeColor = 'primary' | 'success' | 'danger' | 'warning' | 'default' | 'hollow';
+type BadgeColor = 'primary' | 'success' | 'danger' | 'warning' | 'default' | 'hollow';
 export type HealthColor = 'primary' | 'success' | 'danger' | 'warning' | 'subdued';
 
 const states: Record<string, [string, BadgeColor]> = {

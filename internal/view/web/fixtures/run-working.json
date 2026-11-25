@@ -1,7 +1,7 @@
 {
-  "id": "run-b04ce912bceb7864b872adaaa9c74f9c",
-  "tenant": "ben",
-  "host": "mbp",
+  "id": "run-06adb71b13c69028ce654d659761fcad",
+  "tenant": "acme",
+  "host": "laptop-1",
   "pool": "nomad",
   "receiver": "nomad-1",
   "agent": "claude",
@@ -12,17 +12,17 @@
   "terminal": false,
   "storage": {
     "endpoint": "https://s3.example.com",
-    "bucket": "wherry-runs"
+    "bucket": "runs-example"
   },
   "admitted": "2026-11-24T17:14:00Z",
   "first": "2026-11-24T17:14:00Z",
   "last": "2026-11-24T17:50:00Z",
   "outputs": 0,
-  "task_hash": "sha256:9b2e",
+  "task_hash": "bcbe6ef50286e3fd896520942ca87a26506217154e73f0bd50ee69661b8492ec",
   "echoes": [
     {
       "receiver": "nomad-1",
-      "host": "mbp",
+      "host": "laptop-1",
       "pool": "nomad",
       "agent": "claude",
       "model": "claude-fable-5-1",
@@ -39,7 +39,7 @@
         {
           "kind": "claimed",
           "state": "TASK_STATE_WORKING",
-          "event_id": "event-4f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c",
+          "event_id": "event-5391c322b2d11defffa6222d28073494",
           "receiver": "nomad-1",
           "at": "2026-11-24T17:14:06Z",
           "signer": "wherry.rcv.nomad-1"
@@ -47,7 +47,7 @@
         {
           "kind": "started",
           "state": "TASK_STATE_WORKING",
-          "event_id": "event-5f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c",
+          "event_id": "event-ac698dab0fd078a5258fd594a306ceb0",
           "receiver": "nomad-1",
           "at": "2026-11-24T17:14:12Z",
           "signer": "wherry.rcv.nomad-1"
@@ -55,7 +55,7 @@
         {
           "kind": "working",
           "state": "TASK_STATE_WORKING",
-          "event_id": "event-6f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c",
+          "event_id": "event-701c047f49cac4cf9dd9720b2cac0f06",
           "receiver": "nomad-1",
           "at": "2026-11-24T17:21:00Z",
           "message": "go test ./... passing so far",
@@ -87,7 +87,7 @@
   "path": [
     {
       "step": "admitted",
-      "actor": "mbp > nomad-1",
+      "actor": "laptop-1 > nomad-1",
       "at": "2026-11-24T17:14:00Z"
     }
   ]

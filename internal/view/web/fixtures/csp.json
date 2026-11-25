@@ -1,0 +1,5 @@
+{
+  "csp": "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",
+  "page": "default-src 'none'; script-src 'self'; style-src 'self' 'nonce-__CSP_NONCE__'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",
+  "placeholder": "__CSP_NONCE__"
+}

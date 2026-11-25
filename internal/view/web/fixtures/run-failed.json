@@ -1,7 +1,7 @@
 {
-  "id": "run-49f960713214457a3e21d20ece496b85",
-  "tenant": "ben",
-  "host": "mbp",
+  "id": "run-24a373cef0aaf32ea0d792f359533ffd",
+  "tenant": "acme",
+  "host": "laptop-1",
   "pool": "nomad",
   "receiver": "nomad-1",
   "agent": "claude",
@@ -20,12 +20,12 @@
   "truncated": [
     "run_events"
   ],
-  "task_hash": "sha256:3f1c",
+  "task_hash": "619ac521b6987adedd32020e06e1e0f10d577fc7f6b9ae903ace5e58b2687f16",
   "reason": "agent exited with status 1: integration tests could not reach [redacted-url]",
   "echoes": [
     {
       "receiver": "nomad-1",
-      "host": "mbp",
+      "host": "laptop-1",
       "pool": "nomad",
       "agent": "claude",
       "model": "claude-sonnet-5-5",
@@ -43,7 +43,7 @@
         {
           "kind": "claimed",
           "state": "TASK_STATE_WORKING",
-          "event_id": "event-e5cd77d6aa2a0e825638ae87bb3b49b1",
+          "event_id": "event-b61d7c874d325a2056c7b1fc4489bc1e",
           "receiver": "nomad-1",
           "at": "2026-11-24T17:39:06Z",
           "signer": "wherry.rcv.nomad-1"
@@ -73,7 +73,7 @@
         {
           "kind": "claimed",
           "state": "TASK_STATE_WORKING",
-          "event_id": "event-0f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c",
+          "event_id": "event-5eafa0473bafa851e4eb30e7ec314627",
           "receiver": "nomad-1",
           "at": "2026-11-24T17:41:00Z",
           "signer": "wherry.rcv.nomad-1"
@@ -81,7 +81,7 @@
         {
           "kind": "started",
           "state": "TASK_STATE_WORKING",
-          "event_id": "event-1f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c",
+          "event_id": "event-87a761dd5561301bd75891333a1a7069",
           "receiver": "nomad-1",
           "at": "2026-11-24T17:41:06Z",
           "signer": "wherry.rcv.nomad-1"
@@ -89,7 +89,7 @@
         {
           "kind": "working",
           "state": "TASK_STATE_WORKING",
-          "event_id": "event-2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c",
+          "event_id": "event-c20442dd230a6ea4218aaf80b8f07043",
           "receiver": "nomad-1",
           "at": "2026-11-24T17:43:00Z",
           "message": "running make integration against [redacted-url]",
@@ -98,7 +98,7 @@
         {
           "kind": "terminal",
           "state": "TASK_STATE_FAILED",
-          "event_id": "event-3f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c",
+          "event_id": "event-7c234fbf301dd9ef1ff8f50607fa3f16",
           "receiver": "nomad-1",
           "at": "2026-11-24T17:48:00Z",
           "class": "failed",
@@ -130,9 +130,9 @@
   ],
   "cancels": [
     {
-      "host": "mbp",
+      "host": "laptop-1",
       "at": "2026-11-24T17:47:00Z",
-      "signer": "wherry.tnt.ben.mbp"
+      "signer": "wherry.tnt.acme.laptop-1"
     }
   ],
   "result": {
@@ -145,14 +145,14 @@
       {
         "name": "test-output.txt",
         "size": 18342,
-        "sha256": "7a1d0c55e9b24f3a8c6e2d1b0f9a8e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7"
+        "sha256": "b3cebe726d8b702f06f1364ee110cb34928eb2a50f355dae23fa4597b428e607"
       }
     ],
     "s3_outputs": [
       {
         "name": "reports/integration/log.txt",
         "size": 9000000,
-        "sha256": "0a1d0c55e9b24f3a8c6e2d1b0f9a8e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7"
+        "sha256": "a9fe5b409a70016409e334674cdaf17426dc5830ac28050d482faf80f75bab0b"
       }
     ],
     "not_returned": [
@@ -174,7 +174,7 @@
   "path": [
     {
       "step": "admitted",
-      "actor": "mbp > nomad-1",
+      "actor": "laptop-1 > nomad-1",
       "at": "2026-11-24T17:39:00Z"
     },
     {

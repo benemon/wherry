@@ -1,7 +1,7 @@
 import type { Forest, SpanNode } from './types';
 import type { HealthColor } from './format';
 
-export interface Flat {
+interface Flat {
   span: SpanNode;
   depth: number;
 }
@@ -22,23 +22,27 @@ export function flatten(forest: Forest): Flat[] {
   return out;
 }
 
-export interface SpanStatus {
+interface SpanStatus {
   label: string;
   color: HealthColor;
   error: boolean;
 }
 
-// spanStatus reads a span's status as OpenTelemetry defines it: absent is unset, a normal span that set no status,
-// shown neutral; ok is success; error is a failure. Every server span has an end, so none is open.
+// spanStatus reads a span's status as the server encodes it (internal/view/trace.go, allowlist.status): absent is
+// unset, a normal span that set no status, shown neutral; "ok" is success; "error: <class>" is a failure with its
+// class, "[other]" for one outside the fixed set. Every server span has an end, so none is open.
 export function spanStatus(span: SpanNode): SpanStatus {
-  switch (span.status) {
-    case 'error':
-      return { label: 'error', color: 'danger', error: true };
-    case 'ok':
-      return { label: 'ok', color: 'success', error: false };
-    default:
-      return { label: 'unset', color: 'subdued', error: false };
+  const status = span.status || '';
+  if (status === '') {
+    return { label: 'unset', color: 'subdued', error: false };
   }
+  if (status === 'ok') {
+    return { label: 'ok', color: 'success', error: false };
+  }
+  if (status.startsWith('error')) {
+    return { label: status, color: 'danger', error: true };
+  }
+  return { label: status, color: 'subdued', error: false };
 }
 
 // markerText is the sentence a forest's fixed marker code reads as.

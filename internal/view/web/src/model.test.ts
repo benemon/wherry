@@ -6,7 +6,6 @@ import type { Model, RunDetail } from './types';
 const read = <T>(name: string): T => JSON.parse(readFileSync(new URL('../fixtures/' + name, import.meta.url), 'utf8')) as T;
 
 const model = read<Model>('model.json');
-const sample = read<Model>('sample-model.json');
 const failed = read<RunDetail>('run-failed.json');
 
 const now = Date.parse(model.now);
@@ -72,7 +71,7 @@ describe('bounds', () => {
     expect(note).toContain('cut short');
     expect(note).toContain('Only the newest 7 of 7 runs are listed');
     expect(note).toContain('Limits hit: transcript_scan');
-    expect(windowNote(sample)).toBe('');
+    expect(windowNote({ ...model, bounds: [], truncated: undefined })).toBe('');
   });
 });
 
@@ -104,6 +103,16 @@ describe('contract states', () => {
   });
 });
 
+describe('the run list filters', () => {
+  it('match by state, by a name and by the placeholder for a missing one, and search by run ID', () => {
+    expect(model.runs.filter((r) => matches(r, { state: 'TASK_STATE_FAILED' }))).toHaveLength(2);
+    expect(model.runs.filter((r) => matches(r, { host: 'laptop-1', pool: 'nomad' }))).toHaveLength(3);
+    expect(model.runs.filter((r) => matches(r, { host: '__none' })).map((r) => r.state)).toEqual(['TASK_STATE_REJECTED']);
+    expect(model.runs.filter((r) => matches(r, { q: failed.id.slice(4, 12) }))).toEqual([model.runs[1]]);
+    expect(model.runs.filter((r) => matches(r, { state: 'TASK_STATE_FAILED' }, 'state'))).toHaveLength(model.runs.length);
+  });
+});
+
 describe('scrubbing', () => {
   it('replays the runs admitted by t and not yet terminal, and recomputes the counts from them', () => {
     const t = now - 5 * 60 * 1000;
@@ -111,23 +120,11 @@ describe('scrubbing', () => {
     const failedRun = at.find((r) => r.id === failed.id)!;
     expect(failedRun.state).toBe('TASK_STATE_WORKING');
     expect(failedRun.terminal).toBe(false);
-    expect(at.find((r) => r.id === 'run-5555555555555555555555555555555e')?.state).toBe('TASK_STATE_WORKING');
+    const released = model.runs.find((r) => r.stage === 'released')!;
+    expect(at.find((r) => r.id === released.id)?.state).toBe('TASK_STATE_WORKING');
     expect(replay(model.runs, now - 38 * 60 * 1000).map((r) => r.id)).not.toContain(model.runs[0].id);
     expect(byStateOf(pool('nomad')!.by_state, at, false)).toBe(pool('nomad')!.by_state);
     expect(byStateOf(pool('nomad')!.by_state, at.filter((r) => r.pool === 'nomad'), true)).toEqual({ TASK_STATE_WORKING: 3, TASK_STATE_CANCELED: 1, TASK_STATE_REJECTED: 1 });
     expect(replay(model.runs, null)).toBe(model.runs);
-  });
-});
-
-describe('the sample model', () => {
-  it('loads and filters', () => {
-    expect(sample.runs).toHaveLength(36);
-    expect(sample.runs.filter((r) => matches(r, { state: 'TASK_STATE_FAILED' }))).toHaveLength(10);
-    expect(sample.runs.filter((r) => matches(r, { host: 'mbp', q: 'run-' })).length).toBeGreaterThan(0);
-    const t = tally(sample.runs, Date.parse(sample.now));
-    expect(t.byState.TASK_STATE_COMPLETED).toBe(25);
-    for (const r of sample.receivers) {
-      expect(['success', 'danger', 'warning', 'subdued']).toContain(receiverHealth(r, sample.pools.find((p) => p.name === r.pool), sample.custodians.find((c) => c.pool === r.pool), t).color);
-    }
   });
 });

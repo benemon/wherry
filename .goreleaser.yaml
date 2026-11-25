@@ -96,7 +96,10 @@ brews:
       name: homebrew-tap
       branch: main
     skip_upload: "true"
+    # The notices of the npm packages bundled into the operator view's page go beside the binary, so a Homebrew
+    # install carries EUI's terms as the archive does.
     install: |
       bin.install "wherry"
+      prefix.install "THIRD_PARTY_NOTICES"
     test: |
       assert_match "version=v#{version}", shell_output("#{bin}/wherry version")

@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { Plugin } from 'vite';
 
 // The licences the bundle may carry: the Go allowlist of the Makefile plus the fonts' OFL, and the three Elastic
@@ -57,8 +57,9 @@ export function notices(): Plugin {
   return {
     name: 'wherry-notices',
     generateBundle(_, bundle) {
-      // The modules rendered into the chunks, not the whole module graph: what the page ships.
-      const ids = Object.values(bundle).flatMap((out) => (out.type === 'chunk' ? Object.keys(out.modules) : []));
+      // The modules rendered into the chunks and the files the assets were made from (the fonts, which enter
+      // through CSS url()), not the whole module graph: what the page ships.
+      const ids = Object.values(bundle).flatMap((out) => (out.type === 'chunk' ? Object.keys(out.modules) : (out.originalFileNames || []).map((f) => resolve(f))));
       const packages = new Map<string, Pkg>();
       for (const id of ids) {
         if (id.startsWith('\0')) {

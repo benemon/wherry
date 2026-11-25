@@ -9,7 +9,7 @@ import type { Filters } from './model';
 import { activeFilters } from './model';
 import { flatten, markerText, serviceColors, spanStatus } from './trace';
 import { segments } from './transcript';
-import type { Forest, RunDetail, RunSummary } from './types';
+import type { Attempt, Forest, RunDetail, RunSummary } from './types';
 
 interface Props {
   view: View;
@@ -111,7 +111,7 @@ export function RunDrawer({ view, id, fromList, setFromList, wide, setWide }: Pr
             {detail && detail.reason && (
               <div className="w-mono w-reason">
                 <Segments text={detail.reason} />
-                {detail.attempts.some((a) => a.events.some((e) => e.kind === 'terminal' && e.truncated)) && <span className="w-muted"> [cut at 1 KiB]</span>}
+                {reasonCut(detail) && <span className="w-muted"> [cut at 1 KiB]</span>}
               </div>
             )}
             {detail && !detail.reason && <span className="w-muted" style={{ fontSize: 12 }}>no reason recorded</span>}
@@ -147,6 +147,12 @@ export function RunDrawer({ view, id, fromList, setFromList, wide, setWide }: Pr
     </>
   );
 }
+
+// reasonCut says whether the reason, the highest attempt's terminal message, was cut at 1 KiB.
+const reasonCut = (detail: RunDetail): boolean => {
+  const highest = detail.attempts.reduce<Attempt | null>((top, a) => (top && top.number > a.number ? top : a), null);
+  return !!highest?.events.some((e) => e.kind === 'terminal' && e.truncated);
+};
 
 interface Step {
   at: string;
