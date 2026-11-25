@@ -542,7 +542,11 @@ group `Describe` it reports `missing DESCRIBE ACL on p- for wherry.operator`;
 a re-run of `init` grants it, and creates the trace topics, as
 [Upgrade](upgrade.md#trace-topics-and-the-operator-s-group-grant) describes.
 
-`Alter` on the cluster lets its holder grant itself any ACL, so
+`Read` on the `wherry.` prefix lets `wherry.operator` read every tenant's
+feed and transcript topic, so whoever holds `operator.password` can read
+every run's status messages and transcript; the
+[operator view](operator-view.md#the-transcript) shows them to whoever opens
+its address. `Alter` on the cluster lets its holder grant itself any ACL, so
 `wherry.operator` is close to the super user in effect: whoever holds
 `operator.password` can take over the cluster. The super user's credential
 is neither kept nor used after setup, and `wherry.operator`'s password
