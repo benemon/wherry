@@ -564,14 +564,14 @@ func parsePage(query url.Values) (Page, bool) {
 		return &n, true
 	}
 	count := func(name string) (int, bool) {
-		n, ok := integer(name)
-		if !ok || n != nil && (*n < 1 || *n > MaxPage) {
-			return 0, false
-		}
-		if n == nil {
+		if !query.Has(name) {
 			return 0, true
 		}
-		return int(*n), true
+		n, err := strconv.ParseInt(query.Get(name), 10, 32)
+		if err != nil || n < 1 || n > MaxPage {
+			return 0, false
+		}
+		return int(n), true
 	}
 	var ok bool
 	if page.Tail, ok = count("tail"); !ok {
