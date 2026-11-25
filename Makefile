@@ -81,11 +81,9 @@ check-ui-source: ## Fail on raw HTML rendering in the operator view's app source
 check: check-fmt vet test check-licenses check-markers check-names check-ui-source ## Run every CI gate
 
 .PHONY: ui
-# The built page is committed under internal/view/static, so go build and the Go jobs need no Node; ci.yml's ui job
-# rebuilds it from the lockfile and fails when the committed output differs. The build also writes
-# internal/view/static/THIRD_PARTY_NOTICES and fails on a bundled licence outside its list. npm dependency bumps are
-# made here by hand, the lockfile regenerated on Linux (docker run node:22 npm install --package-lock-only), since a
-# bump without a rebuild would fail the ui job: Dependabot has no npm entry.
+# The build also writes internal/view/static/THIRD_PARTY_NOTICES. The lockfile is regenerated on Linux from
+# package.json alone (docker run node:22 npm install --package-lock-only), since one made beside an installed
+# node_modules records that platform's bindings only (npm/cli#4828).
 ui: ## Rebuild the operator view's page into internal/view/static (needs Node 22)
 	cd internal/view/web && npm ci && npm run check && npm run build
 

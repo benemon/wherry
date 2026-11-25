@@ -164,8 +164,7 @@ interface Step {
   tone: 'ok' | 'bad' | 'key' | 'host';
 }
 
-// steps is the run's path from its signed facts, each with its signer: admitted by the joined echo, each attempt's
-// claim decision, key request and answer or refusal, start failure and events, the host's cancels and the result.
+// steps is the run's path from its signed facts, grouped by attempt, each step with its signer.
 function steps(detail: RunDetail): { head: string; steps: Step[] }[] {
   const echo = detail.echoes.find((e) => e.joined);
   const host = or(detail.host);

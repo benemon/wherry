@@ -75,9 +75,7 @@ export interface Health {
   label: string;
 }
 
-// receiverHealth is a receiver's ring: red for stale or silent or a failure on it in the recent window, amber when
-// live but gated (the server's gate word), its pool suspended or its custodian key suspended, green when live, grey
-// when ended or unknown.
+// receiverHealth is a receiver's ring, in the legend's order of severity; the gate is the server's own word.
 export function receiverHealth(r: Receiver, pool: Pool | undefined, custodian: Custodian | undefined, tally: Tally): Health {
   if (r.status === 'ended' || r.ended) {
     return { color: 'subdued', label: 'ended' };
@@ -144,8 +142,7 @@ export function bounds(hits: BoundHit[]): Bounds {
   return { cut: cutBy.length > 0, cutBy, other };
 }
 
-// windowNote is the banner over the map: the window cut short by the caps that drop runs, the runs list cut to fit
-// the response, and any other cap hit.
+// windowNote is the banner over the map.
 export function windowNote(m: Model): string {
   const b = bounds(m.bounds || []);
   const parts: string[] = [];

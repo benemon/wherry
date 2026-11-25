@@ -13,9 +13,8 @@ export interface Query {
   limit?: number;
 }
 
-// State is the transcript shown: its cursor, the lines merged by seq, and what the last response said of the
-// run's transcript: complete, retry (not indexed yet), predates_log, missing, the caps that cut it. error is the
-// last request's failure, busy a 503, cleared by the next response.
+// State is the transcript shown: its cursor, the lines merged by seq, and what the last response said. retry is a
+// tail not indexed yet; error is the last request's failure, busy a 503, cleared by the next response.
 export interface State {
   attempt: number;
   first: number | null;

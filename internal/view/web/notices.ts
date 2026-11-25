@@ -2,9 +2,9 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { Plugin } from 'vite';
 
-// The licences the bundle may carry: the Go allowlist of the Makefile plus the fonts' OFL, and the three Elastic
-// packages under the Elastic License 2.0 by election. A package outside the list fails the build: investigate the
-// package, do not widen the list to get green.
+// The licences the bundle may carry: the OSI licences in use (the Makefile's Go allowlist, 0BSD and the fonts' OFL),
+// and the three Elastic packages under the Elastic License 2.0 by election. A package outside the list fails the
+// build: investigate the package, do not widen the list to get green.
 const allowed = new Set(['MIT', 'Apache-2.0', 'BSD-2-Clause', 'BSD-3-Clause', '0BSD', 'ISC', 'MPL-2.0', 'OFL-1.1']);
 const elastic = new Set(['@elastic/eui', '@elastic/eui-theme-borealis', '@elastic/eui-theme-common']);
 

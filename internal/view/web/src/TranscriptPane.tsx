@@ -65,7 +65,6 @@ export function TranscriptPane({ view, run, attempts, wide }: Props) {
     [run.id],
   );
 
-  // A new run opens from the tail.
   useEffect(() => {
     runRef.current = run.id;
     const fresh = initial();
@@ -76,7 +75,7 @@ export function TranscriptPane({ view, run, attempts, wide }: Props) {
     ask({ tail: 200 }, 'tail');
   }, [run.id, ask]);
 
-  // The follow: on each model version at once, and every two seconds while the run may have more lines.
+  // The follow asks at most every two seconds, the bound docs/operator-view.md states.
   useEffect(() => {
     if (!working) {
       return;

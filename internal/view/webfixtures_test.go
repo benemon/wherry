@@ -18,7 +18,6 @@ import (
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
 
-// updateFixtures rewrites the page's fixtures from the view's JSON types instead of checking them.
 var updateFixtures = flag.Bool("update", false, "rewrite internal/view/web/fixtures from the view's JSON types")
 
 // webFixturesDir holds the JSON the page's unit tests and browser smoke run against, from this package's directory.
@@ -46,11 +45,7 @@ func spanStatus(code tracepb.Status_StatusCode, class string) string {
 }
 
 // webFixtures is every contract state the page handles, built from the types the API encodes so the page's tests
-// read what the server writes: a gated receiver, stale and silent ones, a suspended custodian, lag error and
-// unavailable, bounds that drop runs and ones that do not, a truncated runs list, model errors, topics missing,
-// predating the log and in error, a run with a reason and its truncated flag, cancels, a start failure, a refused
-// key request, outputs not returned, unknown storage, spans with an absent, ok and error status, and each transcript
-// state. The names are invented; the receiver and pool names are the ones the docs use.
+// read what the server writes. The names are invented; the receiver and pool names are the ones the docs use.
 func webFixtures() map[string]any {
 	now := time.Date(2026, 11, 24, 17, 51, 0, 0, time.UTC)
 	at := func(minutesAgo float64) time.Time { return now.Add(-time.Duration(minutesAgo * float64(time.Minute))) }

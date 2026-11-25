@@ -1,5 +1,5 @@
 // Package view is the operator network view: a model of the cluster rebuilt from the records Kafka keeps, kept live
-// by tailing them, served read-only over loopback HTTP as JSON, a Server-Sent Events stream and a placeholder page.
+// by tailing them, served read-only over loopback HTTP as JSON, a Server-Sent Events stream and the page.
 // The view never produces to Kafka. Every record is projected to named fields, and every name it holds is one the
 // operator's configuration yields or a fixed placeholder, except a result's output names, kept when they follow the
 // output name grammar; of what an agent wrote it holds the status messages that say what is going on and why a run

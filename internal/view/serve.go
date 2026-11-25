@@ -24,8 +24,8 @@ import (
 	"time"
 )
 
-// The page as make ui builds it from internal/view/web: index.html with the nonce placeholder and the hashed assets.
-// THIRD_PARTY_NOTICES beside them ships in the release archive, not the binary.
+// The page as make ui builds it from internal/view/web. THIRD_PARTY_NOTICES beside it ships in the release archive,
+// not the binary.
 //
 //go:embed static/index.html static/assets
 var static embed.FS
@@ -332,7 +332,7 @@ func (s *Server) fail(w http.ResponseWriter, status int, text string) {
 	io.WriteString(w, text+"\n")
 }
 
-// page serves index.html with a fresh nonce, 128 bits from crypto/rand, in the policy and the meta tag the app reads.
+// page serves index.html with a fresh nonce in the policy and in the meta tag the app reads.
 func (s *Server) page(w http.ResponseWriter, r *http.Request) {
 	index, err := static.ReadFile("static/index.html")
 	if err != nil {

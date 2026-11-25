@@ -111,7 +111,7 @@ const custodianText = (view: View, pool: string) => {
   return 'custodian ' + c.receiver + (c.suspended ? ' · suspended' : ' · key ' + age + ' h') + (view.scrubbing ? ' · now' : '');
 };
 
-// fullLayout places every host and receiver as its own node: the sample's scale.
+// fullLayout places every host and receiver as its own node.
 function fullLayout(view: View): Layout {
   const m = view.model;
   const sel = view.sel;
@@ -292,8 +292,8 @@ const matchesFilters = (view: View, r: RunSummary) => {
   return (!f.state || r.state === f.state) && (!f.tenant || r.tenant === f.tenant) && (!f.pool || r.pool === f.pool) && (!f.receiver || (r.receiver || '__none') === f.receiver) && (!f.host || (r.host || '__none') === f.host) && (!f.agent || (r.agent || '__none') === f.agent) && (!f.q || r.id.includes(f.q.trim()));
 };
 
-// compactLayout collapses hosts into one row per tenant and receivers into rings inside their pool: the design's
-// scale, where links run tenant to broker to pool to storage.
+// compactLayout collapses hosts into one row per tenant and receivers into rings inside their pool; links run
+// tenant to broker to pool to storage.
 function compactLayout(view: View): Layout {
   const m = view.model;
   const sel = view.sel;
