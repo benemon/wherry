@@ -73,7 +73,15 @@ func (h *Host) Collect(ctx context.Context, runID string, result AwaitResult, di
 		h.logger.Printf("run %s: record the collected %s: %v", runID, wire.GitBundle, err)
 		return collected, nil
 	}
-	local, err := h.recordBundle(ctx, runs, path, collected.Outputs[i])
+	// The lock of the run, and of the run it replaces, is held from the record through the fetch and its checks, so two
+	// collects of one run take their turns.
+	unlock, err := h.lockRuns(ctx, runs[max(len(runs)-2, 0):])
+	if err != nil {
+		h.logger.Printf("run %s: record the collected %s: %v", runID, wire.GitBundle, err)
+		return collected, nil
+	}
+	defer unlock()
+	local, err := h.recordBundle(runs, path, collected.Outputs[i])
 	if err != nil {
 		h.logger.Printf("run %s: record the collected %s: %v", runID, wire.GitBundle, err)
 	}

@@ -49,6 +49,10 @@ func TestExplainUnknownAuthority(t *testing.T) {
 		if strings.Contains(set, "set ca_cert") {
 			t.Errorf("with a ca_cert set the hint asks to set it: %q", set)
 		}
+		also := ExplainUnknownAuthority(err, CASetting{File: "config.yaml", Also: "set x too"}).Error()
+		if want := "cannot verify the broker's certificate: install the CA that signed it in this machine's trust store, or set ca_cert in config.yaml; set x too (" + err.Error() + ")"; also != want {
+			t.Errorf("with more to set: %q; want %q", also, want)
+		}
 		once := ExplainUnknownAuthority(err, CASetting{File: "config.yaml"})
 		if !errors.Is(once, err) {
 			t.Errorf("the explanation of %v no longer wraps it", err)

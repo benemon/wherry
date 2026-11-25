@@ -111,17 +111,29 @@ func bundleHeader(bundle io.Reader) (base, head string, err error) {
 	return "", "", errors.New("has no header end within 64 KiB")
 }
 
-// recordBundle records bundle, the collected changes.bundle at the absolute path, in the local record of the last of
-// runs, holding its lock and that of the run it replaces, under which a replacement's record is written, and returns
-// the record. Without a record, or when it cannot be written, the record keeps the bundle it holds.
-func (h *Host) recordBundle(ctx context.Context, runs []string, path string, bundle Output) (*runRecord, error) {
-	for _, run := range runs[max(len(runs)-2, 0):] {
+// lockRuns takes the lock of each of runs, in order, and returns the release of all of them.
+func (h *Host) lockRuns(ctx context.Context, runs []string) (func(), error) {
+	var unlocks []func()
+	release := func() {
+		for i := len(unlocks) - 1; i >= 0; i-- {
+			unlocks[i]()
+		}
+	}
+	for _, run := range runs {
 		unlock, err := h.lockRun(ctx, run)
 		if err != nil {
+			release()
 			return nil, err
 		}
-		defer unlock()
+		unlocks = append(unlocks, unlock)
 	}
+	return release, nil
+}
+
+// recordBundle records bundle, the collected changes.bundle at the absolute path, in the local record of the last of
+// runs, and returns the record. The caller holds that run's lock and that of the run it replaces, under which a
+// replacement's record is written. Without a record, or when it cannot be written, the record keeps the bundle it holds.
+func (h *Host) recordBundle(runs []string, path string, bundle Output) (*runRecord, error) {
 	local, err := h.localRun(runs[len(runs)-1])
 	if err != nil || local == nil {
 		return nil, err

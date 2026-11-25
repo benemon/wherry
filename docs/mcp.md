@@ -178,8 +178,8 @@ transcript; `logs` pages it.
 | `artifacts` | the result's: `result`, then a [reference](a2a-extension-v1.md#reference-artifacts) for each returned output, the reply over 64 KiB and the transcript; each is `{artifact_id, parts}`, and each part has one of `text`, `data`, `url` or `raw_bytes` (the size of a binary part, which is not included), with `media_type` |
 | `outputs` | `{name, path, sha256, size}` for each output written, S3 outputs included |
 | `not_returned` | `{name, size, reason}` for each output the result lists as not returned and each one that fails verification |
-| `fetched_ref` | for a run of the current repository whose `changes.bundle` came back, the branch it was fetched into, or already stood at, `wherry/<run>`, `<run>` the run whose bundle it is; the working tree, index and `HEAD` are untouched, and `git merge wherry/<run>` is the next step |
-| `not_fetched` | for such a run, why the bundle was not fetched: `exists`, the branch names another commit and was left; `no git`; `no repository`; `git refused`; or `unreadable bundle`; the bundle at its output path can be fetched by hand with `git fetch <path> HEAD` |
+| `fetched_ref` | for a run submitted with `git` `remote` `.` whose `changes.bundle` came back, the branch it was fetched into, or already stood at, `wherry/<run>`, in the repository the run's record names, wherever the server runs; `<run>` the run whose bundle it is; the working tree, index and `HEAD` are untouched, and `git merge wherry/<run>` is the next step |
+| `not_fetched` | for such a run, why the bundle was not fetched: `exists`, the branch names another commit and was left; `no git`; `no repository`; `git refused`; `unreadable bundle`; `wrong commit`, the branch the fetch made named another commit and was deleted; or `timeout`, past 10 minutes; the bundle at its output path can be fetched by hand with `git fetch <path> HEAD` |
 | `redacted` | each redaction marker's name and its count |
 | `skipped` | the run's records that failed verification |
 | `runs` | for a run resubmitted after `key-lost`, every run followed, the run whose outcome this is last |

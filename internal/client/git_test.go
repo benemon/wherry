@@ -379,7 +379,9 @@ func TestSubmitGitVersionRetried(t *testing.T) {
 }
 
 // gitShim is a git stand-in first on PATH: it records every call's argv and environment under dir and answers from the
-// files the test writes there.
+// files the test writes there. Its fetch stands for git's: it leaves the refspec's source as the branch's commit, which
+// the next rev-parse of refs/heads/wherry/<run> answers with, or the commit in fetchlands; with fetchwait present it
+// writes fetching and waits for go first; update-ref -d removes the branch.
 type gitShim struct {
 	dir string
 }
@@ -415,7 +417,10 @@ case "$sub" in
   ls-remote) case "$*" in *--symref*) cat "$d/symref";; *) cat "$d/heads";; esac;;
   cat-file) exit $(cat "$d/catfile" 2>/dev/null || echo 0);;
   merge-base) exit $(cat "$d/mergebase" 2>/dev/null || echo 1);;
-  fetch) exit $(cat "$d/fetch" 2>/dev/null || echo 0);;
+  fetch) touch "$d/fetching"; if [ -f "$d/fetchwait" ]; then while [ ! -f "$d/go" ]; do sleep 0.05; done; fi
+    for a in "$@"; do :; done; src=${a%%:*}; [ -f "$d/fetchlands" ] && src=$(cat "$d/fetchlands"); echo "$src" > "$d/wherryref"
+    exit $(cat "$d/fetch" 2>/dev/null || echo 0);;
+  update-ref) rm -f "$d/wherryref";;
   *) exit 1;;
 esac
 `

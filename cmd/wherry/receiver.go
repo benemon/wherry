@@ -46,15 +46,23 @@ const (
 	defaultDrainTimeout   = 20 * time.Second
 )
 
-// platformBundle is where the receiver's platform puts its bundle: $CREDENTIALS_DIRECTORY/bundle under systemd,
-// $NOMAD_SECRETS_DIR/receiver.bundle under Nomad, else the Kubernetes Secret mount. The variable that is set decides,
-// and a bundle missing there is refused naming the path; another platform's path is not tried.
+// inNomadTask reports whether the receiver runs inside a Nomad task, by $NOMAD_SECRETS_DIR, which Nomad sets in a task
+// alone. It is looked at before systemd's variables: a Nomad exec task inherits the Nomad client's environment, and a
+// client run as a systemd unit with LoadCredential= or StateDirectory= passes $CREDENTIALS_DIRECTORY and
+// $STATE_DIRECTORY on, which name the client's directories, not the task's.
+func inNomadTask() bool {
+	return os.Getenv("NOMAD_SECRETS_DIR") != ""
+}
+
+// platformBundle is where the receiver's platform puts its bundle: $NOMAD_SECRETS_DIR/receiver.bundle inside a Nomad
+// task, else $CREDENTIALS_DIRECTORY/bundle under systemd, else the Kubernetes Secret mount. The innermost platform
+// decides, and a bundle missing at its path is refused naming the path; another platform's path is not tried.
 func platformBundle() (string, error) {
 	path := defaultBundle
-	if dir := os.Getenv("CREDENTIALS_DIRECTORY"); dir != "" {
+	if inNomadTask() {
+		path = filepath.Join(os.Getenv("NOMAD_SECRETS_DIR"), "receiver.bundle")
+	} else if dir := os.Getenv("CREDENTIALS_DIRECTORY"); dir != "" {
 		path = filepath.Join(dir, "bundle")
-	} else if dir := os.Getenv("NOMAD_SECRETS_DIR"); dir != "" {
-		path = filepath.Join(dir, "receiver.bundle")
 	}
 	if _, err := os.Stat(path); err != nil {
 		return "", fmt.Errorf("%w; put the receiver's bundle there, or name a configuration file with --config-file", err)
@@ -62,14 +70,21 @@ func platformBundle() (string, error) {
 	return path, nil
 }
 
-// platformStateDir is where the receiver keeps its state without a configured state_dir: state under the first of
-// systemd's $STATE_DIRECTORY, else defaultStateDir.
+// platformStateDir is where the receiver keeps its state without a configured state_dir: defaultStateDir, the
+// examples' volume, inside a Nomad task; else state under the first of systemd's $STATE_DIRECTORY; else defaultStateDir.
 func platformStateDir() string {
-	if dirs := os.Getenv("STATE_DIRECTORY"); dirs != "" {
+	if dirs := os.Getenv("STATE_DIRECTORY"); dirs != "" && !inNomadTask() {
 		first, _, _ := strings.Cut(dirs, ":")
 		return filepath.Join(first, "state")
 	}
 	return defaultStateDir
+}
+
+// filelessCA is where a receiver without a file sets ca_cert, for the hint on an unknown authority: a new file at the
+// default path, which then gives every field a file's meaning, so the hint names what else it must hold for the
+// receiver to go on as it did, bundle, found at the platform's path, among them should it move.
+func filelessCA(bundle string) operator.CASetting {
+	return operator.CASetting{File: defaultReceiverConfig, Also: "a new file there gives every field a file's meaning, so set metrics_addr: \":9464\" and drain_timeout: 20s in it too, and bundle unless it stays at " + bundle}
 }
 
 // filelessConfig is the receiver's configuration without a file: the bundle and state directory where its platform
@@ -190,16 +205,19 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	// Without --config-file and without the default file, the platform's paths and the defaults configure the receiver.
 	var config receiverLocalConfig
 	var roots *x509.CertPool
+	// Where ca_cert lives, for the hint on an unknown authority: the file read, or the new file a receiver without one
+	// would read.
+	var ca operator.CASetting
 	if _, err := os.Stat(*configPath); !wasSet(flags, "config-file") && errors.Is(err, fs.ErrNotExist) {
 		if config, err = filelessConfig(); err != nil {
 			return err
 		}
+		ca = filelessCA(config.Bundle)
 	} else if config, roots, err = loadReceiverLocalConfig(*configPath); err != nil {
 		return err
+	} else {
+		ca = operator.CASetting{File: *configPath, Set: config.CACert != ""}
 	}
-	// Where ca_cert lives, for the hint on an unknown authority: the file --config-file names, or the default a receiver
-	// without one would read.
-	ca := operator.CASetting{File: *configPath, Set: config.CACert != ""}
 	bundle, err := operator.ReadBundle(config.Bundle)
 	if err != nil {
 		return err

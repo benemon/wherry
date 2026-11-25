@@ -34,9 +34,11 @@ func receiverCredentials(config operator.ReceiverConfig) []string {
 }
 
 // receiverLocalWritten is the local configuration apply writes: a source for each platform credential the profiles
-// name, with the metrics address and drain timeout a receiver without a file gets, so the file changes nothing else.
-// The bundle, state and plugin directories are left to the receiver's platform.
+// name, with the plugin directory, metrics address and drain timeout a receiver without a file gets, so the file
+// changes nothing else; the plugin directory is written out so a receiver whose plugins are elsewhere, a Nomad exec or
+// systemd one, has the line to change. The bundle and state directory are left to the receiver's platform.
 type receiverLocalWritten struct {
+	PluginDir    string                       `yaml:"plugin_dir"`
 	MetricsAddr  string                       `yaml:"metrics_addr"`
 	DrainTimeout time.Duration                `yaml:"drain_timeout"`
 	Credentials  map[string]credential.Source `yaml:"credentials"`
@@ -87,7 +89,7 @@ func receiverLocalFile(ctx context.Context, dir, name, receiverPath string, dire
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
 		}
-		encoded, err := yaml.Marshal(receiverLocalWritten{MetricsAddr: defaultMetricsAddr, DrainTimeout: defaultDrainTimeout, Credentials: sources})
+		encoded, err := yaml.Marshal(receiverLocalWritten{PluginDir: defaultPluginDir, MetricsAddr: defaultMetricsAddr, DrainTimeout: defaultDrainTimeout, Credentials: sources})
 		if err != nil {
 			return err
 		}

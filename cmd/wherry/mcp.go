@@ -277,7 +277,7 @@ type waitReply struct {
 	Outputs     []outputReply           `json:"outputs,omitempty" jsonschema:"the run's outputs, verified and written locally"`
 	NotReturned []wire.UnreturnedOutput `json:"not_returned,omitempty" jsonschema:"outputs the run did not return or this host could not verify, each with its reason"`
 	FetchedRef  string                  `json:"fetched_ref,omitempty" jsonschema:"for a run submitted with git remote . whose changes.bundle came back: the branch, wherry/<run>, the bundle was fetched into in that repository, to merge from; the working tree, index and HEAD are untouched"`
-	NotFetched  string                  `json:"not_fetched,omitempty" jsonschema:"for such a run, why the bundle was not fetched: exists (wherry/<run> names another commit and was left alone), no git, no repository, git refused or unreadable bundle; the bundle at its output path can be fetched by hand with git fetch <path> HEAD"`
+	NotFetched  string                  `json:"not_fetched,omitempty" jsonschema:"for such a run, why the bundle was not fetched: exists (wherry/<run> names another commit and was left alone), no git, no repository, git refused, unreadable bundle, wrong commit or timeout; the bundle at its output path can be fetched by hand with git fetch <path> HEAD"`
 	Redacted    map[string]int          `json:"redacted,omitempty" jsonschema:"redaction markers in the message and artifacts by the credential or S3 object each names"`
 	Skipped     int                     `json:"skipped,omitempty"`
 	Runs        []string                `json:"runs,omitempty" jsonschema:"set when the run lost its pool key before it started and was resubmitted: every run followed, the run whose outcome this is last"`

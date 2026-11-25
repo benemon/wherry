@@ -39,7 +39,8 @@ The Variable default is the credential name in upper case, with characters outsi
 File path has no default.
 Wherry shows why it refuses an answer on the same page, and you correct it and continue.
 Ctrl-C or end of input writes no local configuration and records no receiver; a receiver file generated before these questions remains.
-The written file holds the sources, with `metrics_addr: ":9464"` and `drain_timeout: 20s`, the values a receiver without a file takes, so it changes nothing else; its bundle, state and plugin directories are the [defaults](#without-a-file).
+The written file holds the sources, with `plugin_dir: /usr/local/libexec/wherry/plugins`, `metrics_addr: ":9464"` and `drain_timeout: 20s`, the values a receiver without a file takes, so it changes nothing else; its bundle and state directory are the [defaults](#without-a-file).
+A systemd or Nomad exec receiver changes `plugin_dir` to `/usr/local/libexec/wherry/current/plugins`, as the examples have it.
 Wherry asks nothing about the broker's CA and writes no CA setting: the receiver's machine trusts the broker through its trust store.
 Only the file can set `drain_timeout: 0s`, an empty `metrics_addr` or a `command` credential source.
 Every credential named by a profile must have a source.
@@ -48,12 +49,13 @@ Standard output keeps the receiver record format.
 
 ### The plugin examples
 
-The Kubernetes and Nomad docker examples on
-[wherry-plugins main](https://github.com/benemon/wherry-plugins/tree/main/examples)
-run without a file: their bundle and state paths are the defaults, and their receivers name no platform credential.
-The systemd example and Nomad exec's `examples/nomad/config-host.yaml` keep a file for their `plugin_dir`, `/usr/local/libexec/wherry/<version>/plugins`; replace `<version>` with the version you installed.
-A receiver verifies the broker and its pool's bucket against its machine's trust store plus the `ca_cert` of this file
-([Broker and S3 trust](security.md#broker-and-s3-trust)); on OpenShift the CA goes in this file as `ca_cert`.
+Of the examples on
+[wherry-plugins main](https://github.com/benemon/wherry-plugins/tree/main/examples),
+the Kubernetes and Nomad docker configurations can run without a file: their bundle and state paths are the defaults, and their receivers name no platform credential.
+Today every example ships a `config.yaml` and passes `--config-file`; a follow-up to wherry-plugins drops the file from those two.
+The systemd example and Nomad exec's `examples/nomad/config-host.yaml` keep a file for their `plugin_dir`, `/usr/local/libexec/wherry/current/plugins`, which stays right across an upgrade.
+A receiver verifies the broker and its pool's bucket against its machine's trust store plus the `ca_cert` of its file
+([Broker and S3 trust](security.md#broker-and-s3-trust)); on OpenShift the CA goes in a file as `ca_cert`, with the fields [a new file must also set](#without-a-file).
 
 ### Where wherry looks for the file
 
@@ -72,14 +74,17 @@ A file that leaves `bundle` out takes the bundle path below, and one that leaves
 
 | Setting | Value |
 | --- | --- |
-| Bundle | `$CREDENTIALS_DIRECTORY/bundle` when systemd's `CREDENTIALS_DIRECTORY` is set; else `$NOMAD_SECRETS_DIR/receiver.bundle` when Nomad's `NOMAD_SECRETS_DIR` is set; else `/etc/wherry/bundle/bundle.yaml`, the Kubernetes example's Secret mount |
-| State directory | `state` under the first path of systemd's `STATE_DIRECTORY` when set; else `/var/lib/wherry/state` |
+| Bundle | `$NOMAD_SECRETS_DIR/receiver.bundle` when Nomad's `NOMAD_SECRETS_DIR` is set; else `$CREDENTIALS_DIRECTORY/bundle` when systemd's `CREDENTIALS_DIRECTORY` is set; else `/etc/wherry/bundle/bundle.yaml`, the Kubernetes example's Secret mount |
+| State directory | `/var/lib/wherry/state`, the examples' volume, when `NOMAD_SECRETS_DIR` is set; else `state` under the first path of systemd's `STATE_DIRECTORY` when set; else `/var/lib/wherry/state` |
 | Plugin directory | `/usr/local/libexec/wherry/plugins` |
 | Drain timeout | `20s`, which ends a stop within 25 seconds of the signal, inside a 30-second stop window |
 | Metrics | `/metrics` on `:9464` |
 | Credentials, `ca_cert`, tracing | none |
 
-The variable that is set decides the bundle path, and the receiver refuses to start when nothing is there, naming the path and `--config-file`; it does not try another platform's path.
+The innermost platform decides the bundle and state paths: Nomad sets `NOMAD_SECRETS_DIR` inside a task alone, while an exec task inherits the Nomad client's environment, a systemd unit's `CREDENTIALS_DIRECTORY` and `STATE_DIRECTORY` among it, so Nomad's paths win over systemd's.
+The receiver refuses to start when nothing is at the bundle path, naming the path and `--config-file`; it does not try another platform's path.
+A receiver without a file that must trust a private CA writes `/etc/wherry/config.yaml` with `ca_cert`, and that file gives every field a file's meaning: set `metrics_addr: ":9464"` and `drain_timeout: 20s` in it too, and `bundle` unless the bundle stays where the platform puts it.
+The receiver's hint on an unknown authority says the same.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |

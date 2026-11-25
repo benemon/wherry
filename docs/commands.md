@@ -953,7 +953,8 @@ ends the message.
 without that file, the receiver runs [without a
 file](configuration-receiver.md#without-a-file), reading its bundle where
 its platform puts it, and refuses to start naming the path when nothing is
-there. It creates the
+there; its hint on an unknown authority then names the new file and the
+fields the file must also set. It creates the
 configuration's `state_dir` with mode 0700 and keeps `signing.key`, a
 private JWK with mode 0600, in it, and in `pool-keys/` one file with mode
 0600 per pool key it holds: the private JWK, its creation time, the append
@@ -1517,7 +1518,11 @@ configuration, no `GIT_*` or `SSH_*` variable and no credential helper,
 runs no hook, file system monitor or gc, never prompts, and inherits only
 `PATH`, `TMPDIR`, `LANG`, `LC_ALL` and the proxy variables; in the
 repository it reads the repository's own configuration, with
-`safe.directory` set to the repository alone. `git ls-remote` uses the
+`safe.directory` set to the repository alone. Every command refuses every
+transport but `file`, `ext`, which runs a program, among those refused, so a
+`url.<base>.insteadOf` in the repository's configuration sends no command
+anywhere it can run or reach; `git ls-remote` alone is allowed `https` and
+`ssh`. `git ls-remote` uses the
 matched `git` entry's credential: an `https` token as a `Basic`
 `Authorization` header for the user `x-access-token`, passed through the
 environment, which needs `git` 2.31 or later, refused otherwise naming the
@@ -1818,24 +1823,36 @@ holds, as the branch `wherry/<run>`, and prints
 `fetched into wherry/<run>: git merge wherry/<run>` in place of the
 `fetch with` line; `<run>` is the run whose bundle it is, the last of a
 resubmitted run's replacements. The working tree, the index and `HEAD` are
-untouched, and `git merge wherry/<run>`, from the directory `submit` ran in,
-is the next step. The fetch is
+untouched, and `git merge wherry/<run>`, from any directory of that
+repository, is the next step. The fetch is
 `git -c fetch.fsckObjects=true -c maintenance.auto=false fetch --no-tags
---no-recurse-submodules <path> HEAD:refs/heads/wherry/<run>`, run as
+--no-recurse-submodules <path> <head>:refs/heads/wherry/<run>`, `<head>` the
+commit the bundle's header names, run as
 [`--git .`](#wherry-host-submit) runs git, with the repository alone as a
-safe directory and no repository above it found, so it imports the one ref,
-checks every object whatever the repository's own `fetch.fsckObjects` says,
-and runs no hook. A `wherry/<run>` that exists is created once and never
+safe directory, no repository above it found and no transport but `file`,
+so it imports that one commit or nothing, wherever a `url.<base>.insteadOf`
+in the repository's configuration sends the path, fetches nothing for a
+submodule or a tag, and runs no hook; the branch is then read back and must
+name `<head>`. It turns `fetch.fsckObjects` on over a repository's
+`fetch.fsckObjects=false`; the check honours the repository's own
+`fetch.fsck.<msg-id>` and `fetch.fsck.skipList` exceptions, which no
+command line setting covers. `result` holds the run's local lock from the
+check before the fetch to the one after, so two `result` calls for one run
+take turns. A `wherry/<run>` that exists is created once and never
 moved: at the bundle's head there is nothing to do, and `result` prints the
 same line; at any other commit, an ancestor of the head included, it is left
 and `result` prints `not fetched (exists); fetch with: git fetch <path> HEAD`
 and exits as it would have. Any other failure prints the same line with its
 reason, `no git` (none on `PATH`, or older than 2.45), `no repository` (the
 recorded directory gone, or no longer a repository), `git refused` (a
-prerequisite the repository lacks, a corrupt object, the branch checked out)
-or `unreadable bundle`, never git's output; the collect still succeeds, and
-the bundle at `<path>` is fetched by hand. A run submitted with `--git URL`
-records no repository, and `result` prints the `fetch with` line alone.
+prerequisite the repository lacks, a corrupt object, a rewritten path),
+`unreadable bundle`, `wrong commit` (the branch the fetch made named another
+commit, and was deleted) or `timeout` (the fetch, its checks included, did
+not end within 10 minutes), never git's output; the collect still succeeds,
+and the bundle at `<path>` is fetched by hand. A refused fetch may leave
+unreferenced objects in the repository, which `git gc` removes. A run
+submitted with `--git URL` records no repository, and `result` prints the
+`fetch with` line alone.
 No expected output takes the name `reply.txt`, and a file of that name the
 agent leaves is listed as not returned, `rejected: reserved name`.
 

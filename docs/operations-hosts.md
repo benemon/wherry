@@ -352,8 +352,12 @@ Review the branch, merge it, and delete it. The branch is never moved: a
 `not fetched (exists); fetch with: git fetch <path> HEAD`, and so is a
 repository that is gone or a bundle git refuses, each with its reason, while
 the bundle stays at its output path
-([`result`](commands.md#wherry-host-result-run-id)). The MCP `result` tool
-and `submit` with `wait` report the same in `fetched_ref` and `not_fetched`.
+([`result`](commands.md#wherry-host-result-run-id)). The fetch runs in the
+foreground of `result`, indexing the bundle with its object checks, for up
+to 10 minutes, `not fetched (timeout)` past them; a refused fetch may leave
+unreferenced objects in `.git/objects`, which `git gc` removes. The MCP
+`result` tool and `submit` with `wait` report the same in `fetched_ref` and
+`not_fetched`.
 To
 build on a run's commits in a new run, `wherry host submit --continue RUN_ID`
 reuses its repository and continues from the `changes.bundle` that `result`

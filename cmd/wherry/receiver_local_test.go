@@ -118,11 +118,11 @@ func TestReceiverLocalFullFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "metrics_addr: :9464\ndrain_timeout: 20s\ncredentials:\n    kube-token:\n        env: KUBE_TOKEN\n    nomad-token:\n        file: /run/secrets/nomad\n"
+	want := "plugin_dir: /usr/local/libexec/wherry/plugins\nmetrics_addr: :9464\ndrain_timeout: 20s\ncredentials:\n    kube-token:\n        env: KUBE_TOKEN\n    nomad-token:\n        file: /run/secrets/nomad\n"
 	if string(data) != want {
 		t.Fatalf("YAML: got\n%s\nwant\n%s", data, want)
 	}
-	expected := receiverLocalConfig{MetricsAddr: ":9464", DrainTimeout: 20 * time.Second, Credentials: map[string]credential.Source{"kube-token": {Env: "KUBE_TOKEN"}, "nomad-token": {File: "/run/secrets/nomad"}}}
+	expected := receiverLocalConfig{PluginDir: defaultPluginDir, MetricsAddr: ":9464", DrainTimeout: 20 * time.Second, Credentials: map[string]credential.Source{"kube-token": {Env: "KUBE_TOKEN"}, "nomad-token": {File: "/run/secrets/nomad"}}}
 	if local, _, err := readReceiverLocalConfig(path); err != nil || !reflect.DeepEqual(local, expected) {
 		t.Fatalf("read back: %+v, %v", local, err)
 	}
@@ -405,7 +405,7 @@ func TestReceiverApplyAsksForCredentialsAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	written, err := os.ReadFile(filepath.Join("receivers", "r.config.yaml"))
-	if want := "metrics_addr: :9464\ndrain_timeout: 20s\ncredentials:\n    nomad-token:\n        env: NOMAD_TOKEN\n"; err != nil || string(written) != want {
+	if want := "plugin_dir: /usr/local/libexec/wherry/plugins\nmetrics_addr: :9464\ndrain_timeout: 20s\ncredentials:\n    nomad-token:\n        env: NOMAD_TOKEN\n"; err != nil || string(written) != want {
 		t.Fatalf("apply wrote %q, %v; want %q", written, err, want)
 	}
 	if lines := collapsedLines(out.String()); !reflect.DeepEqual(lines, []string{"? Credential nomad-token  Environment variable NOMAD_TOKEN"}) {

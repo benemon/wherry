@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/benemon/wherry/internal/wire"
 )
@@ -19,9 +20,19 @@ import (
 // variable, or a configuration under HOME, could redirect the remote, run a program or record a token.
 var gitInherited = []string{"PATH", "TMPDIR", "LANG", "LC_ALL", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy"}
 
-// gitSettings go on every command line: no hooks, no file system monitor, no gc and no credential helper, whatever the
-// repository's configuration says.
-var gitSettings = []string{"core.hooksPath=/dev/null", "core.fsmonitor=false", "gc.auto=0", "credential.helper="}
+// gitSettings go on every command line: no hooks, no file system monitor, no gc, no credential helper and no transport
+// but file, whatever the repository's configuration says. A url.<base>.insteadOf in that configuration rewrites a path
+// given on the command line, a bundle's included; protocol.allow=never refuses every transport the rewrite could name
+// that has no key of its own, and the keys name the ones that matter, since a repository's protocol.<name>.allow beats
+// protocol.allow as the more specific key: file, which a bundle path counts as, allowed; ext, which runs a program,
+// and git's own network protocols refused. The last -c of a key wins, which is how remoteSettings lets ls-remote reach
+// a remote.
+var gitSettings = []string{"core.hooksPath=/dev/null", "core.fsmonitor=false", "gc.auto=0", "credential.helper=",
+	"protocol.allow=never", "protocol.file.allow=always", "protocol.ext.allow=never", "protocol.https.allow=never", "protocol.ssh.allow=never", "protocol.http.allow=never", "protocol.git.allow=never"}
+
+// remoteSettings go on ls-remote alone, the one command that reaches a remote, after gitSettings: https and ssh, the
+// protocols a remote may use.
+var remoteSettings = []string{"protocol.https.allow=always", "protocol.ssh.allow=always"}
 
 // ParseGit splits a --git value into its remote and ref: "." is the current repository, with no ref; otherwise the text
 // before the last @ is the remote when it is one, and the rest the ref; else the whole value is an unpinned remote, so
@@ -142,6 +153,9 @@ func (g *hostGit) run(dir string, args ...string) (string, error) {
 	command := exec.CommandContext(g.ctx, "git", argv...)
 	var stdout bytes.Buffer
 	command.Dir, command.Env, command.Stdout = dir, g.environment(dir), &stdout
+	// A git killed at its context's end can leave a child, such as the index-pack of a fetch, holding its stdout; Run
+	// waits this long for it and no longer.
+	command.WaitDelay = 5 * time.Second
 	err := command.Run()
 	var exit *exec.ExitError
 	switch {
@@ -151,6 +165,15 @@ func (g *hostGit) run(dir string, args ...string) (string, error) {
 		return "", fmt.Errorf("git %s: %w", subcommand(args), err)
 	}
 	return stdout.String(), nil
+}
+
+// lsRemote runs ls-remote with args in scratch, the one command allowed https and ssh.
+func (g *hostGit) lsRemote(args ...string) (string, error) {
+	argv := make([]string, 0, 2*len(remoteSettings)+1+len(args))
+	for _, setting := range remoteSettings {
+		argv = append(argv, "-c", setting)
+	}
+	return g.run(g.scratch, append(append(argv, "ls-remote"), args...)...)
 }
 
 // subcommand is the git subcommand in args, after any -c settings of its own.
@@ -221,7 +244,7 @@ func (g *hostGit) current() (currentRepo, error) {
 // the repository holds. There is no fetch, so a tip the repository lacks is not checked. A remote-tracking ref says
 // nothing: its branch may be gone from the remote.
 func (g *hostGit) onRemote(remote, commit string) (bool, error) {
-	out, err := g.run(g.scratch, "ls-remote", "--heads", "--tags", remote)
+	out, err := g.lsRemote("--heads", "--tags", remote)
 	if err != nil {
 		return false, err
 	}
@@ -256,7 +279,7 @@ func (g *hostGit) onRemote(remote, commit string) (bool, error) {
 // defaultHead is the commit the remote's HEAD names: the ls-remote --symref line whose ref is exactly HEAD. A remote
 // whose HEAD names no commit, as an empty repository's does, has none.
 func (g *hostGit) defaultHead(remote string) (string, error) {
-	out, err := g.run(g.scratch, "ls-remote", "--symref", remote, "HEAD")
+	out, err := g.lsRemote("--symref", remote, "HEAD")
 	if err != nil {
 		return "", err
 	}
