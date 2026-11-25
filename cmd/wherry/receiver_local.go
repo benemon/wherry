@@ -33,10 +33,21 @@ func receiverCredentials(config operator.ReceiverConfig) []string {
 	return result
 }
 
-const receiverLocalFields = "bundle, state_dir, plugin_dir, metrics_addr, drain_timeout and credentials"
+// receiverLocalWritten is the local configuration apply writes: a source for each platform credential the profiles
+// name, with the plugin directory, metrics address and drain timeout a receiver without a file gets, so the file
+// changes nothing else; the plugin directory is written out so a receiver whose plugins are elsewhere, a Nomad exec or
+// systemd one, has the line to change. The bundle and state directory are left to the receiver's platform.
+type receiverLocalWritten struct {
+	PluginDir    string                       `yaml:"plugin_dir"`
+	MetricsAddr  string                       `yaml:"metrics_addr"`
+	DrainTimeout time.Duration                `yaml:"drain_timeout"`
+	Credentials  map[string]credential.Source `yaml:"credentials"`
+}
 
-// receiverLocalFile finds, or asks for and writes, the receiver's local configuration and checks it against config. The
-// broker's CA is not asked for: the receiver's machine trusts it through its system roots.
+// receiverLocalFile checks a kept local configuration against config, or, when the profiles name a platform
+// credential and no file is kept, asks for a source for each and writes the file. With no credential named it writes
+// nothing: the receiver runs without a file. The broker's CA is not asked for: the receiver's machine trusts it through
+// its system roots.
 func receiverLocalFile(ctx context.Context, dir, name, receiverPath string, directory, dryRun bool, out io.Writer, config operator.ReceiverConfig) error {
 	path := filepath.Join(dir, "receivers", name+".config.yaml")
 	if directory {
@@ -51,28 +62,34 @@ func receiverLocalFile(ctx context.Context, dir, name, receiverPath string, dire
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	var local receiverLocalConfig
+	names := receiverCredentials(config)
+	var sources map[string]credential.Source
 	if err == nil {
-		local, _, err = loadReceiverLocalConfig(path)
+		local, _, err := readReceiverLocalConfig(path)
 		if err != nil {
 			return fmt.Errorf("%s: %w", path, err)
 		}
+		sources = local.Credentials
 	} else {
+		if len(names) == 0 {
+			fmt.Fprintf(out, "%s is absent and no profile names a platform credential; the receiver runs without a file\n", path)
+			return nil
+		}
 		if dryRun {
-			fmt.Fprintf(out, "%s is absent; apply will ask for local configuration\n", path)
+			fmt.Fprintf(out, "%s is absent; apply will ask for a source for each platform credential\n", path)
 			return nil
 		}
 		if !promptsEligible(out) {
-			return fmt.Errorf("%s does not exist and there is no terminal to prompt on; write it with %s", path, receiverLocalFields)
+			return fmt.Errorf("%s does not exist and there is no terminal to prompt on; write it with a credentials source for %s", path, strings.Join(names, ", "))
 		}
-		local, err = promptReceiverLocal(&questions{ctx, stdin, &promptLatch{out: out}}, config)
+		sources, err = promptReceiverCredentials(&questions{ctx, stdin, &promptLatch{out: out}}, names)
 		if err != nil {
 			return presentationError{err}
 		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
 		}
-		encoded, err := yaml.Marshal(local)
+		encoded, err := yaml.Marshal(receiverLocalWritten{PluginDir: defaultPluginDir, MetricsAddr: defaultMetricsAddr, DrainTimeout: defaultDrainTimeout, Credentials: sources})
 		if err != nil {
 			return err
 		}
@@ -82,8 +99,8 @@ func receiverLocalFile(ctx context.Context, dir, name, receiverPath string, dire
 		}
 		fmt.Fprintf(out, "wrote %s\n", path)
 	}
-	for _, name := range receiverCredentials(config) {
-		if _, ok := local.Credentials[name]; !ok {
+	for _, name := range names {
+		if _, ok := sources[name]; !ok {
 			return fmt.Errorf("%s: missing credential source %s", path, name)
 		}
 	}
@@ -96,82 +113,25 @@ func receiverLocalFile(ctx context.Context, dir, name, receiverPath string, dire
 var receiverEnv = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var receiverEnvOther = regexp.MustCompile(`[^A-Z0-9_]`)
 
-func promptReceiverLocal(q *questions, config operator.ReceiverConfig) (receiverLocalConfig, error) {
-	local := receiverLocalConfig{Credentials: map[string]credential.Source{}}
-	kinds := map[string]bool{}
-	for _, profile := range config.Profiles {
-		kinds[profile.Plugin] = true
-	}
-	margin := max(10*time.Second, 6*time.Second+2*time.Second*time.Duration(len(kinds)))
-	// Receiver-host values get no completion and no local checks.
+// promptReceiverCredentials asks for a source for each of names, in order. Receiver-host values get no completion and
+// no local checks.
+func promptReceiverCredentials(q *questions, names []string) (map[string]credential.Source, error) {
+	sources := map[string]credential.Source{}
 	input := func(label, initial string, validate func(string) error) (string, error) {
 		return q.input(label, "", initial, "", validate)
 	}
-	notBlank := func(what string) func(string) error {
-		return func(s string) error {
-			if s == "" {
-				return errors.New(what + " must not be blank")
-			}
-			return nil
-		}
-	}
-	asked := func(label, initial string, validate func(string) error) (string, error) {
-		return q.ask(label, "", initial, "", validate)
-	}
-	if err := q.line("\nReceiver host\n"); err != nil {
-		return local, err
-	}
-	var err error
-	if local.Bundle, err = asked("Bundle path", "/etc/wherry/receiver.bundle", notBlank("bundle path")); err != nil {
-		return local, err
-	}
-	if local.StateDir, err = asked("State directory (must survive restarts)", "/var/lib/wherry/state", notBlank("state directory")); err != nil {
-		return local, err
-	}
-	if local.PluginDir, err = asked("Plugin directory", defaultPluginDir, notBlank("plugin directory")); err != nil {
-		return local, err
-	}
-	var window time.Duration
-	if _, err := asked("Stop window (how long its platform waits before killing it)", "30s", func(s string) error {
-		var err error
-		if window, err = time.ParseDuration(s); err != nil {
-			return fmt.Errorf("stop window: %w", err)
-		}
-		if window < margin+5*time.Second {
-			return errors.New("stop window leaves less than 5s to drain; raise kill_timeout, terminationGracePeriodSeconds or TimeoutStopSec")
-		}
-		return nil
-	}); err != nil {
-		return local, err
-	}
-	local.DrainTimeout = window - margin
-	metrics := "listen"
-	if _, err := q.pick("Metrics", "", []huh.Option[string]{option("Listen on an address", "listen"), option("No listener", "none")}, &metrics); err != nil {
-		return local, err
-	}
-	answer := "No listener"
-	if metrics == "listen" {
-		if local.MetricsAddr, err = input("Metrics address", ":9464", notBlank("metrics address")); err != nil {
-			return local, err
-		}
-		answer = local.MetricsAddr
-	}
-	if err := q.answer("Metrics", answer); err != nil {
-		return local, err
-	}
-	names := receiverCredentials(config)
-	if len(names) > 0 {
-		if err := q.line("\nCredentials\n"); err != nil {
-			return local, err
-		}
+	if err := q.line("\nCredentials\n"); err != nil {
+		return sources, err
 	}
 	for _, name := range names {
 		label := "Credential " + name
 		kind := "env"
 		if _, err := q.pick(label, "", []huh.Option[string]{option("Environment variable", "env"), option("File", "file")}, &kind); err != nil {
-			return local, err
+			return sources, err
 		}
 		var source credential.Source
+		var answer string
+		var err error
 		if kind == "env" {
 			variable := receiverEnvOther.ReplaceAllString(strings.ToUpper(name), "_")
 			if variable[0] >= '0' && variable[0] <= '9' {
@@ -183,19 +143,24 @@ func promptReceiverLocal(q *questions, config operator.ReceiverConfig) (receiver
 				}
 				return nil
 			}); err != nil {
-				return local, err
+				return sources, err
 			}
 			answer = "Environment variable " + source.Env
 		} else {
-			if source.File, err = input("File path", "", notBlank("credential file path")); err != nil {
-				return local, err
+			if source.File, err = input("File path", "", func(s string) error {
+				if s == "" {
+					return errors.New("credential file path must not be blank")
+				}
+				return nil
+			}); err != nil {
+				return sources, err
 			}
 			answer = "File " + source.File
 		}
 		if err := q.answer(label, answer); err != nil {
-			return local, err
+			return sources, err
 		}
-		local.Credentials[name] = source
+		sources[name] = source
 	}
-	return local, nil
+	return sources, nil
 }

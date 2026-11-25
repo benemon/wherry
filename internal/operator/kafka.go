@@ -302,6 +302,9 @@ func unknownAuthority(err error) bool {
 type CASetting struct {
 	File string
 	Set  bool
+	// Also is what the hint adds after naming File, for a configuration that runs without a file today: what else a
+	// new file at File must hold. Empty for a file that exists.
+	Also string
 }
 
 // explainedError is an explanation ExplainUnknownAuthority made, so a second pass on the way out of a command leaves it
@@ -312,9 +315,9 @@ func (e *explainedError) Error() string { return e.err.Error() }
 func (e *explainedError) Unwrap() error { return e.err }
 
 // ExplainUnknownAuthority replaces err, when unknownAuthority, with what failed and the one remedy, keeping err at the
-// end: with ca's File holding no ca_cert, install the CA in the machine's trust store or set ca_cert there; with one set,
-// the certificate is signed neither by the trust store nor by that CA, so no key is asked for that is already set. Any
-// other err, an explanation already made among them, is returned as it is.
+// end: with ca's File holding no ca_cert, install the CA in the machine's trust store or set ca_cert there, with ca's
+// Also after it; with one set, the certificate is signed neither by the trust store nor by that CA, so no key is asked
+// for that is already set. Any other err, an explanation already made among them, is returned as it is.
 func ExplainUnknownAuthority(err error, ca CASetting) error {
 	var explained *explainedError
 	if !unknownAuthority(err) || errors.As(err, &explained) {
@@ -323,7 +326,11 @@ func ExplainUnknownAuthority(err error, ca CASetting) error {
 	if ca.Set {
 		return &explainedError{fmt.Errorf("cannot verify the broker's certificate: it is signed neither by this machine's trust store nor by the CA in ca_cert in %s (%w)", ca.File, err)}
 	}
-	return &explainedError{fmt.Errorf("cannot verify the broker's certificate: install the CA that signed it in this machine's trust store, or set ca_cert in %s (%w)", ca.File, err)}
+	also := ""
+	if ca.Also != "" {
+		also = "; " + ca.Also
+	}
+	return &explainedError{fmt.Errorf("cannot verify the broker's certificate: install the CA that signed it in this machine's trust store, or set ca_cert in %s%s (%w)", ca.File, also, err)}
 }
 
 var yamlLine = regexp.MustCompile(`line \d+`)

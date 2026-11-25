@@ -28,9 +28,10 @@ Choose a Kubernetes plugin release that pairs with your wherry release.
   You set up your laptop as a host on a later page.
   Run the check at the end of this page from the operator machine instead.
 - The steps copy the example `config.yaml` to `receivers/kubernetes-1.config.yaml`.
-  Without this file, `receiver apply` asks for each value instead.
-  [Receiver local configuration](configuration-receiver.md#receiver-local-configuration) lists the questions and each
-  plugin example's answers.
+  Without this file, `receiver apply` asks only for a source for each platform credential the profiles name, and
+  writes nothing when there is none.
+  [Receiver local configuration](configuration-receiver.md#receiver-local-configuration) describes the file and the
+  defaults a receiver without one takes.
 
 <!--@include: ./plugins/kubernetes/README.md#install-->
 

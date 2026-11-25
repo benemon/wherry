@@ -240,7 +240,7 @@ func (h *Host) replace(ctx context.Context, runID string, local *runRecord, now 
 	if err != nil {
 		return "", err
 	}
-	record.Signed = encoded
+	record.Signed, record.Repo = encoded, local.Repo
 	if err := h.writeRun(record); err != nil {
 		return "", err
 	}

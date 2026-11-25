@@ -379,7 +379,9 @@ func TestSubmitGitVersionRetried(t *testing.T) {
 }
 
 // gitShim is a git stand-in first on PATH: it records every call's argv and environment under dir and answers from the
-// files the test writes there.
+// files the test writes there. Its fetch stands for git's: it leaves the refspec's source as the branch's commit, which
+// the next rev-parse of refs/heads/wherry/<run> answers with, or the commit in fetchlands; with fetchwait present it
+// writes fetching and waits for go first; update-ref -d removes the branch.
 type gitShim struct {
 	dir string
 }
@@ -411,10 +413,14 @@ done
 case "$sub" in
   version) if [ -f "$d/versionfail" ]; then rm "$d/versionfail"; exit 1; fi; echo "git version ` + version + `";;
   config) cat "$d/origin";;
-  rev-parse) case "$*" in *abbrev-ref*) cat "$d/branch";; *) cat "$d/commit";; esac;;
+  rev-parse) case "$*" in *abbrev-ref*) cat "$d/branch";; *refs/heads/wherry/*) [ -f "$d/wherryref" ] && cat "$d/wherryref" || exit 1;; *) cat "$d/commit";; esac;;
   ls-remote) case "$*" in *--symref*) cat "$d/symref";; *) cat "$d/heads";; esac;;
   cat-file) exit $(cat "$d/catfile" 2>/dev/null || echo 0);;
   merge-base) exit $(cat "$d/mergebase" 2>/dev/null || echo 1);;
+  fetch) touch "$d/fetching"; if [ -f "$d/fetchwait" ]; then while [ ! -f "$d/go" ]; do sleep 0.05; done; fi
+    for a in "$@"; do :; done; src=${a%%:*}; [ -f "$d/fetchlands" ] && src=$(cat "$d/fetchlands"); echo "$src" > "$d/wherryref"
+    exit $(cat "$d/fetch" 2>/dev/null || echo 0);;
+  update-ref) rm -f "$d/wherryref";;
   *) exit 1;;
 esac
 `
@@ -565,6 +571,9 @@ func TestSubmitGitCurrentRepo(t *testing.T) {
 	if git := task.Wherry.Git; git == nil || *git != want {
 		t.Fatalf("git %+v, want %+v", git, want)
 	}
+	if local, err := f.host.localRun(submitted.RunID); err != nil || local == nil || local.Repo != top {
+		t.Fatalf("the run's record holds repo %q, %v; want %s", local.Repo, err, top)
+	}
 	calls := shim.calls(t)
 	var subs []string
 	for i, c := range calls {
@@ -604,8 +613,8 @@ func TestSubmitGitCurrentRepo(t *testing.T) {
 		if c.env["GIT_NO_LAZY_FETCH"] != "1" {
 			t.Errorf("call %d %q: environment lacks GIT_NO_LAZY_FETCH=1", i, c.sub())
 		}
-		if _, ceiling := c.env["GIT_CEILING_DIRECTORIES"]; ceiling == inRepo {
-			t.Errorf("call %d %q: GIT_CEILING_DIRECTORIES %v, want it outside the repository alone", i, c.sub(), ceiling)
+		if ceiling := c.env["GIT_CEILING_DIRECTORIES"]; ceiling == "" || inRepo && ceiling != filepath.Dir(top) {
+			t.Errorf("call %d %q: GIT_CEILING_DIRECTORIES %q, want the parent of the command's directory", i, c.sub(), ceiling)
 		}
 		if c.env["GIT_CONFIG_GLOBAL"] != "/dev/null" || c.env["GIT_CONFIG_KEY_0"] != "http.extraHeader" || c.env["GIT_CONFIG_VALUE_0"] != "" {
 			t.Errorf("call %d %q: environment %v lacks the global config and the header reset", i, c.sub(), c.env)

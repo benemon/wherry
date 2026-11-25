@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/benemon/wherry/internal/wire"
@@ -67,7 +65,7 @@ func (h *Host) continued(runID string) (continuation, error) {
 	if err != nil {
 		return continuation{}, fmt.Errorf("%w: continue: the %s collected for run %s cannot be read", ErrInvalidInput, wire.GitBundle, local.Run)
 	}
-	commit, err := bundleBase(bundle)
+	commit, _, err := bundleHeader(bundle)
 	if err != nil {
 		bundle.Close()
 		return continuation{}, fmt.Errorf("%w: continue: the %s collected for run %s %v", ErrInvalidInput, wire.GitBundle, local.Run, err)
@@ -75,67 +73,71 @@ func (h *Host) continued(runID string) (continuation, error) {
 	return continuation{last: local, bundle: bundle, commit: commit}, nil
 }
 
-// bundleBase reads a v2 or v3 git bundle's header and returns its one prerequisite, which its HEAD ref builds on.
-func bundleBase(bundle io.Reader) (string, error) {
+// bundleHeader reads a v2 or v3 git bundle's header and returns its one prerequisite and the commit its HEAD ref
+// names, which builds on the prerequisite.
+func bundleHeader(bundle io.Reader) (base, head string, err error) {
 	scanner := bufio.NewScanner(io.LimitReader(bundle, maxBundleHeader))
 	scanner.Buffer(nil, maxBundleHeader)
 	var prerequisites []string
-	var head string
 	for first := true; scanner.Scan(); first = false {
 		line := scanner.Text()
 		switch {
 		case first:
 			if line != "# v2 git bundle" && line != "# v3 git bundle" {
-				return "", errors.New("is not a v2 or v3 git bundle")
+				return "", "", errors.New("is not a v2 or v3 git bundle")
 			}
 		case line == "":
 			if len(prerequisites) != 1 || head == "" || head == prerequisites[0] {
-				return "", errors.New("needs exactly one prerequisite and a HEAD ref other than it")
+				return "", "", errors.New("needs exactly one prerequisite and a HEAD ref other than it")
 			}
-			return prerequisites[0], nil
+			return prerequisites[0], head, nil
 		case strings.HasPrefix(line, "@"):
 		case strings.HasPrefix(line, "-"):
 			commit, _, _ := strings.Cut(line[1:], " ")
 			if !wire.ValidCommit(commit) {
-				return "", errors.New("has a malformed prerequisite")
+				return "", "", errors.New("has a malformed prerequisite")
 			}
 			prerequisites = append(prerequisites, commit)
 		default:
 			oid, ref, _ := strings.Cut(line, " ")
 			if ref == "HEAD" {
 				if !wire.ValidCommit(oid) {
-					return "", errors.New("has a malformed HEAD ref")
+					return "", "", errors.New("has a malformed HEAD ref")
 				}
 				head = oid
 			}
 		}
 	}
-	return "", errors.New("has no header end within 64 KiB")
+	return "", "", errors.New("has no header end within 64 KiB")
 }
 
-// recordBundle records the changes.bundle among outputs in the local record of the last of runs, holding its lock and
-// that of the run it replaces, under which a replacement's record is written. Without one the record keeps the bundle
-// it holds.
-func (h *Host) recordBundle(ctx context.Context, runs []string, outputs []Output) error {
-	i := slices.IndexFunc(outputs, func(output Output) bool { return output.Name == wire.GitBundle })
-	if i < 0 {
-		return nil
+// lockRuns takes the lock of each of runs, in order, and returns the release of all of them.
+func (h *Host) lockRuns(ctx context.Context, runs []string) (func(), error) {
+	var unlocks []func()
+	release := func() {
+		for i := len(unlocks) - 1; i >= 0; i-- {
+			unlocks[i]()
+		}
 	}
-	path, err := filepath.Abs(outputs[i].Path)
-	if err != nil {
-		return err
-	}
-	for _, run := range runs[max(len(runs)-2, 0):] {
+	for _, run := range runs {
 		unlock, err := h.lockRun(ctx, run)
 		if err != nil {
-			return err
+			release()
+			return nil, err
 		}
-		defer unlock()
+		unlocks = append(unlocks, unlock)
 	}
+	return release, nil
+}
+
+// recordBundle records bundle, the collected changes.bundle at the absolute path, in the local record of the last of
+// runs, and returns the record. The caller holds that run's lock and that of the run it replaces, under which a
+// replacement's record is written. Without a record, or when it cannot be written, the record keeps the bundle it holds.
+func (h *Host) recordBundle(runs []string, path string, bundle Output) (*runRecord, error) {
 	local, err := h.localRun(runs[len(runs)-1])
 	if err != nil || local == nil {
-		return err
+		return nil, err
 	}
-	local.Bundle = &collectedBundle{Path: path, Size: outputs[i].Size, SHA256: outputs[i].SHA256}
-	return h.writeRun(*local)
+	local.Bundle = &collectedBundle{Path: path, Size: bundle.Size, SHA256: bundle.SHA256}
+	return local, h.writeRun(*local)
 }

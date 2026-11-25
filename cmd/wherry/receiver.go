@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"maps"
 	"net"
@@ -35,11 +36,66 @@ import (
 )
 
 // The defaults of the receiver's local configuration; the docs and the receiver image install plugins in
-// defaultPluginDir.
+// defaultPluginDir. defaultBundle is the Kubernetes example's Secret mount, and defaultStateDir the examples' volume.
 const (
 	defaultReceiverConfig = "/etc/wherry/config.yaml"
 	defaultPluginDir      = "/usr/local/libexec/wherry/plugins"
+	defaultBundle         = "/etc/wherry/bundle/bundle.yaml"
+	defaultStateDir       = "/var/lib/wherry/state"
+	defaultMetricsAddr    = ":9464"
+	defaultDrainTimeout   = 20 * time.Second
 )
+
+// inNomadTask reports whether the receiver runs inside a Nomad task, by $NOMAD_SECRETS_DIR, which Nomad sets in a task
+// alone. It is looked at before systemd's variables: a Nomad exec task inherits the Nomad client's environment, and a
+// client run as a systemd unit with LoadCredential= or StateDirectory= passes $CREDENTIALS_DIRECTORY and
+// $STATE_DIRECTORY on, which name the client's directories, not the task's.
+func inNomadTask() bool {
+	return os.Getenv("NOMAD_SECRETS_DIR") != ""
+}
+
+// platformBundle is where the receiver's platform puts its bundle: $NOMAD_SECRETS_DIR/receiver.bundle inside a Nomad
+// task, else $CREDENTIALS_DIRECTORY/bundle under systemd, else the Kubernetes Secret mount. The innermost platform
+// decides, and a bundle missing at its path is refused naming the path; another platform's path is not tried.
+func platformBundle() (string, error) {
+	path := defaultBundle
+	if inNomadTask() {
+		path = filepath.Join(os.Getenv("NOMAD_SECRETS_DIR"), "receiver.bundle")
+	} else if dir := os.Getenv("CREDENTIALS_DIRECTORY"); dir != "" {
+		path = filepath.Join(dir, "bundle")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return "", fmt.Errorf("%w; put the receiver's bundle there, or name a configuration file with --config-file", err)
+	}
+	return path, nil
+}
+
+// platformStateDir is where the receiver keeps its state without a configured state_dir: defaultStateDir, the
+// examples' volume, inside a Nomad task; else state under the first of systemd's $STATE_DIRECTORY; else defaultStateDir.
+func platformStateDir() string {
+	if dirs := os.Getenv("STATE_DIRECTORY"); dirs != "" && !inNomadTask() {
+		first, _, _ := strings.Cut(dirs, ":")
+		return filepath.Join(first, "state")
+	}
+	return defaultStateDir
+}
+
+// filelessCA is where a receiver without a file sets ca_cert, for the hint on an unknown authority: a new file at the
+// default path, which then gives every field a file's meaning, so the hint names what else it must hold for the
+// receiver to go on as it did, bundle, found at the platform's path, among them should it move.
+func filelessCA(bundle string) operator.CASetting {
+	return operator.CASetting{File: defaultReceiverConfig, Also: "a new file there gives every field a file's meaning, so set metrics_addr: \":9464\" and drain_timeout: 20s in it too, and bundle unless it stays at " + bundle}
+}
+
+// filelessConfig is the receiver's configuration without a file: the bundle and state directory where its platform
+// puts them, the default plugin directory, a 20s drain and metrics on :9464, and no credentials, ca_cert or tracing.
+func filelessConfig() (receiverLocalConfig, error) {
+	bundle, err := platformBundle()
+	if err != nil {
+		return receiverLocalConfig{}, err
+	}
+	return receiverLocalConfig{Bundle: bundle, StateDir: platformStateDir(), PluginDir: defaultPluginDir, MetricsAddr: defaultMetricsAddr, DrainTimeout: defaultDrainTimeout}, nil
+}
 
 // receiverLocalConfig is the receiver's local configuration file. Credentials maps the name a profile's config gives
 // its platform credential to the source of its value. DrainTimeout bounds how long held runs may finish after a stop
@@ -57,10 +113,37 @@ type receiverLocalConfig struct {
 	Tracing      bool                         `yaml:"tracing,omitempty"`
 }
 
-// loadReceiverLocalConfig decodes the receiver's local configuration at path, defaulting state_dir and plugin_dir, and
-// builds the pool its ca_cert gives, the machine's trust store plus the CA, refusing a ca_cert from which Go appends
-// no certificate; the pool is built here once and carried to the dial.
+// loadReceiverLocalConfig reads the receiver's local configuration at path and fills the paths it leaves out: the
+// bundle where the platform puts it, state_dir beside a named bundle or where the platform puts it, and plugin_dir
+// the default.
 func loadReceiverLocalConfig(path string) (receiverLocalConfig, *x509.CertPool, error) {
+	config, roots, err := readReceiverLocalConfig(path)
+	if err != nil {
+		return receiverLocalConfig{}, nil, err
+	}
+	named := config.Bundle != ""
+	if !named {
+		if config.Bundle, err = platformBundle(); err != nil {
+			return receiverLocalConfig{}, nil, err
+		}
+	}
+	if config.StateDir == "" {
+		config.StateDir = platformStateDir()
+		if named {
+			config.StateDir = filepath.Join(filepath.Dir(config.Bundle), "state")
+		}
+	}
+	if config.PluginDir == "" {
+		config.PluginDir = defaultPluginDir
+	}
+	return config, roots, nil
+}
+
+// readReceiverLocalConfig decodes and checks the receiver's local configuration at path, as receiver apply does on the
+// operator's machine, and builds the pool its ca_cert gives, the machine's trust store plus the CA, refusing a ca_cert
+// from which Go appends no certificate; the pool is built here once and carried to the dial. The paths the file leaves
+// out stay empty.
+func readReceiverLocalConfig(path string) (receiverLocalConfig, *x509.CertPool, error) {
 	path, err := client.ExpandHome(path)
 	if err != nil {
 		return receiverLocalConfig{}, nil, err
@@ -76,9 +159,6 @@ func loadReceiverLocalConfig(path string) (receiverLocalConfig, *x509.CertPool, 
 	if err := operator.DecodeYAML(encoded, &config); err != nil {
 		return receiverLocalConfig{}, nil, fmt.Errorf("decode config: %w", err)
 	}
-	if config.Bundle == "" {
-		return receiverLocalConfig{}, nil, errors.New("config requires bundle")
-	}
 	roots, err := operator.ConfigRootPool(path, config.CACert)
 	if err != nil {
 		return receiverLocalConfig{}, nil, err
@@ -90,12 +170,6 @@ func loadReceiverLocalConfig(path string) (receiverLocalConfig, *x509.CertPool, 
 		if *path, err = client.ExpandHome(*path); err != nil {
 			return receiverLocalConfig{}, nil, err
 		}
-	}
-	if config.StateDir == "" {
-		config.StateDir = filepath.Join(filepath.Dir(config.Bundle), "state")
-	}
-	if config.PluginDir == "" {
-		config.PluginDir = defaultPluginDir
 	}
 	for name, source := range config.Credentials {
 		if err := source.Validate(); err != nil {
@@ -128,12 +202,22 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	if flags.NArg() != 0 {
 		return errors.New(usage)
 	}
-	config, roots, err := loadReceiverLocalConfig(*configPath)
-	if err != nil {
+	// Without --config-file and without the default file, the platform's paths and the defaults configure the receiver.
+	var config receiverLocalConfig
+	var roots *x509.CertPool
+	// Where ca_cert lives, for the hint on an unknown authority: the file read, or the new file a receiver without one
+	// would read.
+	var ca operator.CASetting
+	if _, err := os.Stat(*configPath); !wasSet(flags, "config-file") && errors.Is(err, fs.ErrNotExist) {
+		if config, err = filelessConfig(); err != nil {
+			return err
+		}
+		ca = filelessCA(config.Bundle)
+	} else if config, roots, err = loadReceiverLocalConfig(*configPath); err != nil {
 		return err
+	} else {
+		ca = operator.CASetting{File: *configPath, Set: config.CACert != ""}
 	}
-	// Where ca_cert lives, for the hint on an unknown authority: the file --config-file names.
-	ca := operator.CASetting{File: *configPath, Set: config.CACert != ""}
 	bundle, err := operator.ReadBundle(config.Bundle)
 	if err != nil {
 		return err

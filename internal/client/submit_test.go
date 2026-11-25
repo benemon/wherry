@@ -69,7 +69,7 @@ func TestAFailedTaskWriteLeavesNoRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.host.publish(cancelled, fresh, f.taskTopics(t, "pool-a")[0], encoded, time.Now(), make([]byte, 32), false); err == nil {
+	if err := f.host.publish(cancelled, fresh, f.taskTopics(t, "pool-a")[0], encoded, time.Now(), make([]byte, 32), false, ""); err == nil {
 		t.Fatal("publish succeeded on a cancelled context")
 	}
 	if local, err := f.host.localRun("run-fresh"); err != nil || local != nil {

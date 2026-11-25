@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -343,9 +345,11 @@ func TestReceiverLocalConfigDefaultsAndExpansion(t *testing.T) {
 }
 
 func TestReceiverLocalConfigRefusals(t *testing.T) {
+	t.Setenv("CREDENTIALS_DIRECTORY", "")
+	t.Setenv("NOMAD_SECRETS_DIR", "")
 	for name, test := range map[string]struct{ content, want string }{
 		"an unknown field":     {"bundle: b\nbundle_file: b\n", "decode config: invalid or unknown field at line 2"},
-		"no bundle":            {"state_dir: s\n", "config requires bundle"},
+		"no bundle anywhere":   {"state_dir: s\n", defaultBundle + ": no such file or directory; put the receiver's bundle there, or name a configuration file with --config-file"},
 		"a negative drain":     {"bundle: b\ndrain_timeout: -1s\n", "config drain_timeout must not be negative"},
 		"two kinds of source":  {"bundle: b\ncredentials:\n  token: {file: x, env: A}\n", "config credential token: needs exactly one of file, env and command"},
 		"no kind of source":    {"bundle: b\ncredentials:\n  token: {}\n", "config credential token: needs exactly one of file, env and command"},
@@ -359,24 +363,134 @@ func TestReceiverLocalConfigRefusals(t *testing.T) {
 	}
 }
 
-// receiver run reads the file --config-file names, and /etc/wherry/config.yaml without it; the flags the file replaced
-// are refused.
+// receiver run reads the file --config-file names, a missing one included; the flags the file replaced are refused.
 func TestReceiverRunTakesItsConfigFile(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing.yaml")
 	err := run([]string{"receiver", "run", "--config-file", writeLocalConfig(t, "bundle: "+missing+"\n")}, io.Discard, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "read bundle") || !strings.Contains(err.Error(), missing) {
 		t.Fatalf("receiver run --config-file = %v; want the named file's bundle read", err)
 	}
-	if _, statErr := os.Stat(defaultReceiverConfig); statErr == nil {
-		t.Logf("%s exists here; not checking the default", defaultReceiverConfig)
-	} else if err := run([]string{"receiver", "run"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), defaultReceiverConfig) {
-		t.Fatalf("receiver run = %v; want %s read", err, defaultReceiverConfig)
+	if err := run([]string{"receiver", "run", "--config-file", missing}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("receiver run --config-file of a missing file = %v; want it refused naming the file", err)
 	}
 	for _, flag := range []string{"--bundle-file", "--state-dir", "--plugin-dir", "--metrics-addr"} {
 		var stderr bytes.Buffer
 		if err := run([]string{"receiver", "run", flag, "x"}, io.Discard, &stderr); err == nil || !strings.Contains(err.Error(), "flag provided but not defined: "+strings.TrimPrefix(flag, "-")) {
 			t.Errorf("receiver run %s = %v; want the flag refused", flag, err)
 		}
+	}
+}
+
+// Without --config-file and without /etc/wherry/config.yaml, receiver run takes its bundle where its platform puts it:
+// each variable picks its own path and refuses, naming the path and --config-file, when nothing is there, with no
+// look at another platform's path; no variable picks the Kubernetes mount. Inside a Nomad task, Nomad's path wins over
+// systemd's variable, which an exec task inherits from the client.
+func TestReceiverRunWithoutAFileTakesThePlatformsBundle(t *testing.T) {
+	if _, err := os.Stat(defaultReceiverConfig); err == nil {
+		t.Skipf("%s exists here", defaultReceiverConfig)
+	}
+	systemd, nomad := t.TempDir(), t.TempDir()
+	for name, test := range map[string]struct {
+		systemd, nomad, bundle string
+	}{
+		"systemd":           {systemd, "", filepath.Join(systemd, "bundle")},
+		"systemd and nomad": {systemd, nomad, filepath.Join(nomad, "receiver.bundle")},
+		"nomad":             {"", nomad, filepath.Join(nomad, "receiver.bundle")},
+		"neither":           {"", "", defaultBundle},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("CREDENTIALS_DIRECTORY", test.systemd)
+			t.Setenv("NOMAD_SECRETS_DIR", test.nomad)
+			// A bundle at every other platform's path is not what this platform's receiver reads.
+			for _, other := range []string{filepath.Join(systemd, "bundle"), filepath.Join(nomad, "receiver.bundle")} {
+				if other == test.bundle {
+					continue
+				}
+				if err := os.WriteFile(other, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.Remove(other) })
+			}
+			err := run([]string{"receiver", "run"}, io.Discard, io.Discard)
+			want := "stat " + test.bundle + ": no such file or directory; put the receiver's bundle there, or name a configuration file with --config-file"
+			if err == nil || err.Error() != want {
+				t.Fatalf("receiver run = %v; want %q", err, want)
+			}
+			if test.bundle == defaultBundle {
+				return
+			}
+			// With something in place it is what is read: a directory there fails the read naming it.
+			if err := os.Mkdir(test.bundle, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.Remove(test.bundle) })
+			if err := run([]string{"receiver", "run"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), test.bundle) {
+				t.Fatalf("receiver run = %v; want %s read", err, test.bundle)
+			}
+		})
+	}
+}
+
+// Without a file the state directory is state under systemd's $STATE_DIRECTORY, the first when the unit lists
+// several, else /var/lib/wherry/state, and inside a Nomad task /var/lib/wherry/state whatever $STATE_DIRECTORY the task
+// inherited; the drain is 20s and metrics listen on :9464. A file that leaves bundle out takes the platform's, and one
+// that leaves metrics_addr out still has no listener.
+func TestReceiverFilelessDefaults(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "bundle"), []byte("broker: b\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CREDENTIALS_DIRECTORY", dir)
+	t.Setenv("NOMAD_SECRETS_DIR", "")
+	for name, test := range map[string]struct{ state, want string }{
+		"unset":     {"", defaultStateDir},
+		"one":       {"/var/lib/wherry-receiver", "/var/lib/wherry-receiver/state"},
+		"two paths": {"/var/lib/first:/var/lib/second", "/var/lib/first/state"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("STATE_DIRECTORY", test.state)
+			config, err := filelessConfig()
+			want := receiverLocalConfig{Bundle: filepath.Join(dir, "bundle"), StateDir: test.want, PluginDir: defaultPluginDir, MetricsAddr: ":9464", DrainTimeout: 20 * time.Second}
+			if err != nil || !reflect.DeepEqual(config, want) {
+				t.Fatalf("fileless config = %+v, %v; want %+v", config, err, want)
+			}
+		})
+	}
+	t.Run("a Nomad task with the client's variables", func(t *testing.T) {
+		nomad := t.TempDir()
+		if err := os.WriteFile(filepath.Join(nomad, "receiver.bundle"), []byte("broker: b\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("NOMAD_SECRETS_DIR", nomad)
+		t.Setenv("STATE_DIRECTORY", "/var/lib/nomad-client")
+		config, err := filelessConfig()
+		want := receiverLocalConfig{Bundle: filepath.Join(nomad, "receiver.bundle"), StateDir: defaultStateDir, PluginDir: defaultPluginDir, MetricsAddr: ":9464", DrainTimeout: 20 * time.Second}
+		if err != nil || !reflect.DeepEqual(config, want) {
+			t.Fatalf("fileless config = %+v, %v; want %+v, the task's paths over the client's", config, err, want)
+		}
+	})
+	t.Setenv("STATE_DIRECTORY", "/var/lib/first:/var/lib/second")
+	config, _, err := loadReceiverLocalConfig(writeLocalConfig(t, "credentials:\n  token: {env: TOKEN}\n"))
+	want := receiverLocalConfig{Bundle: filepath.Join(dir, "bundle"), StateDir: "/var/lib/first/state", PluginDir: defaultPluginDir, Credentials: map[string]credential.Source{"token": {Env: "TOKEN"}}}
+	if err != nil || !reflect.DeepEqual(config, want) {
+		t.Fatalf("a file without bundle or metrics_addr = %+v, %v; want %+v, with no listener", config, err, want)
+	}
+	config, _, err = loadReceiverLocalConfig(writeLocalConfig(t, "bundle: "+filepath.Join(dir, "bundle")+"\nmetrics_addr: \"\"\n"))
+	if err != nil || config.MetricsAddr != "" || config.StateDir != filepath.Join(dir, "state") {
+		t.Fatalf("a file naming its bundle = %+v, %v; want state beside the bundle and no listener", config, err)
+	}
+}
+
+// A receiver without a file is told, on an unknown authority, to set ca_cert in a new /etc/wherry/config.yaml and what
+// else that file must hold, since a file gives every field a file's meaning: metrics_addr, drain_timeout, and bundle
+// should it leave the platform's path.
+func TestReceiverFilelessHintNamesTheFilesOtherFields(t *testing.T) {
+	unknown := fmt.Errorf("unable to dial: %w", &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}})
+	got := operator.ExplainUnknownAuthority(unknown, filelessCA("/secrets/receiver.bundle")).Error()
+	want := "cannot verify the broker's certificate: install the CA that signed it in this machine's trust store, or set ca_cert in /etc/wherry/config.yaml; " +
+		"a new file there gives every field a file's meaning, so set metrics_addr: \":9464\" and drain_timeout: 20s in it too, and bundle unless it stays at /secrets/receiver.bundle (" + unknown.Error() + ")"
+	if got != want {
+		t.Fatalf("fileless hint\n%s\nwant\n%s", got, want)
 	}
 }
 

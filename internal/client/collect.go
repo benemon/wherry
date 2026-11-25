@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"path/filepath"
 	"slices"
 
 	"github.com/benemon/wherry/internal/wire"
@@ -15,6 +16,11 @@ type Collected struct {
 	Outputs []Output
 	// Rejected are the outputs this host could not verify.
 	Rejected []wire.UnreturnedOutput
+	// Fetched is the branch, wherry/<run>, the collected changes.bundle was fetched into in the repository the run's
+	// record names, or already stood at; NotFetched is the fixed reason it was not. Both are empty when the record names
+	// no repository.
+	Fetched    string
+	NotFetched string
 }
 
 // CollectError is the step of Collect that failed: "write outputs" or "S3 outputs".
@@ -28,8 +34,9 @@ func (e *CollectError) Error() string { return e.Step + ": " + e.Err.Error() }
 func (e *CollectError) Unwrap() error { return e.Err }
 
 // Collect writes a run's verified outputs, S3 ones through DownloadOutputs, beneath dir, by default
-// <state_dir>/runs/<run>/outputs, and records a verified changes.bundle for a run that continues it. A run whose
-// task_started_by passed unclaimed has nothing collected. Its error is a *CollectError.
+// <state_dir>/runs/<run>/outputs, records a verified changes.bundle for a run that continues it and, when the run's
+// record names a repository, fetches the bundle into that repository's wherry/<run>. A run whose task_started_by passed
+// unclaimed has nothing collected. Its error is a *CollectError.
 func (h *Host) Collect(ctx context.Context, runID string, result AwaitResult, dir string) (Collected, error) {
 	var collected Collected
 	if result.Unclaimed != "" {
@@ -56,9 +63,30 @@ func (h *Host) Collect(ctx context.Context, runID string, result AwaitResult, di
 	}
 	collected.Outputs = append(collected.Outputs, downloaded...)
 	collected.Rejected = slices.Concat(result.Rejected, rejected)
+	i := slices.IndexFunc(collected.Outputs, func(output Output) bool { return output.Name == wire.GitBundle })
+	if i < 0 {
+		return collected, nil
+	}
 	// The outputs are on disk: a continuation of this run refuses without the record rather than this collect failing.
-	if err := h.recordBundle(ctx, runs, collected.Outputs); err != nil {
+	path, err := filepath.Abs(collected.Outputs[i].Path)
+	if err != nil {
 		h.logger.Printf("run %s: record the collected %s: %v", runID, wire.GitBundle, err)
+		return collected, nil
+	}
+	// The lock of the run, and of the run it replaces, is held from the record through the fetch and its checks, so two
+	// collects of one run take their turns.
+	unlock, err := h.lockRuns(ctx, runs[max(len(runs)-2, 0):])
+	if err != nil {
+		h.logger.Printf("run %s: record the collected %s: %v", runID, wire.GitBundle, err)
+		return collected, nil
+	}
+	defer unlock()
+	local, err := h.recordBundle(runs, path, collected.Outputs[i])
+	if err != nil {
+		h.logger.Printf("run %s: record the collected %s: %v", runID, wire.GitBundle, err)
+	}
+	if local != nil && local.Repo != "" {
+		collected.Fetched, collected.NotFetched = fetchBundle(ctx, local.Repo, runID, path)
 	}
 	return collected, nil
 }

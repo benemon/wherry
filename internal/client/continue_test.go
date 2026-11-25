@@ -81,16 +81,21 @@ func collectBundle(t *testing.T, f *fixture, runs []string, data []byte) string 
 }
 
 // A continuation clones the previous run's repository at its base with the current configuration's credential, carries
-// the collected bundle as base.bundle through S3 and asks for its own, and joins the previous run's context.
+// the collected bundle as base.bundle through S3 and asks for its own, joins the previous run's context and records the
+// repository the previous run recorded.
 func TestSubmitContinuesARun(t *testing.T) {
 	f, o, receiver := continueFixture(t)
 	first := firstRun(t, f, testBundle)
+	rewrite(t, f, first, func(local *runRecord) { local.Repo = "/home/me/src/repo" })
 	// The git configuration changed after the first run: the clone takes the current one's credential.
 	f.host.credentials["forge-token"] = credential.Source{File: f.secret}
 	f.host.git = []GitCredential{{URL: "https://git.example.test/", Credential: "forge-token"}}
 	submitted, err := f.host.Submit(f.ctx, continueInput(first))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if local, err := f.host.localRun(submitted.RunID); err != nil || local == nil || local.Repo != "/home/me/src/repo" {
+		t.Fatalf("the continuation's record holds repo %q, %v; want the first run's", local.Repo, err)
 	}
 	task := receiver.claim(t, f.ctx, submitted.RunID)[0].submission
 	want := wire.GitInput{Remote: "https://git.example.test/org/repo.git", Ref: "main", Path: "src/repo", Credential: "forge-token", Base: &wire.GitBase{Bundle: "base.bundle", Commit: testBase}}
@@ -380,20 +385,20 @@ func TestSubmitRefusesABundleWithoutOneBaseAndAHead(t *testing.T) {
 	})
 }
 
-func TestBundleBaseReadsV2AndV3Headers(t *testing.T) {
+func TestBundleHeaderReadsV2AndV3Headers(t *testing.T) {
 	sha256Base, sha256Head := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
 	for name, test := range map[string]struct {
-		header, want string
+		header, base, head string
 	}{
-		"v2":                {"# v2 git bundle\n-" + testBase + " subject\n" + testHead + " HEAD\n", testBase},
-		"v2 empty subject":  {"# v2 git bundle\n-" + testBase + " \n" + testHead + " HEAD\n", testBase},
-		"v2 no subject":     {"# v2 git bundle\n-" + testBase + "\n" + testHead + " HEAD\n", testBase},
-		"v3 object format":  {"# v3 git bundle\n@object-format=sha256\n-" + sha256Base + " subject\n" + sha256Head + " HEAD\n", sha256Base},
-		"v3 two capability": {"# v3 git bundle\n@object-format=sha1\n@filter=blob:none\n-" + testBase + " subject\n" + testHead + " HEAD\n", testBase},
+		"v2":                {"# v2 git bundle\n-" + testBase + " subject\n" + testHead + " HEAD\n", testBase, testHead},
+		"v2 empty subject":  {"# v2 git bundle\n-" + testBase + " \n" + testHead + " HEAD\n", testBase, testHead},
+		"v2 no subject":     {"# v2 git bundle\n-" + testBase + "\n" + testHead + " HEAD\n", testBase, testHead},
+		"v3 object format":  {"# v3 git bundle\n@object-format=sha256\n-" + sha256Base + " subject\n" + sha256Head + " HEAD\n", sha256Base, sha256Head},
+		"v3 two capability": {"# v3 git bundle\n@object-format=sha1\n@filter=blob:none\n-" + testBase + " subject\n" + testHead + " HEAD\n", testBase, testHead},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got, err := bundleBase(bytes.NewReader(bundleBytes(test.header))); err != nil || got != test.want {
-				t.Fatalf("bundleBase = %q, %v; want %q", got, err, test.want)
+			if base, head, err := bundleHeader(bytes.NewReader(bundleBytes(test.header))); err != nil || base != test.base || head != test.head {
+				t.Fatalf("bundleHeader = %q, %q, %v; want %q, %q", base, head, err, test.base, test.head)
 			}
 		})
 	}
@@ -559,10 +564,11 @@ func TestCollectReturnsItsOutputsWhenTheBundleIsNotRecorded(t *testing.T) {
 	}
 }
 
-// A key-lost continuation's replacement keeps its context, its reference and its git base.
+// A key-lost continuation's replacement keeps its context, its reference, its git base and its recorded repository.
 func TestAReplacementKeepsTheContinuation(t *testing.T) {
 	f, _, receiver := continueFixture(t)
 	first := firstRun(t, f, testBundle)
+	rewrite(t, f, first, func(local *runRecord) { local.Repo = "/home/me/src/repo" })
 	submitted, err := f.host.Submit(f.ctx, continueInput(first))
 	if err != nil {
 		t.Fatal(err)
@@ -572,6 +578,9 @@ func TestAReplacementKeepsTheContinuation(t *testing.T) {
 	status, err := f.host.Status(f.ctx, submitted.RunID)
 	if err != nil || status.Replacement == "" {
 		t.Fatalf("status %+v, %v; want a replacement", status, err)
+	}
+	if local, err := f.host.localRun(status.Replacement); err != nil || local == nil || local.Repo != "/home/me/src/repo" {
+		t.Fatalf("the replacement's record holds repo %q, %v; want the continuation's", local.Repo, err)
 	}
 	replacement, _, err := open(t, f, status.Replacement, f.poolKeys["pool-c"])
 	if err != nil {

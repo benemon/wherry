@@ -130,8 +130,12 @@ func explained(t *testing.T, what string, err error, ca operator.CASetting, pass
 	if ca.Set {
 		hint = caCertSetHint
 	}
-	if !strings.HasPrefix(text, hint+ca.File+" (") || !strings.Contains(text, "x509: ") || !strings.HasSuffix(text, ")") {
-		t.Fatalf("%s = %q; want %q with the x509 error at the end", what, text, hint+ca.File+" (")
+	prefix := hint + ca.File
+	if ca.Also != "" {
+		prefix += "; " + ca.Also
+	}
+	if !strings.HasPrefix(text, prefix+" (") || !strings.Contains(text, "x509: ") || !strings.HasSuffix(text, ")") {
+		t.Fatalf("%s = %q; want %q with the x509 error at the end", what, text, prefix+" (")
 	}
 	if ca.Set && !strings.Contains(text, unknownAuthorityText) {
 		t.Fatalf("%s = %q; want Go's verifier's %q after the added CA failed too", what, text, unknownAuthorityText)
@@ -309,6 +313,31 @@ func TestUnknownAuthorityGetsTheOneHint(t *testing.T) {
 			var out bytes.Buffer
 			explained(t, "receiver run", run([]string{"receiver", "run", "--config-file", localConfig}, &out, &out), operator.CASetting{File: localConfig, Set: caCert != ""}, password)
 		}
+		// Without a file, from systemd's credential and state directories, the hint names the new default file and
+		// what else it must hold.
+		t.Run("without a file", func(t *testing.T) {
+			if _, err := os.Stat(defaultReceiverConfig); err == nil {
+				t.Skipf("%s exists here", defaultReceiverConfig)
+			}
+			if listener, err := net.Listen("tcp", defaultMetricsAddr); err != nil {
+				t.Skipf("%s, the fileless metrics address, is busy: %v", defaultMetricsAddr, err)
+			} else {
+				listener.Close()
+			}
+			credentials := t.TempDir()
+			data, err := os.ReadFile(bundle)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(credentials, "bundle"), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CREDENTIALS_DIRECTORY", credentials)
+			t.Setenv("NOMAD_SECRETS_DIR", "")
+			t.Setenv("STATE_DIRECTORY", t.TempDir())
+			var out bytes.Buffer
+			explained(t, "receiver run without a file", run([]string{"receiver", "run"}, &out, &out), filelessCA(filepath.Join(credentials, "bundle")), password)
+		})
 	})
 	t.Run("operator", func(t *testing.T) {
 		for _, caCert := range []string{testCA.pem, ""} {
