@@ -186,13 +186,23 @@ func (h *Host) lockRuns(ctx context.Context, runs []string) (func(), error) {
 }
 
 // recordOutputs records outputs, the collected outputs at their absolute paths, in the local record of the last of
-// runs, replacing what it held, and returns the record, nil for a run this host has no record of. The caller holds that
-// run's lock and that of the run it replaces, under which a replacement's record is written.
+// runs, merged by name into what it held: an output replaces the entry of its name and the entries this collect did not
+// verify stay, since the run's S3 prefix is deleted once a collect verifies every output and a later collect into
+// another directory gets the inline outputs alone. It returns the record, nil for a run this host has no record of. The
+// caller holds that run's lock and that of the run it replaces, under which a replacement's record is written.
 func (h *Host) recordOutputs(runs []string, outputs []collectedOutput) (*runRecord, error) {
 	local, err := h.localRun(runs[len(runs)-1])
 	if err != nil || local == nil {
 		return nil, err
 	}
-	local.Outputs = outputs
+	merged := slices.Clone(local.Outputs)
+	for _, output := range outputs {
+		if i := slices.IndexFunc(merged, func(kept collectedOutput) bool { return kept.Name == output.Name }); i >= 0 {
+			merged[i] = output
+		} else {
+			merged = append(merged, output)
+		}
+	}
+	local.Outputs = merged
 	return local, h.writeRun(*local)
 }

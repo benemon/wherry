@@ -1441,8 +1441,9 @@ An input's delivered name, like an output's, is a relative path of file names
 joined by `/`, and no input name is a directory of another; `--input FILE`
 delivers the file under its base name. `--input DIR` delivers every file
 beneath the directory as `<base>/<relative path>`, `<base>` the directory's
-own name with a trailing slash removed, so `--input docs/` gives
-`docs/guide/a.md`; `--input .` uses the working directory's name, and
+own name as given, a trailing slash removed, so `--input docs/` gives
+`docs/guide/a.md` and `--input latest`, a link to `docs`, gives
+`latest/guide/a.md`; `--input .` uses the working directory's name, and
 `--input /` is refused. Entries named with a leading dot, files and
 directories alike, are skipped, since no input name starts with a dot, and
 `submit` prints `skipped N hidden entries under DIR` on standard error. A
@@ -1847,8 +1848,12 @@ For `changes.patch` it also prints `apply with: git am <path>`, and for
 `result` also records each verified output, its name, absolute path, size
 and SHA-256, in the run's local record, wherever `--outputs-dir` puts it,
 for [`submit --continue`](#wherry-host-submit); a `result` that cannot
-record them fails with `record outputs`. A later `result` replaces the
-record with the outputs it collects.
+record them prints their lines all the same, since the files are written,
+then fails with `record outputs`. A later `result` merges the outputs it
+collects into the record by name: each replaces the entry of its name, and
+an entry it could not collect again stays, so a `result` into another
+directory after the run's S3 outputs are deleted from the bucket keeps them
+recorded where the first `result` wrote them.
 
 For a run submitted with `--git .`, or a `--continue` of one, `result` also
 fetches the bundle into that repository, whose top level the run's record

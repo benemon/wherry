@@ -388,10 +388,19 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 			return err
 		}
 		if !info.IsDir() {
+			// A FIFO is refused on this stat, before an open that would wait for a writer.
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("--input %s: not a regular file", path)
+			}
 			files = append(files, busclient.InputFile{Name: filepath.Base(path), Open: func() (io.ReadSeekCloser, error) {
 				file, err := os.Open(path)
 				if err != nil {
 					return nil, err
+				}
+				// The file opened is the file the stat saw, as a walked directory's files are.
+				if opened, err := file.Stat(); err != nil || !os.SameFile(info, opened) {
+					file.Close()
+					return nil, errors.New("not the file submit checked")
 				}
 				return file, nil
 			}})
@@ -633,7 +642,8 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 		}
 		return errors.New(result.Unclaimed)
 	}
-	if collectErr == nil {
+	// A collect that wrote its outputs but could not record them lists them all the same; its error follows.
+	if collectErr == nil || len(collected.Outputs) > 0 {
 		for _, output := range collected.Outputs {
 			fmt.Fprintf(stdout, "output=%s path=%s sha256=%s size=%d\n", output.Name, output.Path, output.SHA256, output.Size)
 			switch output.Name {

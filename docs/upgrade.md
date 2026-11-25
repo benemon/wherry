@@ -37,10 +37,23 @@ A clean break, as every pre-1.0 change ([ADR-0032](design.md)); no
 compatibility path remains.
 
 - `result` records every verified output, not the `changes.bundle` alone, in
-  the run's local record, and fails with `record outputs` when it cannot. A
-  run record an earlier release wrote with a collected bundle no longer
-  decodes: such a run cannot be continued or collected again, and its
-  outputs stay where `result` wrote them.
+  the run's local record, merged by name with the outputs an earlier `result`
+  recorded, and fails with `record outputs` when it cannot, after it has
+  written and listed the outputs.
+- A run record an earlier release wrote with a collected bundle, one holding
+  a `bundle` member, no longer decodes. For such a run, `status`, `events`,
+  `logs`, `cancel` and `result`, and the MCP tools of the same names, fail
+  with
+  `decode <state_dir>/runs/<run>.json: json: cannot unmarshal JSON string into Go client.runRecord: unknown object member name "bundle"`,
+  and `submit --continue RUN` and the MCP `continue` with
+  `continue: the local records of run <run>'s chain cannot be read`. `runs`
+  still lists the run from the tenant feed and counts its record in
+  `skipped N unverifiable records`. Every other run and the host itself keep
+  working. The remedy: delete `<state_dir>/runs/<run>.json`, or edit the
+  file and remove its `bundle` member, for each such run; or reset the
+  deployment. The outputs on disk, the bundle included, are unaffected, and a
+  run whose record is deleted can still be read from the feed but not
+  continued.
 - `submit --continue` and the MCP `continue` take a run without a git input,
   delivering its collected outputs as `previous/<name>`. No input of the
   caller's is named under `previous/`, on any run.

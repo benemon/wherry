@@ -604,6 +604,11 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, err
 		}
 		if storable && size > v.state.Pools[pool].RecordLimit {
+			// A previous output of another size than result verified is refused before any upload; one of the same size
+			// is refused after its upload, from the hash of the bytes sent.
+			if file.recorded != nil && size != file.recorded.Size {
+				return SubmitResult{}, changedOutput(file.recorded.Name, continued.last.Run)
+			}
 			input.S3Inputs = append(input.S3Inputs, S3File{Name: file.Name, Body: body})
 			if file.recorded != nil {
 				recorded[file.Name] = *file.recorded

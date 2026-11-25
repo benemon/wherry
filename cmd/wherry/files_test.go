@@ -407,6 +407,26 @@ func TestMCPInputsStayInTheRootAfterResolution(t *testing.T) {
 	}
 }
 
+// A file swapped for a link into the state directory after the input's path resolves is refused: the link stays inside
+// the root, which os.Root follows, and the ancestor check over the resolved path alone would miss the state directory.
+func TestMCPInputsRefuseALinkSwappedInAfterResolution(t *testing.T) {
+	work := t.TempDir()
+	writeFiles(t, work, "sub/data.csv", "state/runs/run-a.json")
+	read := inputReader(inputOpener(work, busclient.Config{StateDir: filepath.Join(work, "state")}).file)
+	previous := resolveInput
+	t.Cleanup(func() { resolveInput = previous })
+	resolveInput = func(path string) (string, error) {
+		resolved, err := previous(path)
+		if err == nil {
+			err = errors.Join(os.Remove(filepath.Join(work, "sub", "data.csv")), os.Symlink(filepath.Join(work, "state", "runs", "run-a.json"), filepath.Join(work, "sub", "data.csv")))
+		}
+		return resolved, err
+	}
+	if part, err := read(filepath.Join(work, "sub", "data.csv"), math.MaxInt64); err == nil {
+		t.Fatalf("read %q through a link into the state directory swapped in after resolution", part.Raw)
+	}
+}
+
 // os.OpenRoot follows a link in the root's own name: a root that is a link to a directory confines inputs to that
 // directory, named through the link or the directory.
 func TestMCPInputRootMayBeALink(t *testing.T) {
@@ -523,6 +543,28 @@ func TestSubmitInputDirectory(t *testing.T) {
 	}
 }
 
+// --input FILE refuses a FIFO on the stat it takes, without an open that would wait for a writer.
+func TestSubmitRefusesAFIFOInput(t *testing.T) {
+	b := newBus(t)
+	fifo := filepath.Join(t.TempDir(), "fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		var stdout, stderr bytes.Buffer
+		done <- runSubmit(b.ctx, b.client, []string{"--prompt", "read", "--input", fifo}, &stdout, &stderr)
+	}()
+	select {
+	case err := <-done:
+		if want := "--input " + fifo + ": not a regular file"; err == nil || err.Error() != want {
+			t.Fatalf("submit = %v, want %q", err, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("submit blocked on the FIFO")
+	}
+}
+
 // The MCP submit tool's inputs take a directory beneath the input roots, walked as --input DIR is, with the hidden
 // entries it skipped counted; a directory holding one of the host's own files refuses the submission, as do an existing
 // directory outside the roots and the state directory.
@@ -593,20 +635,29 @@ func (b *bus) plainRunCollected(t *testing.T, dir string, names ...string) strin
 	return run
 }
 
-// The CLI and the MCP tool sign the same submission for the same --input DIR and the same --continue of a run without
-// git: the same input names, sizes and hashes, and the same context.
+// The CLI and the MCP tool sign the same submission for the same --input DIR, given as the directory or as a link to
+// it, and the same --continue of a run without git: the same input names, sizes and hashes, and the same context,
+// each run's own or, for the continuation, the continued run's with a reference to it.
 func TestCLIAndMCPSubmitTheSameInputs(t *testing.T) {
 	b := newBus(t)
 	work := t.TempDir()
 	writeFiles(t, work, "docs/readme.md", "docs/guide/a.md", "docs/.hidden")
+	if err := os.Symlink(filepath.Join(work, "docs"), filepath.Join(work, "latest")); err != nil {
+		t.Fatal(err)
+	}
 	first := b.plainRunCollected(t, t.TempDir(), "report.md", "notes/next.md")
 	session := mcpSessionReading(t, b.connect(t), nil, inputOpener(work, busclient.Config{StateDir: b.stateDir}))
 	for name, test := range map[string]struct {
 		flags     []string
 		arguments map[string]any
+		// prefix starts every input name; context is the context both carry, the run's own when empty, and references
+		// the task references.
+		prefix, context string
+		references      []string
 	}{
-		"input directory": {[]string{"--input", filepath.Join(work, "docs")}, map[string]any{"prompt": "read", "inputs": []map[string]any{{"path": "docs"}}}},
-		"continue":        {[]string{"--continue", first}, map[string]any{"prompt": "read", "continue": first}},
+		"input directory":    {[]string{"--input", filepath.Join(work, "docs")}, map[string]any{"prompt": "read", "inputs": []map[string]any{{"path": "docs"}}}, "docs/", "", nil},
+		"a linked directory": {[]string{"--input", filepath.Join(work, "latest")}, map[string]any{"prompt": "read", "inputs": []map[string]any{{"path": "latest"}}}, "latest/", "", nil},
+		"continue":           {[]string{"--continue", first}, map[string]any{"prompt": "read", "continue": first}, "previous/", first, []string{first}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -617,14 +668,76 @@ func TestCLIAndMCPSubmitTheSameInputs(t *testing.T) {
 			var submitted submitOutput
 			callTool(t, b.ctx, session, "submit", test.arguments, &submitted)
 			tool := b.tasks(t, submitted.ID)[0].submission
-			if parts := inputParts(cli); len(parts) < 2 || !slices.Equal(parts, inputParts(tool)) {
+			parts := inputParts(cli)
+			if len(parts) < 2 || !slices.Equal(parts, inputParts(tool)) {
 				t.Fatalf("the CLI signed %+v and the tool %+v", parts, inputParts(tool))
 			}
-			if cli.Message.ContextID != tool.Message.ContextID && cli.Message.ContextID != cli.Wherry.Run || !slices.Equal(cli.Message.ReferenceTaskIDs, tool.Message.ReferenceTaskIDs) {
-				t.Fatalf("the CLI's context %s and references %v; the tool's %s and %v", cli.Message.ContextID, cli.Message.ReferenceTaskIDs, tool.Message.ContextID, tool.Message.ReferenceTaskIDs)
+			for _, part := range parts {
+				if !strings.HasPrefix(part.name, test.prefix) {
+					t.Fatalf("input %s, want every name under %s", part.name, test.prefix)
+				}
+			}
+			for side, submission := range map[string]wire.Submission{"CLI": cli, "tool": tool} {
+				context := test.context
+				if context == "" {
+					context = submission.Wherry.Run
+				}
+				if submission.Message.ContextID != context || !slices.Equal(submission.Message.ReferenceTaskIDs, test.references) {
+					t.Fatalf("the %s's context %s and references %v; want %s and %v", side, submission.Message.ContextID, submission.Message.ReferenceTaskIDs, context, test.references)
+				}
 			}
 		})
 	}
+}
+
+// A result that writes the run's outputs but cannot record them still names them: the CLI prints each output's line
+// before the record outputs error, and the MCP result lists the outputs with not_recorded in place of a failure, since
+// the files are on disk.
+func TestResultListsTheOutputsItCouldNotRecord(t *testing.T) {
+	b := newBus(t)
+	runs := filepath.Join(b.stateDir, "runs")
+	// The run's outputs directory exists before runs turns read-only, so the outputs are written and the record alone
+	// fails.
+	unwritableRecord := func(t *testing.T, run string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(runs, run, "outputs"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(runs, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(runs, 0o700) })
+	}
+	t.Run("CLI", func(t *testing.T) {
+		admitted := b.admitted(t)
+		run := admitted.submission.Wherry.Run
+		b.outputResult(t, admitted, "report.md", "report", hashOf("report"))
+		unwritableRecord(t, run)
+		dir := t.TempDir()
+		var stdout, stderr bytes.Buffer
+		err := runWait(b.ctx, b.client, []string{run, "--outputs-dir", dir}, &stdout, &stderr)
+		if err == nil || !strings.HasPrefix(err.Error(), busclient.StepRecordOutputs+": ") {
+			t.Fatalf("result = %v, want the record outputs step failed", err)
+		}
+		if want := "output=report.md path=" + filepath.Join(dir, "report.md") + " sha256=" + hashOf("report") + " size=6\n"; !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout %q, want the output's line %q", stdout.String(), want)
+		}
+	})
+	t.Run("MCP", func(t *testing.T) {
+		admitted := b.admitted(t)
+		run := admitted.submission.Wherry.Run
+		b.outputResult(t, admitted, "report.md", "report", hashOf("report"))
+		unwritableRecord(t, run)
+		session := mcpSession(t, b.connect(t), nil)
+		var reply waitReply
+		callTool(t, b.ctx, session, "result", map[string]any{"id": run}, &reply)
+		if len(reply.Outputs) != 1 || reply.Outputs[0].Path != filepath.Join(runs, run, "outputs", "report.md") || reply.Outputs[0].SHA256 != hashOf("report") {
+			t.Fatalf("outputs %+v, want the report at its path", reply.Outputs)
+		}
+		if !strings.HasPrefix(reply.NotRecorded, busclient.StepRecordOutputs+": ") || strings.Contains(reply.NotRecorded, b.stateDir) {
+			t.Fatalf("not_recorded %q, want the record outputs note without a path", reply.NotRecorded)
+		}
+	})
 }
 
 // The MCP submit tool continues a run without git whose outputs result collected to the default directory, beneath the

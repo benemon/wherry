@@ -166,6 +166,15 @@ func collectFailure(err error) error {
 	return &toolError{Code: "OUTPUTS_NOT_WRITTEN", Message: message}
 }
 
+// notRecorded is the note a result carries when Collect wrote the run's outputs but could not record them, and "" for
+// any other error: the files are on disk, so the reply lists them rather than failing.
+func notRecorded(err error) string {
+	if failed := (*busclient.CollectError)(nil); errors.As(err, &failed) && failed.Step == busclient.StepRecordOutputs {
+		return busclient.StepRecordOutputs + ": the outputs were written but not recorded in the run's record, so continue cannot deliver them; the MCP server's log holds the cause"
+	}
+	return ""
+}
+
 type receiversInput struct{}
 
 type receiversOutput struct {
@@ -279,6 +288,7 @@ type waitReply struct {
 	Reply       *replyFile              `json:"reply,omitempty" jsonschema:"set when the agent's answer is over 64 KiB"`
 	Artifacts   []resultArtifact        `json:"artifacts,omitempty"`
 	Outputs     []outputReply           `json:"outputs,omitempty" jsonschema:"the run's outputs, verified and written locally"`
+	NotRecorded string                  `json:"not_recorded,omitempty" jsonschema:"set when the outputs were written but could not be recorded in the run's record, so continue cannot deliver them; the server's log holds the cause"`
 	NotReturned []wire.UnreturnedOutput `json:"not_returned,omitempty" jsonschema:"outputs the run did not return or this host could not verify, each with its reason"`
 	FetchedRef  string                  `json:"fetched_ref,omitempty" jsonschema:"for a run submitted with git remote . whose changes.bundle came back: the branch, wherry/<run>, the bundle was fetched into in that repository, to merge from; the working tree, index and HEAD are untouched"`
 	NotFetched  string                  `json:"not_fetched,omitempty" jsonschema:"for such a run, why the bundle was not fetched: exists (wherry/<run> names another commit and was left alone), no git, no repository, git refused, unreadable bundle, wrong commit or timeout; the bundle at its output path can be fetched by hand with git fetch <path> HEAD"`
@@ -419,9 +429,12 @@ func newMCPServer(connect func() (*busclient.Host, error), inputs *inputRoots, w
 		}
 		collected, err := client.Collect(ctx, input.ID, result, "")
 		if err != nil {
-			// The model sees the step that failed; the server's log keeps the cause.
+			// The model sees the step that failed; the server's log keeps the cause. Outputs written but not recorded are
+			// listed with the note, since they are on disk.
 			logger.Print("tool failed: " + busclient.Redact(err.Error()))
-			return nil, waitReply{}, collectFailure(err)
+			if output.NotRecorded = notRecorded(err); output.NotRecorded == "" {
+				return nil, waitReply{}, collectFailure(err)
+			}
 		}
 		for _, written := range collected.Outputs {
 			output.Outputs = append(output.Outputs, outputReply{Name: written.Name, Path: written.Path, SHA256: written.SHA256, Size: written.Size})
@@ -903,11 +916,17 @@ func (r *inputRoots) protects(resolved string, info os.FileInfo) bool {
 	}
 }
 
+// absolute is path as given, made absolute against dir.
+func (r *inputRoots) absolute(path string) string {
+	if !filepath.IsAbs(path) {
+		return filepath.Join(r.dir, path)
+	}
+	return path
+}
+
 // resolve resolves path to the root containing it, its path relative to that root and its resolved path.
 func (r *inputRoots) resolve(path string) (*os.Root, string, string, error) {
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(r.dir, path)
-	}
+	path = r.absolute(path)
 	resolved, err := resolveInput(path)
 	if err != nil {
 		return nil, "", "", r.refused
@@ -933,8 +952,11 @@ func (r *inputRoots) file(path string) (*os.File, error) {
 	if err != nil {
 		return nil, r.refused
 	}
+	// The resolved path held no link; os.Root follows one swapped in since that stays inside the root, and the ancestor
+	// check over the path would miss where it leads, so the name must still hold the file opened.
 	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || r.protects(resolved, info) {
+	named, lstatErr := root.Lstat(relative)
+	if err != nil || lstatErr != nil || !info.Mode().IsRegular() || !os.SameFile(named, info) || r.protects(resolved, info) {
 		file.Close()
 		return nil, r.refused
 	}
@@ -942,8 +964,9 @@ func (r *inputRoots) file(path string) (*os.File, error) {
 }
 
 // inputs returns the input files path names: a regular file under its base name, or a directory's files under its
-// name, with the count of hidden entries skipped and the close of the directory, which stays open for the files to open
-// through, checked against the host's own files one by one.
+// name as given, a link's own and not its target's, as --input DIR names them, with the count of hidden entries skipped
+// and the close of the directory, which stays open for the files to open through, checked against the host's own files
+// one by one.
 func (r *inputRoots) inputs(path string) ([]busclient.InputFile, int, func(), error) {
 	root, relative, resolved, err := r.resolve(path)
 	if err != nil {
@@ -965,7 +988,7 @@ func (r *inputRoots) inputs(path string) ([]busclient.InputFile, int, func(), er
 	if r.protects(resolved, info) {
 		return nil, 0, nil, r.refused
 	}
-	base, err := busclient.DirBase(resolved)
+	base, err := busclient.DirBase(r.absolute(path))
 	if err != nil {
 		return nil, 0, nil, invalidArgument(fmt.Sprintf("input %s: %v", path, err))
 	}

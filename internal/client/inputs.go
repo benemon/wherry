@@ -75,7 +75,8 @@ func DirBase(dir string) (string, error) {
 // relative to root> in lexical order, with the count of hidden entries skipped: files and directories named with a
 // leading dot, which no input name carries. A symbolic link, device, socket or FIFO is refused naming it, and so is a
 // directory with no file to send. Each file opens through root without blocking, and the open refuses what is not a
-// regular file by then; check, when given, then sees the file's path relative to root and its stat.
+// regular file by then, or not the file the walk listed; check, when given, then sees the file's path relative to root
+// and its stat.
 func DirInputs(root *os.Root, base string, check func(relative string, info fs.FileInfo) error) ([]InputFile, int, error) {
 	var files []InputFile
 	skipped := 0
@@ -99,8 +100,13 @@ func DirInputs(root *os.Root, base string, check func(relative string, info fs.F
 		if entry.Type() != 0 {
 			return fmt.Errorf("%s/%s is not a regular file", base, relative)
 		}
+		// The entry's identity: the open must reach this file and no other.
+		walked, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("%s/%s: %w", base, relative, bare(err))
+		}
 		files = append(files, InputFile{Name: base + "/" + relative, Open: func() (io.ReadSeekCloser, error) {
-			return openInRoot(root, relative, check)
+			return openInRoot(root, relative, walked, check)
 		}})
 		return nil
 	})
@@ -113,9 +119,11 @@ func DirInputs(root *os.Root, base string, check func(relative string, info fs.F
 	return files, skipped, nil
 }
 
-// openInRoot opens relative in root as a regular file: O_NONBLOCK keeps a FIFO swapped in since the walk from blocking
-// the open, and the stat refuses it.
-func openInRoot(root *os.Root, relative string, check func(string, fs.FileInfo) error) (io.ReadSeekCloser, error) {
+// openInRoot opens relative in root as the regular file the walk listed as walked: O_NONBLOCK keeps a FIFO swapped in
+// since the walk from blocking the open, and the stat refuses it. os.Root follows a link that stays inside the root, so
+// the name is looked up again without following one and the file opened must be the file the name holds and the file
+// the walk listed; a link swapped in since, or another file, is refused.
+func openInRoot(root *os.Root, relative string, walked fs.FileInfo, check func(string, fs.FileInfo) error) (io.ReadSeekCloser, error) {
 	file, err := root.OpenFile(relative, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, bare(err)
@@ -129,6 +137,10 @@ func openInRoot(root *os.Root, relative string, check func(string, fs.FileInfo) 
 		file.Close()
 		return nil, errors.New("not a regular file")
 	}
+	if named, err := root.Lstat(relative); err != nil || !os.SameFile(named, info) || !os.SameFile(walked, info) {
+		file.Close()
+		return nil, errNotWalked
+	}
 	if check != nil {
 		if err := check(relative, info); err != nil {
 			file.Close()
@@ -137,6 +149,9 @@ func openInRoot(root *os.Root, relative string, check func(string, fs.FileInfo) 
 	}
 	return file, nil
 }
+
+// errNotWalked refuses an open that reaches a file other than the one the walk listed under the name.
+var errNotWalked = errors.New("not the file the walk listed")
 
 // bare is err without the path a *fs.PathError carries, which names the root's own directory.
 func bare(err error) error {

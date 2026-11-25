@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -107,9 +108,13 @@ func TestDirInputsRefusesWhatIsNotARegularFile(t *testing.T) {
 			}
 		}, "docs/fifo is not a regular file"},
 		"a socket": {func(t *testing.T, dir string) {
-			if err := syscall.Mknod(filepath.Join(dir, "sock"), syscall.S_IFSOCK|0o600, 0); err != nil {
+			// A listener's socket needs no privilege, on Linux or macOS; it stays on disk once the listener closes.
+			listener, err := net.Listen("unix", filepath.Join(dir, "sock"))
+			if err != nil {
 				t.Fatal(err)
 			}
+			listener.(*net.UnixListener).SetUnlinkOnClose(false)
+			listener.Close()
 		}, "docs/sock is not a regular file"},
 		"no file": {func(t *testing.T, dir string) {
 			if err := os.RemoveAll(filepath.Join(dir, "a")); err != nil {
@@ -154,6 +159,37 @@ func TestDirInputsOpenRefusesAFIFOSwappedInAfterTheWalk(t *testing.T) {
 	}
 }
 
+// A file swapped between the walk and its open for a link to a regular file, which os.Root follows inside the root, or
+// for another regular file is refused: the open delivers the file the walk listed and no other, so a hidden file a link
+// names stays off the wire.
+func TestDirInputsOpenRefusesAFileSwappedInAfterTheWalk(t *testing.T) {
+	for name, swap := range map[string]func(path string) error{
+		"a link to a hidden file": func(path string) error { return os.Symlink(".secret/key", path) },
+		"another file":            func(path string) error { return os.WriteFile(path, []byte("SECRET"), 0o600) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := writeTree(t, t.TempDir(), "a.txt", ".secret/key")
+			files, _, opened, err := walked(t, dir, "docs")
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "a.txt")
+			if err := os.Remove(path); err != nil || swap(path) != nil {
+				t.Fatal(err)
+			}
+			body, err := files[0].Open()
+			if err == nil {
+				data, _ := io.ReadAll(body)
+				body.Close()
+				t.Fatalf("open delivered %q, want the swapped file refused", data)
+			}
+			if err.Error() != "not the file the walk listed" || opened.Load() != 0 {
+				t.Fatalf("open = %v with %d files checked, want the swapped file refused before the check", err, opened.Load())
+			}
+		})
+	}
+}
+
 // The base is the directory's own name, a trailing slash removed, the working directory's for ".", and the root
 // directory has none.
 func TestDirBase(t *testing.T) {
@@ -182,8 +218,8 @@ type readSeekCloser struct{ *strings.Reader }
 func (readSeekCloser) Close() error { return nil }
 
 // Submit checks every input's name before it opens any file: a name repeated across two inputs, one that is a
-// directory of another, one under previous/, one that is not a portable path, and more parts than a run carries are
-// refused with no file opened.
+// directory of another, one under previous/, one that is not a portable path, and more parts than a run carries, the
+// prompt and the S3 inputs counted, are refused with no file opened.
 func TestSubmitChecksInputNamesBeforeOpeningAFile(t *testing.T) {
 	f := newFixture(t)
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
@@ -195,17 +231,19 @@ func TestSubmitChecksInputNamesBeforeOpeningAFile(t *testing.T) {
 	}
 	for name, test := range map[string]struct {
 		files []InputFile
+		s3    []S3File
 		want  string
 	}{
-		"a name repeated across two flags": {[]InputFile{counted("docs/a.md", []byte("1"), &opens), counted("docs/a.md", []byte("2"), &opens)}, "input docs/a.md is named twice"},
-		"a parent of another name":         {[]InputFile{counted("docs", []byte("1"), &opens), counted("docs/a.md", []byte("2"), &opens)}, "input docs/a.md lies under input docs"},
-		"a name under previous/":           {[]InputFile{counted("previous/a.md", []byte("1"), &opens)}, "input previous/a.md: names under previous/ are reserved for a continued run's outputs"},
-		"a hidden name":                    {[]InputFile{counted(".docs/a.md", []byte("1"), &opens)}, "input .docs/a.md is not a relative path of portable file names"},
-		"the prompt counted toward 256":    {many, "a run carries at most 256 parts and S3 inputs, the prompt included, not 257"},
+		"a name repeated across two flags": {[]InputFile{counted("docs/a.md", []byte("1"), &opens), counted("docs/a.md", []byte("2"), &opens)}, nil, "input docs/a.md is named twice"},
+		"a parent of another name":         {[]InputFile{counted("docs", []byte("1"), &opens), counted("docs/a.md", []byte("2"), &opens)}, nil, "input docs/a.md lies under input docs"},
+		"a name under previous/":           {[]InputFile{counted("previous/a.md", []byte("1"), &opens)}, nil, "input previous/a.md: names under previous/ are reserved for a continued run's outputs"},
+		"a hidden name":                    {[]InputFile{counted(".docs/a.md", []byte("1"), &opens)}, nil, "input .docs/a.md is not a relative path of portable file names"},
+		"the prompt counted toward 256":    {many, nil, "a run carries at most 256 parts and S3 inputs, the prompt included, not 257"},
+		"an S3 input counted toward 256":   {many[:len(many)-1], []S3File{{Name: "dataset.bin", Body: strings.NewReader("x")}}, "a run carries at most 256 parts and S3 inputs, the prompt included, not 257"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			opens.Store(0)
-			_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Files: test.files, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
+			_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Files: test.files, S3Inputs: test.s3, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 			if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("submit = %v, want %q", err, test.want)
 			}

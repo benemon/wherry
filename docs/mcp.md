@@ -13,7 +13,7 @@ The defaults are `10m` and `2h`.
 | `receivers` | none | `receivers`, the objects `wherry host receivers --json` prints |
 | `submit` | `prompt`, `agent`, `model`, `selector`, `git`, `continue`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by`, `wait` | `id`, `pool`, `command`, `unsupplied`, `skipped_hidden`, `result`, `error` |
 | `status` | `id`, optional | `runs`, `skipped` |
-| `result` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `reply`, `artifacts`, `outputs`, `not_returned`, `fetched_ref`, `not_fetched`, `redacted`, `skipped`, `runs` |
+| `result` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `reply`, `artifacts`, `outputs`, `not_recorded`, `not_returned`, `fetched_ref`, `not_fetched`, `redacted`, `skipped`, `runs` |
 | `cancel` | `id` | `id`, `cancel`, `skipped` |
 | `events` | `id` | `id`, `events`, `chunks`, `redacted`, `skipped` |
 | `logs` | `id`, `offset`, `limit` | `id`, `attempt`, `total`, `next_offset`, `lines`, `redacted`, `skipped` |
@@ -57,7 +57,8 @@ The defaults are `10m` and `2h`.
   names joined by `/`, no name a directory of another and none under
   `previous/`; a `{path}` input that is a file is delivered under its base
   name, and one that is a directory delivers every file beneath it as
-  `<name>/<relative path>`, as `--input DIR` does: entries named with a
+  `<name>/<relative path>`, `<name>` the directory's name as given, a link's
+  own and not its target's, as `--input DIR` does: entries named with a
   leading dot are skipped and counted in `skipped_hidden`, and a symbolic
   link, device, socket or FIFO beneath it, or a directory with no file left,
   refuses the submission naming it.
@@ -189,6 +190,7 @@ transcript; `logs` pages it.
 | `reply` | for a reply over 64 KiB, `{path, sha256, size, cut}` of `reply.txt`, which `result` writes among the run's outputs, with `cut` set when the reply was longer than the pool's `reply_limit`; `{rejected}` with the reason when the reply's chunks do not verify; absent for a reply within 64 KiB |
 | `artifacts` | the result's: `result`, then a [reference](a2a-extension-v1.md#reference-artifacts) for each returned output, the reply over 64 KiB and the transcript; each is `{artifact_id, parts}`, and each part has one of `text`, `data`, `url` or `raw_bytes` (the size of a binary part, which is not included), with `media_type` |
 | `outputs` | `{name, path, sha256, size}` for each output written, S3 outputs included |
+| `not_recorded` | set when the outputs were written but could not be recorded in the run's record, so `continue` cannot deliver them; the message starts with `record outputs`, and the server writes the cause to standard error |
 | `not_returned` | `{name, size, reason}` for each output the result lists as not returned and each one that fails verification |
 | `fetched_ref` | for a run submitted with `git` `remote` `.` whose `changes.bundle` came back, the branch it was fetched into, or already stood at, `wherry/<run>`, in the repository the run's record names, wherever the server runs; `<run>` the run whose bundle it is; the working tree, index and `HEAD` are untouched, and `git merge wherry/<run>` is the next step |
 | `not_fetched` | for such a run, why the bundle was not fetched: `exists`, the branch names another commit and was left; `no git`; `no repository`; `git refused`; `unreadable bundle`; `wrong commit`, the branch the fetch made named another commit and was deleted; or `timeout`, past 10 minutes; the bundle at its output path can be fetched by hand with `git fetch <path> HEAD` |
@@ -208,7 +210,7 @@ error text from the bus, the broker or the host key.
 | `INVALID_ARGUMENT` | an input is missing or malformed; the message names the rule it breaks |
 | `RUN_NOT_FOUND` | this host has not submitted the run and no receiver has admitted it |
 | `NO_MATCHING_RECEIVER` | no live receiver of an entitled pool can take the agent and selector |
-| `OUTPUTS_NOT_WRITTEN` | the run's verified outputs could not be written, its S3 outputs downloaded or the run's prefix deleted; the message starts with the step, `write outputs` or `S3 outputs`, and the server writes the cause to standard error |
+| `OUTPUTS_NOT_WRITTEN` | the run's verified outputs could not be written, its S3 outputs downloaded or the run's prefix deleted; the message starts with the step, `write outputs` or `S3 outputs`, and the server writes the cause to standard error; outputs written but not recorded come back in `outputs` with `not_recorded` instead |
 | `CANCELLED` | the request was cancelled |
 | `VERSION_SKEW` | `wherry.operator` holds records a later release wrote, with a `v` higher than this release knows; upgrade `wherry` and restart the MCP server |
 | `UNAVAILABLE` | any other failure; the server writes its cause to standard error, which the harness keeps in its MCP server log, and the CLI reports it too |
