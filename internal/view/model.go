@@ -1,8 +1,9 @@
 // Package view is the operator network view: a model of the cluster rebuilt from the records Kafka keeps, kept live
 // by tailing them, served read-only over loopback HTTP as JSON, a Server-Sent Events stream and a placeholder page.
-// The view never produces to Kafka and never holds agent text: every record is projected to named fields, and every
-// name it holds is one the operator's configuration yields or a fixed placeholder, except a result's output names,
-// kept when they follow the output name grammar.
+// The view never produces to Kafka. Every record is projected to named fields, and every name it holds is one the
+// operator's configuration yields or a fixed placeholder, except a result's output names, kept when they follow the
+// output name grammar; of what an agent wrote it holds the status messages that say what is going on and why a run
+// failed, and serves the transcript's lines on request, each as text alone.
 package view
 
 import (
@@ -17,6 +18,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
@@ -53,6 +55,13 @@ type Caps struct {
 	TraceRecords, TraceSpans, TraceForest, TraceScans int
 	TraceScan                                         time.Duration
 	TraceRuns                                         int
+	// TranscriptBytes, TranscriptRecords and TranscriptScan bound one transcript request's reading, its scan and seek
+	// together; TranscriptLines the lines indexed per run and TranscriptTotalLines over every run; TranscriptScans the
+	// requests running at once; TranscriptRuns the runs whose index is kept.
+	TranscriptBytes                                                           int64
+	TranscriptRecords, TranscriptLines, TranscriptTotalLines, TranscriptScans int
+	TranscriptScan                                                            time.Duration
+	TranscriptRuns                                                            int
 }
 
 // DefaultCaps are the caps the command runs with.
@@ -63,6 +72,7 @@ var DefaultCaps = Caps{
 	Events: 2000000, Attempts: 1000000, Echoes: 200000, Cancels: 200000, Opens: 200000, Bytes: 512 << 20, Progress: 200000,
 	ResponseBytes: 8 << 20, EventBytes: 64 << 10,
 	TraceBytes: 32 << 20, TraceRecords: 20000, TraceSpans: 5000, TraceForest: 5000, TraceScans: 2, TraceScan: 5 * time.Second, TraceRuns: 32,
+	TranscriptBytes: 32 << 20, TranscriptRecords: 20000, TranscriptLines: 500000, TranscriptTotalLines: 2000000, TranscriptScans: 2, TranscriptScan: 5 * time.Second, TranscriptRuns: 32,
 }
 
 // The names a cap is reported under.
@@ -105,7 +115,8 @@ const (
 )
 
 // Failure classes, from a fixed table: the wire carries no class except a start failure's, so each is derived from a
-// status's kind, state and event, or a start failure's class. The reason text in a status is never read.
+// status's kind, state and event, or a start failure's class. The reason text in a status is kept beside it, never
+// classified.
 const (
 	ClassKeyLost      = "key-lost"
 	ClassFailed       = "failed"
@@ -167,7 +178,10 @@ func (m *model) signer(s source) string {
 	return Unknown
 }
 
-// event is a status projected: no message, no metadata. Its kind, state and event are of the fixed sets.
+// event is a status projected: no metadata. Its kind, state and event are of the fixed sets. Message is the status's
+// text as the receiver redacted it, kept for a working status, the agent's current line, and for a failed, canceled or
+// rejected terminal, its reason, cut at MaxMessage; a completed terminal's text is the agent's reply and is not kept.
+// Chunks is a terminal's count of the attempt's transcript chunks.
 type event struct {
 	Kind       string
 	State      wire.TaskState
@@ -179,7 +193,38 @@ type event struct {
 	LogOffset  *int64
 	Event      string
 	Class      string
+	Message    string
+	Truncated  bool
+	Chunks     int64
 	src        source
+}
+
+// MaxMessage bounds the message text kept of a status; a longer one is cut at a rune boundary and marked.
+const MaxMessage = 1024
+
+// messageText is the text of status's message as the model keeps it: its text parts and its raw parts that are valid
+// UTF-8, joined by newlines, cut at MaxMessage; a data part is not text. It is empty for a kind or state whose text is
+// not kept.
+func messageText(status wire.RunStatus) (string, bool) {
+	kind, state, message := status.Wherry.Kind, status.StatusUpdate.Status.State, status.StatusUpdate.Status.Message
+	keep := kind == "working" || kind == "rejected" || kind == "terminal" && (state == wire.TaskStateFailed || state == wire.TaskStateCanceled)
+	if !keep || message == nil {
+		return "", false
+	}
+	var texts []string
+	for _, part := range message.Parts {
+		switch {
+		case part.Text != "":
+			texts = append(texts, part.Text)
+		case part.Raw != nil && utf8.Valid(part.Raw):
+			texts = append(texts, string(part.Raw))
+		}
+	}
+	text := strings.Join(texts, "\n")
+	if len(text) > MaxMessage {
+		return wire.CutUTF8(text, MaxMessage), true
+	}
+	return text, false
 }
 
 type attempt struct {
@@ -312,7 +357,7 @@ func (r *run) measure() measure {
 		me.bytes += int64(attemptOverhead + len(a.Receiver) + len(a.TaskTopic) + len(a.ClaimDigest))
 		me.events += len(a.Events)
 		for _, e := range a.Events {
-			me.bytes += int64(eventOverhead + len(e.EventID) + len(e.Receiver))
+			me.bytes += int64(eventOverhead + len(e.EventID) + len(e.Receiver) + len(e.Message))
 		}
 		if a.Decision != nil {
 			me.bytes += decisionOverhead
@@ -1227,7 +1272,8 @@ func (m *model) addStatus(status wire.RunStatus, digest string, src source) erro
 	receiverAt, _ := time.Parse(time.RFC3339, status.StatusUpdate.Status.Timestamp)
 	kind, state, named := fixed(statusKinds, binding.Kind), taskState(status.StatusUpdate.Status.State), fixed(statusEvents, binding.Event)
 	e := event{Kind: kind, State: state, EventID: id, Attempt: binding.Attempt, Receiver: binding.Receiver, At: at, ReceiverAt: receiverAt, LogOffset: binding.LogOffset,
-		Event: named, Class: FailureClass(kind, state, named), src: src}
+		Event: named, Class: FailureClass(kind, state, named), Chunks: binding.TranscriptChunks, src: src}
+	e.Message, e.Truncated = messageText(status)
 	// Records of one attempt arrive in log order on each topic; the dual-written copy is the same event.
 	i, _ := slices.BinarySearchFunc(a.Events, e, func(x, y event) int { return x.At.Compare(y.At) })
 	a.Events = slices.Insert(a.Events, i, e)

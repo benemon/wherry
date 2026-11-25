@@ -25,7 +25,8 @@ const sentinel = "s3cr3t"
 // Rule 1: a sentinel planted in every record and span field the view reads, where the wire lets one through, reaches
 // no response, no stream event, no error body and no log line. Each planted record is folded, so the check is of the
 // projection, not of a refusal: the names show as the placeholder. The output names planted are outside the output
-// name grammar, the one text a result shows when it is within it.
+// name grammar, the one text a result shows when it is within it. A working status's line and a failed terminal's
+// reason are the text the view shows by design, so theirs carry no sentinel and are asserted present.
 func TestNoRecordStringReachesAnySurface(t *testing.T) {
 	f := newFixture(t)
 	at := f.now.Add(-10 * time.Minute)
@@ -46,11 +47,11 @@ func TestNoRecordStringReachesAnySurface(t *testing.T) {
 	claim := f.sign(claimed, f.keys[receiverA])
 	f.produce(operator.PoolEventsTopic(poolA), run, claim, at.Add(time.Second))
 	f.produce(operator.TenantTopic(tenantA), run, claim, at.Add(time.Second))
-	f.status(at.Add(2*time.Second), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: run, kind: "working", state: wire.TaskStateWorking, text: sentinel + "-working-line", eventID: sentinel + "-working"})
+	f.status(at.Add(2*time.Second), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: run, kind: "working", state: wire.TaskStateWorking, text: "shown-working-line", eventID: sentinel + "-working"})
 	f.decision(at.Add(2*time.Second), receiverA, poolA, run, wire.Digest(claim), sentinel+"-previous", wire.ClaimUnchanged, true)
 	request := f.openRequest(at.Add(3*time.Second), receiverA, poolA, run, 1)
 	f.produce(operator.PoolEventsTopic(poolA), run, f.sign(&wire.AttemptWrap{Custodian: receiverA, TaskHash: hashOf(run), Request: request, Receiver: sentinel + "-receiver", Attempt: 1, JWE: sentinel + "-jwe"}, f.keys[receiverA]), at.Add(4*time.Second))
-	f.status(at.Add(5*time.Second), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: run, kind: "terminal", state: wire.TaskStateFailed, text: sentinel + "-failure", eventID: sentinel + "-terminal"})
+	f.status(at.Add(5*time.Second), st{receiver: receiverA, tenant: tenantA, pool: poolA, run: run, kind: "terminal", state: wire.TaskStateFailed, text: "shown-failure", eventID: sentinel + "-terminal"})
 	// A result whose metadata, message, artifact and history carry the sentinel, output names included.
 	metadata := wire.ResultMetadata{ReceiverID: receiverA, Pool: poolA, Profile: sentinel + "-profile", Labels: map[string]string{sentinel + "-label-key": sentinel + "-label-value"}, Job: sentinel + "-job",
 		Outputs: []wire.ReturnedOutput{{Name: sentinel + "/../output.txt", SHA256: hashOf("out"), Size: 3, Key: sentinel + "-s3-key"}}, S3Outputs: []wire.ReturnedOutput{{Name: "/" + sentinel + "-big.tar", SHA256: hashOf("big"), Size: 9, Key: sentinel + "-s3-key"}},
@@ -145,6 +146,9 @@ func TestNoRecordStringReachesAnySurface(t *testing.T) {
 		t.Errorf("planted echo and statuses: %+v", r)
 	}
 	d, _ := served.v.RunDetail(run)
+	if d.Reason != "shown-failure" || len(d.Attempts) == 0 || len(d.Attempts[0].Events) < 2 || d.Attempts[0].Events[1].Message != "shown-working-line step" {
+		t.Errorf("the working line and failure reason are not shown: reason %q events %+v", d.Reason, d.Attempts)
+	}
 	derived := regexp.MustCompile(`^event-[0-9a-f]{32}$`)
 	if len(d.Attempts) != 2 || d.Attempts[0].TaskTopic != Unknown || len(d.Attempts[0].Events) != 3 || !derived.MatchString(d.Attempts[0].Events[0].EventID) ||
 		d.Attempts[0].Decision == nil || d.Attempts[0].Decision.Previous != Unknown || d.Attempts[1].StartFailure == nil || d.Attempts[1].StartFailure.Profile != Unknown || d.Attempts[1].StartFailure.Agent != Unknown {

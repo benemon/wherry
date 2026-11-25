@@ -125,6 +125,7 @@ func Serve(v *View, opts ServeOptions) (*Server, error) {
 	mux.Handle("GET /api/model", http.HandlerFunc(s.model))
 	mux.Handle("GET /api/runs/{id}", http.HandlerFunc(s.run))
 	mux.Handle("GET /api/runs/{id}/trace", http.HandlerFunc(s.trace))
+	mux.Handle("GET /api/runs/{id}/transcript", http.HandlerFunc(s.transcript))
 	mux.Handle("GET /api/stream", http.HandlerFunc(s.stream))
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusNotFound, textNotFound)
@@ -290,7 +291,7 @@ var routes = map[string]struct {
 	cookie bool
 }{
 	"GET /{$}": {"page", false}, "GET /app.js": {"asset", false}, "GET /app.css": {"asset", false}, "POST /session": {"session", false},
-	"GET /api/model": {"model", true}, "GET /api/runs/{id}": {"run", true}, "GET /api/runs/{id}/trace": {"trace", true}, "GET /api/stream": {"stream", true},
+	"GET /api/model": {"model", true}, "GET /api/runs/{id}": {"run", true}, "GET /api/runs/{id}/trace": {"trace", true}, "GET /api/runs/{id}/transcript": {"transcript", true}, "GET /api/stream": {"stream", true},
 }
 
 // log writes the method as one of the fixed set, the matched route's fixed identifier and the status: nothing of the
@@ -517,6 +518,95 @@ func (s *Server) trace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, r, forest)
+}
+
+// transcript serves a page of a run's transcript; the query names exactly one of tail, before and from.
+func (s *Server) transcript(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !runIDPattern.MatchString(id) {
+		s.fail(w, http.StatusNotFound, textNotFound)
+		return
+	}
+	page, ok := parsePage(r.URL.Query())
+	if !ok {
+		s.fail(w, http.StatusBadRequest, textBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), s.v.opts.Caps.TranscriptScan+10*time.Second)
+	defer cancel()
+	transcript, err := s.v.transcripts.Transcript(ctx, id, page)
+	switch {
+	case errors.Is(err, errNotFound):
+		s.fail(w, http.StatusNotFound, textNotFound)
+		return
+	case errors.Is(err, errBusy):
+		s.fail(w, http.StatusServiceUnavailable, textBusy)
+		return
+	case err != nil:
+		s.fail(w, http.StatusBadGateway, textUnavailable)
+		return
+	}
+	s.writeJSON(w, r, transcript)
+}
+
+// parsePage is the page query asks for: tail=N, or before=<seq> or from=<seq> with limit=N and the cursor's attempt
+// and first; N is 1 to MaxPage. Anything else is refused.
+func parsePage(query url.Values) (Page, bool) {
+	var page Page
+	integer := func(name string) (*int64, bool) {
+		if !query.Has(name) {
+			return nil, true
+		}
+		n, err := strconv.ParseInt(query.Get(name), 10, 64)
+		if err != nil || n < 0 {
+			return nil, false
+		}
+		return &n, true
+	}
+	count := func(name string) (int, bool) {
+		n, ok := integer(name)
+		if !ok || n != nil && (*n < 1 || *n > MaxPage) {
+			return 0, false
+		}
+		if n == nil {
+			return 0, true
+		}
+		return int(*n), true
+	}
+	var ok bool
+	if page.Tail, ok = count("tail"); !ok {
+		return Page{}, false
+	}
+	if page.Limit, ok = count("limit"); !ok {
+		return Page{}, false
+	}
+	if page.Before, ok = integer("before"); !ok {
+		return Page{}, false
+	}
+	if page.From, ok = integer("from"); !ok {
+		return Page{}, false
+	}
+	attempt, ok := integer("attempt")
+	if !ok {
+		return Page{}, false
+	}
+	if page.First, ok = integer("first"); !ok {
+		return Page{}, false
+	}
+	given := 0
+	for _, set := range []bool{page.Tail > 0, page.Before != nil, page.From != nil} {
+		if set {
+			given++
+		}
+	}
+	cursor := page.Before != nil || page.From != nil
+	if given != 1 || cursor != (page.Limit > 0) || cursor != (attempt != nil) || !cursor && page.First != nil {
+		return Page{}, false
+	}
+	if attempt != nil {
+		page.Attempt = *attempt
+	}
+	return page, true
 }
 
 // StreamEvent is one stream event: the version and the run count, so a page re-fetches the model.

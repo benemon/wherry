@@ -190,7 +190,9 @@ type RunSummary struct {
 
 type RunDetail struct {
 	RunSummary
-	Hash             string     `json:"task_hash,omitzero"`
+	Hash string `json:"task_hash,omitzero"`
+	// Reason is the failure reason: the highest attempt's terminal message, as the receiver redacted it.
+	Reason           string     `json:"reason,omitzero"`
 	Echoes           []Echo     `json:"echoes"`
 	MismatchedEchoes int        `json:"mismatched_echoes,omitzero"`
 	Attempts         []Attempt  `json:"attempts"`
@@ -214,15 +216,20 @@ type Echo struct {
 }
 
 type Attempt struct {
-	Number       int64         `json:"number"`
-	Receiver     string        `json:"receiver"`
-	TaskTopic    string        `json:"task_topic,omitzero"`
-	TaskOffset   *int64        `json:"task_offset,omitzero"`
-	Events       []Event       `json:"events"`
-	Decision     *Decision     `json:"decision,omitzero"`
-	StartFailure *StartFailure `json:"start_failure,omitzero"`
+	Number     int64  `json:"number"`
+	Receiver   string `json:"receiver"`
+	TaskTopic  string `json:"task_topic,omitzero"`
+	TaskOffset *int64 `json:"task_offset,omitzero"`
+	// TranscriptChunks is the chunk count a finished attempt's terminal carries; it counts the empty final chunk, so
+	// it is an estimate of the lines.
+	TranscriptChunks int64         `json:"transcript_chunks,omitzero"`
+	Events           []Event       `json:"events"`
+	Decision         *Decision     `json:"decision,omitzero"`
+	StartFailure     *StartFailure `json:"start_failure,omitzero"`
 }
 
+// Event is a status. Message is its text as the receiver redacted it, kept for a working status and a failed, canceled
+// or rejected terminal, cut at MaxMessage with Truncated set; it is text for the page to render as text.
 type Event struct {
 	Kind       string    `json:"kind"`
 	State      string    `json:"state"`
@@ -233,6 +240,8 @@ type Event struct {
 	LogOffset  *int64    `json:"log_offset,omitzero"`
 	Event      string    `json:"event,omitzero"`
 	Class      string    `json:"class,omitzero"`
+	Message    string    `json:"message,omitzero"`
+	Truncated  bool      `json:"truncated,omitzero"`
 	Signer     string    `json:"signer"`
 }
 
@@ -348,7 +357,8 @@ type BoundHit struct {
 // capNames are the counters that are caps.
 var capNames = []string{capRecordBytes, capRuns, capDigests, capPending, capCursors, capRunEvents, capRunAttempts, capRunEchoes, capRunCancels, capRunOpens, capRunBytes,
 	capEvents, capAttempts, capEchoes, capCancels, capOpens, capBytes, capProgress, capResponse, capEvent, capSessions,
-	capTraceBytes, capTraceRecords, capTraceSpans, capTraceForest, capTraceScan, capTraceScans, capTraceRuns, capTraceLinks}
+	capTraceBytes, capTraceRecords, capTraceSpans, capTraceForest, capTraceScan, capTraceScans, capTraceRuns, capTraceLinks,
+	capTranscriptBytes, capTranscriptRecords, capTranscriptScan, capTranscriptScans, capTranscriptLines, capTranscriptRuns}
 
 // Snapshot is the model now, with at most maxRuns runs, newest last activity first; 0 is every run. Every name it
 // carries is one the configuration yields, through the catalog, or a fixed placeholder.
@@ -612,6 +622,9 @@ func (v *View) RunDetail(id string) (RunDetail, bool) {
 	names, signer := v.m.catalog(), v.m.signer
 	receiver, host := names.receiver, func(name string) string { return names.host(r.Tenant, name) }
 	d := RunDetail{RunSummary: v.m.summary(r, names), Hash: r.Hash, Echoes: []Echo{}, Attempts: []Attempt{}, Opens: []Open{}, Cancels: []Cancel{}, Path: []PathStep{}}
+	if t, ok := r.terminal(); ok && t.Class != "" {
+		d.Reason = t.Message
+	}
 	// An echo carrying another task hash than the run's statuses did not admit them; it is counted, never shown.
 	if e, ok := r.echo(); ok {
 		d.Echoes = append(d.Echoes, Echo{Receiver: receiver(e.Receiver), Host: host(e.Host), Pool: names.pool(e.Pool), Agent: names.agent(r.Pool, e.Agent), Model: names.model(r.Pool, e.Model), At: e.At, Joined: true, Signer: signer(e.src)})
@@ -622,8 +635,11 @@ func (v *View) RunDetail(id string) (RunDetail, bool) {
 		a := r.Attempts[number]
 		attempt := Attempt{Number: number, Receiver: receiver(a.Receiver), TaskTopic: names.taskTopic(a.TaskTopic), TaskOffset: a.TaskOffset, Events: []Event{}}
 		for _, e := range a.Events {
-			attempt.Events = append(attempt.Events, Event{Kind: e.Kind, State: string(e.State), EventID: e.EventID, Receiver: receiver(e.Receiver), At: e.At, ReceiverAt: e.ReceiverAt, LogOffset: e.LogOffset, Event: e.Event, Class: e.Class, Signer: signer(e.src)})
+			attempt.Events = append(attempt.Events, Event{Kind: e.Kind, State: string(e.State), EventID: e.EventID, Receiver: receiver(e.Receiver), At: e.At, ReceiverAt: e.ReceiverAt, LogOffset: e.LogOffset, Event: e.Event, Class: e.Class, Message: e.Message, Truncated: e.Truncated, Signer: signer(e.src)})
 			step := PathStep{Step: e.Kind, Actor: receiver(e.Receiver), Attempt: number, At: e.At}
+			if e.Kind == "terminal" {
+				attempt.TranscriptChunks = e.Chunks
+			}
 			if e.Kind == "terminal" || e.Kind == "rejected" {
 				step.Detail = stateWord(e.State)
 				if e.Class != "" {

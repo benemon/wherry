@@ -23,8 +23,9 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// Sentinels the stored records carry and no response may.
-var sentinels = []string{"s3cr3t-working-line", "s3cr3t-reply-text", "s3cr3t-artifact-text", "s3cr3t-span-attr", "s3cr3t-span-name", "s3cr3t-host-record", "s3cr3t-rejection",
+// Sentinels the stored records carry and no response may. A working status's line and a rejection's reason are shown
+// by design, so they are not among them.
+var sentinels = []string{"s3cr3t-reply-text", "s3cr3t-artifact-text", "s3cr3t-span-attr", "s3cr3t-span-name", "s3cr3t-host-record",
 	"s3cr3t-label-key", "s3cr3t-label-value", "s3cr3t-profile", "s3cr3t-agent", "s3cr3t-unreturned-reason", "s3cr3t-offer"}
 
 // served is a view with a recorded workload holding every sentinel, served, with the token parsed from the URL.

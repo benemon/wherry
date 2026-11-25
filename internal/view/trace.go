@@ -40,9 +40,10 @@ const (
 // maxLinks bounds the links kept of one span.
 const maxLinks = 16
 
-// traceSkew is how far before a run's first record its tenant's trace topic is scanned from: a host's submit spans
-// are exported after the task record, on another leader's clock.
-const traceSkew = time.Minute
+// scanSkew is how far before a run's first record its tenant's trace and transcript topics are scanned from: a host's
+// submit spans are exported after the task record, on another leader's clock, and a chunk's append time is the
+// receiver's leader's.
+const scanSkew = time.Minute
 
 // Markers a forest carries for what was cut.
 const (
@@ -178,7 +179,7 @@ func (t *traces) Trace(ctx context.Context, id string) (Forest, error) {
 	}
 	if !s.started {
 		listed, err := operator.ListOffsets(ctx, func(ctx context.Context, topics ...string) (kadm.ListedOffsets, error) {
-			return admin.ListOffsetsAfterMilli(ctx, from.Add(-traceSkew).UnixMilli(), topics...)
+			return admin.ListOffsetsAfterMilli(ctx, from.Add(-scanSkew).UnixMilli(), topics...)
 		}, s.topic)
 		if err != nil {
 			return Forest{}, err

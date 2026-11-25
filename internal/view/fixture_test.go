@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	json "encoding/json/v2"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -187,6 +188,7 @@ type st struct {
 	hash, event, text, eventID  string
 	key                         ed25519.PrivateKey
 	taskOffset                  *int64
+	chunks                      int64
 }
 
 func (f *fixture) statusRecord(at time.Time, s st) []byte {
@@ -212,7 +214,7 @@ func (f *fixture) statusValue(at time.Time, s st) (*wire.RunStatus, ed25519.Priv
 	}
 	status := &wire.RunStatus{
 		StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: s.run, ContextID: s.run, Status: wire.TaskStatus{State: s.state, Timestamp: at.UTC().Format(time.RFC3339Nano)}},
-		Wherry:       wire.StatusBinding{ReceiverBinding: wire.ReceiverBinding{Receiver: s.receiver, Tenant: s.tenant, Pool: s.pool, Run: s.run, Attempt: s.attempt}, EventID: s.eventID, Kind: s.kind, TaskHash: s.hash, Event: s.event},
+		Wherry:       wire.StatusBinding{ReceiverBinding: wire.ReceiverBinding{Receiver: s.receiver, Tenant: s.tenant, Pool: s.pool, Run: s.run, Attempt: s.attempt}, EventID: s.eventID, Kind: s.kind, TaskHash: s.hash, Event: s.event, TranscriptChunks: s.chunks},
 	}
 	if s.kind == "placing" || s.kind == "working" {
 		status.StatusUpdate.Status.Message = &wire.Message{MessageID: wire.RandomID("msg-"), Role: wire.RoleAgent, Parts: []wire.Part{{Text: strings.TrimSpace(s.text + " step")}}, Extensions: []string{wire.ExtensionURI}}
@@ -436,3 +438,96 @@ func poolOf(t *testing.T, s Snapshot, name string) Pool {
 	t.Fatalf("pool %s is not in the snapshot", name)
 	return Pool{}
 }
+
+// ch describes a transcript chunk to sign: the line at seq of attempt, text "line <seq>" unless part is given, the
+// empty final chunk when last is set with no part.
+type ch struct {
+	receiver, tenant, pool, run string
+	attempt, seq                int64
+	part                        *wire.Part
+	last                        bool
+	hash                        string
+	key                         ed25519.PrivateKey
+}
+
+// chunkValue is the chunk c describes, signed with the key c names or its receiver's.
+func (f *fixture) chunkValue(c ch) []byte {
+	f.t.Helper()
+	if c.attempt == 0 {
+		c.attempt = 1
+	}
+	if c.hash == "" {
+		c.hash = hashOf(c.run)
+	}
+	if c.key == nil {
+		c.key = f.keys[c.receiver]
+	}
+	parts := []wire.Part{}
+	switch {
+	case c.part != nil:
+		parts = append(parts, *c.part)
+	case !c.last:
+		parts = append(parts, wire.Part{Text: "line " + strconv.FormatInt(c.seq, 10), MediaType: "application/x-ndjson"})
+	}
+	chunk := &wire.Chunk{
+		ArtifactUpdate: wire.TaskArtifactUpdateEvent{TaskID: c.run, ContextID: c.run, Artifact: wire.Artifact{ArtifactID: wire.TranscriptArtifact, Parts: parts, Extensions: []string{wire.ExtensionURI}}, Append: c.seq > 0, LastChunk: c.last},
+		Wherry:         wire.ChunkBinding{ReceiverBinding: wire.ReceiverBinding{Receiver: c.receiver, Tenant: c.tenant, Pool: c.pool, Run: c.run, Attempt: c.attempt}, TaskHash: c.hash, Seq: c.seq},
+	}
+	return f.sign(chunk, c.key)
+}
+
+// chunk writes the chunk c describes to tenant's transcript topic, keyed by its run, stamped at; topicTenant names
+// another tenant's topic when set.
+func (f *fixture) chunk(at time.Time, c ch) *kgo.Record {
+	f.t.Helper()
+	return f.produce(operator.TenantTranscriptTopic(c.tenant), c.run, f.chunkValue(c), at)
+}
+
+// output writes receiver's output chunk of name holding data for run to tenant's transcript topic.
+func (f *fixture) output(at time.Time, receiver, tenant, pool, run, name string, data []byte) {
+	f.t.Helper()
+	metadata := must(f.t)(json.Marshal(wire.OutputMetadata{Index: 0}))
+	output := &wire.Output{
+		ArtifactUpdate: wire.TaskArtifactUpdateEvent{TaskID: run, ContextID: run, LastChunk: true, Metadata: metadata,
+			Artifact: wire.Artifact{ArtifactID: name, Name: name, Parts: []wire.Part{{Raw: wire.StdBytes(data), Filename: name, MediaType: wire.OutputMediaType}}, Extensions: []string{wire.ExtensionURI}}},
+		Wherry: wire.ResultBinding{ReceiverBinding: wire.ReceiverBinding{Receiver: receiver, Tenant: tenant, Pool: pool, Run: run, Attempt: 1}, TaskHash: hashOf(run)},
+	}
+	f.produce(operator.TenantTranscriptTopic(tenant), run, f.sign(output, f.keys[receiver]), at)
+}
+
+// produceMany writes records together, in order, and waits for them all.
+func (f *fixture) produceMany(records []*kgo.Record) {
+	f.t.Helper()
+	ctx, cancel := context.WithTimeout(f.ctx, 2*time.Minute)
+	defer cancel()
+	var failed error
+	var mu sync.Mutex
+	for _, record := range records {
+		f.client.Produce(ctx, record, func(_ *kgo.Record, err error) {
+			if err != nil {
+				mu.Lock()
+				failed = err
+				mu.Unlock()
+			}
+		})
+	}
+	if err := f.client.Flush(ctx); err != nil {
+		f.t.Fatal(err)
+	}
+	if failed != nil {
+		f.t.Fatalf("produce: %v", failed)
+	}
+}
+
+// lines writes n text chunks of attempt for run, seq 0, 10, 20 and so on, each stamped a millisecond apart from at.
+func (f *fixture) lines(at time.Time, receiver, tenant, pool, run string, attempt int64, n int) {
+	f.t.Helper()
+	var records []*kgo.Record
+	for i := range n {
+		records = append(records, &kgo.Record{Topic: operator.TenantTranscriptTopic(tenant), Key: []byte(run), Value: f.chunkValue(ch{receiver: receiver, tenant: tenant, pool: pool, run: run, attempt: attempt, seq: int64(i) * 10}), Timestamp: at.Add(time.Duration(i) * time.Millisecond)})
+	}
+	f.produceMany(records)
+}
+
+// transcriptCaps are DefaultCaps: the bounded reads of a transcript scan take whole batches.
+func transcriptCaps() Caps { return DefaultCaps }
