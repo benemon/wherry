@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -34,10 +33,6 @@ type S3File struct {
 // getLifetime is how long a presigned GET for an S3 input lives; a run's POST policy for its S3 outputs lives until its
 // task_ended_by plus the upload grace.
 const getLifetime = 15 * time.Minute
-
-// storageTransport carries the client's S3 requests, nil for Go's default. A variable so tests can trust their TLS
-// servers.
-var storageTransport http.RoundTripper
 
 // bundleAccessKey and bundleSecretKey name the bundle's storage keys in the redaction markers that replace them.
 const bundleAccessKey, bundleSecretKey = "bundle-access-key", "bundle-secret-key"
@@ -119,9 +114,17 @@ func (h *Host) bucket(ctx context.Context, pool string, storage *operator.Storag
 		holdStorageKey(name, []byte(keys[i]))
 		values[name] = []byte(keys[i])
 	}
-	// minio drops the default port Host adds, as presigned URLs are signed without it.
+	// minio's default transport, verifying the bucket's certificate against the host's roots; minio drops the default
+	// port Host adds, as presigned URLs are signed without it.
+	transport, err := minio.DefaultTransport(storage.Secure())
+	if err != nil {
+		return nil, err
+	}
+	if transport.TLSClientConfig != nil {
+		transport.TLSClientConfig.RootCAs = h.roots
+	}
 	client, err := minio.New(storage.Host(), &minio.Options{
-		Creds: credentials.NewStaticV4(keys[0], keys[1], ""), Secure: storage.Secure(), BucketLookup: minio.BucketLookupPath, Transport: storageTransport,
+		Creds: credentials.NewStaticV4(keys[0], keys[1], ""), Secure: storage.Secure(), BucketLookup: minio.BucketLookupPath, Transport: transport,
 	})
 	if err != nil {
 		return nil, err

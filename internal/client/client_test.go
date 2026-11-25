@@ -1545,8 +1545,8 @@ func TestHostPathsDefaultToXDGLocations(t *testing.T) {
 				t.Fatal(err)
 			}
 			config, err := LoadConfig(path)
-			if err != nil || config.HostKey != filepath.Join(test.config, "host.key") || config.StateDir != test.state || config.CAFile != "" {
-				t.Fatalf("config %+v, %v; want host_key in %s, state_dir %s and no ca_file", config, err, test.config, test.state)
+			if err != nil || config.HostKey != filepath.Join(test.config, "host.key") || config.StateDir != test.state {
+				t.Fatalf("config %+v, %v; want host_key in %s and state_dir %s", config, err, test.config, test.state)
 			}
 		})
 	}
@@ -1579,39 +1579,16 @@ func TestConfigInputRoots(t *testing.T) {
 	}
 }
 
-// The host trusts the broker through its config's ca_file alone, expanded; without one it names none, and a ca.pem in
-// the configuration directory, which older hosts read, is not picked up: the bundle carries the CA.
-func TestConfigCAFile(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", "")
+// A configuration that keeps the ca_file earlier releases read is refused naming the key and the trust store, not as
+// an unknown field at a line.
+func TestConfigRefusesCAFileByName(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	load := func(config string) string {
-		t.Helper()
-		if err := os.WriteFile(path, []byte("bundle: bundle.yaml\n"+config), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		loaded, err := LoadConfig(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return loaded.CAFile
-	}
-	if got := load(""); got != "" {
-		t.Fatalf("ca_file %q without a setting; want none, for the bundle's ca or the system roots", got)
-	}
-	oldCA := filepath.Join(home, ".config", "wherry", "ca.pem")
-	if err := os.MkdirAll(filepath.Dir(oldCA), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte("bundle: bundle.yaml\nca_file: ~/private/kafka-ca.pem\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(oldCA, []byte("ca"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if got := load(""); got != "" {
-		t.Fatalf("ca_file %q without a setting; want %s left alone", got, oldCA)
-	}
-	if got := load("ca_file: ~/private/kafka-ca.pem\n"); got != filepath.Join(home, "private", "kafka-ca.pem") {
-		t.Fatalf("ca_file %q; want the setting expanded", got)
+	_, err := LoadConfig(path)
+	if want := path + ": ca_file is now ca_cert"; err == nil || err.Error() != want {
+		t.Fatalf("config with a ca_file: %v; want %q", err, want)
 	}
 }
 

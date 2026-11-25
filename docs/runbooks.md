@@ -405,16 +405,14 @@ Then:
 
 - Restore the route from the receiver host to the broker's TLS listener,
   or the brokers themselves.
-- For a TLS or SCRAM error, check the receiver's `ca_file`, else the
-  bundle's `ca`, else the system roots, against the listener's certificate,
-  and the bundle's principal and password against the cluster's SCRAM
-  credentials. A failure to verify the broker's certificate names the CA
-  the receiver used. A stale `ca_file` on the receiver host, named by its
-  path, overrides the bundle: point it at the broker's CA or remove the
-  line. The bundle's `ca`, or none, after a CA renewal or on a bundle
-  written before the operator named a `ca_file`, wants a refreshed bundle,
-  which `wherry operator receiver apply RECEIVER` rewrites
-  ([Broker trust](security.md#broker-trust)).
+- For a TLS or SCRAM error, check the receiver machine's trust store and
+  the `ca_cert` of its local configuration against the listener's
+  certificate chain, and the bundle's principal and password against the
+  cluster's SCRAM credentials. A failure to verify the broker's certificate
+  says so and names the configuration: with no `ca_cert` set, install the
+  CA that signed it in the machine's trust store or set `ca_cert` there;
+  with one set, the certificate is signed neither by the trust store nor by
+  the CA in `ca_cert` ([Broker and S3 trust](security.md#broker-and-s3-trust)).
 - For `denied <op>`, run `wherry operator check` to confirm the ACLs the state
   calls for exist, and fix the bundle's credentials; until then the
   receiver restarts and exits again.

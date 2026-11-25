@@ -114,6 +114,8 @@ var devCommands = map[string]string{
 type devEnv struct {
 	instance devInstance
 	manifest devManifest
+	// caCert is the instance CA's PEM, devTLS's, which every configuration up writes holds as ca_cert.
+	caCert string
 	// driver is the Nomad driver of the runtime's containers: podman on Linux with podman, else docker.
 	driver string
 	// socket is the runtime's API socket as a unix:// URI.
@@ -217,10 +219,14 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 	env.agents, env.defaultAgent = agents, devDefaultAgent(manifest.DefaultAgent, sources)
 
 	step("tls")
-	ca, err := devTLS(instance)
+	if err := devTLS(instance); err != nil {
+		return err
+	}
+	ca, err := os.ReadFile(instance.env("tls", "ca.pem"))
 	if err != nil {
 		return err
 	}
+	env.caCert = string(ca)
 
 	step("super-user")
 	secret := make([]byte, 24)
@@ -256,7 +262,7 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 
 	step("kafka")
 	stopWait = waiting(stderr, "kafka")
-	kafkaAlloc, err := startKafka(ctx, nomad, env, ca, superPassword)
+	kafkaAlloc, err := startKafka(ctx, nomad, env, superPassword)
 	stopWait()
 	if err != nil {
 		return err
@@ -289,7 +295,7 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 	}
 
 	step("operator")
-	service, err := devOperator(ctx, instance, devBroker)
+	service, err := devOperator(ctx, env, devBroker)
 	if err != nil {
 		return err
 	}
@@ -426,11 +432,11 @@ func waiting(stderr io.Writer, name string) func() {
 	return func() { close(done); <-finished }
 }
 
-// devTLS writes the instance CA and the broker's certificate, returning the CA certificate's PEM.
-func devTLS(instance devInstance) ([]byte, error) {
+// devTLS writes the instance CA and the broker's certificate.
+func devTLS(instance devInstance) error {
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	now := time.Now()
 	caTemplate := &x509.Certificate{
@@ -439,12 +445,12 @@ func devTLS(instance devInstance) ([]byte, error) {
 	}
 	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	caCert, _ := x509.ParseCertificate(caDER)
 	brokerKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	brokerTemplate := &x509.Certificate{
 		SerialNumber: randomSerial(), Subject: pkix.Name{CommonName: "wherry-dev-broker"}, NotBefore: now.Add(-time.Minute), NotAfter: now.AddDate(0, 0, 365),
@@ -453,7 +459,7 @@ func devTLS(instance devInstance) ([]byte, error) {
 	}
 	brokerDER, err := x509.CreateCertificate(rand.Reader, brokerTemplate, caCert, &brokerKey.PublicKey, caKey)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	// The Kafka broker reads its TLS keys only as PEM, so these stay PEM where wherry's own key files are JWKs.
 	keyPEM := func(key *ecdsa.PrivateKey) []byte {
@@ -468,10 +474,10 @@ func devTLS(instance devInstance) ([]byte, error) {
 	}
 	for path, data := range files {
 		if err := os.WriteFile(instance.env(path), data, 0o600); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	return caPEM, nil
+	return nil
 }
 
 func randomSerial() *big.Int {
@@ -587,7 +593,8 @@ func storageJob(env devEnv) *api.Job {
 	})
 }
 
-// receiverJob runs the snapshot's receiver under raw_exec; it exits on a configuration change and restarts.
+// receiverJob runs the snapshot's receiver under raw_exec; its configuration holds the instance CA as ca_cert. It exits
+// on a configuration change and restarts.
 func receiverJob(env devEnv) *api.Job {
 	return serviceJob(jobID(env.instance, "receiver"), &api.TaskGroup{
 		Name: new("receiver"), Count: new(1),
@@ -718,9 +725,19 @@ func poll(ctx context.Context, bound time.Duration, check func() error) error {
 	}
 }
 
+// devKafkaOpts are the options of up's readiness wait: the super user at broker, verifying the broker against the
+// machine's trust store plus the instance CA.
+func devKafkaOpts(env devEnv, broker, superPassword string) ([]kgo.Opt, error) {
+	roots, err := operator.RootPool(env.caCert)
+	if err != nil {
+		return nil, err
+	}
+	return operator.KafkaOpts(broker, devSuperUser, superPassword, roots)
+}
+
 // startKafka waits for an authenticated metadata request, since rootless podman's port forwarder accepts connections
 // while the container is down.
-func startKafka(ctx context.Context, nomad *api.Client, env devEnv, ca []byte, superPassword string) (string, error) {
+func startKafka(ctx context.Context, nomad *api.Client, env devEnv, superPassword string) (string, error) {
 	raw := make([]byte, 16)
 	clusterID := "-"
 	for strings.HasPrefix(clusterID, "-") {
@@ -734,7 +751,7 @@ func startKafka(ctx context.Context, nomad *api.Client, env devEnv, ca []byte, s
 	if err != nil {
 		return "", err
 	}
-	opts, err := operator.KafkaOpts(devBroker, ca, devSuperUser, superPassword)
+	opts, err := devKafkaOpts(env, devBroker, superPassword)
 	if err != nil {
 		return alloc, err
 	}
@@ -883,7 +900,7 @@ func devDefaultAgent(defaultHarness string, copied map[string]credential.Source)
 // explicit credential is required where up copied a source for it.
 func devTerms(agents []string, defaultHarness string, storage bool, copied map[string]credential.Source) operator.Terms {
 	optional := false
-	terms := operator.Terms{DefaultAgent: devDefaultAgent(defaultHarness, copied), DeliveryLimit: 2, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 10}
+	terms := operator.Terms{DefaultAgent: devDefaultAgent(defaultHarness, copied), DeliveryLimit: 2, LockDurationMS: 15000, ProducerByteRate: operator.DefaultProducerByteRate, RequestPercentage: operator.DefaultRequestPercentage}
 	for _, agent := range agents {
 		agentTerms := operator.AgentTerms{Name: agent, Credentials: []operator.AgentCredential{}}
 		if agent == "mock" {
@@ -929,15 +946,17 @@ func devProfiles(env devEnv, agents []string) []operator.ProfileSettings {
 	return profiles
 }
 
-// devOperator provisions as operator init does, on the instance's operator working directory env/operator, and
-// connects as wherry.operator through it.
-func devOperator(ctx context.Context, instance devInstance, broker string) (*operator.Service, error) {
+// devOperator provisions as operator init does, with the instance CA as --ca-cert, on the instance's operator working
+// directory env/operator, and connects as wherry.operator through it.
+func devOperator(ctx context.Context, env devEnv, broker string) (*operator.Service, error) {
+	instance := env.instance
 	dir := instance.env("operator")
-	options := map[string]string{"broker": broker, "ca-file": instance.env("tls", "ca.pem"), "super-user": devSuperUser, "super-user-password-file": instance.env("kafka", "cfg", "super-user-password")}
+	options := map[string]string{"broker": broker, "super-user": devSuperUser, "super-user-password": "@" + instance.env("kafka", "cfg", "super-user-password"), "ca-cert": env.caCert}
 	if err := operatorInit(ctx, dir, options, io.Discard); err != nil {
 		return nil, err
 	}
-	return operatorService(dir)
+	service, _, err := operatorService(dir)
+	return service, err
 }
 
 // devBootstrap writes the development instance configuration and bundles.
@@ -968,7 +987,7 @@ func devBootstrap(ctx context.Context, env devEnv, agents []string, sources map[
 	if err := service.ReceiverAdd(ctx, receiver, service.Broker, receiverBundle); err != nil {
 		return fmt.Errorf("receiver apply: %w", err)
 	}
-	local := map[string]string{"bundle": receiverBundle, "ca_file": instance.env("tls", "ca.pem"), "state_dir": instance.env("receiver", "state"), "plugin_dir": instance.cache("plugins")}
+	local := map[string]string{"bundle": receiverBundle, "state_dir": instance.env("receiver", "state"), "plugin_dir": instance.cache("plugins"), "ca_cert": env.caCert}
 	return writeYAML(instance.env("receiver", "config.yaml"), local)
 }
 
@@ -1050,7 +1069,8 @@ func writeHost(env *devEnv, sources map[string]credential.Source, dir string, re
 		return busclient.Config{}, "", err
 	}
 	host := busclient.Config{
-		Bundle: filepath.Join(dir, "bundle.yaml"), CAFile: instance.env("tls", "ca.pem"), HostKey: filepath.Join(dir, "host.key"), StateDir: stateDir, Credentials: sources,
+		Bundle: filepath.Join(dir, "bundle.yaml"), HostKey: filepath.Join(dir, "host.key"), StateDir: stateDir, CACert: env.caCert, Credentials: sources,
+		Path: filepath.Join(dir, "config.yaml"),
 	}
 	if env.storage() {
 		host.Storage = map[string]busclient.StorageConfig{devPool: {AccessKey: "s3-access-key", SecretKey: "s3-secret-key"}}
@@ -1194,7 +1214,7 @@ func notCreated(path string, entry devHostFile) error {
 
 // hostConfigFile is config as its YAML file holds it, with only the set fields.
 func hostConfigFile(config busclient.Config) map[string]any {
-	file := map[string]any{"bundle": config.Bundle, "ca_file": config.CAFile, "host_key": config.HostKey, "state_dir": config.StateDir}
+	file := map[string]any{"bundle": config.Bundle, "host_key": config.HostKey, "state_dir": config.StateDir, "ca_cert": config.CACert}
 	if len(config.Credentials) > 0 {
 		sources := map[string]map[string]string{}
 		for name, source := range config.Credentials {
@@ -1314,7 +1334,7 @@ func smoke(ctx context.Context, env devEnv, hostConfig busclient.Config) error {
 }
 
 // printReady names config in the commands it prints unless up wrote it at the standard path, where every host command
-// reads it by default.
+// reads it by default; the instance CA is in the configurations up wrote, so nothing is exported for trust.
 func printReady(stdout io.Writer, env devEnv, config string) {
 	m := env.manifest
 	fmt.Fprintf(stdout, "ready: instance %s (nomad %s, kafka %s, plugin %s, wherry %s)\n",
@@ -1329,7 +1349,7 @@ func printReady(stdout io.Writer, env devEnv, config string) {
 	}
 	variable := ""
 	if m.HostFiles == nil {
-		variable = "--env WHERRY_CONFIG=" + shellQuote(config) + " "
+		variable += "--env WHERRY_CONFIG=" + shellQuote(config) + " "
 		fmt.Fprintf(stdout, "export WHERRY_CONFIG=%s\n", shellQuote(config))
 	}
 	fmt.Fprintln(stdout, `submit: wherry submit --prompt "..."`)

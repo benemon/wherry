@@ -235,6 +235,7 @@ func TestTracedUploadInputsCarryTheTerms(t *testing.T) {
 	exporter := teletest.Install(t)
 	o := newUploadOracle(t)
 	f := newFixture(t)
+	f.host.roots = o.roots
 	terms := testTerms()
 	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
 	if err := f.service.PoolApply(f.ctx, "pool-s3", terms, false); err != nil {
@@ -282,6 +283,7 @@ func TestTracedUploadFailureKeepsTheStorageKeys(t *testing.T) {
 	exporter := teletest.Install(t)
 	server := refusingStore(t)
 	f := newFixture(t)
+	f.host.roots = serverRoots(t, server)
 	const access, secret = "AKIAS3CR3TACCESSKEY", "s3cr3t-secret-key-value"
 	accessFile, secretFile := filepath.Join(t.TempDir(), "access"), filepath.Join(t.TempDir(), "secret")
 	for path, value := range map[string]string{accessFile: access, secretFile: secret} {

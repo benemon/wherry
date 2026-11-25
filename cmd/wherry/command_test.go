@@ -77,8 +77,10 @@ const credentialText = "s3cr3t-model-credential"
 // bus is a kfake cluster provisioned through operator.Service: pool-a with receiver-a live in it, and host-a of
 // tenant-a entitled to it with its key registered.
 type bus struct {
-	cluster     *kfake.Cluster
-	ca          string
+	cluster *kfake.Cluster
+	ca      string
+	// caCert is the host configuration's ca_cert on a TLS bus: the broker's CA and, with storage, the store's.
+	caCert      string
 	keyFile     string
 	ctx         context.Context
 	service     *operator.Service
@@ -129,7 +131,11 @@ func newBusStorage(t *testing.T, storage *s3Store) *bus {
 	t.Cleanup(operatorClient.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
-	b := &bus{cluster: cluster, ca: ca, ctx: ctx, service: &operator.Service{Operator: operatorClient, Broker: cluster.ListenAddrs()[0], CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}, stateDir: t.TempDir(), logs: &syncBuffer{}}
+	b := &bus{cluster: cluster, ca: ca, ctx: ctx, service: &operator.Service{Operator: operatorClient, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10, LockCeilingMS: 60000}, stateDir: t.TempDir(), logs: &syncBuffer{}}
+	if storage != nil {
+		// The host's configuration trusts the broker's CA and the store's through one ca_cert.
+		b.caCert = caCert(storage.ca)
+	}
 	optional := false
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{
 		{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}},
@@ -241,7 +247,7 @@ func (b *bus) connect(t *testing.T) func() (*busclient.Host, error) {
 	kafka.Close()
 	return func() (*busclient.Host, error) {
 		if b.ca != "" {
-			return busclient.Connect(busclient.Config{Bundle: b.hostBundle, HostKey: b.keyFile, StateDir: b.stateDir, Credentials: b.credentials, Git: b.git}, log.New(b.logs, "", 0))
+			return busclient.Connect(busclient.Config{Bundle: b.hostBundle, HostKey: b.keyFile, StateDir: b.stateDir, CACert: b.caCert, Credentials: b.credentials, Git: b.git}, log.New(b.logs, "", 0))
 		}
 		encoded, _ := os.ReadFile(b.hostBundle)
 		var bundle operator.Bundle
@@ -915,38 +921,66 @@ func TestLogsPrintsTheLatestAttemptsLines(t *testing.T) {
 	}
 }
 
-func TestEmptyPromptFileIsRefused(t *testing.T) {
+// An empty prompt is refused however it is given: as text, as an empty file through @FILE or as empty standard input
+// through @-; --prompt-file is an unknown flag.
+func TestEmptyPromptIsRefused(t *testing.T) {
 	empty := filepath.Join(t.TempDir(), "empty.md")
 	if err := os.WriteFile(empty, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	defer func(previous io.Reader) { stdin = previous }(stdin)
+	stdin = strings.NewReader("")
+	for name, value := range map[string]string{"text": "", "file": "@" + empty, "standard input": "@-"} {
+		var stderr bytes.Buffer
+		if err := runSubmit(context.Background(), nil, []string{"--prompt", value}, &stderr, &stderr); err == nil || err.Error() != "--prompt is empty" {
+			t.Fatalf("submit with an empty prompt as %s: %v", name, err)
+		}
+	}
 	var stderr bytes.Buffer
-	if err := runSubmit(context.Background(), nil, []string{"--prompt-file", empty}, &stderr, &stderr); err == nil || err.Error() != "--prompt-file is empty" {
-		t.Fatalf("submit: %v", err)
+	if err := runSubmit(context.Background(), nil, []string{"--prompt-file", empty}, &stderr, &stderr); err == nil || !strings.Contains(err.Error(), "flag provided but not defined: -prompt-file") {
+		t.Fatalf("submit --prompt-file: %v; want the unknown-flag error", err)
+	}
+	if err := runSubmit(context.Background(), nil, nil, &stderr, &stderr); err == nil || err.Error() != "submit requires --prompt" {
+		t.Fatalf("submit without --prompt: %v", err)
 	}
 }
 
-// --prompt-file - reads the prompt from standard input, though the directory holds a file named -.
-func TestPromptFileReadsStandardInput(t *testing.T) {
+// --prompt reads its value as every flag does: the text as given, @FILE for the file's contents, with ~ expanded, and @-
+// for standard input, though the directory holds a file named -.
+func TestPromptReadsTextFileAndStandardInput(t *testing.T) {
 	b := newBus(t)
 	dir := t.TempDir()
 	t.Chdir(dir)
-	if err := os.WriteFile(filepath.Join(dir, "-"), []byte("from the file"), 0o600); err != nil {
-		t.Fatal(err)
+	t.Setenv("HOME", dir)
+	for name, contents := range map[string]string{"-": "from the file named -", "brief.md": "from the file"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	defer func(previous io.Reader) { stdin = previous }(stdin)
-	stdin = strings.NewReader("from standard input")
-	var stdout, stderr bytes.Buffer
-	if err := runSubmit(b.ctx, b.client, []string{"--prompt-file", "-"}, &stdout, &stderr); err != nil {
-		t.Fatal(err)
+	submit := func(value string) string {
+		t.Helper()
+		stdin = strings.NewReader("from standard input")
+		var stdout, stderr bytes.Buffer
+		if err := runSubmit(b.ctx, b.client, []string{"--prompt", value}, &stdout, &stderr); err != nil {
+			t.Fatalf("submit --prompt %q: %v", value, err)
+		}
+		runID, _, _ := strings.Cut(strings.TrimPrefix(stdout.String(), "run_id="), " ")
+		return b.tasks(t, runID)[0].submission.Message.Parts[0].Text
 	}
-	runID, _, _ := strings.Cut(strings.TrimPrefix(stdout.String(), "run_id="), " ")
-	if text := b.tasks(t, runID)[0].submission.Message.Parts[0].Text; !strings.Contains(text, "from standard input") || strings.Contains(text, "from the file") {
-		t.Fatalf("prompt %q, want standard input's", text)
+	for value, want := range map[string]string{"the text": "the text", "@brief.md": "from the file", "@~/brief.md": "from the file", "@-": "from standard input"} {
+		if text := submit(value); !strings.Contains(text, want) || (want != "from the file" && strings.Contains(text, "from the file")) {
+			t.Fatalf("--prompt %q gave prompt %q, want %q", value, text, want)
+		}
 	}
-	stdin = strings.NewReader("")
-	if err := runSubmit(b.ctx, b.client, []string{"--prompt-file", "-"}, &stdout, &stderr); err == nil || err.Error() != "--prompt-file is empty" {
-		t.Fatalf("submit with empty standard input: %v", err)
+	for value, want := range map[string]string{
+		"@":           "--prompt @ names no file; a value starting with @ names a file, and @- standard input",
+		"@missing.md": "--prompt @missing.md: open missing.md: no such file or directory; a value starting with @ names a file",
+	} {
+		var stdout, stderr bytes.Buffer
+		if err := runSubmit(b.ctx, b.client, []string{"--prompt", value}, &stdout, &stderr); err == nil || err.Error() != want {
+			t.Fatalf("submit --prompt %q = %v; want %q", value, err, want)
+		}
 	}
 }
 

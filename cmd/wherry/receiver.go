@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	json "encoding/json/v2"
 	"errors"
@@ -40,45 +41,54 @@ const (
 	defaultPluginDir      = "/usr/local/libexec/wherry/plugins"
 )
 
-// receiverLocalConfig is the receiver's local configuration file. CAFile holds the PEM certificates the receiver trusts
-// the broker with; without it, the bundle's ca, else the system roots. Credentials maps the name a profile's config gives
+// receiverLocalConfig is the receiver's local configuration file. Credentials maps the name a profile's config gives
 // its platform credential to the source of its value. DrainTimeout bounds how long held runs may finish after a stop
 // signal; it stays below the platform's stop window, which the receiver cannot read. Tracing writes the receiver's
-// spans to the trace topics; off by default.
+// spans to the trace topics; off by default. CACert is the PEM of the CA the receiver's Kafka and S3 connections trust
+// beside the machine's trust store; empty for the trust store alone.
 type receiverLocalConfig struct {
 	Bundle       string                       `yaml:"bundle"`
-	CAFile       string                       `yaml:"ca_file,omitempty"`
 	StateDir     string                       `yaml:"state_dir"`
 	PluginDir    string                       `yaml:"plugin_dir"`
+	CACert       string                       `yaml:"ca_cert,omitempty"`
 	MetricsAddr  string                       `yaml:"metrics_addr"`
 	DrainTimeout time.Duration                `yaml:"drain_timeout"`
 	Credentials  map[string]credential.Source `yaml:"credentials"`
 	Tracing      bool                         `yaml:"tracing,omitempty"`
 }
 
-// loadReceiverLocalConfig decodes the receiver's local configuration at path, defaulting state_dir and plugin_dir.
-func loadReceiverLocalConfig(path string) (receiverLocalConfig, error) {
+// loadReceiverLocalConfig decodes the receiver's local configuration at path, defaulting state_dir and plugin_dir, and
+// builds the pool its ca_cert gives, the machine's trust store plus the CA, refusing a ca_cert from which Go appends
+// no certificate; the pool is built here once and carried to the dial.
+func loadReceiverLocalConfig(path string) (receiverLocalConfig, *x509.CertPool, error) {
 	path, err := client.ExpandHome(path)
 	if err != nil {
-		return receiverLocalConfig{}, err
+		return receiverLocalConfig{}, nil, err
 	}
 	encoded, err := os.ReadFile(path)
 	if err != nil {
-		return receiverLocalConfig{}, err
+		return receiverLocalConfig{}, nil, err
+	}
+	if err := operator.RefuseCAFile(path, encoded); err != nil {
+		return receiverLocalConfig{}, nil, err
 	}
 	var config receiverLocalConfig
 	if err := operator.DecodeYAML(encoded, &config); err != nil {
-		return receiverLocalConfig{}, fmt.Errorf("decode config: %w", err)
+		return receiverLocalConfig{}, nil, fmt.Errorf("decode config: %w", err)
 	}
 	if config.Bundle == "" {
-		return receiverLocalConfig{}, errors.New("config requires bundle")
+		return receiverLocalConfig{}, nil, errors.New("config requires bundle")
+	}
+	roots, err := operator.ConfigRootPool(path, config.CACert)
+	if err != nil {
+		return receiverLocalConfig{}, nil, err
 	}
 	if config.DrainTimeout < 0 {
-		return receiverLocalConfig{}, errors.New("config drain_timeout must not be negative")
+		return receiverLocalConfig{}, nil, errors.New("config drain_timeout must not be negative")
 	}
-	for _, path := range []*string{&config.Bundle, &config.CAFile, &config.StateDir, &config.PluginDir} {
+	for _, path := range []*string{&config.Bundle, &config.StateDir, &config.PluginDir} {
 		if *path, err = client.ExpandHome(*path); err != nil {
-			return receiverLocalConfig{}, err
+			return receiverLocalConfig{}, nil, err
 		}
 	}
 	if config.StateDir == "" {
@@ -89,14 +99,14 @@ func loadReceiverLocalConfig(path string) (receiverLocalConfig, error) {
 	}
 	for name, source := range config.Credentials {
 		if err := source.Validate(); err != nil {
-			return receiverLocalConfig{}, fmt.Errorf("config credential %s: %w", name, err)
+			return receiverLocalConfig{}, nil, fmt.Errorf("config credential %s: %w", name, err)
 		}
 		if source.File, err = client.ExpandHome(source.File); err != nil {
-			return receiverLocalConfig{}, err
+			return receiverLocalConfig{}, nil, err
 		}
 		config.Credentials[name] = source
 	}
-	return config, nil
+	return config, roots, nil
 }
 
 func runReceiver(args []string, stdout, stderr io.Writer) error {
@@ -118,19 +128,15 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	if flags.NArg() != 0 {
 		return errors.New(usage)
 	}
-	config, err := loadReceiverLocalConfig(*configPath)
+	config, roots, err := loadReceiverLocalConfig(*configPath)
 	if err != nil {
 		return err
 	}
+	// Where ca_cert lives, for the hint on an unknown authority: the file --config-file names.
+	ca := operator.CASetting{File: *configPath, Set: config.CACert != ""}
 	bundle, err := operator.ReadBundle(config.Bundle)
 	if err != nil {
 		return err
-	}
-	var ca []byte
-	if config.CAFile != "" {
-		if ca, err = os.ReadFile(config.CAFile); err != nil {
-			return fmt.Errorf("ca_file: %w", err)
-		}
 	}
 	logger := log.New(stdout, "receiver: ", log.LstdFlags|log.LUTC)
 	registry := newRegistry()
@@ -143,12 +149,9 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	}
 	plugins := &plugins{dir: config.PluginDir, credentials: config.Credentials, logger: logger, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
-	source := operator.TrustSource{CAFile: config.CAFile, Config: *configPath, BundleCA: bundle.CA != ""}
-	refresh := operator.BundleRefresh{Command: "wherry operator receiver apply " + strings.TrimPrefix(bundle.Principal, operator.ReceiverPrincipal("")),
-		Install: "install the new bundle by your receiver platform's procedure and restart the receiver"}
-	r, err := receiver.New(bundle, ca, config.StateDir, *rotateKey, config.DrainTimeout, plugins.profile, logger, registry)
+	r, err := receiver.New(bundle, roots, config.StateDir, *rotateKey, config.DrainTimeout, plugins.profile, logger, registry)
 	if err != nil {
-		return operator.ExplainUnknownAuthority(err, source, refresh)
+		return operator.ExplainUnknownAuthority(err, ca)
 	}
 	plugins.logs, plugins.hold = r.PluginLogs(stdout), r.HoldPlatformCredential
 	if config.Tracing {
@@ -157,7 +160,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := r.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		return operator.ExplainUnknownAuthority(err, source, refresh)
+		return operator.ExplainUnknownAuthority(err, ca)
 	}
 	return nil
 }

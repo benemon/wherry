@@ -27,8 +27,8 @@ names only its line numbers, and no `~` is expanded:
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `broker` | string | required | Kafka bootstrap address, `host:port`; host bundles name it, and receiver bundles unless the receiver's file names another |
-| `ca_file` | string | none | path of the PEM CA certificates the operator trusts the broker with, which `operator init` writes absolute and every bundle for its broker carries as `ca`; a relative path is in the working directory; absent for the system's trusted roots |
 | `password_file` | string | required | `wherry.operator`'s password file, `operator.password`; a relative path is in the working directory |
+| `ca_cert` | string | none | PEM of a CA, or several concatenated, the operator's Kafka connection trusts beside the machine's trust store; `operator init --ca-cert` writes it ([Broker and S3 trust](security.md#broker-and-s3-trust)) |
 | `tracing` | bool | `false` | write a span per operator command to the trace topics through the operator's Kafka connection ([Tracing](tracing.md)) |
 
 It holds nothing about the Kafka super user, which only
@@ -58,8 +58,8 @@ ignored. Any other entry and a directory with no agent files are errors.
 | `start_by_limit` | duration | `72h` | Bound how far after submission a run may start. |
 | `delivery_limit` | integer | `5` | Set the share group's delivery count limit. |
 | `lock_duration` | duration | `15s` | Set the share group's record lock duration. |
-| `producer_byte_rate` | integer | required | Set each host's producer quota in bytes per second. |
-| `request_percentage` | number | required | Set each host's quota as a percentage of broker request time. |
+| `producer_byte_rate` | integer | `1048576` | Set each host's producer quota in bytes per second. |
+| `request_percentage` | number | `10` | Set each host's quota as a percentage of broker request time. |
 | `output_limit` | integer | `8388608` | Bound one output, all outputs together and the outcome file in bytes. |
 | `reply_limit` | integer | the smaller of `1048576` and `output_limit` | Bound the redacted reply in bytes. |
 | `vcs` | list of strings | none | Allow git inputs from the listed remote hosts. |
@@ -132,8 +132,10 @@ the bucket, addressed path-style, `<endpoint>/<bucket>/<key>`. A pool
 without `storage` accepts no S3 input or output.
 
 No number or duration is negative, and a zero takes the field's default
-where it has one; `producer_byte_rate` and `request_percentage` are
-positive. Durations use Go syntax and are
+where it has one, so an explicit `0` for `producer_byte_rate` or
+`request_percentage` means its default. The record holds the quotas as
+applied, defaults included: re-applying a file that leaves them out resets
+a pool recorded at other values to the defaults. Durations use Go syntax and are
 stored in milliseconds. Set `lock_duration` above `10s`, since a
 receiver renews its lock every 10 seconds; wherry does not check this. The
 broker bounds it between
@@ -373,7 +375,8 @@ window.
 
 Each host principal gets the Kafka client quotas `producer_byte_rate` and
 `request_percentage`, the lowest of each across the pools its tenant is
-entitled to.
+entitled to. A pool file that leaves them out records `1048576` bytes per
+second and `10` percent.
 
 
 ## Tenants and entitlements

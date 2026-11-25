@@ -1,9 +1,7 @@
 package main
 
 import (
-	"crypto/x509"
 	"fmt"
-	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -179,105 +177,6 @@ func (q *questions) source(name, label string, uses []credentialUse, configured 
 
 var openFile = os.OpenFile
 
-const caLimit = 1 << 20
-
-var readCAData = func(file io.Reader) ([]byte, error) { return io.ReadAll(io.LimitReader(file, caLimit+1)) }
-
-func readCA(path string) error {
-	_, err := loadCA(path)
-	return err
-}
-
-// loadCA accepts symlinks to regular files and bounds reads even if the file changes after listing.
-func loadCA(path string) ([]byte, error) {
-	// Refuse a special file before opening it, since opening some devices acts; Fstat below decides acceptance.
-	if info, err := os.Stat(path); err == nil && !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s holds no PEM certificate", path)
-	}
-	file, err := openFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() || info.Size() > caLimit {
-		return nil, fmt.Errorf("%s holds no PEM certificate", path)
-	}
-	pem, err := readCAData(file)
-	if err != nil {
-		return nil, err
-	}
-	if len(pem) > caLimit || !x509.NewCertPool().AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("%s holds no PEM certificate", path)
-	}
-	return pem, nil
-}
-func caOptions() []huh.Option[string] {
-	var result []huh.Option[string]
-	info, err := os.Stat(".")
-	if err != nil || !info.IsDir() {
-		return []huh.Option[string]{option("System roots", "system"), option("Other file...", "other")}
-	}
-	entries, _ := os.ReadDir(".")
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".") || (!e.Type().IsRegular() && e.Type()&os.ModeSymlink == 0) {
-			continue
-		}
-		path, err := localPath(e.Name())
-		if err == nil && readCA(path) == nil {
-			result = append(result, option(e.Name(), path))
-			if len(result) == 8 {
-				break
-			}
-		}
-	}
-	return append(result, option("System roots", "system"), option("Other file...", "other"))
-}
-func (q *questions) ca() (string, error) {
-	prev := ""
-	for {
-		value, err := q.pick("CA certificate", "", caOptions(), &prev)
-		if err != nil {
-			return "", err
-		}
-		if value == "system" {
-			return "", q.answer("CA certificate", "System roots")
-		}
-		if value == "other" {
-			value, err = q.input("CA file (blank returns)", "", "", "path", func(s string) error {
-				if s == "" {
-					return nil
-				}
-				p, err := localPath(s)
-				if err != nil {
-					return err
-				}
-				return readCA(p)
-			})
-			if err != nil {
-				return "", err
-			}
-			if value == "" {
-				continue
-			}
-			value, err = localPath(value)
-			if err != nil {
-				return "", err
-			}
-		}
-		if err = readCA(value); err != nil {
-			if err = q.line("%s\n", display(err.Error())); err != nil {
-				return "", err
-			}
-			continue
-		}
-		return value, q.answer("CA certificate", value)
-	}
-}
-
 type gitNames struct {
 	pairs  map[string]string
 	owners map[string]string
@@ -391,7 +290,9 @@ func localPath(path string) (string, error) {
 	return filepath.Abs(path)
 }
 
-func loadPassword(path string) ([]byte, error) {
+// openPasswordFile opens the file --super-user-password @FILE names: a regular file, opened without blocking, so a
+// FIFO, a device or a directory cannot hold the command or stand in for a file.
+func openPasswordFile(path string) (*os.File, error) {
 	if info, err := os.Stat(path); err == nil && !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
@@ -399,13 +300,14 @@ func loadPassword(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
+		file.Close()
 		return nil, err
 	}
 	if !info.Mode().IsRegular() {
+		file.Close()
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
-	return io.ReadAll(file)
+	return file, nil
 }

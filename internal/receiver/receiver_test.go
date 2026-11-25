@@ -6,19 +6,14 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"log"
-	"math/big"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -830,7 +825,7 @@ func (f fixture) newReceiver(t *testing.T, config operator.ReceiverConfig) (*Rec
 		plugin.mu.Unlock()
 		return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: plugin, Exited: plugin.exited}, nil
 	}
-	r := &Receiver{id: config.Receiver, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), factory: factory, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry())}
+	r := &Receiver{id: config.Receiver, base: base, storage: storageClient(nil), reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), factory: factory, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry())}
 	if teletest.On() {
 		r.Trace()
 	}
@@ -1430,35 +1425,12 @@ func TestRunJoinsPeriodicWork(t *testing.T) {
 	}
 }
 
-func testCA(t *testing.T) []byte {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test CA"}, NotBefore: time.Now(), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-}
-
 func TestNewTakesItsIDFromTheBundle(t *testing.T) {
-	ca := testCA(t)
 	dir := t.TempDir()
-	for name, test := range map[string]struct {
-		bundle operator.Bundle
-		ca     []byte
-	}{
-		"host principal":           {operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.TenantPrincipal("tenant-a", "host-a"), Password: "p"}, ca},
-		"a CA with no certificate": {operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"}, []byte("no certificate")},
-	} {
-		if _, err := New(test.bundle, test.ca, filepath.Join(dir, name), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry()); err == nil {
-			t.Fatalf("%s: New accepted the bundle", name)
-		}
+	if _, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.TenantPrincipal("tenant-a", "host-a"), Password: "p"}, nil, filepath.Join(dir, "host"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry()); err == nil {
+		t.Fatal("New accepted a host principal's bundle")
 	}
-	r, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"}, ca, filepath.Join(dir, "state"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
+	r, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"}, nil, filepath.Join(dir, "state"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1466,7 +1438,7 @@ func TestNewTakesItsIDFromTheBundle(t *testing.T) {
 	if r.id != "receiver-a" {
 		t.Fatalf("receiver ID %q", r.id)
 	}
-	again, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"}, ca, filepath.Join(dir, "state"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
+	again, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"}, nil, filepath.Join(dir, "state"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}

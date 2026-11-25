@@ -18,6 +18,7 @@ import (
 	"time"
 
 	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 )
 
@@ -107,10 +108,11 @@ func runHost(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stderr, hostUsage)
 		return flag.ErrHelp
 	case "init":
-		const initUsage = "usage: wherry host init [BUNDLE] [--config-file FILE]"
+		const initUsage = "usage: wherry host init [BUNDLE] [--config-file FILE] [--ca-cert PEM|@FILE|@-]"
 		flags := flag.NewFlagSet("host init", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		configFile := flags.String("config-file", "", "host configuration file")
+		caCert := flags.String("ca-cert", "", "PEM of a CA the host's Kafka and S3 connections trust beside the machine's trust store, written as ca_cert: the text, @FILE or @-")
 		positional, err := parseAnywhere(flags, args[1:])
 		if err != nil {
 			return err
@@ -122,7 +124,15 @@ func runHost(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		return hostInit(context.Background(), path, strings.Join(positional, ""), stdout, stderr)
+		var ca *string
+		if wasSet(flags, "ca-cert") {
+			text, _, err := caCertFlag(*caCert)
+			if err != nil {
+				return err
+			}
+			ca = &text
+		}
+		return hostInit(context.Background(), path, strings.Join(positional, ""), ca, stdout, stderr)
 	case "key":
 		const keyUsage = "usage: wherry host key rotate [--config-file FILE]"
 		if len(args) < 2 || args[1] != "rotate" {
@@ -325,8 +335,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	agent := flags.String("agent", "", "agent to run (default: the pool's default agent)")
 	model := flags.String("model", "", "model the agent runs, one of its models as receivers lists them (default: the agent's default model)")
 	selectorText := flags.String("selector", "", "labels the profile must carry: key=v|v, key!=v|v, key, !key, comma-separated")
-	prompt := flags.String("prompt", "", "prompt text")
-	promptFile := flags.String("prompt-file", "", "prompt file, or - for standard input")
+	prompt := flags.String("prompt", "", "the prompt: its text, @FILE for a file's contents or @- for standard input")
 	gitRemote := flags.String("git", "", "REMOTE[@REF] or .: git repository the agent clones, an https or ssh URL or user@host:path, at a branch, tag or commit, or without @REF at its default branch's commit; . is this repository's origin at the current commit, which must be on it")
 	gitPath := flags.String("git-path", "", "checkout directory, relative (default: the repository name)")
 	gitChanges := flags.String("git-changes", "", "bundle, patch or none: the agent's commits come back as changes.bundle (default), as changes.patch, or not at all")
@@ -364,7 +373,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry host submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE[@REF]|. [--git-path PATH] [--git-changes bundle|patch|none] | --continue RUN_ID] [--input FILE]... [--credential NAME|NAME:file=FILE|NAME:env=VAR]... [--output NAME]... [--start-by TIME|DURATION] [--end-by TIME|DURATION] [--wait [--outputs-dir DIR]]")
+		return errors.New("usage: wherry host submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] --prompt TEXT|@FILE|@- [--git REMOTE[@REF]|. [--git-path PATH] [--git-changes bundle|patch|none] | --continue RUN_ID] [--input FILE]... [--credential NAME|NAME:file=FILE|NAME:env=VAR]... [--output NAME]... [--start-by TIME|DURATION] [--end-by TIME|DURATION] [--wait [--outputs-dir DIR]]")
 	}
 	if wasSet(flags, "outputs-dir") && !*wait {
 		return errors.New("--outputs-dir requires --wait")
@@ -391,10 +400,8 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	} else if wasSet(flags, "git-path") || wasSet(flags, "git-changes") {
 		return errors.New("--git-path and --git-changes need --git")
 	}
-	promptSet := wasSet(flags, "prompt")
-	promptFileSet := wasSet(flags, "prompt-file")
-	if promptSet == promptFileSet {
-		return errors.New("submit requires exactly one of --prompt or --prompt-file")
+	if !wasSet(flags, "prompt") {
+		return errors.New("submit requires --prompt")
 	}
 	now := time.Now()
 	startTime, err := busclient.ParseBound(*startBy, now)
@@ -405,21 +412,12 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	if err != nil {
 		return fmt.Errorf("--end-by: %w", err)
 	}
-	if promptFileSet {
-		var contents []byte
-		var err error
-		if *promptFile == "-" {
-			contents, err = io.ReadAll(stdin)
-		} else {
-			contents, err = os.ReadFile(*promptFile)
-		}
-		if err != nil {
-			return err
-		}
-		if len(contents) == 0 {
-			return errors.New("--prompt-file is empty")
-		}
-		*prompt = string(contents)
+	text, err := flagValue("--prompt", *prompt, openFlagFile, stdin)
+	if err != nil {
+		return err
+	}
+	if text == "" {
+		return errors.New("--prompt is empty")
 	}
 	selector, err := parseRequirements(*selectorText)
 	if err != nil {
@@ -431,7 +429,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	}
 	defer closeClient()
 	result, err := client.Submit(ctx, busclient.SubmitInput{
-		Agent: *agent, Model: *model, Selector: selector, Prompt: *prompt, Files: files, Credentials: credentials, Requested: requested, Outputs: outputs, Git: git, GitChanges: *gitChanges,
+		Agent: *agent, Model: *model, Selector: selector, Prompt: text, Files: files, Credentials: credentials, Requested: requested, Outputs: outputs, Git: git, GitChanges: *gitChanges,
 		Continue: *continueRun, StartBy: startTime, EndBy: endTime,
 	})
 	if err != nil {
@@ -445,8 +443,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if *wait {
-		bound := max(time.Until(time.Unix(endTime.Unix(), 0).Add(submitWaitMargin)), time.Second)
-		err := runWait(ctx, client, []string{result.RunID, "--timeout", bound.String(), "--outputs-dir", *outputsDir}, stdout, stderr)
+		err := runWait(ctx, client, []string{result.RunID, "--outputs-dir", *outputsDir}, stdout, stderr)
 		var exit *exitError
 		if errors.As(err, &exit) && exit.code == timeoutCode {
 			command, commandErr := waitCommand(*configFile)
@@ -479,13 +476,50 @@ func outputFlag(outputs *[]wire.ExpectedOutput) func(string) error {
 // stdin is a variable so tests can give submit a prompt on standard input.
 var stdin io.Reader = os.Stdin
 
-// defaultSubmitWaitMargin is the margin result's default timeout has over the default task_ended_by.
-const defaultSubmitWaitMargin = busclient.DefaultStartBy
+// resultGrace is how long past a run's task_ended_by result waits by default: operator.UploadGrace, while the run's S3
+// outputs may still upload, and 30 s for the collection pass after it. resultFloor is the least it waits, so a finished
+// run's result stays readable however late result runs, since Await bounds the whole feed replay. Variables so tests
+// shorten them.
+var (
+	resultGrace = operator.UploadGrace + 30*time.Second
+	resultFloor = time.Minute
+)
 
-var submitWaitMargin = defaultSubmitWaitMargin
+// defaultWaitTimeout covers a run at the default task_started_by and task_ended_by, from its submission; a variable so
+// tests shorten it.
+var defaultWaitTimeout = busclient.DefaultStartBy + busclient.DefaultEndBy
 
-// defaultWaitTimeout covers a run at the default task_started_by and task_ended_by.
-const defaultWaitTimeout = busclient.DefaultStartBy + busclient.DefaultEndBy
+// resultDeadline is the bound result waits to without --timeout and the MCP result tool offers retry_after within, from
+// what this host recorded of the run: endBy plus resultGrace; with no task_ended_by recorded, as hosts wrote before it
+// was, submitted plus defaultWaitTimeout; zero with no record of the run.
+func resultDeadline(submitted, endBy time.Time) time.Time {
+	switch {
+	case !endBy.IsZero():
+		return endBy.Add(resultGrace)
+	case !submitted.IsZero():
+		return submitted.Add(defaultWaitTimeout)
+	}
+	return time.Time{}
+}
+
+// resultBound is result's wait with no --timeout: until resultDeadline, at least resultFloor; with no record of the run,
+// defaultWaitTimeout from now.
+func resultBound(submitted, endBy time.Time) time.Duration {
+	deadline := resultDeadline(submitted, endBy)
+	if deadline.IsZero() {
+		return defaultWaitTimeout
+	}
+	return max(time.Until(deadline), resultFloor)
+}
+
+// resultTimeout is the timeout result reports, on exit 6 and in the MCP reply, for a run unfinished at resultDeadline:
+// its recorded task_ended_by plus resultGrace, or, with none recorded, defaultWaitTimeout from its submission.
+func resultTimeout(submitted, endBy time.Time) string {
+	if endBy.IsZero() {
+		return fmt.Sprintf("the run has not ended within %s of its submission, the wait for a run with no recorded task_ended_by (%s)", defaultWaitTimeout, submitted.Add(defaultWaitTimeout).UTC().Format(time.RFC3339))
+	}
+	return fmt.Sprintf("the run has not ended by its task_ended_by plus the upload grace (%s)", endBy.Add(resultGrace).UTC().Format(time.RFC3339))
+}
 
 // streamRetry separates a failed read of a run's transcript that logs follows from the next, and bounds each wait for
 // more of it.
@@ -510,7 +544,7 @@ var stateCodes = map[wire.TaskState]int{
 const timeoutCode = 6
 
 func runWait(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
-	const waitUsage = "usage: wherry host result RUN_ID [--timeout 2h10m] [--outputs-dir DIR]"
+	const waitUsage = "usage: wherry host result RUN_ID [--timeout DURATION] [--outputs-dir DIR]"
 	flags := flag.NewFlagSet("result", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() {
@@ -518,7 +552,7 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 		flags.PrintDefaults()
 	}
 	configFile := flags.String("config-file", "", "host configuration file")
-	timeout := flags.Duration("timeout", defaultWaitTimeout, "wait timeout")
+	timeout := flags.Duration("timeout", 0, "wait timeout (default: the run's task_ended_by plus 10m30s, at least 1m; 2h10m from its submission without a recorded task_ended_by, from now without a record of the run)")
 	outputsDir := flags.String("outputs-dir", "", "directory for the run's outputs (default: <state_dir>/runs/RUN_ID/outputs)")
 	positional, err := parseAnywhere(flags, args)
 	if err != nil {
@@ -528,7 +562,8 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 		return errors.New(waitUsage)
 	}
 	runID := positional[0]
-	if *timeout <= 0 {
+	explicit := wasSet(flags, "timeout")
+	if explicit && *timeout <= 0 {
 		return errors.New("timeout must be positive")
 	}
 	client, closeClient, err := commandClient(client, *configFile, stderr)
@@ -536,6 +571,10 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 		return err
 	}
 	defer closeClient()
+	submitted, endBy := client.RecordedBounds(runID)
+	if !explicit {
+		*timeout = resultBound(submitted, endBy)
+	}
 	result, err := client.Await(ctx, runID, *timeout)
 	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 		if status, statusErr := client.LastStatus(ctx, runID); statusErr == nil {
@@ -544,6 +583,9 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 					fmt.Fprintln(stderr, note)
 				}
 			}
+		}
+		if !explicit && !resultDeadline(submitted, endBy).IsZero() {
+			err = fmt.Errorf("%s: %w", resultTimeout(submitted, endBy), err)
 		}
 		return &exitError{timeoutCode, err}
 	}

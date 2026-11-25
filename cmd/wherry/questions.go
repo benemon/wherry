@@ -229,18 +229,6 @@ func terminalStandardInput(flag, what string) error {
 	return fmt.Errorf("standard input is a terminal; leave out --%s to be asked for the %s, or pipe it in", flag, what)
 }
 
-// secretFromStandardInput reads the secret a flag given `-` names, all of standard input as the bytes arrive, after the
-// caller refused a terminal; its errors name standard input, never a value.
-func secretFromStandardInput(what string) ([]byte, error) {
-	b, err := io.ReadAll(stdin)
-	if err != nil {
-		return nil, fmt.Errorf("standard input: %w", err)
-	}
-	if len(strings.TrimRight(string(b), "\r\n")) == 0 {
-		return nil, fmt.Errorf("standard input held no %s", what)
-	}
-	return b, nil
-}
 func safeCandidates(list []string) []string {
 	list = slices.DeleteFunc(list, func(s string) bool { return display(s) != s })
 	slices.Sort(list)

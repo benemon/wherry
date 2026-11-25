@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -24,19 +25,29 @@ import (
 // Config is the on-disk wherry host configuration. Credentials maps a
 // credential name to the source of its value. Git names the credential and
 // host key a task cloning under each URL prefix takes. InputRoots are the
-// directories the MCP server sends inputs from. CAFile holds the PEM certificates the host trusts the broker with; without
-// it, the bundle's ca, and without that the system roots. Storage maps a pool to the credentials of its bucket.
-// Tracing writes the host's spans to its tenant's trace topic; off by default.
+// directories the MCP server sends inputs from. Storage maps a pool to the credentials of its bucket. Tracing writes
+// the host's spans to its tenant's trace topic; off by default. CACert is the PEM of the CA the host's Kafka and S3
+// connections trust beside the machine's trust store; empty for the trust store alone. Path is the file the
+// configuration was loaded from, which the hint on an unknown authority names. Roots is the pool LoadConfig built from
+// CACert, the machine's trust store plus the CA, carried to Connect so it is built once per load; a Config built in
+// code leaves it nil and Connect builds it.
 type Config struct {
 	Bundle      string                       `yaml:"bundle"`
-	CAFile      string                       `yaml:"ca_file,omitempty"`
 	HostKey     string                       `yaml:"host_key,omitempty"`
 	StateDir    string                       `yaml:"state_dir,omitempty"`
+	CACert      string                       `yaml:"ca_cert,omitempty"`
 	Credentials map[string]credential.Source `yaml:"credentials,omitempty"`
 	Git         []GitCredential              `yaml:"git,omitempty"`
 	Storage     map[string]StorageConfig     `yaml:"storage,omitempty"`
 	InputRoots  []string                     `yaml:"input_roots,omitempty"`
 	Tracing     bool                         `yaml:"tracing,omitempty"`
+	Path        string                       `yaml:"-"`
+	Roots       *x509.CertPool               `yaml:"-"`
+}
+
+// ca is where config's ca_cert lives, for the hint on an unknown authority.
+func (config Config) ca() operator.CASetting {
+	return operator.CASetting{File: config.Path, Set: config.CACert != ""}
 }
 
 // GitCredential gives a task whose git remote starts with URL the credential Credential and, for ssh, the known_hosts
@@ -137,7 +148,8 @@ func sameExistingFile(a, b string) bool {
 	return errA == nil && errB == nil && os.SameFile(infoA, infoB)
 }
 
-// LoadConfig decodes the config at path, defaulting host_key and state_dir to DefaultPaths' for path.
+// LoadConfig decodes the config at path, defaulting host_key and state_dir to DefaultPaths' for path, and refusing a
+// ca_cert from which Go appends no certificate.
 func LoadConfig(path string) (Config, error) {
 	path, err := ExpandHome(path)
 	if err != nil {
@@ -147,12 +159,19 @@ func LoadConfig(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if err := operator.RefuseCAFile(path, encoded); err != nil {
+		return Config{}, err
+	}
 	var config Config
 	if err := operator.DecodeYAML(encoded, &config); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
 	if config.Bundle == "" {
 		return Config{}, errors.New("config requires bundle")
+	}
+	config.Path = path
+	if config.Roots, err = operator.ConfigRootPool(path, config.CACert); err != nil {
+		return Config{}, err
 	}
 	if config.HostKey == "" || config.StateDir == "" {
 		paths, err := DefaultPaths(path)
@@ -166,7 +185,7 @@ func LoadConfig(path string) (Config, error) {
 			config.StateDir = paths.StateDir
 		}
 	}
-	for _, path := range []*string{&config.Bundle, &config.HostKey, &config.StateDir, &config.CAFile} {
+	for _, path := range []*string{&config.Bundle, &config.HostKey, &config.StateDir} {
 		if *path, err = ExpandHome(*path); err != nil {
 			return Config{}, err
 		}
@@ -257,20 +276,21 @@ func Init(ctx context.Context, config Config) (string, map[string]operator.Terms
 // pingTimeout bounds Connect's first exchange with the broker; franz-go bounds each dial and request at 10 s.
 const pingTimeout = 30 * time.Second
 
-// Connect opens the bundle's TLS and SCRAM-SHA-512 Kafka connection as its host principal, trusting the broker through
-// the configuration's ca_file, else the bundle's ca, else the system roots; the host logs to logger.
+// Connect opens the bundle's TLS and SCRAM-SHA-512 Kafka connection as its host principal, verifying the broker, and
+// later each pool's bucket, against the machine's trust store plus config's ca_cert; the host logs to logger.
 func Connect(config Config, logger *log.Logger) (*Host, error) {
 	bundle, err := operator.ReadBundle(config.Bundle)
 	if err != nil {
 		return nil, err
 	}
-	var ca []byte
-	if config.CAFile != "" {
-		if ca, err = os.ReadFile(config.CAFile); err != nil {
-			return nil, fmt.Errorf("ca_file: %w", err)
+	// LoadConfig built the pool; a Config built in code gets it here.
+	roots := config.Roots
+	if roots == nil {
+		if roots, err = operator.ConfigRootPool(config.Path, config.CACert); err != nil {
+			return nil, err
 		}
 	}
-	opts, err := operator.BundleKafkaOpts(bundle, ca)
+	opts, err := operator.BundleKafkaOpts(bundle, roots)
 	if err != nil {
 		return nil, fmt.Errorf("bundle: %w", err)
 	}
@@ -284,14 +304,13 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 		kafka.Close()
 		return nil, err
 	}
-	// The first exchange with the broker, so a certificate the connection does not trust fails here, where the CA it
-	// was checked against is known.
+	host.roots = roots
+	// The first exchange with the broker, so a certificate the connection does not trust fails here.
 	ping, cancel := context.WithTimeout(context.Background(), pingTimeout)
 	defer cancel()
 	if err := kafka.Ping(ping); err != nil {
 		kafka.Close()
-		source := operator.TrustSource{CAFile: config.CAFile, Config: "your host configuration", BundleCA: bundle.CA != ""}
-		return nil, operator.ExplainUnknownAuthority(err, source, hostRefresh(host.tenant, host.host))
+		return nil, operator.ExplainUnknownAuthority(err, config.ca())
 	}
 	if host.key, err = operator.RecoverKey(context.Background(), kafka, signed.HostOwner(host.tenant, host.host), operator.HostTopic(host.tenant, host.host), config.HostKey); err != nil {
 		kafka.Close()
@@ -305,11 +324,6 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 		}
 	}
 	return host, nil
-}
-
-// hostRefresh is the operator command that rewrites the bundle of host in tenant, and how the host installs it.
-func hostRefresh(tenant, host string) operator.BundleRefresh {
-	return operator.BundleRefresh{Command: "wherry operator tenant host refresh " + tenant + " " + host, Install: "install it with wherry host init"}
 }
 
 // RotateKey replaces the host key with a new one and returns the old and new key IDs. It refuses while a run this host

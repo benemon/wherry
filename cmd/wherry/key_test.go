@@ -34,7 +34,7 @@ func newKeyHost(t *testing.T) keyHost {
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
 	service := &operator.Service{Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}
+		Broker: address, DeliveryCeiling: 10, LockCeilingMS: 60000}
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}}}}}, DefaultAgent: "claude",
 		DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	dir := t.TempDir()
@@ -50,11 +50,7 @@ func newKeyHost(t *testing.T) keyHost {
 			t.Fatal(err)
 		}
 	}
-	caFile := filepath.Join(dir, "ca.pem")
-	if err := os.WriteFile(caFile, []byte(ca), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(h.config, []byte("bundle: "+bundle+"\nca_file: "+caFile+"\nhost_key: "+h.keyPath+"\nstate_dir: "+h.stateDir+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(h.config, []byte("bundle: "+bundle+"\nhost_key: "+h.keyPath+"\nstate_dir: "+h.stateDir+"\n"+caCertYAML()), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
@@ -213,7 +209,7 @@ func TestReceiverRotateKey(t *testing.T) {
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
 	service := &operator.Service{Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}
+		Broker: address, DeliveryCeiling: 10, LockCeilingMS: 60000}
 	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}}}}}, DefaultAgent: "claude",
 		DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
@@ -249,11 +245,7 @@ func TestReceiverRotateKey(t *testing.T) {
 		return key
 	}
 	localConfig := filepath.Join(dir, "config.yaml")
-	caFile := filepath.Join(dir, "ca.pem")
-	if err := os.WriteFile(caFile, []byte(ca), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(localConfig, []byte("bundle: "+bundle+"\nca_file: "+caFile+"\nstate_dir: "+stateDir+"\nplugin_dir: "+t.TempDir()+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(localConfig, []byte("bundle: "+bundle+"\nstate_dir: "+stateDir+"\nplugin_dir: "+t.TempDir()+"\n"+caCertYAML()), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// With no plugin the receiver stops at configuration, which comes before it advertises or claims anything.

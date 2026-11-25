@@ -38,7 +38,7 @@ func localReceiver() operator.ReceiverConfig {
 }
 
 // localForms accept every default: a metrics address, and each variable as derived. No question asks for the broker's
-// CA: the bundle carries it.
+// CA: the receiver's machine trusts it through its system roots.
 func localForms(variables ...string) []receiverForm {
 	forms := []receiverForm{inputForm("/etc/wherry/receiver.bundle", "\r"), inputForm("/var/lib/wherry/state", "\r"), inputForm(defaultPluginDir, "\r"), inputForm("30s", "\r"), pickForm("listen", "\r"), inputForm(":9464", "\r")}
 	for _, variable := range variables {
@@ -96,14 +96,14 @@ func TestReceiverLocalPrompts(t *testing.T) {
 			if local.DrainTimeout != test.drain || local.Bundle != "/etc/wherry/receiver.bundle" || local.StateDir != "/var/lib/wherry/state" || local.PluginDir != defaultPluginDir || local.Credentials["nomad-token"].Env != "NOMAD_TOKEN" {
 				t.Fatalf("config = %+v", local)
 			}
-			if local.CAFile != "" || local.MetricsAddr != test.metrics {
+			if local.MetricsAddr != test.metrics {
 				t.Fatalf("config = %+v", local)
 			}
 			path := filepath.Join(t.TempDir(), "config.yaml")
 			if err := writeYAML(path, local); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := loadReceiverLocalConfig(path); err != nil {
+			if _, _, err := loadReceiverLocalConfig(path); err != nil {
 				t.Fatal(err)
 			}
 			encoded, err := os.ReadFile(path)
@@ -127,7 +127,7 @@ func TestReceiverLocalPrompts(t *testing.T) {
 }
 
 // The full flow writes the exact YAML for each Metrics choice, with one credential from a variable and one from a file,
-// and never a ca_file: the bundle carries the broker's CA.
+// and never a ca_file: the receiver's machine trusts the broker's CA through its system roots.
 func TestReceiverLocalFullFlow(t *testing.T) {
 	config := localReceiver()
 	config.Profiles = append(config.Profiles, operator.ProfileSettings{Name: "b", Plugin: "kubernetes", Config: map[string]any{"credential": "kube-token"}})
@@ -160,7 +160,7 @@ func TestReceiverLocalFullFlow(t *testing.T) {
 			if string(data) != want {
 				t.Fatalf("YAML: got\n%s\nwant\n%s", data, want)
 			}
-			if local, err := loadReceiverLocalConfig(path); err != nil || !reflect.DeepEqual(local, expected) {
+			if local, _, err := loadReceiverLocalConfig(path); err != nil || !reflect.DeepEqual(local, expected) {
 				t.Fatalf("read back: %+v, %v", local, err)
 			}
 			lines := collapsedLines(out.String())
@@ -201,7 +201,7 @@ func TestReceiverLocalFile(t *testing.T) {
 	if !strings.Contains(out.String(), "wrote "+path+"\n") {
 		t.Fatal(out.String())
 	}
-	local, err := loadReceiverLocalConfig(path)
+	local, _, err := loadReceiverLocalConfig(path)
 	if err != nil || local.DrainTimeout != 20*time.Second {
 		t.Fatalf("load: %+v %v", local, err)
 	}
@@ -276,7 +276,7 @@ func TestReceiverLocalLiteralNone(t *testing.T) {
 	if err != nil || !strings.Contains(string(data), "metrics_addr: none\n") {
 		t.Fatalf("YAML: %s, %v", data, err)
 	}
-	if local, err := loadReceiverLocalConfig(path); err != nil || local.MetricsAddr != "none" {
+	if local, _, err := loadReceiverLocalConfig(path); err != nil || local.MetricsAddr != "none" {
 		t.Fatalf("read back: %+v, %v", local, err)
 	}
 	lines := strings.Join(collapsedLines(out.String()), "\n")
@@ -415,7 +415,7 @@ func TestReceiverLocalEscape(t *testing.T) {
 	if err := receiverLocalFile(context.Background(), dir, "r", "outside.yaml", false, false, &out, localReceiver()); err != nil {
 		t.Fatal(err)
 	}
-	local, err := loadReceiverLocalConfig(filepath.Join(dir, "receivers", "r.config.yaml"))
+	local, _, err := loadReceiverLocalConfig(filepath.Join(dir, "receivers", "r.config.yaml"))
 	if err != nil || local.Credentials["nomad-token"].File != "/run/\u202etoken" {
 		t.Fatalf("written: %+v, %v", local, err)
 	}

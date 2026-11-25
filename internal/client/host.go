@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	json "encoding/json/v2"
 	"errors"
@@ -195,7 +196,9 @@ type Host struct {
 	// bundleStorage is the tenant's S3 key pair the bundle carries, zero for none: the keys of every pool with storage
 	// that storage does not map. It is no credential, so no pool's terms can request it.
 	bundleStorage operator.StorageKeys
-	logger        *log.Logger
+	// roots is the pool each bucket's certificate is verified against, Connect's; nil is the system roots alone.
+	roots  *x509.CertPool
+	logger *log.Logger
 	// follower is the host's reader of the tenant feed, kept while its context lasts.
 	followMu sync.Mutex
 	follower *follower
@@ -1180,6 +1183,22 @@ func (h *Host) localRun(runID string) (*runRecord, error) {
 		return nil, err
 	}
 	return &record, nil
+}
+
+// RecordedBounds are when this host published runID and the task_ended_by it recorded, each zero without a record,
+// or with one written before the field was recorded.
+func (h *Host) RecordedBounds(runID string) (submitted, endBy time.Time) {
+	local, err := h.localRun(runID)
+	if err != nil || local == nil {
+		return time.Time{}, time.Time{}
+	}
+	if local.SubmittedMS != 0 {
+		submitted = time.UnixMilli(local.SubmittedMS)
+	}
+	if local.TaskEndedBy != 0 {
+		endBy = time.Unix(local.TaskEndedBy, 0)
+	}
+	return submitted, endBy
 }
 
 func (h *Host) writeRun(record runRecord) error {

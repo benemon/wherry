@@ -207,7 +207,10 @@ admission: a malformed first task can win its run and then fail at open with
   presigned URL lasts, and one S3 POST policy per run, for any key under
   `wherry/<tenant>/<run>/outputs/` of at most 5 GiB, until `task_ended_by`
   plus 10 minutes. The 10 minutes let a run stopped at `task_ended_by`
-  upload the outputs its job left. For a pool with storage,
+  upload the outputs its job left: one 5 GiB object at the slowest measured
+  13 MB/s takes about 6.6 minutes, and 10 minutes is about 1.5 times that;
+  several large S3 outputs in one timed-out run are not covered. `result`
+  waits by default until that grace plus 30 seconds. For a pool with storage,
   `start_by_limit` plus six hours and ten minutes must not exceed 7 days.
   The host signs with its static storage credential, so the 7-day ceiling
   and those deadlines are the only bounds on a link or a policy.
@@ -560,53 +563,59 @@ in git without them. Hand each bundle to its host or receiver over a channel
 you trust. A host bundle holds the host's Kafka password and its tenant's
 storage pair.
 
-### Broker trust
+### Broker and S3 trust
 
-A bundle carries the broker address, the principal and its password, and,
-when `operator.yaml` names a `ca_file` and the bundle's broker is the
-operator's, that file's certificates as `ca`; a host bundle carries the
-tenant's storage pair as `storage` too. The operator trusts the broker
-through `operator.yaml`. A host or receiver trusts it through the `ca_file`
-its own configuration names, else the bundle's `ca`, else the system's
-trusted roots. A `ca` that holds no certificate is refused. The host or
-receiver does not fall back to the system roots. A `ca_file` overrides the
-bundle, so a stale one hides a refreshed CA: `wherry host init BUNDLE` warns
-when the configuration keeps a `ca_file` and the bundle carries a `ca`, and
-the renewal below removes the line. A machine that trusts the system roots
-trusts every CA they hold for the broker's address.
+A bundle carries the broker address, the principal and its password; a host
+bundle carries the tenant's storage pair as `storage` too. wherry distributes
+no CA. The operator, each host and each receiver verify the broker's
+certificate, and a host and a receiver a pool's bucket, against the machine's
+trust store, Go's system roots. A CA the trust store lacks goes in the
+configuration of the role that needs it as `ca_cert`, the PEM text itself:
+`ca_cert` in the host's `config.yaml`, in the receiver's local configuration
+and in `operator.yaml`, which `host init --ca-cert` and `operator init
+--ca-cert` write. The value adds to the machine's trust store and replaces
+none of it, for wherry's Kafka and S3 connections alone; no other process is
+affected. One value may hold several certificates, a Kafka CA and an S3 CA
+concatenated (`--ca-cert "$(cat broker-ca.pem s3-ca.pem)"`): one pool trusts
+them all on both. A plugin fetches a task's S3 inputs itself, under the
+trust of the receiver's environment, so `ca_cert` does not reach those
+fetches. wherry hands the value to Go and does not validate it; a value from
+which Go reads no certificate is refused as `ca_cert in <file> holds no
+certificate`. A renewed CA is a new value in the configuration and a
+restart. A bundle or configuration keeping a CA setting of earlier releases
+is refused naming the key ([Upgrade](upgrade.md#broker-trust)).
 
-A failure to verify the broker's certificate names the CA the connection
-used, a `ca_file` by its path, and one remedy for it. A bundle written
-before the operator trusted the broker through a CA file carries no `ca`. A
-host or receiver running it with no `ca_file` fails against a private-CA
-broker, and the failure says the system roots do not trust the certificate
-and names the refresh.
+A failure to verify the broker's certificate says so once and names the
+configuration file. With no `ca_cert` set, it names the one remedy: install
+the CA that signed it in the machine's trust store, or set `ca_cert` in that
+file. With one set, it says the certificate is signed neither by the
+machine's trust store nor by the CA in `ca_cert` in that file, and asks for
+no key already set. Go's x509 error ends the message.
 
-### Renew the broker CA
+Go's own `SSL_CERT_FILE` and `SSL_CERT_DIR`, no wherry setting, reach every
+Go program the shell that sets them starts: with either set, Go on macOS and
+Windows skips the platform verifier and trusts the named files alone, and on
+Linux the file stands in for the default bundle files while the default
+directories are still read unless `SSL_CERT_DIR` is set.
 
-The Kafka platform issues and renews its CA. A renewal means refreshing and
-redistributing bundles. No password changes.
+### Install a private CA
 
-Before you start, have:
+The Kafka platform issues and renews its CA. Either install its certificate,
+in PEM, in the trust store of each machine wherry runs on, or give it to
+wherry alone as `ca_cert`. A renewal means the new certificate the same way
+while the brokers still present a chain the old one signs; no bundle and no
+password changes.
 
-- the new CA certificate in PEM;
-- the operator's working directory, whose `operator.yaml` names a `ca_file`;
-- the channel you trust to each host's user and each receiver's platform.
-
-1. Put the new CA in the file `operator.yaml` names as `ca_file`. Keep the
-   old certificate beside it while the brokers still present the old chain.
-2. Run `wherry operator tenant host refresh TENANT HOST` for each host and
-   `wherry operator receiver apply RECEIVER` for each receiver on the
-   operator's broker. Each rewrites its kept bundle with the new `ca` and
-   the same password. A rerun changes nothing.
-3. Hand each refreshed bundle over as you handed the first. Ask each host's
-   user to run `wherry host init BUNDLE`, which replaces the host's copy, to
-   remove any `ca_file` line from the host configuration, and to restart a
-   long-lived MCP server so that it rereads the bundle. Ask each receiver's
-   platform owner to replace the bundle and restart the receiver, and to
-   remove a `ca_file` from its local configuration or replace its file.
-4. Once every bundle is refreshed, remove the old certificate from the
-   operator's file. The next refresh of each bundle drops it there.
+- The machine's trust store, for every program on it. macOS: add it to the
+  System keychain and trust it for SSL, through Keychain Access or with
+  `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain broker-ca.pem`.
+  RHEL and its derivatives: copy it to `/etc/pki/ca-trust/source/anchors/`
+  and run `sudo update-ca-trust`.
+- `ca_cert`, for wherry's Kafka and S3 connections alone: `wherry host init
+  BUNDLE --ca-cert @broker-ca.pem` on a host and `wherry operator init
+  --ca-cert @broker-ca.pem` on the operator's machine write it; a receiver's
+  local configuration holds it as a block scalar. On OpenShift, the CA goes
+  in the receiver's local configuration as `ca_cert`.
 
 ## Trace topics
 

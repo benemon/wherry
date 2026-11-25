@@ -23,8 +23,8 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// initHost is host-a of tenant-a on a TLS kfake cluster, added but not initialised, its bundle, which carries the
-// cluster's CA, where the operator wrote it. HOME is a temporary directory without XDG variables.
+// initHost is host-a of tenant-a on a TLS kfake cluster, added but not initialised, and its bundle where the operator
+// wrote it. HOME is a temporary directory without XDG variables.
 type initHost struct {
 	ctx     context.Context
 	service *operator.Service
@@ -40,7 +40,7 @@ func newInitHost(t *testing.T, pools map[string]operator.Terms) initHost {
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
 	service := &operator.Service{Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}
+		Broker: address, DeliveryCeiling: 10, LockCeilingMS: 60000}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	for _, variable := range []string{"XDG_CONFIG_HOME", "XDG_STATE_HOME", "WHERRY_CONFIG"} {
@@ -74,11 +74,11 @@ func (h initHost) entitle(t *testing.T, pool string, terms operator.Terms) {
 	}
 }
 
-// init runs wherry host init with args, returning its stdout and its prompts.
+// init runs wherry host init with args and the broker's CA as --ca-cert, returning its stdout and its prompts.
 func (h initHost) init(t *testing.T, args ...string) (string, string) {
 	t.Helper()
 	var stdout, prompts bytes.Buffer
-	if err := run(append([]string{"host", "init"}, args...), &stdout, &prompts); err != nil {
+	if err := run(append([]string{"host", "init", "--ca-cert", testCA.pem}, args...), &stdout, &prompts); err != nil {
 		t.Fatalf("host init: %v\n%s", err, prompts.String())
 	}
 	return stdout.String(), prompts.String()
@@ -159,7 +159,7 @@ func TestHostInitWithoutATerminal(t *testing.T) {
 	noTerminal(t)
 	stdout, prompts := h.init(t, h.bundle)
 	h.registered(t, strings.TrimSpace(stdout))
-	for _, asked := range []string{"Source for", "found MODEL_API_KEY", "Git URL prefix", "Credential holding", "CA file"} {
+	for _, asked := range []string{"Source for", "found MODEL_API_KEY", "Git URL prefix", "Credential holding"} {
 		if strings.Contains(prompts, asked) {
 			t.Errorf("init without a terminal printed\n%s\nwant nothing asked", prompts)
 		}
@@ -325,7 +325,7 @@ func TestHostInitKeepsAnExplicitBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, prompts bytes.Buffer
-	err := run([]string{"host", "init", h.bundle, "--config-file", other}, &stdout, &prompts)
+	err := run([]string{"host", "init", h.bundle, "--config-file", other, "--ca-cert", testCA.pem}, &stdout, &prompts)
 	if want := taken + " exists and is not the bundle of configuration " + other + "; set bundle in " + other + " to a path of its own"; err == nil || err.Error() != want {
 		t.Fatalf("init = %v; want %q", err, want)
 	}
@@ -351,7 +351,7 @@ func TestHostInitRefusesADanglingLinkAtADerivedPath(t *testing.T) {
 				t.Fatal(err)
 			}
 			var stdout, prompts bytes.Buffer
-			err := run([]string{"host", "init", h.bundle, "--config-file", config}, &stdout, &prompts)
+			err := run([]string{"host", "init", h.bundle, "--config-file", config, "--ca-cert", testCA.pem}, &stdout, &prompts)
 			what := map[string]string{"bundle": "bundle", "host_key": "host key", "state_dir": "state directory"}[setting]
 			if want := config + suffix + " exists and is not the " + what + " of configuration " + config + "; set " + setting + " in " + config + " to a path of its own"; err == nil || err.Error() != want {
 				t.Fatalf("init = %v; want %q", err, want)
@@ -462,7 +462,7 @@ func TestHostInitMalformedHostKeyEchoesNoKeyMaterial(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, prompts bytes.Buffer
-	err := run([]string{"host", "init", h.bundle, "--config-file", own}, &stdout, &prompts)
+	err := run([]string{"host", "init", h.bundle, "--config-file", own, "--ca-cert", testCA.pem}, &stdout, &prompts)
 	if err == nil {
 		t.Fatal("init with a malformed host key succeeded")
 	}
@@ -491,7 +491,7 @@ func TestHostInitRefusesAnotherConfigurationsFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 		var stdout, prompts bytes.Buffer
-		if err := run([]string{"host", "init", h.bundle, "--config-file", a}, &stdout, &prompts); err == nil || err.Error() != want {
+		if err := run([]string{"host", "init", h.bundle, "--config-file", a, "--ca-cert", testCA.pem}, &stdout, &prompts); err == nil || err.Error() != want {
 			t.Fatalf("init = %v; want %q", err, want)
 		}
 		if after, err := os.ReadFile(blocking); err != nil || !bytes.Equal(before, after) {
@@ -690,7 +690,7 @@ func TestHostInitWithAVariableThenSubmitWithoutIt(t *testing.T) {
 	if !strings.Contains(prompts, "pool pool-a agent claude: ready; anthropic-api-key from ANTHROPIC_API_KEY\n") || len(h.written(t).Credentials) != 0 {
 		t.Fatalf("init printed\n%s\nand wrote %+v; want the agent ready from the variable and no credential line", prompts, h.written(t).Credentials)
 	}
-	h.receiver(t, string(h.service.CA), "claude")
+	h.receiver(t, testCA.pem, "claude")
 	config, err := busclient.LoadConfig(h.config)
 	if err != nil {
 		t.Fatal(err)
@@ -711,7 +711,7 @@ func TestHostInitWithAVariableThenSubmitWithoutIt(t *testing.T) {
 	if entries, err := os.ReadDir(filepath.Join(config.StateDir, "runs")); err == nil && len(entries) != 0 {
 		t.Fatalf("%d local run records; want none", len(entries))
 	}
-	admin := connectTLS(t, h.service.Broker, string(h.service.CA), "admin", "password")
+	admin := connectTLS(t, h.service.Broker, testCA.pem, "admin", "password")
 	if records, err := readTasks(h.ctx, admin, "pool-a"); err != nil || len(records) != 0 {
 		t.Fatalf("%d task records, %v; want none published", len(records), err)
 	}

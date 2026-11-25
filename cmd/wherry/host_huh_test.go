@@ -303,7 +303,7 @@ func TestHostHuhInterruptAfterBootstrap(t *testing.T) {
 	h := newInitHost(t, map[string]operator.Terms{"a": agentTerms(envCredential("key", "KEY"))})
 	scriptForms(t, keys("\x03"))
 	var out bytes.Buffer
-	err := hostInit(h.ctx, h.config, h.bundle, &out, &out)
+	err := hostInit(h.ctx, h.config, h.bundle, &testCA.pem, &out, &out)
 	if !errors.Is(err, errInterrupted) {
 		t.Fatal(err)
 	}
@@ -333,7 +333,7 @@ func TestHostKeyIDStaysInTerminalSummary(t *testing.T) {
 		io.Copy(&output, master)
 		close(done)
 	}()
-	if err := hostInit(h.ctx, h.config, h.bundle, tty, tty); err != nil {
+	if err := hostInit(h.ctx, h.config, h.bundle, &testCA.pem, tty, tty); err != nil {
 		t.Fatal(err)
 	}
 	tty.Close()
@@ -406,41 +406,6 @@ func TestHostLabelsTargetsAndEscapes(t *testing.T) {
 	err := presentationError{errors.New("\x1b[2J")}
 	if strings.Contains(err.Error(), "\x1b") || errors.Unwrap(err) == nil {
 		t.Fatal(err)
-	}
-}
-func TestHostCARejectsUnsafeFiles(t *testing.T) {
-	dir := t.TempDir()
-	fifo := filepath.Join(dir, "fifo")
-	if err := syscall.Mkfifo(fifo, 0600); err != nil {
-		t.Fatal(err)
-	}
-	link := filepath.Join(dir, "link")
-	os.Symlink(fifo, link)
-	dirLink := filepath.Join(dir, "directory-link")
-	os.Symlink(dir, dirLink)
-	for _, p := range []string{fifo, link, dir, dirLink} {
-		done := make(chan error, 1)
-		go func() { done <- readCA(p) }()
-		select {
-		case err := <-done:
-			if err == nil {
-				t.Fatal(p)
-			}
-		case <-time.After(time.Second):
-			t.Fatal("blocked", p)
-		}
-	}
-	_, ca := tlsCluster(t)
-	regular := filepath.Join(dir, "ca")
-	os.WriteFile(regular, []byte(ca), 0600)
-	os.Remove(link)
-	os.Symlink(regular, link)
-	if err := readCA(link); err != nil {
-		t.Fatal(err)
-	}
-	os.WriteFile(regular, bytes.Repeat([]byte("x"), (1<<20)+1), 0600)
-	if readCA(link) == nil {
-		t.Fatal("oversized accepted")
 	}
 }
 func TestHostCompletionRules(t *testing.T) {
@@ -614,26 +579,6 @@ func TestHostRenderedDescriptionEscapes(t *testing.T) {
 		}
 	}
 }
-func TestHostCAPipeWithCertificate(t *testing.T) {
-	_, ca := tlsCluster(t)
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Close()
-	if _, err = io.WriteString(w, ca); err != nil {
-		t.Fatal(err)
-	}
-	w.Close()
-	path := fmt.Sprintf("/proc/self/fd/%d", r.Fd())
-	if _, err = os.Stat(path); os.IsNotExist(err) {
-		t.Skip("requires proc fd paths")
-	}
-	if readCA(path) == nil {
-		t.Fatal("accepted PEM from a non-regular file")
-	}
-}
-
 func TestHostSharedInputTypeahead(t *testing.T) {
 	t.Setenv("TERM", "xterm-256color")
 	for _, tail := range []string{"discarded\r", "\x03"} {
@@ -757,39 +702,6 @@ func TestHostReadablePathRejectsNonRegularFiles(t *testing.T) {
 	}
 }
 
-func TestHostCADoesNotTrustPreOpenMetadata(t *testing.T) {
-	_, ca := tlsCluster(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "ca")
-	os.WriteFile(path, []byte(ca), 0600)
-	old := openFile
-	t.Cleanup(func() { openFile = old })
-	called := false
-	openFile = func(p string, flags int, mode os.FileMode) (*os.File, error) {
-		called = true
-		if flags&syscall.O_NONBLOCK == 0 {
-			t.Error("CA open can block")
-		}
-		os.Remove(p)
-		if err := syscall.Mkfifo(p, 0600); err != nil {
-			return nil, err
-		}
-		return old(p, flags, mode)
-	}
-	done := make(chan error, 1)
-	go func() { done <- readCA(path) }()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("accepted replacement")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("replacement blocked")
-	}
-	if !called {
-		t.Fatal("CA bypassed safe open")
-	}
-}
 func TestHostCompletionDoesNotReadNonDirectories(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "file")
 	os.WriteFile(path, nil, 0600)
@@ -870,7 +782,7 @@ func TestHostSSHRequiresSchemeHostAndNewPrefix(t *testing.T) {
 func TestHostReturnedErrorIsEscapedAndWrapped(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "host\x1b]52;c;x\a.yaml")
 	var out bytes.Buffer
-	err := hostInit(context.Background(), path, "", &out, &out)
+	err := hostInit(context.Background(), path, "", nil, &out, &out)
 	if err == nil || strings.Contains(err.Error(), "\x1b") || errors.Unwrap(err) == nil {
 		t.Fatal(err)
 	}
@@ -896,8 +808,8 @@ func TestHostCancellationKeepsPairReservations(t *testing.T) {
 	}
 }
 
-// host init asks nothing about the broker: the bundle carries its CA, and no ca_file is written. It hardens the
-// configuration directory and copies the bundle, CA included, unchanged.
+// host init asks nothing about the broker: the machine's trust store holds its CA. It hardens the configuration
+// directory and copies the bundle unchanged.
 func TestHostBrokerAndBundleModes(t *testing.T) {
 	h := newInitHost(t, nil)
 	scriptForms(t)
@@ -906,9 +818,6 @@ func TestHostBrokerAndBundleModes(t *testing.T) {
 	if strings.Contains(out, "\nBroker\n") || strings.Contains(out, "CA certificate") || !strings.Contains(out, "Summary  1 of 1") || strings.Count(out, "Wrote "+h.config) != 1 {
 		t.Fatal(out)
 	}
-	if f := h.written(t); f.CAFile != "" {
-		t.Fatal(f)
-	}
 	for path, want := range map[string]os.FileMode{h.dir: 0700, filepath.Join(h.dir, "bundle.yaml"): 0600, h.config: 0600, filepath.Join(h.dir, "host.key"): 0600} {
 		info, err := os.Stat(path)
 		if err != nil || info.Mode().Perm() != want {
@@ -916,8 +825,8 @@ func TestHostBrokerAndBundleModes(t *testing.T) {
 		}
 	}
 	a, err := operator.ReadBundle(h.bundle)
-	if err != nil || a.CA == "" {
-		t.Fatal("the operator's bundle carries no CA", err)
+	if err != nil {
+		t.Fatal(err)
 	}
 	b, err := operator.ReadBundle(filepath.Join(h.dir, "bundle.yaml"))
 	if err != nil || a != b {
@@ -925,48 +834,6 @@ func TestHostBrokerAndBundleModes(t *testing.T) {
 	}
 }
 
-// The CA picker remains the operator's: operator init offers the PEM files in the working directory.
-func TestHostCAOptionsAndRevalidation(t *testing.T) {
-	_, ca := tlsCluster(t)
-	dir := t.TempDir()
-	t.Chdir(dir)
-	for i := 0; i < 10; i++ {
-		os.WriteFile(fmt.Sprintf("%02d.pem", i), []byte(ca), 0600)
-	}
-	os.WriteFile(".hidden", []byte(ca), 0600)
-	os.WriteFile("invalid", []byte("not PEM"), 0600)
-	options := caOptions()
-	if len(options) != 10 {
-		t.Fatal(options)
-	}
-	for i := 0; i < 8; i++ {
-		if options[i].Key != fmt.Sprintf("%02d.pem", i) {
-			t.Fatal(options)
-		}
-	}
-	for i := 1; i < 10; i++ {
-		os.Remove(fmt.Sprintf("%02d.pem", i))
-	}
-	scriptForms(t, keys("\r"), keys("\r"))
-	script := runQuestion
-	once := true
-	runQuestion = func(q *questions, field huh.Field) error {
-		err := script(q, field)
-		if once {
-			once = false
-			os.Remove("00.pem")
-		}
-		return err
-	}
-	var out bytes.Buffer
-	q := &questions{context.Background(), nil, &promptLatch{out: &out}}
-	if p, err := q.ca(); err != nil || p != "" {
-		t.Fatal(p, err)
-	}
-	if !strings.Contains(out.String(), "no such file") {
-		t.Fatal(out.String())
-	}
-}
 func TestHostCompletionCapDedupAndUnsafePrefixes(t *testing.T) {
 	var candidates []string
 	for i := 220; i >= 0; i-- {
@@ -1098,27 +965,6 @@ func TestHostNarrowDescriptionKeepsScopeWarning(t *testing.T) {
 	}
 }
 
-func TestHostGrowingCAIsBounded(t *testing.T) {
-	_, ca := tlsCluster(t)
-	path := filepath.Join(t.TempDir(), "ca.pem")
-	os.WriteFile(path, []byte(ca), 0600)
-	old := readCAData
-	t.Cleanup(func() { readCAData = old })
-	readCAData = func(r io.Reader) ([]byte, error) {
-		if err := os.WriteFile(path, append([]byte(ca), bytes.Repeat([]byte("x"), 2<<20)...), 0600); err != nil {
-			return nil, err
-		}
-		data, err := old(r)
-		if len(data) > (1<<20)+1 {
-			t.Error("read exceeded bound")
-		}
-		return data, err
-	}
-	if readCA(path) == nil {
-		t.Fatal("accepted a file grown after Fstat")
-	}
-}
-
 func TestHostGitAnonymous(t *testing.T) {
 	terms := agentTerms()
 	terms.VCS = []string{"git.test"}
@@ -1179,35 +1025,6 @@ func TestHostNamesTrimTruncatedPunctuation(t *testing.T) {
 	}
 }
 
-func TestHostCAHiddenPathAndHostileName(t *testing.T) {
-	_, ca := tlsCluster(t)
-	dir := t.TempDir()
-	t.Chdir(dir)
-	name := "evil\x1b]52;c;x\a.pem"
-	os.WriteFile(name, []byte(ca), 0600)
-	os.WriteFile(".hidden", []byte(ca), 0600)
-	os.Mkdir("directory", 0700)
-	if err := syscall.Mkfifo("fifo", 0600); err != nil {
-		t.Fatal(err)
-	}
-	options := caOptions()
-	if len(options) != 3 || strings.Contains(options[0].Key, "\x1b") {
-		t.Fatal(options)
-	}
-	scriptForms(t, keys("\r"), keys(down+down+"\r"), keys(filepath.Join(dir, ".hidden")+"\r"))
-	var out bytes.Buffer
-	q := &questions{context.Background(), nil, &promptLatch{out: &out}}
-	if got, err := q.ca(); err != nil || got != filepath.Join(dir, name) {
-		t.Fatal(got, err)
-	}
-	if got, err := q.ca(); err != nil || got != filepath.Join(dir, ".hidden") {
-		t.Fatal(got, err)
-	}
-	if strings.Contains(out.String(), "\x1b]52") {
-		t.Fatal("unsafe filename rendered")
-	}
-}
-
 func TestHostAllOptionalLabel(t *testing.T) {
 	if got := sourceLabel("key", "Account", []credentialUse{{optional: true}, {optional: true}}); got != "Account (optional)" {
 		t.Fatal(got)
@@ -1254,9 +1071,6 @@ func TestHostSpecialFilesAreNotOpened(t *testing.T) {
 		return old(p, flags, mode)
 	}
 	for _, p := range []string{dir, fifo, "/dev/null"} {
-		if readCA(p) == nil {
-			t.Fatalf("CA %s accepted", p)
-		}
 		if _, err := readablePath(p); err == nil {
 			t.Fatalf("known_hosts %s accepted", p)
 		}

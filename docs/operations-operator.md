@@ -11,10 +11,10 @@ principals and group configurations; the cluster itself is prepared once.
   receiver. Every principal wherry issues uses SCRAM-SHA-512, so a listener
   that enables only SCRAM-SHA-256 cannot serve wherry; the super user
   `wherry operator init` uses may log in with SCRAM-SHA-256
-  (`--super-user-mechanism`). Its address goes into every bundle, and so
-  does its CA when `operator.yaml` names a `ca_file`. Each host and receiver
-  trusts the broker through a `ca_file` in its own configuration, else the
-  `ca` its bundle carries, else the system's roots.
+  (`--super-user-mechanism`). Its address goes into every bundle. The
+  operator, each host and each receiver trust its certificate through their
+  machine's trust store plus the `ca_cert` of their configuration
+  ([Broker and S3 trust](security.md#broker-and-s3-trust)).
 - **An authoriser** denies anything no ACL allows, and `super.users` names
   the Kafka super user, which `wherry operator init` uses once. See
   [Authorization and ACLs](https://kafka.apache.org/documentation/#security_authz).
@@ -50,11 +50,12 @@ The pattern matches `wherry.operator`, every host principal
 `wherry.tnt.<tenant>.<host>` and every receiver principal
 `wherry.rcv.<receiver>`.
 
-Strimzi issues and renews the cluster CA. `operator.yaml` names its
-certificate as `ca_file`, and every bundle carries it. When Strimzi replaces
-the CA certificate, put the new one in `operator.yaml`'s `ca_file`, then
-refresh and redistribute every bundle, as
-[Broker trust](security.md#broker-trust) describes.
+Strimzi issues and renews the cluster CA. Install its certificate in the
+trust store of every machine that reaches the broker, or give it to each
+party as `ca_cert`; on OpenShift the CA goes in the receiver's local
+configuration as `ca_cert`, as [Broker and S3 trust](security.md#broker-and-s3-trust)
+describes. When Strimzi replaces the CA certificate, install the new one the
+same way, with a restart where `ca_cert` holds it.
 [Certificate renewal](https://strimzi.io/docs/operators/latest/deploying.html#con-certificate-renewal-str)
 gives Strimzi's timing.
 
@@ -66,12 +67,12 @@ Kafka super user, from flags or, on a terminal, its prompts:
 
 ```sh
 mkdir wherry-prod && cd wherry-prod
-wherry operator init --broker kafka.example.com:9093 --ca-file /etc/wherry/kafka-ca.pem \
-  --super-user kafka-admin --super-user-password-file /etc/wherry/admin-password
+wherry operator init --broker kafka.example.com:9093 \
+  --super-user kafka-admin --super-user-password @/etc/wherry/admin-password
 ```
 
-Leave out `--ca-file` when the listener's certificate chains to a system
-root. `init` creates `wherry.operator` with a new password, grants it the
+The listener's certificate chains to a CA in this machine's trust store, or
+to one given as `--ca-cert` ([Broker and S3 trust](security.md#broker-and-s3-trust)). `init` creates `wherry.operator` with a new password, grants it the
 [ACLs provisioning needs](security.md#the-operator-principal), creates the
 `wherry.operator` topic, and writes `operator.yaml` and
 `operator.password`. The broker address is what host bundles name, so use
@@ -402,10 +403,10 @@ Prerequisites: the working directory
    It prints the bundle's path and the command that installs it.
 
 4. Hand the bundle, `bundles/hosts/acme/laptop.bundle`, to the host's user over
-   a channel you trust. It holds the host's Kafka password, the broker's CA
-   when `operator.yaml` names a `ca_file`, and the tenant's S3 key pair
-   when one is recorded, so the host needs nothing else to reach the broker
-   and its pools' storage.
+   a channel you trust. It holds the host's Kafka password and the tenant's
+   S3 key pair when one is recorded, so the host needs nothing else to reach
+   the broker and its pools' storage once its machine trusts the broker's
+   CA.
 
 The host's user then runs `wherry host init <bundle>`, which places the
 bundle, registers the host key and writes the
@@ -541,10 +542,8 @@ host that meets [Run a receiver](operations-receivers.md#run-a-receiver).
 
 4. Deliver the bundle, `bundles/receivers/nomad-1.bundle`, to the receiver
    host over a channel you trust, such as the platform's secret mechanism.
-   It holds the receiver's Kafka password and, when the receiver uses the
-   operator's broker and `operator.yaml` names a `ca_file`, the broker's CA.
-   A receiver on another broker address gets no CA: it trusts that broker
-   through the system roots, or a `ca_file` in its local configuration.
+   It holds the receiver's Kafka password. The receiver trusts its broker's
+   certificate through its machine's trust store.
 
 5. Install wherry and the receiver's plugins, as in
    [Install plugins](operations-receivers.md#install-plugins), and write the receiver's [local
@@ -555,11 +554,21 @@ host that meets [Run a receiver](operations-receivers.md#run-a-receiver).
 
    ```yaml
    bundle: /etc/wherry/receiver.bundle
-   # A private CA the broker's certificate chains to, overriding the ca the bundle carries; without ca_file, the bundle's
-   # ca, else the system roots.
-   ca_file: /etc/wherry/kafka-ca.pem
    state_dir: /var/lib/wherry/state
    plugin_dir: /usr/local/libexec/wherry/plugins
+   # The CA that signed the broker's and the bucket's certificates, when the machine's trust store lacks it. This value
+   # is an example: a certificate that expired in 2021 and verifies nothing. Put the PEM of your CA here.
+   ca_cert: |
+     -----BEGIN CERTIFICATE-----
+     MIIBbjCCAROgAwIBAgIBATAKBggqhkjOPQQDAjAeMRwwGgYDVQQDExNFeGFtcGxl
+     IENBLCBleHBpcmVkMB4XDTIwMDEwMTAwMDAwMFoXDTIxMDEwMTAwMDAwMFowHjEc
+     MBoGA1UEAxMTRXhhbXBsZSBDQSwgZXhwaXJlZDBZMBMGByqGSM49AgEGCCqGSM49
+     AwEHA0IABKDgH46Z0Jb9ijDRVLk48an3uitOHZeFCHLHl//CE3czOjBUK8aYhf8i
+     KDOaGR3cXQMiPQtlhg4wWYT4iLg313ijQjBAMA4GA1UdDwEB/wQEAwICBDAPBgNV
+     HRMBAf8EBTADAQH/MB0GA1UdDgQWBBSnYcbbuJwFY2RscVcSxkcCI8YfxTAKBggq
+     hkjOPQQDAgNJADBGAiEAtMamhnY5+6DmGNUyq5lrYAwO9q3hy4UBzj6rpOxyY4QC
+     IQDwU2k2agkVRkUA3eGCeDwXqbGOQ+zWrjYwV85RVNKMHQ==
+     -----END CERTIFICATE-----
    metrics_addr: ":9464"
    drain_timeout: 20s
    credentials:

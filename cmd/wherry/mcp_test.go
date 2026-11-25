@@ -999,39 +999,134 @@ func TestMCPLogsDropsThinkingSignatures(t *testing.T) {
 	}
 }
 
-func TestMCPPromptFile(t *testing.T) {
+// The submit tool's prompt takes the text or @FILE, read through the input roots as an input is: a file beneath them is
+// read, the host's bundle beneath them and a file outside them are refused, @- is refused since the server's standard
+// input carries the MCP protocol, an empty prompt however given is refused, and prompt_file is an unknown argument.
+func TestMCPPrompt(t *testing.T) {
 	work := t.TempDir()
-	if err := os.WriteFile(filepath.Join(work, "brief.md"), []byte("the brief"), 0o600); err != nil {
+	for name, contents := range map[string]string{"brief.md": "the brief", "empty.md": ""} {
+		if err := os.WriteFile(filepath.Join(work, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := newBus(t)
+	// The host's bundle sits beneath the input root, as a configuration kept beside a project might; the file outside the
+	// roots exists, so only confinement can refuse it.
+	bundle := filepath.Join(work, "bundle.yaml")
+	if err := os.WriteFile(bundle, []byte("broker: b\nprincipal: p\npassword: s3cr3t\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(work, "empty.md"), nil, 0o600); err != nil {
+	outside := filepath.Join(t.TempDir(), "brief.md")
+	if err := os.WriteFile(outside, []byte("the brief outside the roots"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Run("submit", func(t *testing.T) {
-		b := newBus(t)
-		session := mcpSessionReading(t, b.connect(t), nil, inputOpener(work, busclient.Config{}))
+	session := mcpSessionReading(t, b.connect(t), nil, inputOpener(work, busclient.Config{Bundle: bundle}))
+	for value, want := range map[string]string{"the text": "the text", "@brief.md": "the brief", "@" + filepath.Join(work, "brief.md"): "the brief"} {
 		var submitted submitOutput
-		callTool(t, b.ctx, session, "submit", map[string]any{"prompt_file": "brief.md"}, &submitted)
-		if text := b.tasks(t, submitted.ID)[0].submission.Message.Parts[0].Text; !strings.Contains(text, "the brief") {
-			t.Fatalf("prompt %q, want the file's", text)
+		callTool(t, b.ctx, session, "submit", map[string]any{"prompt": value}, &submitted)
+		if text := b.tasks(t, submitted.ID)[0].submission.Message.Parts[0].Text; !strings.Contains(text, want) {
+			t.Fatalf("prompt %q gave %q, want %q", value, text, want)
 		}
-		if submitted.Command != "wherry result "+submitted.ID {
-			t.Errorf("submit wait %q, want the command that waits for %s", submitted.Command, submitted.ID)
+	}
+	for name, c := range map[string]struct {
+		arguments map[string]any
+		message   string
+	}{
+		"the bundle":      {map[string]any{"prompt": "@bundle.yaml"}, "inputs must be readable regular files beneath one of the MCP server's input roots, outside the wherry configuration"},
+		"outside":         {map[string]any{"prompt": "@" + outside}, "inputs must be readable regular files beneath one of the MCP server's input roots, outside the wherry configuration"},
+		"standard input":  {map[string]any{"prompt": "@-"}, "prompt @- cannot read standard input here; give the text or @FILE"},
+		"an empty file":   {map[string]any{"prompt": "@empty.md"}, "prompt is empty"},
+		"an empty prompt": {map[string]any{"prompt": ""}, "prompt is required"},
+		"no prompt":       {map[string]any{}, "prompt is required"},
+		"@ alone":         {map[string]any{"prompt": "@"}, "prompt @ names no file; a value starting with @ names a file, and @- standard input"},
+	} {
+		failure := callToolError(t, b.ctx, session, "submit", c.arguments)
+		if failure.Code != "INVALID_ARGUMENT" || failure.Message != c.message {
+			t.Errorf("%s: %+v; want INVALID_ARGUMENT %q", name, failure, c.message)
 		}
-		for name, arguments := range map[string]map[string]any{
-			"both":    {"prompt": "x", "prompt_file": "brief.md"},
-			"neither": {},
-			"outside": {"prompt_file": filepath.Join(t.TempDir(), "brief.md")},
-			"empty":   {"prompt_file": "empty.md"},
-		} {
-			if failure := callToolError(t, b.ctx, session, "submit", arguments); failure.Code != "INVALID_ARGUMENT" {
-				t.Errorf("%s: %+v", name, failure)
-			}
+		if strings.Contains(failure.Message, "s3cr3t") {
+			t.Errorf("%s: the error holds the bundle's password: %+v", name, failure)
 		}
-		if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt_file": "empty.md"}); failure.Message != "prompt_file is empty" {
-			t.Errorf("empty prompt file: %+v", failure)
-		}
-	})
+	}
+	// The refusal comes as a tool error or as a protocol error, and either names the argument; a transport failure
+	// names neither and fails here.
+	result, err := session.CallTool(b.ctx, &mcp.CallToolParams{Name: "submit", Arguments: map[string]any{"prompt_file": "brief.md"}})
+	refusal := ""
+	switch {
+	case err != nil:
+		refusal = err.Error()
+	case result.IsError:
+		refusal = toolText(result)
+	default:
+		t.Fatal("submit accepted prompt_file")
+	}
+	if !strings.Contains(refusal, "prompt_file") {
+		t.Fatalf("submit with prompt_file: %q; want it rejected as an unknown argument", refusal)
+	}
+}
+
+// Past the bound wherry result waits to, the run's recorded task_ended_by plus the upload grace, the result tool stops
+// offering retry_after and reports the timeout the CLI's exit 6 reports; within it, retry_after is offered.
+func TestMCPResultPastTheBoundReportsTheTimeout(t *testing.T) {
+	b := newBus(t)
+	shortResultBound(t, 50*time.Millisecond, time.Second)
+	old := waitBound
+	waitBound = time.Second
+	t.Cleanup(func() { waitBound = old })
+	runID, admitted := b.shortRun(t, time.Second, 3*time.Second)
+	b.feed(t, runID, b.echo(t, admitted), b.status(t, admitted, "claimed-1", "claimed", now(wire.TaskStateWorking)))
+	session := mcpSession(t, b.connect(t), nil)
+	var reply map[string]any
+	callTool(t, b.ctx, session, "result", map[string]any{"id": runID}, &reply)
+	if reply["retry_after"] != float64(retryAfter) {
+		t.Fatalf("result within the bound = %#v; want retry_after", reply)
+	}
+	endBy := time.Unix(admitted.submission.Wherry.TaskEndedBy, 0)
+	time.Sleep(time.Until(endBy.Add(resultGrace + 100*time.Millisecond)))
+	reply = map[string]any{}
+	callTool(t, b.ctx, session, "result", map[string]any{"id": runID}, &reply)
+	if _, offered := reply["retry_after"]; offered {
+		t.Fatalf("result past the bound = %#v; want no retry_after", reply)
+	}
+	message, _ := reply["message"].(string)
+	if want := resultTimeout(time.Time{}, endBy); !strings.HasPrefix(message, want) || reply["state"] != string(wire.TaskStateWorking) {
+		t.Fatalf("result past the bound = %#v; want the timeout %q", reply, want)
+	}
+}
+
+// With no recorded task_ended_by, the result tool stops offering retry_after at the bound the CLI's fallback gives, the
+// 2h10m fallback from the run's submission, shortened through its seam, and reports the timeout the CLI's exit 6 names;
+// within it, retry_after is offered.
+func TestMCPResultWithoutARecordedEndByStopsAtTheFallback(t *testing.T) {
+	b := newBus(t)
+	shortResultBound(t, 50*time.Millisecond, time.Second)
+	old := waitBound
+	waitBound = time.Second
+	t.Cleanup(func() { waitBound = old })
+	oldFallback := defaultWaitTimeout
+	defaultWaitTimeout = 4 * time.Second
+	t.Cleanup(func() { defaultWaitTimeout = oldFallback })
+	// The run's own end-by is an hour off, so only the fallback can end the offers.
+	runID, admitted := b.shortRun(t, time.Second, time.Hour)
+	b.feed(t, runID, b.echo(t, admitted), b.status(t, admitted, "claimed-1", "claimed", now(wire.TaskStateWorking)))
+	b.dropRecordedEndBy(t, runID)
+	submitted, _ := b.client.RecordedBounds(runID)
+	session := mcpSession(t, b.connect(t), nil)
+	var reply map[string]any
+	callTool(t, b.ctx, session, "result", map[string]any{"id": runID}, &reply)
+	if reply["retry_after"] != float64(retryAfter) {
+		t.Fatalf("result within the fallback = %#v; want retry_after", reply)
+	}
+	time.Sleep(time.Until(submitted.Add(defaultWaitTimeout + 100*time.Millisecond)))
+	reply = map[string]any{}
+	callTool(t, b.ctx, session, "result", map[string]any{"id": runID}, &reply)
+	if _, offered := reply["retry_after"]; offered {
+		t.Fatalf("result past the fallback = %#v; want no retry_after", reply)
+	}
+	message, _ := reply["message"].(string)
+	if want := resultTimeout(submitted, time.Time{}); !strings.HasPrefix(message, want) || reply["state"] != string(wire.TaskStateWorking) {
+		t.Fatalf("result past the fallback = %#v; want the timeout %q", reply, want)
+	}
 }
 
 func TestWaitCommand(t *testing.T) {
@@ -1128,13 +1223,13 @@ func TestMCPUnavailableLogsItsCause(t *testing.T) {
 }
 
 // A connection the broker's certificate fails for want of a trusted CA is explained in the server's log as Connect
-// explains it to the CLI: the CA used and the refresh that rewrites the bundle, by the host's real names. The model
-// still sees UNAVAILABLE alone.
-func TestMCPUnavailableLogNamesTheRefreshOnAnUnknownAuthority(t *testing.T) {
+// explains it to the CLI: the trust store and ca_cert in the configuration. The model still sees UNAVAILABLE alone.
+func TestMCPUnavailableLogExplainsAnUnknownAuthority(t *testing.T) {
 	h := newInitHost(t, nil)
 	noTerminal(t)
 	h.init(t, h.bundle)
-	editBundle(t, filepath.Join(h.dir, "bundle.yaml"), func(bundle *operator.Bundle) { bundle.CA = otherCA(t) })
+	untrusted := untrustedBroker(t).ListenAddrs()[0]
+	editBundle(t, filepath.Join(h.dir, "bundle.yaml"), func(bundle *operator.Bundle) { bundle.Broker = untrusted })
 	config, err := busclient.LoadConfig(h.config)
 	if err != nil {
 		t.Fatal(err)
@@ -1157,8 +1252,9 @@ func TestMCPUnavailableLogNamesTheRefreshOnAnUnknownAuthority(t *testing.T) {
 	if failure := callToolError(t, ctx, session, "receivers", map[string]any{}); failure != (toolError{Code: "UNAVAILABLE", Message: "the wherry bus could not complete the request; the wherry CLI reports the cause"}) {
 		t.Fatalf("tool error %#v; want UNAVAILABLE alone", failure)
 	}
-	want := "tool failed: cannot verify the broker's certificate: it does not chain to the CA in your bundle; ask the operator for a new bundle (wherry operator tenant host refresh tenant-a host-a) and install it with wherry host init ("
-	if text := logged.String(); !strings.HasPrefix(text, want) || !strings.Contains(text, "x509: certificate signed by unknown authority") {
+	// The configuration host init wrote holds the test CA, so the hint asks for no key already set.
+	want := "tool failed: " + caCertSetHint + h.config + " ("
+	if text := logged.String(); !strings.HasPrefix(text, want) || !strings.Contains(text, unknownAuthorityText) {
 		t.Fatalf("server log %q; want %q with the x509 error", text, want)
 	}
 }

@@ -159,7 +159,7 @@ func headerSpan(t *testing.T, record *kgo.Record) trace.SpanID {
 func TestTracedAttemptsAreSiblingsUnderTheHostSend(t *testing.T) {
 	exporter := teletest.Install(t)
 	s3 := newStore(t)
-	f := newFixtureWith(t, resultStream, s3Terms(s3.endpoint()), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
+	f := s3.trusting(t, newFixtureWith(t, resultStream, s3Terms(s3.endpoint()), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}}))
 	// The first attempt's job never starts and its start retries run out, so the task goes back and is redelivered.
 	f.plugin.failStart = func(string) bool { return f.plugin.lastRun.Attempt == 1 }
 	ctx, stop := context.WithCancel(f.ctx)

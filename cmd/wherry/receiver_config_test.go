@@ -490,9 +490,9 @@ func TestReceiverRejectsCapacity(t *testing.T) {
 				if _, err := readReceiverConfig(path, directory); err == nil || !strings.Contains(err.Error(), "invalid or unknown field at line 1") {
 					t.Fatalf("capacity %s: %v", n, err)
 				}
-				cluster, ca := tlsCluster(t)
-				dir := writeTree(t, map[string]string{"ca.pem": ca, "operator.password": "operator-password\n"})
-				if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{Broker: cluster.ListenAddrs()[0], CAFile: "ca.pem", PasswordFile: "operator.password"}); err != nil {
+				cluster, _ := tlsCluster(t)
+				dir := writeTree(t, map[string]string{"operator.password": "operator-password\n"})
+				if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{Broker: cluster.ListenAddrs()[0], PasswordFile: "operator.password", CACert: testCA.pem}); err != nil {
 					t.Fatal(err)
 				}
 				t.Chdir(dir)

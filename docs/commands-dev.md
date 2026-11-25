@@ -128,7 +128,10 @@ returns once a run of the mock agent completes. Its steps:
 8. `bootstrap` makes the operator's calls through that directory: pool
    `dev`, tenant `dev`, host `dev` and receiver `dev-1` with a plugin
    profile per agent, their bundles under `env/operator/bundles/`. The
-   receiver's `config.yaml` names the instance CA as `ca_file`. Pool `dev`'s
+   receiver's `config.yaml` names its bundle, state and plugin directories
+   and holds the instance CA as `ca_cert`, as every configuration `up`
+   writes does, `operator.yaml` and the host's included; `up`'s own dials
+   trust it the same way. Pool `dev`'s
    terms list each agent by its catalog id with no credential of its own,
    and `pool apply` expands them as it does for any pool: `claude-code`,
    `anthropic` and `codex` each take their one variable, required, and
@@ -153,18 +156,18 @@ returns once a run of the mock agent completes. Its steps:
    If the config, bundle or key is already there, or appears while
    `up` creates them, `up` removes what it created there and, as for every
    other instance and with `WHERRY_CONFIG` set, writes them in
-   `env/host/`. The config names the instance CA as `ca_file`, and the dev
-   pool's [storage](configuration-host.md#client-configuration) credentials
-   with storage.
+   `env/host/`. The config names the dev pool's
+   [storage](configuration-host.md#client-configuration) credentials with
+   storage.
 10. `receiver` runs `wherry receiver run` from the copy as a `raw_exec` job
     and waits for `dev-1` to be live with every profile ready.
 11. `smoke` runs the mock agent and checks the output it returns. `ready`
     writes `env/up.json` and prints the summary, an `agents:` line naming
     pool `dev`'s agents with its default marked, a `submit:` line and an
-    `mcp add` line for each harness. When the config is in `env/host/`, it
-    prints `export WHERRY_CONFIG=<path>` first, and each `mcp add` line
-    passes `WHERRY_CONFIG` to the server; otherwise neither names the
-    config.
+    `mcp add` line for each harness. The instance CA is in the instance's
+    configurations, so nothing is exported for trust. When the config is in `env/host/`, it prints
+    `export WHERRY_CONFIG=<path>` too, and each `mcp add` line passes
+    `WHERRY_CONFIG` to the server; otherwise neither names the config.
 
 The harness profiles and `mock` run under `raw_exec` with label
 `isolation: host`. `--agent-image NAME=IMAGE` splits at the first `=`. It

@@ -3,17 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
 	"crypto/ed25519"
-	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"os"
 	"path/filepath"
 	"slices"
@@ -35,16 +29,7 @@ import (
 func TestKafkaClientRejectsPlaintextListener(t *testing.T) {
 	cluster := kfake.MustCluster(kfake.EnableSASL(), kfake.EnableACLs(), kfake.Superuser("SCRAM-SHA-512", "admin", "password"))
 	defer cluster.Close()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test-ca"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client, err := operatorKafka(cluster.ListenAddrs()[0], pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), "admin", "password")
+	client, err := operatorKafka(cluster.ListenAddrs()[0], "admin", "password", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,19 +53,17 @@ func noTerminal(t *testing.T) {
 func operatorEnv(t *testing.T) *operator.Service {
 	cluster, ca := tlsCluster(t)
 	dir := t.TempDir()
-	for name, contents := range map[string]string{"ca.pem": ca, "operator.password": "operator-password\n"} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o600); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.WriteFile(filepath.Join(dir, "operator.password"), []byte("operator-password\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	address := cluster.ListenAddrs()[0]
-	if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{Broker: address, CAFile: "ca.pem", PasswordFile: "operator.password"}); err != nil {
+	if err := writeYAML(filepath.Join(dir, "operator.yaml"), operatorConfig{Broker: address, PasswordFile: "operator.password", CACert: testCA.pem}); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
 	noTerminal(t)
 	return &operator.Service{Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
-		Broker: address, CA: []byte(ca), DeliveryCeiling: 10, LockCeilingMS: 60000}
+		Broker: address, Roots: testRoots(t), DeliveryCeiling: 10, LockCeilingMS: 60000}
 }
 
 func TestOperatorCommandUsage(t *testing.T) {
@@ -235,7 +218,7 @@ func TestReceiverShowReportsLiveness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	receiver := connectTLS(t, bundle.Broker, string(service.CA), bundle.Principal, bundle.Password)
+	receiver := connectTLS(t, bundle.Broker, testCA.pem, bundle.Principal, bundle.Password)
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -765,7 +748,7 @@ func bundleWorks(t *testing.T, service *operator.Service, path string) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return connectTLS(t, bundle.Broker, string(service.CA), bundle.Principal, bundle.Password).Ping(ctx) == nil
+	return connectTLS(t, bundle.Broker, testCA.pem, bundle.Principal, bundle.Password).Ping(ctx) == nil
 }
 
 // receiver apply adds a receiver and writes its bundle under bundles/receivers, mode 0600 in a directory of mode 0700;

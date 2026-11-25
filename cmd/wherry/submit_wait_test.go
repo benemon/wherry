@@ -131,9 +131,7 @@ func TestSubmitOutputsRequireWait(t *testing.T) {
 	}
 }
 func TestSubmitWaitBound(t *testing.T) {
-	old := submitWaitMargin
-	submitWaitMargin = 50 * time.Millisecond
-	t.Cleanup(func() { submitWaitMargin = old })
+	shortResultBound(t, 50*time.Millisecond, time.Second)
 	for _, absolute := range []bool{false, true} {
 		t.Run(fmt.Sprint(absolute), func(t *testing.T) {
 			b := newBus(t)
@@ -142,8 +140,8 @@ func TestSubmitWaitBound(t *testing.T) {
 			var deadline time.Time
 			stdout := &submitWriter{first: func(line string) {
 				admitted := b.claimSubmitted(t, submittedID(line))
-				deadline = time.Unix(admitted.submission.Wherry.TaskEndedBy, 0).Add(submitWaitMargin)
-				if floor := time.Now().Add(time.Second); floor.After(deadline) {
+				deadline = time.Unix(admitted.submission.Wherry.TaskEndedBy, 0).Add(resultGrace)
+				if floor := time.Now().Add(resultFloor); floor.After(deadline) {
 					deadline = floor
 				}
 			}}
@@ -174,9 +172,7 @@ func TestSubmitWaitBound(t *testing.T) {
 func TestSubmitWaitExpiredBudget(t *testing.T) {
 	b := newBus(t)
 	delayed := b.delayPublish(1200 * time.Millisecond)
-	old := submitWaitMargin
-	submitWaitMargin = time.Millisecond
-	t.Cleanup(func() { submitWaitMargin = old })
+	shortResultBound(t, time.Millisecond, time.Second)
 	var stderr bytes.Buffer
 	stdout := &submitWriter{first: func(line string) { b.claimSubmitted(t, submittedID(line)) }}
 	err := runSubmit(b.ctx, b.client, []string{"--prompt", "work", "--wait", "--start-by", "100ms", "--end-by", "200ms"}, stdout, &stderr)
@@ -403,16 +399,14 @@ func (b *bus) delayPublish(delay time.Duration) *atomic.Bool {
 
 func TestSubmitWaitReplacementBound(t *testing.T) {
 	b := newBus(t)
-	old := submitWaitMargin
-	submitWaitMargin = 50 * time.Millisecond
-	t.Cleanup(func() { submitWaitMargin = old })
+	shortResultBound(t, 50*time.Millisecond, time.Second)
 	var stderr bytes.Buffer
 	var deadline time.Time
 	claimed := make(chan struct{})
 	stdout := &submitWriter{first: func(line string) {
 		id := submittedID(line)
 		admitted := b.claimSubmitted(t, id)
-		deadline = time.Unix(admitted.submission.Wherry.TaskEndedBy, 0).Add(submitWaitMargin)
+		deadline = time.Unix(admitted.submission.Wherry.TaskEndedBy, 0).Add(resultGrace)
 		go func() {
 			defer close(claimed)
 			time.Sleep(900 * time.Millisecond)

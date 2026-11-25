@@ -114,6 +114,7 @@ func TestSubmitTakesTheSnapshotsKeyWhateverTheCustodiansAdvertisement(t *testing
 func TestSuspendedPoolRefusesSubmitBeforeResolvingAnything(t *testing.T) {
 	o := newUploadOracle(t)
 	f := newFixture(t)
+	f.host.roots = o.roots
 	terms := testTerms()
 	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
 	if err := f.service.PoolApply(f.ctx, "pool-a", terms, false); err != nil {
@@ -547,6 +548,7 @@ func keyLostS3Run(t *testing.T) (*uploadOracle, *fixture, *testReceiver, claimed
 	t.Helper()
 	o := newUploadOracle(t)
 	f := newFixture(t)
+	f.host.roots = o.roots
 	terms := testTerms()
 	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
 	if err := f.service.PoolApply(f.ctx, "pool-a", terms, false); err != nil {

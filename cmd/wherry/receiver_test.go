@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -28,12 +29,21 @@ import (
 var pluginDir, fakeSHA256 string
 
 func TestMain(m *testing.M) {
+	// A trust helper is this binary re-run in the environment its test chose, which it keeps.
+	if os.Getenv(trustHelperVariable) != "" {
+		os.Exit(m.Run())
+	}
 	dir, err := os.MkdirTemp("", "wherry-plugins")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	pluginDir = dir
+	// No system root trusts testCA: each test configuration names it in ca_cert, as a configuration names a private CA.
+	if err := newTestCA(filepath.Join(dir, "ca.pem")); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	if output, err := exec.Command("go", "build", "-o", filepath.Join(dir, "wherry-plugin-fake"), "github.com/benemon/wherry/pluginsdk/internal/testplugin").CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "build test plugin: %v\n%s", err, output)
 		os.Exit(1)
@@ -248,41 +258,13 @@ func TestReadBundleIsStrict(t *testing.T) {
 	if _, err := operator.ReadBundle(path); err == nil {
 		t.Fatal("accepted a bundle carrying platform credentials")
 	}
-	// A bundle's ca is the PEM certificates its holder trusts the broker with; one that holds no certificate fails closed
-	// rather than fall back to the system roots.
-	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nca: c\n"), 0o600); err != nil {
+	// A bundle carrying the ca earlier operators wrote is refused naming the key and the reissue, not as an unknown field
+	// at a line.
+	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nca: |\n  -----BEGIN CERTIFICATE-----\n  AAAA\n  -----END CERTIFICATE-----\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := operator.ReadBundle(path); err == nil || err.Error() != "bundle ca holds no PEM certificate" {
-		t.Fatalf("a bundle whose ca holds no certificate: %v; want it refused", err)
-	}
-	// A bundle's storage is the tenant's S3 key pair: both keys or none, and nothing else.
-	for _, storage := range []string{"storage: {access_key: a}\n", "storage: {secret_key: b}\n", "storage: {access_key: a, secret_key: b, token: c}\n", "storage: a\n"} {
-		if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\n"+storage), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := operator.ReadBundle(path); err == nil {
-			t.Fatalf("accepted a bundle with %q", storage)
-		}
-	}
-	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nstorage: {access_key: a, secret_key: b}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if bundle, err := operator.ReadBundle(path); err != nil || bundle.Storage != (operator.StorageKeys{AccessKey: "a", SecretKey: "b"}) {
-		t.Fatalf("bundle %#v err %v; want the storage pair", bundle, err)
-	}
-	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	bundle, err := operator.ReadBundle(path)
-	if err != nil || bundle.Principal != "wherry.rcv.r" {
-		t.Fatalf("bundle %#v err %v", bundle, err)
-	}
-	if err := os.WriteFile(path, []byte("broker: b\npassword: p\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := operator.ReadBundle(path); err == nil {
-		t.Fatal("accepted a bundle without a principal")
+	if _, err := operator.ReadBundle(path); err == nil || err.Error() != path+": ca is no longer read; reissue this bundle" || !errors.Is(err, operator.ErrBundleCA) {
+		t.Fatalf("a bundle carrying a ca: %v; want it refused naming the key", err)
 	}
 }
 
@@ -339,8 +321,8 @@ func writeLocalConfig(t *testing.T, content string) string {
 }
 
 func TestReceiverLocalConfigExampleParses(t *testing.T) {
-	config, err := loadReceiverLocalConfig(filepath.Join("testdata", "example-receiver-config.yaml"))
-	want := receiverLocalConfig{Bundle: "/etc/wherry/receiver.bundle", CAFile: "/etc/wherry/kafka-ca.pem", StateDir: "/var/lib/wherry/state", PluginDir: defaultPluginDir, MetricsAddr: ":9464", DrainTimeout: 20 * time.Second,
+	config, _, err := loadReceiverLocalConfig(filepath.Join("testdata", "example-receiver-config.yaml"))
+	want := receiverLocalConfig{Bundle: "/etc/wherry/receiver.bundle", StateDir: "/var/lib/wherry/state", PluginDir: defaultPluginDir, CACert: "-----BEGIN CERTIFICATE-----\nMIIBbjCCAROgAwIBAgIBATAKBggqhkjOPQQDAjAeMRwwGgYDVQQDExNFeGFtcGxl\nIENBLCBleHBpcmVkMB4XDTIwMDEwMTAwMDAwMFoXDTIxMDEwMTAwMDAwMFowHjEc\nMBoGA1UEAxMTRXhhbXBsZSBDQSwgZXhwaXJlZDBZMBMGByqGSM49AgEGCCqGSM49\nAwEHA0IABKDgH46Z0Jb9ijDRVLk48an3uitOHZeFCHLHl//CE3czOjBUK8aYhf8i\nKDOaGR3cXQMiPQtlhg4wWYT4iLg313ijQjBAMA4GA1UdDwEB/wQEAwICBDAPBgNV\nHRMBAf8EBTADAQH/MB0GA1UdDgQWBBSnYcbbuJwFY2RscVcSxkcCI8YfxTAKBggq\nhkjOPQQDAgNJADBGAiEAtMamhnY5+6DmGNUyq5lrYAwO9q3hy4UBzj6rpOxyY4QC\nIQDwU2k2agkVRkUA3eGCeDwXqbGOQ+zWrjYwV85RVNKMHQ==\n-----END CERTIFICATE-----\n", MetricsAddr: ":9464", DrainTimeout: 20 * time.Second,
 		Credentials: map[string]credential.Source{"nomad-token": {File: "/etc/wherry/nomad-token"}}, Tracing: true}
 	if err != nil || !reflect.DeepEqual(config, want) {
 		t.Fatalf("example = %+v, %v; want %+v", config, err, want)
@@ -352,7 +334,7 @@ func TestReceiverLocalConfigExampleParses(t *testing.T) {
 func TestReceiverLocalConfigDefaultsAndExpansion(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	config, err := loadReceiverLocalConfig(writeLocalConfig(t, "bundle: ~/wherry/receiver.bundle\ncredentials:\n  token: {file: ~/token}\n"))
+	config, _, err := loadReceiverLocalConfig(writeLocalConfig(t, "bundle: ~/wherry/receiver.bundle\ncredentials:\n  token: {file: ~/token}\n"))
 	want := receiverLocalConfig{Bundle: filepath.Join(home, "wherry", "receiver.bundle"), StateDir: filepath.Join(home, "wherry", "state"),
 		PluginDir: "/usr/local/libexec/wherry/plugins", Credentials: map[string]credential.Source{"token": {File: filepath.Join(home, "token")}}}
 	if err != nil || !reflect.DeepEqual(config, want) {
@@ -370,7 +352,7 @@ func TestReceiverLocalConfigRefusals(t *testing.T) {
 		"an empty command":     {"bundle: b\ncredentials:\n  token:\n    command: ['']\n", "config credential token: command names no program"},
 		"a literal credential": {"bundle: b\ncredentials:\n  token: nomad-token-value\n", "decode config"},
 	} {
-		_, err := loadReceiverLocalConfig(writeLocalConfig(t, test.content))
+		_, _, err := loadReceiverLocalConfig(writeLocalConfig(t, test.content))
 		if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), "nomad-tok") {
 			t.Errorf("config with %s: %v; want %q and no value", name, err, test.want)
 		}

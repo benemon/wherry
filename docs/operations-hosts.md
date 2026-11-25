@@ -4,7 +4,8 @@
 
 1. Ask your operator to create your tenant and entitle it to a pool.
 2. Ask for a host bundle from `wherry operator tenant host add TENANT HOST`.
-   It carries the broker's CA when the operator trusts the broker through a `ca_file`.
+   Your machine trusts the broker's certificate through its trust store, or through `ca_cert`, which
+   `host init --ca-cert` writes ([Broker and S3 trust](security.md#broker-and-s3-trust)).
 3. Run `wherry host init HOST.bundle`.
 4. Set the catalog variables its agent lines name where submits run, and
    configure a source for each credential it asks about.
@@ -169,11 +170,11 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
    ```
 
 5. Let the parties reach the endpoint and trust its certificate: hosts,
-   which upload, download and delete, trusting the system roots and the
-   certificates in `SSL_CERT_FILE` when it is set
-   ([Environment variables](configuration-host.md#environment-variables));
-   receiver hosts, which upload outputs with
-   their system roots; and every platform node that fetches inputs, for the
+   which upload, download and delete, and receivers, which upload outputs,
+   each through its machine's trust store plus the `ca_cert` of its
+   configuration ([Broker and S3 trust](security.md#broker-and-s3-trust));
+   and every platform node that fetches inputs, under its own trust, since a
+   plugin fetches them, for the
    Nomad plugin each Nomad client, whose artifact fetcher uses the system
    roots. Agent jobs do not reach the endpoint themselves; see
    [Agent network reach](#agent-network-reach).
@@ -439,7 +440,7 @@ it at the default path or link the default path to it, or register a server of y
 in Claude Code. A plugin update replaces the packaged `mcp.json`, so edits to it
 do not last.
 
-The server sends an input or `prompt_file` only from beneath its input
+The server sends an input, or reads a `prompt` given as `@FILE`, only from beneath its input
 roots: the client configuration's `input_roots`, or its working directory
 when that is unset. Every input root is a directory whose files the harness
 can send to remote agents; list only directories meant for that.

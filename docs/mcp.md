@@ -11,7 +11,7 @@ The defaults are `10m` and `2h`.
 | Tool | Input | Output |
 | --- | --- | --- |
 | `receivers` | none | `receivers`, the objects `wherry host receivers --json` prints |
-| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `continue`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by`, `wait` | `id`, `pool`, `command`, `unsupplied`, `result`, `error` |
+| `submit` | `prompt`, `agent`, `model`, `selector`, `git`, `continue`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by`, `wait` | `id`, `pool`, `command`, `unsupplied`, `result`, `error` |
 | `status` | `id`, optional | `runs`, `skipped` |
 | `result` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `reply`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped`, `runs` |
 | `cancel` | `id` | `id`, `cancel`, `skipped` |
@@ -22,10 +22,11 @@ The defaults are `10m` and `2h`.
   the run and prints its reply, `wherry result ID`, with
   `--config-file` and the server's absolute configuration path when the
   server was started with one or with `WHERRY_CONFIG` set.
-- `submit` requires exactly one of `prompt` and `prompt_file`, a file path read
-  as an input is; an empty file fails with `prompt_file is empty`. The
-  server's standard input carries the MCP protocol, so `prompt_file` `-`
-  names a file called `-`.
+- `submit` requires `prompt`: the text, or `@FILE` for the contents of a
+  file read as an input is, beneath the input roots and never one of the
+  host's own files; an empty prompt, however given, fails with `prompt is
+  empty`. The server's standard input carries the MCP protocol, so `@-` is
+  refused.
   `model` is as `--model` takes it, and a model outside the agent's `models`
   fails with `INVALID_ARGUMENT` naming the model, agent and pool.
   `selector` is an array of `{key, operator, values}`. `git` is
@@ -112,9 +113,9 @@ The defaults are `10m` and `2h`.
   `wherry status` and `wherry result` print it, and `redacted` maps each name
   to the number of its markers in the messages, the artifacts, or every line
   of the transcript's attempt.
-- Before it connects to the bus, `submit` checks that exactly one of `prompt`
-  and `prompt_file` is given, each input's `storage`, and `start_by` and
-  `end_by`, and reads its input files. It checks the rest, such as the agent,
+- Before it connects to the bus, `submit` checks that `prompt` is given and
+  reads it, each input's `storage`, and `start_by` and `end_by`, and reads
+  its input files. It checks the rest, such as the agent,
   model and git host against the pool's terms, once connected.
 - `events` returns `events`, each
   `{attempt, kind, state, receiver, time, message}`, and
@@ -148,7 +149,11 @@ The defaults are `10m` and `2h`.
 notification every 5 seconds. While the run is unfinished it returns the
 run's `state` with `retry_after`, and the `message` `status` gives, such as
 the step the agent last reported; for a resubmitted run, those of the last
-replacement, the run `cancel` names. For a run whose `task_started_by` passes
+replacement, the run `cancel` names. Past the run's recorded `task_ended_by`
+plus the upload grace, the bound `wherry result` waits to, or, for a run
+recorded before `task_ended_by` was, past `2h10m` from its submission, the
+fallback `wherry result` takes, an unfinished run returns no `retry_after`,
+and `message` starts with the timeout `wherry result` exits 6 with. For a run whose `task_started_by` passes
 with no status from a receiver, it returns at once with `state`
 `TASK_STATE_SUBMITTED`, the `message` `status` gives and no `retry_after`,
 and writes nothing.
@@ -163,7 +168,7 @@ transcript; `logs` pages it.
 | `id` | the run the call named |
 | `state` | the run's state |
 | `model` | the run's placement's model, when it has one |
-| `retry_after` | 5, while the run is unfinished |
+| `retry_after` | 5, while the run is unfinished and within its bound |
 | `message` | the status message's parts; for a [reply](a2a-extension-v1.md#the-reply) over 64 KiB, its first 64 KiB; while the run is unfinished, its latest status message |
 | `reply` | for a reply over 64 KiB, `{path, sha256, size, cut}` of `reply.txt`, which `result` writes among the run's outputs, with `cut` set when the reply was longer than the pool's `reply_limit`; `{rejected}` with the reason when the reply's chunks do not verify; absent for a reply within 64 KiB |
 | `artifacts` | the result's: `result`, then a [reference](a2a-extension-v1.md#reference-artifacts) for each returned output, the reply over 64 KiB and the transcript; each is `{artifact_id, parts}`, and each part has one of `text`, `data`, `url` or `raw_bytes` (the size of a binary part, which is not included), with `media_type` |

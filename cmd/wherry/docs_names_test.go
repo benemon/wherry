@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
@@ -211,4 +212,35 @@ func TestConfigurationDocumentedFields(t *testing.T) {
 		})
 	}
 	docEqual(t, "environment variables", variables, slices.Compact(slices.Sorted(slices.Values(reads))))
+}
+
+// No page outside upgrade.md describes a ca_file of wherry's own, a bundle ca or --prompt-file: trust is the machine's
+// plus ca_cert, and a prompt is --prompt's text, @FILE or @-. The Nomad plugin's own tls.ca_file stays. No page gives
+// ca_cert a path in place of the PEM, and none says SSL_CERT_FILE replaces the roots on Linux, where it replaces the
+// default bundle files alone. No install page names renaming agent: claude or mkdir.
+func TestDocsNameNoCA(t *testing.T) {
+	pages, err := filepath.Glob("../../docs/*.md")
+	if err != nil || len(pages) == 0 {
+		t.Fatal("no docs", err)
+	}
+	removed := regexp.MustCompile("`ca_file`|`ca`|^\\s*ca_file:|^\\s*ca:|--ca-file|kafka-ca|--prompt-file|`prompt_file`|--super-user-password-file")
+	caCertPath := regexp.MustCompile("ca_cert:\\s*[\"'@/~.]|ca_cert:\\s*\\S+\\.(pem|crt)|`ca_cert`[^.]*\\bpath\\b")
+	linuxReplaces := regexp.MustCompile("(?i)SSL_CERT_FILE[^.]*replaces[^.]*Linux|Linux[^.]*SSL_CERT_FILE[^.]*replaces[^.]*roots")
+	for _, page := range pages {
+		name := filepath.Base(page)
+		for i, line := range strings.Split(docRead(t, page), "\n") {
+			if name != "upgrade.md" && !strings.Contains(line, "nomad-ca.pem") && removed.MatchString(line) {
+				t.Errorf("%s:%d names a CA wherry no longer carries, --prompt-file or --super-user-password-file: %s", name, i+1, strings.TrimSpace(line))
+			}
+			if caCertPath.MatchString(line) {
+				t.Errorf("%s:%d names ca_cert as a path: %s", name, i+1, strings.TrimSpace(line))
+			}
+			if linuxReplaces.MatchString(line) {
+				t.Errorf("%s:%d says SSL_CERT_FILE replaces the roots on Linux: %s", name, i+1, strings.TrimSpace(line))
+			}
+			if strings.HasPrefix(name, "install") && (strings.Contains(line, "`agent: claude`") || strings.Contains(line, "mkdir")) {
+				t.Errorf("%s:%d: %s", name, i+1, strings.TrimSpace(line))
+			}
+		}
+	}
 }

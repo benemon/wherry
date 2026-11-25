@@ -31,8 +31,9 @@ func (use credentialUse) as() string {
 	return use.target.Env
 }
 
-// hostInit registers a host and configures references to the sources its entitled pools need.
-func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Writer) (result error) {
+// hostInit registers a host and configures references to the sources its entitled pools need. caCert, when given, is
+// the PEM --ca-cert resolved to, written as the configuration's ca_cert.
+func hostInit(ctx context.Context, path, bundle string, caCert *string, stdout, prompts io.Writer) (result error) {
 	defer func() {
 		if result != nil {
 			result = presentationError{result}
@@ -55,7 +56,14 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 	_, statErr := os.Stat(path)
 	changed := errors.Is(statErr, os.ErrNotExist)
 	if !changed {
-		if err := readYAML(path, &file); err != nil {
+		encoded, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := operator.RefuseCAFile(path, encoded); err != nil {
+			return err
+		}
+		if err := operator.DecodeYAML(encoded, &file); err != nil {
 			return fmt.Errorf("%s: %w", path, err)
 		}
 	}
@@ -77,14 +85,11 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 			return err
 		}
 	}
-	// A local ca_file overrides the CA a bundle carries, so a stale one hides a refreshed CA.
-	overridden := false
 	if bundle != "" {
 		contents, err := operator.ReadBundle(bundle)
 		if err != nil {
 			return err
 		}
-		overridden = contents.CA != "" && file.CAFile != ""
 		// The configuration directory is wherry's own and is hardened to 0700; a configuration elsewhere sits in a
 		// directory of the user's, which keeps its mode.
 		if paths.Default {
@@ -108,6 +113,10 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 	} else if file.Bundle == "" {
 		return fmt.Errorf("%s names no bundle; run wherry host init BUNDLE", path)
 	}
+	if caCert != nil && file.CACert != *caCert {
+		file.CACert = *caCert
+		changed = true
+	}
 
 	q := &questions{ctx, stdin, &promptLatch{out: prompts}}
 	interactive := promptsEligible(prompts)
@@ -118,11 +127,6 @@ func hostInit(ctx context.Context, path, bundle string, stdout, prompts io.Write
 		}
 		wrote = true
 		return nil
-	}
-	if overridden {
-		if err = q.line("warning: ca_file %s in %s overrides the CA the bundle carries; remove the line unless the broker is to be trusted through that file alone\n", display(file.CAFile), display(path)); err != nil {
-			return err
-		}
 	}
 	if changed {
 		if err := write(); err != nil {

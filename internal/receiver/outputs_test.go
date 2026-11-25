@@ -208,7 +208,7 @@ func TestAContinuationReturnsItsBundleBySize(t *testing.T) {
 			s := newStore(t)
 			terms := s3Terms(s.endpoint())
 			terms.VCS, terms.OutputLimit = []string{"git.example.test"}, 100
-			f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, outputs: test.outputs}})
+			f := s.trusting(t, newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, outputs: test.outputs}}))
 			status := f.execute(t, f.submit(t, f.host, continuedTask(wire.ExpectedOutput{Name: wire.GitBundle})), 1)
 			task := f.lastTask(t)
 			if status != kgo.AckAccept || task.Status.State != wire.TaskStateCompleted {
@@ -250,7 +250,7 @@ func TestATimedOutRunUploadsWithinTheGrace(t *testing.T) {
 			endBy := time.Now().Add(2 * time.Second).Truncate(time.Second)
 			s.clock = func() time.Time { return endBy.Add(test.after) }
 			fake := &fakePlugin{stream: noResultStream, endDelay: 30 * time.Second, outputs: []pluginsdk.Output{reportOutput()}}
-			f := newFixtureWith(t, noResultStream, s3Terms(s.endpoint()), testConfig(testReceiver), map[string]*fakePlugin{"nomad": fake})
+			f := s.trusting(t, newFixtureWith(t, noResultStream, s3Terms(s.endpoint()), testConfig(testReceiver), map[string]*fakePlugin{"nomad": fake}))
 			signedAt := time.Now()
 			f.envelope = withURLs(func(input string) string {
 				return presignedUntil(s.endpoint(), wire.S3InputKey(testTenant, testRun("run-a"), input), signedAt, 15*time.Minute)

@@ -177,7 +177,7 @@ func TestStrimziIgnoredUsersPatternCoversThePrincipals(t *testing.T) {
 
 // Clients built from KafkaOpts send the broker no client metrics (KIP-714).
 func TestKafkaOptsDisableClientMetrics(t *testing.T) {
-	opts, err := KafkaOpts("127.0.0.1:1", nil, "user", "password")
+	opts, err := KafkaOpts("127.0.0.1:1", "user", "password", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -47,36 +47,39 @@ compatibility path remains.
   refuses such a task without publishing a rejection, so the run waits until
   its `task_started_by` passes unclaimed.
 
-## The broker CA in the bundle
+## Broker trust
 
-Bundles carry the broker's CA as `ca` when `operator.yaml` names a
-`ca_file`, and hosts and receivers trust the broker through their own
-`ca_file`, else the bundle's `ca`, else the system roots. A host no longer
-reads `ca.pem` from its configuration directory, and neither `host init` nor
-`receiver apply` asks for a CA.
+A clean break, as every pre-1.0 change ([ADR-0032](design.md)); no
+compatibility path remains. wherry distributes no CA: bundles carry no `ca`,
+and the `ca_file` of a host, receiver or operator configuration is now
+`ca_cert`, holding the CA's PEM text itself, beside the machine's
+trust store ([Broker and S3 trust](security.md#broker-and-s3-trust)). The new
+binary refuses a bundle carrying `ca` and a configuration keeping `ca_file`,
+naming the key. Upgrade the operator first: an older operator with a
+`ca_file` writes `ca` back into every bundle it issues.
 
-An older binary refuses a bundle that carries `ca`, or the `storage` pair a
-host bundle carries once `tenant storage` recorded it, since unknown fields
-are errors; the new binary with an older bundle and no `ca_file` cannot
-reach a broker under a private CA. Each host and receiver therefore takes
-the new binary and its refreshed bundle in one step:
+1. On the operator's machine, install the binary and replace `ca_file` in
+   `operator.yaml` with `ca_cert` holding the PEM.
+2. Reissue every bundle with `--force`: `wherry operator tenant host add
+   TENANT HOST --force` for each host and `wherry operator receiver apply
+   RECEIVER --force` for each receiver. Each holder is locked out from its
+   reissue until it installs its new bundle.
+3. For each holder: stop it, install the binary and the new bundle, replace
+   `ca_file` in its configuration with `ca_cert` holding the PEM, start it.
+   A host deletes `ca_file` from its `config.yaml` first, since `host init`
+   refuses a configuration holding it, then runs `wherry host init BUNDLE
+   --ca-cert @ca.pem`, which writes `ca_cert`, and restarts the harness
+   sessions that run `wherry host mcp`.
 
-1. Upgrade the operator's binary.
-2. Run `wherry operator tenant host refresh TENANT HOST` for each host and
-   `wherry operator receiver apply RECEIVER` for each receiver, which
-   rewrite each kept bundle with the CA and the same password, and hand
-   each refreshed bundle over as the first was.
-3. On each host, replace the binary and run `wherry host init BUNDLE` with
-   the refreshed bundle, then remove the `ca_file` line from the
-   configuration and `ca.pem` from the configuration directory. Restart the
-   harness sessions that run `wherry host mcp`.
-4. On each receiver, replace the binary and the bundle together and restart
-   the receiver; remove `ca_file` from its local configuration.
+Or reset the deployment and provision it again.
 
-Until a host or receiver takes both, it keeps the old binary with the old
-bundle and its CA file, which still work.
-[Renew the broker CA](security.md#renew-the-broker-ca) gives the renewal
-procedure for later CA changes.
+## `operator init` reads the password as `@FILE` or `@-`
+
+`--super-user-password-file FILE|-` is now `--super-user-password @FILE|@-`,
+the form every flag that takes a value reads. A password as the flag's own
+text is refused, since a command line is visible to other users. Scripts
+that run `operator init` change the flag; the prompt, when the flag is
+absent on a terminal, is as before.
 
 ## Optional credentials the host resolves
 

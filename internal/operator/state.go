@@ -155,12 +155,14 @@ func loopbackHTTP(endpoint string) bool {
 // The Default values are a pool's terms where its terms leave them out; MaxRunDurationMS caps a run after its
 // task_started_by.
 const (
-	DefaultDeliveryLimit  = 5
-	DefaultLockDurationMS = 15000
-	DefaultOutputLimit    = 8 << 20
-	DefaultReplyLimit     = 1 << 20
-	DefaultStartByLimitMS = 72 * 60 * 60 * 1000
-	MaxRunDurationMS      = 6 * 60 * 60 * 1000
+	DefaultDeliveryLimit     = 5
+	DefaultLockDurationMS    = 15000
+	DefaultOutputLimit       = 8 << 20
+	DefaultReplyLimit        = 1 << 20
+	DefaultStartByLimitMS    = 72 * 60 * 60 * 1000
+	DefaultProducerByteRate  = 1048576
+	DefaultRequestPercentage = 10
+	MaxRunDurationMS         = 6 * 60 * 60 * 1000
 	// MaxPresign is the longest lifetime S3 SigV4 allows a presigned URL.
 	MaxPresign = 7 * 24 * time.Hour
 	// UploadGrace is how long after task_ended_by a run's S3 outputs may still upload: the run's POST policy lasts that
@@ -189,6 +191,12 @@ func withDefaults(terms Terms) Terms {
 	}
 	if terms.OutputLimit == 0 {
 		terms.OutputLimit = DefaultOutputLimit
+	}
+	if terms.ProducerByteRate == 0 {
+		terms.ProducerByteRate = DefaultProducerByteRate
+	}
+	if terms.RequestPercentage == 0 {
+		terms.RequestPercentage = DefaultRequestPercentage
 	}
 	// validateTerms requires the reply limit to be at most the output limit.
 	if terms.ReplyLimit == 0 {
@@ -723,7 +731,10 @@ func validateRecord(record Record) error {
 		if validateNames(record.Pool) != nil || record.Terms == nil {
 			return errors.New("invalid pool record")
 		}
-		if err := validateTerms(withDefaults(*record.Terms)); err != nil {
+		// The quotas are recorded as applied, defaults filled, so they are checked as recorded: a 0 is a damaged record.
+		effective := withDefaults(*record.Terms)
+		effective.ProducerByteRate, effective.RequestPercentage = record.Terms.ProducerByteRate, record.Terms.RequestPercentage
+		if err := validateTerms(effective); err != nil {
 			return fmt.Errorf("invalid pool record: %w", err)
 		}
 	case "receiver":
