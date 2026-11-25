@@ -1,0 +1,568 @@
+{
+  "version": 7,
+  "now": "2026-11-24T17:51:00Z",
+  "window_start": "2026-11-23T17:51:00Z",
+  "rebuilt": true,
+  "rebuilt_at": "2026-11-24T14:51:00Z",
+  "brokers": [
+    {
+      "id": 0,
+      "host": "10.0.0.17",
+      "port": 9094,
+      "controller": true,
+      "listeners": [
+        "LAN-9094://10.0.0.17:9094",
+        "TLS-9093://wherry-kafka-0.svc:9093"
+      ]
+    }
+  ],
+  "pools": [
+    {
+      "name": "nomad",
+      "suspended": false,
+      "receivers": [
+        "nomad-1",
+        "nomad-2"
+      ],
+      "tenants": [
+        "ben",
+        "ops"
+      ],
+      "custodian": "nomad-1",
+      "storage": {
+        "endpoint": "https://s3.example.com",
+        "bucket": "wherry-runs"
+      },
+      "delivery_limit": 5,
+      "group": {
+        "state": "Stable",
+        "members": 2
+      },
+      "lag": {
+        "status": "ok",
+        "records": 7,
+        "at": "2026-11-24T17:50:30Z"
+      },
+      "runs": 5,
+      "in_progress": 1,
+      "by_state": {
+        "TASK_STATE_CANCELED": 1,
+        "TASK_STATE_FAILED": 1,
+        "TASK_STATE_REJECTED": 1,
+        "TASK_STATE_WORKING": 2
+      },
+      "by_class": {
+        "canceled": 1,
+        "failed": 1,
+        "rejected": 1
+      },
+      "no_terminal": 1,
+      "agents": [
+        "claude",
+        "codex"
+      ]
+    },
+    {
+      "name": "openshift",
+      "suspended": false,
+      "receivers": [
+        "openshift-1"
+      ],
+      "tenants": [
+        "ben"
+      ],
+      "storage": {
+        "endpoint": "https://s3.example.com",
+        "bucket": "wherry-runs"
+      },
+      "delivery_limit": 3,
+      "group": {
+        "state": "Empty",
+        "members": 0
+      },
+      "lag": {
+        "status": "error",
+        "records": 0,
+        "error": "timeout",
+        "at": "2026-11-24T17:50:00Z"
+      },
+      "runs": 1,
+      "in_progress": 0,
+      "by_state": {
+        "TASK_STATE_FAILED": 1
+      },
+      "by_class": {
+        "start-failure:dispatch": 1
+      },
+      "no_terminal": 0,
+      "agents": [
+        "codex"
+      ]
+    },
+    {
+      "name": "systemd",
+      "suspended": true,
+      "receivers": [
+        "systemd-1"
+      ],
+      "tenants": [
+        "ben"
+      ],
+      "custodian": "systemd-1",
+      "storage": {
+        "endpoint": "https://s3.example.com",
+        "bucket": "wherry-runs"
+      },
+      "delivery_limit": 5,
+      "group": {
+        "state": "Stable",
+        "members": 1
+      },
+      "lag": {
+        "status": "unavailable",
+        "records": 0,
+        "at": "2026-11-24T17:50:00Z"
+      },
+      "runs": 1,
+      "in_progress": 0,
+      "by_state": {
+        "TASK_STATE_COMPLETED": 1
+      },
+      "by_class": {},
+      "no_terminal": 0,
+      "agents": [
+        "claude"
+      ]
+    }
+  ],
+  "receivers": [
+    {
+      "name": "nomad-1",
+      "pool": "nomad",
+      "status": "live",
+      "ended": false,
+      "capacity": 3,
+      "in_flight": 2,
+      "gated": "draining",
+      "offers": [
+        {
+          "profile": "claude",
+          "agent": "claude",
+          "replicas": 2,
+          "in_flight": 1
+        },
+        {
+          "profile": "codex",
+          "agent": "codex",
+          "replicas": 1,
+          "in_flight": 0
+        }
+      ],
+      "last_advertised": "2026-11-24T17:50:42Z",
+      "profiles": [
+        "claude",
+        "codex"
+      ],
+      "runs": 5,
+      "by_state": {
+        "TASK_STATE_CANCELED": 1,
+        "TASK_STATE_FAILED": 1,
+        "TASK_STATE_REJECTED": 1,
+        "TASK_STATE_WORKING": 2
+      },
+      "by_class": {
+        "canceled": 1,
+        "failed": 1,
+        "rejected": 1
+      },
+      "held": [
+        {
+          "run": "run-b04ce912bceb7864b872adaaa9c74f9c",
+          "attempt": 1,
+          "stage": "working",
+          "source": "wherry.receiver.nomad-1.progress"
+        }
+      ],
+      "stale": [
+        {
+          "run": "run-5555555555555555555555555555555e",
+          "attempt": 1,
+          "stage": "working",
+          "stale": true,
+          "source": "wherry.receiver.nomad-1.progress"
+        }
+      ],
+      "unidentified": 1
+    },
+    {
+      "name": "nomad-2",
+      "pool": "nomad",
+      "status": "ended",
+      "ended": true,
+      "capacity": 0,
+      "in_flight": 0,
+      "offers": [],
+      "profiles": [],
+      "runs": 0,
+      "by_state": {},
+      "by_class": {},
+      "held": [],
+      "stale": [],
+      "unidentified": 0
+    },
+    {
+      "name": "openshift-1",
+      "pool": "openshift",
+      "status": "stale",
+      "ended": false,
+      "capacity": 2,
+      "in_flight": 0,
+      "offers": [
+        {
+          "profile": "codex",
+          "agent": "codex",
+          "replicas": 2,
+          "in_flight": 0
+        }
+      ],
+      "last_advertised": "2026-11-24T17:42:00Z",
+      "profiles": [
+        "codex"
+      ],
+      "runs": 1,
+      "by_state": {
+        "TASK_STATE_FAILED": 1
+      },
+      "by_class": {
+        "start-failure:dispatch": 1
+      },
+      "held": [],
+      "stale": [],
+      "unidentified": 0
+    },
+    {
+      "name": "systemd-1",
+      "pool": "systemd",
+      "status": "silent",
+      "ended": false,
+      "capacity": 0,
+      "in_flight": 0,
+      "offers": [],
+      "profiles": [
+        "claude"
+      ],
+      "runs": 1,
+      "by_state": {
+        "TASK_STATE_COMPLETED": 1
+      },
+      "by_class": {},
+      "held": [],
+      "stale": [],
+      "unidentified": 2
+    }
+  ],
+  "custodians": [
+    {
+      "pool": "nomad",
+      "receiver": "nomad-1",
+      "status": "live",
+      "key_id": "k3JvQmFzZTY0VXJsS2V5SWRfNDNfY2hhcnNfbG9uZ18",
+      "reason": "rotation",
+      "at": "2026-11-24T14:51:00Z",
+      "rotated_for": 3,
+      "suspended_for": 0,
+      "resumed_for": 0,
+      "suspended": true,
+      "signer": "wherry.rcv.nomad-1"
+    },
+    {
+      "pool": "systemd",
+      "receiver": "systemd-1",
+      "status": "live",
+      "key_id": "k3JvQmFzZTY0VXJsS2V5SWRfNDNfY2hhcnNfbG9uZ18",
+      "reason": "rotation",
+      "at": "2026-11-24T07:51:00Z",
+      "rotated_for": 1,
+      "suspended_for": 0,
+      "resumed_for": 0,
+      "suspended": false,
+      "signer": "wherry.rcv.systemd-1"
+    }
+  ],
+  "hosts": [
+    {
+      "tenant": "ben",
+      "name": "mbp",
+      "ended": false,
+      "runs": 4,
+      "by_state": {
+        "TASK_STATE_COMPLETED": 1,
+        "TASK_STATE_FAILED": 1,
+        "TASK_STATE_WORKING": 2
+      }
+    },
+    {
+      "tenant": "ben",
+      "name": "mini",
+      "ended": true,
+      "runs": 1,
+      "by_state": {
+        "TASK_STATE_FAILED": 1
+      }
+    },
+    {
+      "tenant": "ops",
+      "name": "ci",
+      "ended": false,
+      "runs": 1,
+      "by_state": {
+        "TASK_STATE_CANCELED": 1
+      }
+    }
+  ],
+  "tenants": [
+    {
+      "name": "ben",
+      "ended": false,
+      "pools": [
+        "nomad",
+        "openshift",
+        "systemd"
+      ],
+      "hosts": [
+        "mbp",
+        "mini"
+      ],
+      "runs": 5
+    },
+    {
+      "name": "ops",
+      "ended": false,
+      "pools": [
+        "nomad"
+      ],
+      "hosts": [
+        "ci"
+      ],
+      "runs": 2
+    }
+  ],
+  "storage": [
+    {
+      "endpoint": "https://s3.example.com",
+      "bucket": "wherry-runs",
+      "pools": [
+        "nomad",
+        "openshift",
+        "systemd"
+      ],
+      "runs": 7,
+      "outputs": 3,
+      "bytes": 3560000000,
+      "unreturned": 1,
+      "failed_runs": 2
+    }
+  ],
+  "runs": [
+    {
+      "id": "run-b04ce912bceb7864b872adaaa9c74f9c",
+      "tenant": "ben",
+      "host": "mbp",
+      "pool": "nomad",
+      "receiver": "nomad-1",
+      "agent": "claude",
+      "model": "claude-fable-5-1",
+      "attempt": 1,
+      "stage": "working",
+      "state": "TASK_STATE_WORKING",
+      "terminal": false,
+      "storage": {
+        "endpoint": "https://s3.example.com",
+        "bucket": "wherry-runs"
+      },
+      "admitted": "2026-11-24T17:14:00Z",
+      "first": "2026-11-24T17:14:00Z",
+      "last": "2026-11-24T17:50:00Z",
+      "outputs": 0
+    },
+    {
+      "id": "run-49f960713214457a3e21d20ece496b85",
+      "tenant": "ben",
+      "host": "mbp",
+      "pool": "nomad",
+      "receiver": "nomad-1",
+      "agent": "claude",
+      "model": "claude-sonnet-5-5",
+      "attempt": 2,
+      "stage": "terminal",
+      "state": "TASK_STATE_FAILED",
+      "class": "failed",
+      "terminal": true,
+      "storage_unknown": true,
+      "cancelled": true,
+      "admitted": "2026-11-24T17:39:00Z",
+      "first": "2026-11-24T17:39:00Z",
+      "last": "2026-11-24T17:48:00Z",
+      "outputs": 1,
+      "truncated": [
+        "run_events"
+      ]
+    },
+    {
+      "id": "run-1111111111111111111111111111111a",
+      "tenant": "ben",
+      "host": "mini",
+      "pool": "openshift",
+      "receiver": "openshift-1",
+      "agent": "codex",
+      "attempt": 1,
+      "stage": "terminal",
+      "state": "TASK_STATE_FAILED",
+      "class": "start-failure:dispatch",
+      "terminal": true,
+      "storage": {
+        "endpoint": "https://s3.example.com",
+        "bucket": "wherry-runs"
+      },
+      "admitted": "2026-11-24T15:41:00Z",
+      "first": "2026-11-24T15:41:00Z",
+      "last": "2026-11-24T15:46:00Z",
+      "outputs": 0
+    },
+    {
+      "id": "run-2222222222222222222222222222222b",
+      "tenant": "ben",
+      "host": "mbp",
+      "pool": "systemd",
+      "receiver": "systemd-1",
+      "agent": "claude",
+      "model": "claude-fable-5-1",
+      "attempt": 1,
+      "stage": "terminal",
+      "state": "TASK_STATE_COMPLETED",
+      "terminal": true,
+      "storage": {
+        "endpoint": "https://s3.example.com",
+        "bucket": "wherry-runs"
+      },
+      "admitted": "2026-11-24T17:01:00Z",
+      "first": "2026-11-24T17:01:00Z",
+      "last": "2026-11-24T17:11:00Z",
+      "outputs": 2
+    },
+    {
+      "id": "run-3333333333333333333333333333333c",
+      "tenant": "ops",
+      "host": "ci",
+      "pool": "nomad",
+      "receiver": "nomad-1",
+      "agent": "claude",
+      "attempt": 1,
+      "stage": "terminal",
+      "state": "TASK_STATE_CANCELED",
+      "class": "canceled",
+      "terminal": true,
+      "storage": {
+        "endpoint": "https://s3.example.com",
+        "bucket": "wherry-runs"
+      },
+      "cancelled": true,
+      "admitted": "2026-11-24T12:51:00Z",
+      "first": "2026-11-24T12:51:00Z",
+      "last": "2026-11-24T13:01:00Z",
+      "outputs": 0
+    },
+    {
+      "id": "run-4444444444444444444444444444444d",
+      "tenant": "ops",
+      "pool": "nomad",
+      "receiver": "nomad-1",
+      "attempt": 1,
+      "stage": "rejected",
+      "state": "TASK_STATE_REJECTED",
+      "class": "rejected",
+      "terminal": true,
+      "storage": {
+        "endpoint": "https://s3.example.com",
+        "bucket": "wherry-runs"
+      },
+      "admitted": "2026-11-24T11:11:00Z",
+      "first": "2026-11-24T11:11:00Z",
+      "last": "2026-11-24T11:11:00Z",
+      "outputs": 0
+    },
+    {
+      "id": "run-5555555555555555555555555555555e",
+      "tenant": "ben",
+      "host": "mbp",
+      "pool": "nomad",
+      "receiver": "nomad-1",
+      "agent": "claude",
+      "attempt": 1,
+      "stage": "released",
+      "state": "TASK_STATE_WORKING",
+      "terminal": false,
+      "storage": {
+        "endpoint": "https://s3.example.com",
+        "bucket": "wherry-runs"
+      },
+      "admitted": "2026-11-24T06:11:00Z",
+      "first": "2026-11-24T06:11:00Z",
+      "last": "2026-11-24T06:21:00Z",
+      "outputs": 0
+    }
+  ],
+  "runs_total": 7,
+  "truncated": true,
+  "topics": [
+    {
+      "name": "wherry.operator",
+      "kind": "operator",
+      "next": 9120,
+      "start": 0,
+      "end": 9120
+    },
+    {
+      "name": "wherry.pool.nomad.events",
+      "kind": "events",
+      "next": 410000,
+      "start": 120000,
+      "end": 410000,
+      "predates_log": true
+    },
+    {
+      "name": "wherry.tenant.ops",
+      "kind": "feed",
+      "next": 0,
+      "start": 0,
+      "end": 0,
+      "missing": true
+    },
+    {
+      "name": "wherry.receiver.systemd-1.progress",
+      "kind": "progress",
+      "next": 0,
+      "start": 0,
+      "end": 0,
+      "error": "timeout"
+    }
+  ],
+  "counts": {
+    "duplicates": 159,
+    "pending": 0,
+    "retracted": 2
+  },
+  "bounds": [
+    {
+      "name": "runs",
+      "hits": 3
+    },
+    {
+      "name": "transcript_scan",
+      "hits": 1
+    }
+  ],
+  "errors": [
+    "timeout"
+  ]
+}

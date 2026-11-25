@@ -238,17 +238,3 @@ func TestTranscriptSameRunWaitsWithoutSlot(t *testing.T) {
 		t.Errorf("%s hit %d times; want none for one run", capTranscriptScans, busy)
 	}
 }
-
-// The page keeps a line's attempt and seq in their own elements and the line in a bdi, and applies a response only to
-// the run and request generation it was asked for.
-func TestPageIsolatesLines(t *testing.T) {
-	script, err := static.ReadFile("static/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"createElement('bdi')", "transcript.run === run && transcript.generation === generation", "response.retry", "followNow"} {
-		if !strings.Contains(string(script), want) {
-			t.Errorf("app.js lacks %s", want)
-		}
-	}
-}

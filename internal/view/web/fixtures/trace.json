@@ -1,0 +1,110 @@
+{
+  "run": "run-49f960713214457a3e21d20ece496b85",
+  "tenant": "ben",
+  "topic": "wherry.traces.ben",
+  "traces": [
+    {
+      "id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "roots": [
+        {
+          "id": "0000000000000001",
+          "name": "task.submit",
+          "kind": "producer",
+          "service": "host",
+          "start": "2026-11-24T17:39:00Z",
+          "end": "2026-11-24T17:39:00.012Z",
+          "duration_ms": 12,
+          "status": "ok",
+          "attributes": {
+            "host": "mbp"
+          },
+          "children": []
+        },
+        {
+          "id": "0000000000000002",
+          "name": "task.claim",
+          "kind": "consumer",
+          "service": "receiver",
+          "start": "2026-11-24T17:39:06Z",
+          "end": "2026-11-24T17:39:06.061Z",
+          "duration_ms": 61,
+          "attributes": {},
+          "links": [
+            "0000000000000001"
+          ],
+          "children": [
+            {
+              "id": "0000000000000003",
+              "parent": "0000000000000002",
+              "name": "key.open",
+              "kind": "client",
+              "service": "receiver",
+              "start": "2026-11-24T17:39:06.6Z",
+              "end": "2026-11-24T17:39:06.95Z",
+              "duration_ms": 350,
+              "attributes": {},
+              "children": []
+            },
+            {
+              "id": "0000000000000004",
+              "parent": "0000000000000002",
+              "name": "task.run",
+              "kind": "internal",
+              "service": "receiver",
+              "start": "2026-11-24T17:39:07.2Z",
+              "end": "2026-11-24T17:46:27.2Z",
+              "duration_ms": 440000,
+              "status": "error",
+              "attributes": {
+                "attempt": "2"
+              },
+              "events": 3,
+              "children": [
+                {
+                  "id": "0000000000000005",
+                  "parent": "0000000000000004",
+                  "name": "[other]",
+                  "kind": "client",
+                  "service": "plugin",
+                  "start": "2026-11-24T17:39:07.8Z",
+                  "end": "2026-11-24T17:39:09.17Z",
+                  "duration_ms": 1370,
+                  "status": "ok",
+                  "attributes": {},
+                  "children": [],
+                  "marker": "attribute filtered"
+                },
+                {
+                  "id": "0000000000000006",
+                  "parent": "0000000000000004",
+                  "name": "agent.exec",
+                  "kind": "internal",
+                  "service": "plugin",
+                  "start": "2026-11-24T17:39:12Z",
+                  "end": "2026-11-24T17:46:29Z",
+                  "duration_ms": 437000,
+                  "status": "error",
+                  "attributes": {
+                    "exit.code": "1"
+                  },
+                  "children": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "spans": 6,
+  "markers": [
+    "cycle cut",
+    "truncated: trace_spans"
+  ],
+  "read": {
+    "bytes": 6210,
+    "records": 10
+  },
+  "next": 10,
+  "complete": false
+}

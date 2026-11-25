@@ -1,0 +1,26 @@
+{
+  "run": "run-b04ce912bceb7864b872adaaa9c74f9c",
+  "attempt": 1,
+  "first": 900,
+  "lines": [
+    {
+      "at": "2026-11-24T17:21:00Z",
+      "attempt": 1,
+      "receiver": "wherry.rcv.nomad-1",
+      "seq": 900,
+      "text": "go test ./..."
+    }
+  ],
+  "next": 915,
+  "complete": false,
+  "predates_log": true,
+  "indexed": 1,
+  "read": {
+    "bytes": 0,
+    "records": 0
+  },
+  "seek": {
+    "bytes": 0,
+    "records": 0
+  }
+}

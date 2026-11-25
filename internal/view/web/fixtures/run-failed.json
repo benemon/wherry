@@ -1,0 +1,188 @@
+{
+  "id": "run-49f960713214457a3e21d20ece496b85",
+  "tenant": "ben",
+  "host": "mbp",
+  "pool": "nomad",
+  "receiver": "nomad-1",
+  "agent": "claude",
+  "model": "claude-sonnet-5-5",
+  "attempt": 2,
+  "stage": "terminal",
+  "state": "TASK_STATE_FAILED",
+  "class": "failed",
+  "terminal": true,
+  "storage_unknown": true,
+  "cancelled": true,
+  "admitted": "2026-11-24T17:39:00Z",
+  "first": "2026-11-24T17:39:00Z",
+  "last": "2026-11-24T17:48:00Z",
+  "outputs": 1,
+  "truncated": [
+    "run_events"
+  ],
+  "task_hash": "sha256:3f1c",
+  "reason": "agent exited with status 1: integration tests could not reach [redacted-url]",
+  "echoes": [
+    {
+      "receiver": "nomad-1",
+      "host": "mbp",
+      "pool": "nomad",
+      "agent": "claude",
+      "model": "claude-sonnet-5-5",
+      "at": "2026-11-24T17:39:00Z",
+      "joined": true,
+      "signer": "wherry.rcv.nomad-1"
+    }
+  ],
+  "attempts": [
+    {
+      "number": 1,
+      "receiver": "nomad-1",
+      "task_topic": "wherry.pool.nomad.tasks.claude",
+      "events": [
+        {
+          "kind": "claimed",
+          "state": "TASK_STATE_WORKING",
+          "event_id": "event-e5cd77d6aa2a0e825638ae87bb3b49b1",
+          "receiver": "nomad-1",
+          "at": "2026-11-24T17:39:06Z",
+          "signer": "wherry.rcv.nomad-1"
+        }
+      ],
+      "decision": {
+        "custodian": "nomad-1",
+        "reason": "unchanged",
+        "served": true,
+        "at": "2026-11-24T17:39:12Z",
+        "signer": "wherry.rcv.nomad-1"
+      },
+      "start_failure": {
+        "profile": "claude",
+        "agent": "claude",
+        "class": "dispatch",
+        "at": "2026-11-24T17:39:30Z",
+        "signer": "wherry.rcv.nomad-1"
+      }
+    },
+    {
+      "number": 2,
+      "receiver": "nomad-1",
+      "task_topic": "wherry.pool.nomad.tasks.claude",
+      "transcript_chunks": 11,
+      "events": [
+        {
+          "kind": "claimed",
+          "state": "TASK_STATE_WORKING",
+          "event_id": "event-0f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c",
+          "receiver": "nomad-1",
+          "at": "2026-11-24T17:41:00Z",
+          "signer": "wherry.rcv.nomad-1"
+        },
+        {
+          "kind": "started",
+          "state": "TASK_STATE_WORKING",
+          "event_id": "event-1f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c",
+          "receiver": "nomad-1",
+          "at": "2026-11-24T17:41:06Z",
+          "signer": "wherry.rcv.nomad-1"
+        },
+        {
+          "kind": "working",
+          "state": "TASK_STATE_WORKING",
+          "event_id": "event-2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c",
+          "receiver": "nomad-1",
+          "at": "2026-11-24T17:43:00Z",
+          "message": "running make integration against [redacted-url]",
+          "signer": "wherry.rcv.nomad-1"
+        },
+        {
+          "kind": "terminal",
+          "state": "TASK_STATE_FAILED",
+          "event_id": "event-3f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c",
+          "receiver": "nomad-1",
+          "at": "2026-11-24T17:48:00Z",
+          "class": "failed",
+          "message": "agent exited with status 1: integration tests could not reach [redacted-url]",
+          "truncated": true,
+          "signer": "wherry.rcv.nomad-1"
+        }
+      ]
+    }
+  ],
+  "opens": [
+    {
+      "attempt": 1,
+      "receiver": "nomad-1",
+      "at": "2026-11-24T17:39:09Z",
+      "signer": "wherry.rcv.nomad-1",
+      "reason": "pool suspended"
+    },
+    {
+      "attempt": 2,
+      "receiver": "nomad-1",
+      "at": "2026-11-24T17:41:03Z",
+      "signer": "wherry.rcv.nomad-1",
+      "answer": "wrap",
+      "custodian": "nomad-1",
+      "answered_at": "2026-11-24T17:41:03.6Z",
+      "answer_signer": "wherry.rcv.nomad-1"
+    }
+  ],
+  "cancels": [
+    {
+      "host": "mbp",
+      "at": "2026-11-24T17:47:00Z",
+      "signer": "wherry.tnt.ben.mbp"
+    }
+  ],
+  "result": {
+    "receiver": "nomad-1",
+    "attempt": 2,
+    "state": "TASK_STATE_FAILED",
+    "at": "2026-11-24T17:48:00Z",
+    "profile": "claude",
+    "outputs": [
+      {
+        "name": "test-output.txt",
+        "size": 18342,
+        "sha256": "7a1d0c55e9b24f3a8c6e2d1b0f9a8e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7"
+      }
+    ],
+    "s3_outputs": [
+      {
+        "name": "reports/integration/log.txt",
+        "size": 9000000,
+        "sha256": "0a1d0c55e9b24f3a8c6e2d1b0f9a8e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7"
+      }
+    ],
+    "not_returned": [
+      {
+        "name": "reports/integration/report.md",
+        "size": 2048,
+        "reason": "missing"
+      },
+      {
+        "name": "(invalid name)",
+        "size": 0,
+        "reason": "invalid name"
+      }
+    ],
+    "reply_size": 0,
+    "artifacts": 2,
+    "signer": "wherry.rcv.nomad-1"
+  },
+  "path": [
+    {
+      "step": "admitted",
+      "actor": "mbp > nomad-1",
+      "at": "2026-11-24T17:39:00Z"
+    },
+    {
+      "step": "terminal",
+      "actor": "nomad-1",
+      "attempt": 2,
+      "at": "2026-11-24T17:48:00Z",
+      "detail": "failed failed"
+    }
+  ]
+}

@@ -922,7 +922,7 @@ wherry operator view [--dir DIR] [--window 24h] [--port N] [--external-url URL]
 
 Rebuilds a model of the cluster from the records of the last `--window`, 24 hours by default, tails them, and
 serves it read-only on `127.0.0.1`, on `--port` or a free port, until Ctrl-C: JSON endpoints, a Server-Sent Events
-stream and a placeholder page of plain tables. It prints the address to open on standard output, with a token in
+stream and the page, a map of the cluster with a drawer per node and run. It prints the address to open on standard output, with a token in
 the URL fragment that the page exchanges once for a session cookie, and the rebuild's run count and time on standard
 error. `--external-url` names the https or http origin a reverse proxy serves the view at, whose `Host` and
 `Origin` are then accepted and whose scheme makes the cookie `Secure`; a URL with a path is refused. The view never

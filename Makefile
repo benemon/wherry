@@ -67,8 +67,31 @@ check-names: ## Fail on the old provisioning-role and command names in tracked f
 	fi; \
 	echo "no old provisioning-role or command names in tracked files"
 
+.PHONY: check-ui-source
+# The operator view renders tenant and agent text as React text nodes alone; the pattern is assembled from fragments
+# so this recipe never contains the string it hunts.
+check-ui-source: ## Fail on raw HTML rendering in the operator view's app source
+	@p="dangerously""SetInnerHTML"; \
+	if hits=$$(git grep -n -E "$$p" -- internal/view/web/src); then \
+		echo "$$hits"; echo "FAIL: raw HTML rendering in the operator view's app source"; exit 1; \
+	fi; \
+	echo "no raw HTML rendering in the operator view's app source"
+
 .PHONY: check
-check: check-fmt vet test check-licenses check-markers check-names ## Run every CI gate
+check: check-fmt vet test check-licenses check-markers check-names check-ui-source ## Run every CI gate
+
+.PHONY: ui
+# The built page is committed under internal/view/static, so go build and the Go jobs need no Node; ci.yml's ui job
+# rebuilds it from the lockfile and fails when the committed output differs. The build also writes
+# internal/view/static/THIRD_PARTY_NOTICES and fails on a bundled licence outside its list. npm dependency bumps are
+# made here by hand, the lockfile regenerated on Linux (docker run node:22 npm install --package-lock-only), since a
+# bump without a rebuild would fail the ui job: Dependabot has no npm entry.
+ui: ## Rebuild the operator view's page into internal/view/static (needs Node 22)
+	cd internal/view/web && npm ci && npm run check && npm run build
+
+.PHONY: ui-smoke
+ui-smoke: ## Run the operator view's browser smoke against the committed page (needs npx playwright install chromium)
+	cd internal/view/web && npm run smoke
 
 .PHONY: docs
 docs: ## Build the documentation site into docs-site/.vitepress/dist (npm ci in docs-site first)

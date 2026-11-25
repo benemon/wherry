@@ -1,0 +1,405 @@
+/* The page's own styles. Colours come from the EUI theme through the custom properties App sets on .w-root, so
+   the stylesheet follows the colour mode without a copy of the tokens. */
+body {
+  margin: 0;
+}
+.w-root {
+  min-height: 100vh;
+  background: var(--w-page);
+}
+.w-main {
+  box-sizing: border-box;
+  padding: 16px 16px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.w-panel {
+  background: var(--w-plain);
+  border: 1px solid var(--w-border-subdued);
+  border-radius: 12px;
+}
+.w-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 16px 14px;
+}
+.w-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.w-subdued {
+  font-size: 12px;
+  color: var(--w-text-subdued);
+}
+.w-mono {
+  font-family: 'Roboto Mono', Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+.w-map {
+  overflow: hidden;
+  position: relative;
+}
+.w-stage {
+  position: relative;
+  transform-origin: 0 0;
+}
+.w-nb {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 12px;
+  color: inherit;
+}
+.w-nb:hover .w-ring {
+  box-shadow: 0 0 0 4px var(--w-hover);
+}
+.w-nb:focus-visible {
+  outline: 2px solid var(--w-text-primary);
+  outline-offset: 2px;
+}
+.w-ring {
+  box-sizing: border-box;
+  flex: none;
+  border-radius: 50%;
+  background: var(--w-plain);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--w-text-heading);
+}
+.w-nt {
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--w-text-subdued);
+}
+.w-nt b {
+  display: block;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+  color: var(--w-text-heading);
+}
+.w-box {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid var(--w-border-subdued);
+  background: var(--w-subdued);
+  border-radius: 12px;
+}
+.w-box.w-selected {
+  border: 2px solid var(--w-primary);
+  background: var(--w-primary-bg);
+}
+.w-box.w-suspended {
+  border-color: var(--w-warning);
+}
+.w-boxbutton {
+  padding: 0;
+  cursor: pointer;
+}
+.w-pill {
+  box-sizing: border-box;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  cursor: pointer;
+  background: var(--w-plain);
+  color: var(--w-text-heading);
+}
+.w-pill.w-selected {
+  outline: 2px solid var(--w-primary);
+  outline-offset: 2px;
+}
+.w-textbutton {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.w-from {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border: 1px dashed var(--w-border-prominent);
+  border-radius: 10px;
+  font-size: 11px;
+  color: var(--w-text-subdued);
+  font-family: 'Roboto Mono', Menlo, monospace;
+}
+.w-flow {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 12px;
+  height: 12px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  background: var(--w-primary);
+  border: 2px solid var(--w-plain);
+  offset-rotate: 0deg;
+  animation: w-flow 2.4s linear infinite;
+  pointer-events: none;
+}
+@keyframes w-flow {
+  from {
+    offset-distance: 0%;
+  }
+  to {
+    offset-distance: 100%;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .w-flow {
+    animation: none;
+    offset-distance: 60%;
+  }
+}
+.w-legend {
+  position: absolute;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 12px;
+  color: var(--w-text-subdued);
+}
+.w-bins {
+  position: relative;
+  height: 26px;
+}
+.w-bin {
+  position: absolute;
+  bottom: 8px;
+  background: var(--w-border-primary);
+  border-radius: 1px;
+  overflow: hidden;
+  display: flex;
+  align-items: flex-end;
+}
+.w-bin > span {
+  display: block;
+  width: 100%;
+  background: var(--w-danger);
+}
+.w-cursor {
+  position: absolute;
+  top: 0;
+  bottom: 6px;
+  width: 2px;
+}
+.w-cut {
+  position: absolute;
+  top: 0;
+  bottom: 8px;
+  left: 0;
+  background: repeating-linear-gradient(45deg, var(--w-warning-bg) 0 4px, transparent 4px 8px);
+  border-right: 1px dashed var(--w-warning);
+}
+.w-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.w-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.w-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--w-border-subdued);
+  border-radius: 8px;
+}
+.w-list > * {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--w-border-subdued);
+}
+.w-list > *:last-child {
+  border-bottom: 0;
+}
+.w-rowbutton {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 12px;
+  width: 100%;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.w-rowbutton:hover {
+  background: var(--w-hover);
+}
+.w-step {
+  display: grid;
+  grid-template-columns: 84px 14px minmax(0, 1fr);
+  column-gap: 10px;
+  align-items: start;
+  padding: 6px 0;
+}
+.w-step.w-future {
+  opacity: 0.35;
+}
+.w-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-top: 5px;
+}
+.w-reason {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--w-text-danger);
+  white-space: pre-wrap;
+}
+.w-redacted {
+  color: var(--w-text-disabled);
+  background: var(--w-page);
+  border-radius: 3px;
+  padding: 0 2px;
+}
+.w-hit {
+  background: var(--w-warning-bg);
+  color: var(--w-text-heading);
+}
+.w-muted {
+  color: var(--w-text-disabled);
+  font-style: italic;
+}
+.w-output {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 12px;
+}
+.w-output.w-unreturned {
+  background: var(--w-warning-bg);
+}
+.w-output .w-name {
+  word-break: break-all;
+}
+.w-transcript {
+  overflow-y: auto;
+  border: 1px solid var(--w-border-subdued);
+  border-radius: 8px;
+  background: var(--w-plain);
+  font-family: 'Roboto Mono', Menlo, monospace;
+  font-size: 12px;
+  line-height: 18px;
+}
+.w-line {
+  display: grid;
+  grid-template-columns: 56px 76px minmax(0, 1fr);
+  gap: 8px;
+  padding: 2px 10px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 22px;
+}
+.w-line.w-status {
+  background: var(--w-primary-bg);
+  color: var(--w-text-primary);
+}
+.w-line .w-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.w-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-family: Inter, sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--w-text-subdued);
+  border-top: 1px solid var(--w-border-plain);
+  border-bottom: 1px solid var(--w-border-plain);
+  background: var(--w-subdued);
+}
+.w-earlier {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 10px;
+  border-bottom: 1px solid var(--w-border-subdued);
+  background: var(--w-subdued);
+  font-family: Inter, sans-serif;
+}
+.w-waterfall-head {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) 64px;
+  font-size: 11px;
+  color: var(--w-text-subdued);
+  border-bottom: 1px solid var(--w-border-subdued);
+  padding: 0 0 4px;
+}
+.w-span {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) 64px;
+  gap: 8px;
+  align-items: center;
+  padding: 3px 4px;
+  border: 0;
+  border-radius: 4px;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  background: none;
+}
+.w-span.w-selected {
+  background: var(--w-primary-bg);
+}
+.w-span .w-spanname {
+  font-family: 'Roboto Mono', Menlo, monospace;
+  font-size: 12px;
+  color: var(--w-text-heading);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.w-track {
+  position: relative;
+  height: 20px;
+  background: linear-gradient(90deg, var(--w-border-subdued) 1px, transparent 1px) 50% 0 / 50% 100%;
+}
+.w-bar {
+  position: absolute;
+  top: 5px;
+  height: 10px;
+  border-radius: 2px;
+}
+.w-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+.w-attrs {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  gap: 12px;
+  font-size: 12px;
+}

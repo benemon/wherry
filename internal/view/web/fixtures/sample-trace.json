@@ -1,0 +1,14 @@
+{
+ "run": "run-b6b5c184c4bf8d907e66595ddbe55f17",
+ "tenant": "ben",
+ "topic": "wherry.traces.ben",
+ "traces": [],
+ "spans": 0,
+ "markers": [],
+ "read": {
+  "bytes": 0,
+  "records": 0
+ },
+ "next": 0,
+ "complete": true
+}

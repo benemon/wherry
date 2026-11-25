@@ -6,23 +6,35 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"embed"
+	"encoding/base64"
 	"encoding/hex"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-//go:embed static
+// The page as make ui builds it from internal/view/web: index.html with the nonce placeholder and the hashed assets.
+// THIRD_PARTY_NOTICES beside them ships in the release archive, not the binary.
+//
+//go:embed static/index.html static/assets
 var static embed.FS
+
+// assets is the hashed files the page references, served by exact name alone.
+var assets, _ = fs.Sub(static, "static/assets")
+
+// noncePlaceholder is what index.html carries where each response's nonce goes.
+const noncePlaceholder = "__CSP_NONCE__"
 
 // ServeOptions configure Serve.
 type ServeOptions struct {
@@ -72,8 +84,17 @@ const (
 	textTooLarge         = "response over its bound"
 )
 
-// csp is the page's Content-Security-Policy: assets from the embedded files alone, no inline script.
-const csp = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+// csp is the Content-Security-Policy of every response: assets from the embedded files alone, no inline script, data:
+// for the images EUI's styles carry. The page's own policy adds a per-response nonce to style-src, since EUI injects
+// its styles at runtime; nothing else differs, and script-src never carries a nonce.
+const csp = "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+
+func pageCSP(nonce string) string {
+	return strings.Replace(csp, "style-src 'self'", "style-src 'self' 'nonce-"+nonce+"'", 1)
+}
+
+// assetTypes are the content types of the files the build emits; anything else is served as bytes.
+var assetTypes = map[string]string{".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".woff2": "font/woff2", ".svg": "image/svg+xml", ".png": "image/png"}
 
 // sessionBodyLimit bounds a POST /session body.
 const sessionBodyLimit = 1024
@@ -118,9 +139,8 @@ func Serve(v *View, opts ServeOptions) (*Server, error) {
 	s.port = listener.Addr().(*net.TCPAddr).Port
 	s.cookie = "wherry-view-" + strconv.Itoa(s.port)
 	mux := http.NewServeMux()
-	mux.Handle("GET /{$}", s.static("index.html", "text/html; charset=utf-8"))
-	mux.Handle("GET /app.js", s.static("app.js", "text/javascript; charset=utf-8"))
-	mux.Handle("GET /app.css", s.static("app.css", "text/css; charset=utf-8"))
+	mux.Handle("GET /{$}", http.HandlerFunc(s.page))
+	mux.Handle("GET /assets/{file}", http.HandlerFunc(s.asset))
 	mux.Handle("POST /session", http.HandlerFunc(s.session))
 	mux.Handle("GET /api/model", http.HandlerFunc(s.model))
 	mux.Handle("GET /api/runs/{id}", http.HandlerFunc(s.run))
@@ -290,7 +310,7 @@ var routes = map[string]struct {
 	name   string
 	cookie bool
 }{
-	"GET /{$}": {"page", false}, "GET /app.js": {"asset", false}, "GET /app.css": {"asset", false}, "POST /session": {"session", false},
+	"GET /{$}": {"page", false}, "GET /assets/{file}": {"asset", false}, "POST /session": {"session", false},
 	"GET /api/model": {"model", true}, "GET /api/runs/{id}": {"run", true}, "GET /api/runs/{id}/trace": {"trace", true}, "GET /api/runs/{id}/transcript": {"transcript", true}, "GET /api/stream": {"stream", true},
 }
 
@@ -311,16 +331,40 @@ func (s *Server) fail(w http.ResponseWriter, status int, text string) {
 	io.WriteString(w, text+"\n")
 }
 
-func (s *Server) static(name, contentType string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		content, err := static.ReadFile("static/" + name)
-		if err != nil {
-			s.fail(w, http.StatusNotFound, textNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", contentType)
-		w.Write(content)
-	})
+// page serves index.html with a fresh nonce, 128 bits from crypto/rand, in the policy and the meta tag the app reads.
+func (s *Server) page(w http.ResponseWriter, r *http.Request) {
+	index, err := static.ReadFile("static/index.html")
+	if err != nil {
+		s.fail(w, http.StatusNotFound, textNotFound)
+		return
+	}
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		s.fail(w, http.StatusInternalServerError, textUnavailable)
+		return
+	}
+	nonce := base64.StdEncoding.EncodeToString(raw)
+	w.Header().Set("Content-Security-Policy", pageCSP(nonce))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(bytes.Replace(index, []byte(noncePlaceholder), []byte(nonce), 1))
+}
+
+// asset serves one file of the build's assets directory by its exact name; any other name, a directory included,
+// gets the fixed 404. The names are content-hashed, so the response is cacheable for good.
+func (s *Server) asset(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("file")
+	content, err := fs.ReadFile(assets, name)
+	if err != nil {
+		s.fail(w, http.StatusNotFound, textNotFound)
+		return
+	}
+	contentType := assetTypes[path.Ext(name)]
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Write(content)
 }
 
 // session exchanges the token, posted once by the page, for a cookie holding a server-issued session ID; the

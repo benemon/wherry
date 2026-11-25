@@ -1,0 +1,17 @@
+{
+  "run": "run-b04ce912bceb7864b872adaaa9c74f9c",
+  "attempt": 0,
+  "first": null,
+  "lines": [],
+  "complete": true,
+  "missing": true,
+  "indexed": 0,
+  "read": {
+    "bytes": 0,
+    "records": 0
+  },
+  "seek": {
+    "bytes": 0,
+    "records": 0
+  }
+}

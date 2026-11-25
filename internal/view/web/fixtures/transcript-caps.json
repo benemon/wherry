@@ -1,0 +1,30 @@
+{
+  "run": "run-b04ce912bceb7864b872adaaa9c74f9c",
+  "attempt": 1,
+  "first": 0,
+  "lines": [
+    {
+      "at": "2026-11-24T17:15:00Z",
+      "attempt": 1,
+      "receiver": "wherry.rcv.nomad-1",
+      "seq": 0,
+      "text": "Starting with the failing build on this branch."
+    }
+  ],
+  "next": 48,
+  "complete": false,
+  "indexed": 300,
+  "read": {
+    "bytes": 0,
+    "records": 0
+  },
+  "seek": {
+    "bytes": 0,
+    "records": 0
+  },
+  "truncated": [
+    "transcript_bytes",
+    "response_bytes"
+  ],
+  "evicted": 1
+}

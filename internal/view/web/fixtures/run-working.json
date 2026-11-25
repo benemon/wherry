@@ -1,0 +1,94 @@
+{
+  "id": "run-b04ce912bceb7864b872adaaa9c74f9c",
+  "tenant": "ben",
+  "host": "mbp",
+  "pool": "nomad",
+  "receiver": "nomad-1",
+  "agent": "claude",
+  "model": "claude-fable-5-1",
+  "attempt": 1,
+  "stage": "working",
+  "state": "TASK_STATE_WORKING",
+  "terminal": false,
+  "storage": {
+    "endpoint": "https://s3.example.com",
+    "bucket": "wherry-runs"
+  },
+  "admitted": "2026-11-24T17:14:00Z",
+  "first": "2026-11-24T17:14:00Z",
+  "last": "2026-11-24T17:50:00Z",
+  "outputs": 0,
+  "task_hash": "sha256:9b2e",
+  "echoes": [
+    {
+      "receiver": "nomad-1",
+      "host": "mbp",
+      "pool": "nomad",
+      "agent": "claude",
+      "model": "claude-fable-5-1",
+      "at": "2026-11-24T17:14:00Z",
+      "joined": true,
+      "signer": "wherry.rcv.nomad-1"
+    }
+  ],
+  "attempts": [
+    {
+      "number": 1,
+      "receiver": "nomad-1",
+      "events": [
+        {
+          "kind": "claimed",
+          "state": "TASK_STATE_WORKING",
+          "event_id": "event-4f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c",
+          "receiver": "nomad-1",
+          "at": "2026-11-24T17:14:06Z",
+          "signer": "wherry.rcv.nomad-1"
+        },
+        {
+          "kind": "started",
+          "state": "TASK_STATE_WORKING",
+          "event_id": "event-5f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c",
+          "receiver": "nomad-1",
+          "at": "2026-11-24T17:14:12Z",
+          "signer": "wherry.rcv.nomad-1"
+        },
+        {
+          "kind": "working",
+          "state": "TASK_STATE_WORKING",
+          "event_id": "event-6f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c",
+          "receiver": "nomad-1",
+          "at": "2026-11-24T17:21:00Z",
+          "message": "go test ./... passing so far",
+          "signer": "wherry.rcv.nomad-1"
+        }
+      ],
+      "decision": {
+        "custodian": "nomad-1",
+        "reason": "unchanged",
+        "served": true,
+        "at": "2026-11-24T17:14:09Z",
+        "signer": "wherry.rcv.nomad-1"
+      }
+    }
+  ],
+  "opens": [
+    {
+      "attempt": 1,
+      "receiver": "nomad-1",
+      "at": "2026-11-24T17:14:07.2Z",
+      "signer": "wherry.rcv.nomad-1",
+      "answer": "wrap",
+      "custodian": "nomad-1",
+      "answered_at": "2026-11-24T17:14:07.8Z",
+      "answer_signer": "wherry.rcv.nomad-1"
+    }
+  ],
+  "cancels": [],
+  "path": [
+    {
+      "step": "admitted",
+      "actor": "mbp > nomad-1",
+      "at": "2026-11-24T17:14:00Z"
+    }
+  ]
+}

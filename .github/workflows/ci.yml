@@ -157,6 +157,31 @@ jobs:
         if: failure()
         run: for node in 1 2 3; do docker logs --tail 200 "wherry-kafka-$node"; done
 
+  # The operator view's page: type-checked, unit-tested and rebuilt from the lockfile, failing when the committed
+  # output under internal/view/static differs from the rebuild, then the browser smoke against the rebuilt page.
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: internal/view/web/package-lock.json
+      - name: Rebuild the page
+        run: make ui
+      - name: Check the committed page matches the rebuild
+        run: |
+          git status --porcelain -- internal/view/static
+          test -z "$(git status --porcelain -- internal/view/static)" || { git diff --stat -- internal/view/static; echo "FAIL: internal/view/static differs from a rebuild; run make ui and commit"; exit 1; }
+      - name: Install Chromium for the smoke
+        run: npx playwright install --with-deps chromium
+        working-directory: internal/view/web
+      - name: Run the browser smoke
+        run: make ui-smoke
+
   # The release build as a snapshot, unsigned and unpublished: it fails when the archives or the files they hold differ
   # from .github/release-contents.txt.
   release-build:
