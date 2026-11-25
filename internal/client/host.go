@@ -63,9 +63,9 @@ type SubmitInput struct {
 	Prompt   string
 	// Parts follow the prompt's text part.
 	Parts []wire.Part
-	// Files are input files read into raw parts after Parts, except that on a pool with storage one over the pool's
-	// record limit, which can never travel inline, uploads from its Body as an S3 input.
-	Files []S3File
+	// Files are input files, opened once every input's name is checked and read into raw parts after Parts, except that
+	// on a pool with storage one over the pool's record limit, which can never travel inline, uploads as an S3 input.
+	Files []InputFile
 	// Credentials name credentials this host configures, each delivered to the agent at its target.
 	Credentials []wire.TaskCredential
 	// Requested names the placed agent's credentials the task asks for: an optional one named here fails the submission
@@ -78,8 +78,9 @@ type SubmitInput struct {
 	// GitChanges is how the clone's changes come back: as changes.bundle when empty or bundle, as changes.patch for
 	// patch, and not at all for none.
 	GitChanges string
-	// Continue names a run of this host whose collected changes.bundle the agent continues from: the run takes that
-	// run's git input and context, and returns its own changes.bundle through S3.
+	// Continue names a run of this host the agent continues from, with that run's context: a run with a git input gives
+	// its git input and its collected changes.bundle, and the new run returns its own through S3; any other gives its
+	// collected outputs as the inputs previous/<name>.
 	Continue string
 	// S3Inputs are files uploaded to the pool's bucket before the task is published, which the plugin fetches.
 	S3Inputs []S3File
@@ -352,6 +353,12 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	var continued continuation
 	// repo is the repository --git . read, or the one the continued run recorded.
 	var repo string
+	files := make([]sendFile, 0, len(input.Files))
+	for _, file := range input.Files {
+		files = append(files, sendFile{InputFile: file})
+	}
+	// recorded is what result verified of each S3 input a continuation sends, by input name.
+	recorded := map[string]collectedOutput{}
 	if input.Continue != "" {
 		if input.Git != nil || input.GitChanges != "" {
 			return SubmitResult{}, fmt.Errorf("%w: continue takes the git input of the run it continues, so not git or git changes", ErrInvalidInput)
@@ -362,7 +369,10 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 				names = append(names, wire.InputName(part))
 			}
 		}
-		for _, file := range slices.Concat(input.Files, input.S3Inputs) {
+		for _, file := range input.Files {
+			names = append(names, file.Name)
+		}
+		for _, file := range input.S3Inputs {
 			names = append(names, file.Name)
 		}
 		for _, output := range input.Outputs {
@@ -375,14 +385,24 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		if continued, err = h.continued(input.Continue); err != nil {
 			return SubmitResult{}, err
 		}
-		defer continued.bundle.Close()
-		previous := continued.last.Task.Wherry.Git
-		input.Git = &wire.GitInput{Remote: previous.Remote, Ref: previous.Ref, Path: previous.Path}
-		repo = continued.last.Repo
-		input.S3Inputs = append(slices.Clone(input.S3Inputs), S3File{Name: baseBundle, Body: continued.bundle})
-		// A plain expected output: over the inline budget it goes through the pool's bucket, and a receiver never
-		// requires a git input's changes file.
-		input.Outputs = append(slices.Clone(input.Outputs), wire.ExpectedOutput{Name: wire.GitBundle})
+		if continued.bundle != nil {
+			defer continued.bundle.Close()
+			previous := continued.last.Task.Wherry.Git
+			input.Git = &wire.GitInput{Remote: previous.Remote, Ref: previous.Ref, Path: previous.Path}
+			repo = continued.last.Repo
+			input.S3Inputs = append(slices.Clone(input.S3Inputs), S3File{Name: baseBundle, Body: continued.bundle})
+			recorded[baseBundle] = continued.last.Outputs[slices.IndexFunc(continued.last.Outputs, func(output collectedOutput) bool { return output.Name == wire.GitBundle })]
+			// A plain expected output: over the inline budget it goes through the pool's bucket, and a receiver never
+			// requires a git input's changes file.
+			input.Outputs = append(slices.Clone(input.Outputs), wire.ExpectedOutput{Name: wire.GitBundle})
+		} else {
+			for _, output := range continued.last.Outputs {
+				files = append(files, previousFile(output, continued.last.Run))
+			}
+		}
+	}
+	if err := checkInputNames(input.Parts, files, input.S3Inputs, len(input.Files)); err != nil {
+		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
 	outputs := input.Outputs
 	// One resolver: the bytes that decide what is supplied are the bytes the envelope carries, the storage keys sign
@@ -566,22 +586,41 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	}
 	storable := v.state.Pools[pool].Storage != nil && h.credentialed(pool)
 	input.Parts = slices.Clone(input.Parts)
-	for _, file := range input.Files {
-		size, err := file.Body.Seek(0, io.SeekEnd)
+	input.S3Inputs = slices.Clone(input.S3Inputs)
+	var opened []io.Closer
+	defer func() {
+		for _, file := range opened {
+			file.Close()
+		}
+	}()
+	for _, file := range files {
+		body, err := file.Open()
+		if err != nil {
+			return SubmitResult{}, fmt.Errorf("%w: input %s: %w", ErrInvalidInput, file.Name, err)
+		}
+		opened = append(opened, body)
+		size, err := body.Seek(0, io.SeekEnd)
 		if err != nil {
 			return SubmitResult{}, err
 		}
 		if storable && size > v.state.Pools[pool].RecordLimit {
-			input.S3Inputs = append(slices.Clone(input.S3Inputs), file)
+			input.S3Inputs = append(input.S3Inputs, S3File{Name: file.Name, Body: body})
+			if file.recorded != nil {
+				recorded[file.Name] = *file.recorded
+			}
 			stored = true
 			continue
 		}
-		if _, err := file.Body.Seek(0, io.SeekStart); err != nil {
+		if _, err := body.Seek(0, io.SeekStart); err != nil {
 			return SubmitResult{}, err
 		}
-		data, err := io.ReadAll(file.Body)
+		data, err := io.ReadAll(body)
 		if err != nil {
 			return SubmitResult{}, err
+		}
+		// The bytes hashed are the bytes sent: this read's, which toS3 uploads should they leave the record.
+		if file.recorded != nil && !file.recorded.matches(int64(len(data)), data) {
+			return SubmitResult{}, changedOutput(file.recorded.Name, continued.last.Run)
 		}
 		input.Parts = append(input.Parts, wire.Part{Raw: data, Filename: file.Name})
 	}
@@ -592,7 +631,7 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err := wire.ValidateInputs(input.Parts, s3Names, math.MaxInt64); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
-	if continued.last != nil && !storable {
+	if continued.bundle != nil && !storable {
 		return SubmitResult{}, fmt.Errorf("%w: continue needs a pool with storage and a host storage credential: the bundles travel through S3", ErrInvalidInput)
 	}
 	toS3 := func() {
@@ -666,11 +705,13 @@ func (h *Host) submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if stored {
 		submission.Wherry.S3Inputs, err = uploadInputs(ctx, store, storage, h.tenant, runID, input.S3Inputs)
 	}
-	if err == nil && continued.last != nil {
-		uploaded := submission.Wherry.S3Inputs[slices.IndexFunc(submission.Wherry.S3Inputs, func(input wire.S3Input) bool { return input.Name == baseBundle })]
-		if collected := continued.last.Bundle; uploaded.Size != collected.Size || uploaded.SHA256 != collected.SHA256 {
-			err = fmt.Errorf("%w: continue: the %s collected for run %s changed after result verified it", ErrInvalidInput, wire.GitBundle, continued.last.Run)
+	// The hash compared is of the bytes the upload sent.
+	for _, uploaded := range submission.Wherry.S3Inputs {
+		if collected, ok := recorded[uploaded.Name]; err == nil && ok && (uploaded.Size != collected.Size || uploaded.SHA256 != collected.SHA256) {
+			err = changedOutput(collected.Name, continued.last.Run)
 		}
+	}
+	if err == nil && continued.bundle != nil {
 		// Set once base.bundle is among the S3 inputs, which validation requires of the base.
 		submission.Wherry.Git.Base = &wire.GitBase{Bundle: baseBundle, Commit: continued.commit}
 	}
@@ -1140,8 +1181,8 @@ type runRecord struct {
 	Produced bool   `json:"produced,omitzero"`
 	// CancelRequestedMS is when this host first published a cancel of the run.
 	CancelRequestedMS int64 `json:"cancel_requested_at_ms,omitzero"`
-	// Bundle is the run's changes.bundle as result last collected and verified it.
-	Bundle *collectedBundle `json:"bundle,omitzero"`
+	// Outputs are the run's outputs as result last collected and verified them.
+	Outputs []collectedOutput `json:"outputs,omitzero"`
 	// Repo is the absolute top level of the repository a --git . submission read, which a continuation and a
 	// resubmission keep; result fetches the collected bundle into its wherry/<run>.
 	Repo string `json:"repo,omitzero"`

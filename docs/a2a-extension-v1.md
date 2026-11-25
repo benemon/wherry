@@ -356,8 +356,10 @@ A submission is the task of one run.
 
 A submission whose input names repeat, or whose names nest one under another,
 among its input files, its S3 inputs and `known_hosts`, fails to decode, so a
-receiver drops it at [admission](#admission) step 2. `previous/` is reserved
-for a later non-git continue.
+receiver drops it at [admission](#admission) step 2. Hosts reserve
+`previous/` for a continued run's outputs
+([`submit --continue`](commands.md#wherry-host-submit)); on the wire those
+inputs are files like any other.
 
 ## Cancel
 

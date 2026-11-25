@@ -692,7 +692,7 @@ func (value *Submission) validate() error {
 		}
 		inputs[input.Name] = true
 	}
-	// previous/ is reserved for a later non-git continue; it enters the set then.
+	// previous/, a continued run's outputs, is the host's reservation: on the wire they are inputs like any other.
 	if binding.Git != nil {
 		if err := binding.Git.Validate(binding.Credentials); err != nil {
 			return err
@@ -708,7 +708,7 @@ func (value *Submission) validate() error {
 			inputs[KnownHostsFile] = true
 		}
 	}
-	if nestedConflict(inputs) {
+	if name, _ := nestedConflict(inputs); name != "" {
 		return errNestedInputs
 	}
 	return nil
@@ -727,7 +727,7 @@ func ValidateInputs(parts []Part, s3 []string, limit int64) error {
 		}
 		names[name] = true
 	}
-	if nestedConflict(names) {
+	if name, _ := nestedConflict(names); name != "" {
 		return errNestedInputs
 	}
 	if inline > limit {
@@ -763,17 +763,36 @@ func inputBytes(parts []Part) (map[string]bool, int64, error) {
 	return names, inline, nil
 }
 
-// nestedConflict reports whether a name in the set is a parent directory of another, so the two cannot both be
-// delivered as files.
-func nestedConflict(names map[string]bool) bool {
+// ValidateInputNames checks the names a submission's input files and S3 inputs will carry, before any is read: each is
+// a relative path of portable file names, none repeats and none is a directory of another. Its errors name the input.
+func ValidateInputNames(names []string) error {
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		if !ValidOutputName(name) {
+			return fmt.Errorf("input %s is not a relative path of portable file names of at most 512 bytes", name)
+		}
+		if set[name] {
+			return fmt.Errorf("input %s is named twice", name)
+		}
+		set[name] = true
+	}
+	if name, parent := nestedConflict(set); name != "" {
+		return fmt.Errorf("input %s lies under input %s", name, parent)
+	}
+	return nil
+}
+
+// nestedConflict returns a name in the set and the name that is its parent directory, so the two cannot both be
+// delivered as files, or two empty strings.
+func nestedConflict(names map[string]bool) (name, parent string) {
 	for name := range names {
 		for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
 			if names[parent] {
-				return true
+				return name, parent
 			}
 		}
 	}
-	return false
+	return "", ""
 }
 
 func (value *Cancel) validate() error {

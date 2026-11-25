@@ -11,7 +11,7 @@ The defaults are `10m` and `2h`.
 | Tool | Input | Output |
 | --- | --- | --- |
 | `receivers` | none | `receivers`, the objects `wherry host receivers --json` prints |
-| `submit` | `prompt`, `agent`, `model`, `selector`, `git`, `continue`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by`, `wait` | `id`, `pool`, `command`, `unsupplied`, `result`, `error` |
+| `submit` | `prompt`, `agent`, `model`, `selector`, `git`, `continue`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by`, `wait` | `id`, `pool`, `command`, `unsupplied`, `skipped_hidden`, `result`, `error` |
 | `status` | `id`, optional | `runs`, `skipped` |
 | `result` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `reply`, `artifacts`, `outputs`, `not_returned`, `fetched_ref`, `not_fetched`, `redacted`, `skipped`, `runs` |
 | `cancel` | `id` | `id`, `cancel`, `skipped` |
@@ -40,7 +40,12 @@ The defaults are `10m` and `2h`.
   remote, and takes no `ref`. Both run `git` on the host, as
   [`submit`](commands.md#wherry-host-submit) describes, and fail with
   `INVALID_ARGUMENT` without it, or naming the step that failed. `continue`
-  is a run ID, as `--continue` takes it, and is refused with `git`. `inputs` is
+  is a run ID, as `--continue` takes it, and is refused with `git`: a run
+  with `git` continues from its `changes.bundle`, and any other run delivers
+  the outputs `result` collected as the inputs `previous/<name>`, read from
+  where `result` wrote them, the default outputs directory included, which
+  the input roots do not apply to; a run never collected is refused with
+  `run <id> has no collected outputs; run wherry result <id> first`. `inputs` is
   an array of `{path}`, `credentials` an array of `{name}`,
   `{name, file}` or `{name, env}` and `outputs` an array of `{name}`,
   as `--input`, `--credential` and `--output` take them; every output is
@@ -49,16 +54,22 @@ The defaults are `10m` and `2h`.
   S3 by size; drop :s3` or `outputs move to S3 by size; drop :s3`, and an
   output's `required` with `outputs are always required; drop :required`.
   An input's delivered name, like an output's, is a relative path of file
-  names joined by `/`, no name a directory of another; a `{path}` input is
-  delivered under its base name.
+  names joined by `/`, no name a directory of another and none under
+  `previous/`; a `{path}` input that is a file is delivered under its base
+  name, and one that is a directory delivers every file beneath it as
+  `<name>/<relative path>`, as `--input DIR` does: entries named with a
+  leading dot are skipped and counted in `skipped_hidden`, and a symbolic
+  link, device, socket or FIFO beneath it, or a directory with no file left,
+  refuses the submission naming it.
   An input must resolve, through any
-  symbolic links, to a regular file beneath one of the
+  symbolic links, to a regular file or directory beneath one of the
   [`input_roots`](configuration-host.md#client-configuration), and opens through that
   root, so a link that leads out of it, even one that appears after the path
   resolves, is refused. An input root is matched by its path with symbolic links
   resolved when the server starts; an input that spells a root in different case,
   even on a case-insensitive file system, is refused. It must resolve to none of `state_dir`,
-  `host_key`, `bundle`, a file a `file` source names or a storage key file; a relative
+  `host_key`, `bundle`, a file a `file` source names or a storage key file, and a
+  directory holding one of them refuses the whole submission; a relative
   path is taken from the server's working directory. Keep `state_dir` outside every
   input root. With the default `state_dir`, `~/.local/state/wherry`, a root of `~`,
   `~/.local`, `~/.local/state` or `~/.local/state/wherry` holds it; `XDG_STATE_HOME`
@@ -114,9 +125,10 @@ The defaults are `10m` and `2h`.
   to the number of its markers in the messages, the artifacts, or every line
   of the transcript's attempt.
 - Before it connects to the bus, `submit` checks that `prompt` is given and
-  reads it, each input's `storage`, and `start_by` and `end_by`, and reads
-  its input files. It checks the rest, such as the agent,
-  model and git host against the pool's terms, once connected.
+  reads it, each input's `storage`, and `start_by` and `end_by`, and walks
+  its input directories. It checks the rest, such as the agent,
+  model and git host against the pool's terms, once connected, and opens
+  its input files once every input's name has passed its checks.
 - `events` returns `events`, each
   `{attempt, kind, state, receiver, time, message}`, and
   `chunks`, each `{attempt, chunks}`.

@@ -1427,8 +1427,8 @@ and needs `wherry host init` on a re-provisioned host.
 | `--git REMOTE[@REF]` or `--git .` | | repository the agent clones: an `https` or `ssh` URL, or `user@host:path`, at a branch, tag or commit, or without `@REF` at its default branch's commit; `.` is the working directory's repository, its origin at the commit checked out |
 | `--git-path` | the repository name | checkout directory, relative to the agent's working directory |
 | `--git-changes bundle\|patch\|none` | `bundle` | how the agent's commits come back: as the output `changes.bundle`, as `changes.patch`, or not at all |
-| `--continue RUN_ID` | | continue from the `changes.bundle` `result` collected for a run of this host, in that run's repository, and return the next bundle |
-| `--input FILE` | | file the agent gets in `WHERRY_INPUT_DIR` under its base name; one over the inline limits goes through the pool's bucket, at most 5 GiB; repeatable |
+| `--continue RUN_ID` | | continue a run of this host with its context: from the `changes.bundle` `result` collected for a `--git` run, in that run's repository, returning the next bundle; or with any other run's collected outputs as the inputs `previous/<name>` |
+| `--input FILE` or `--input DIR` | | file the agent gets in `WHERRY_INPUT_DIR` under its base name, or directory whose files it gets as `<name>/<relative path>`, hidden entries skipped; one over the inline limits goes through the pool's bucket, at most 5 GiB; repeatable |
 | `--credential NAME` | | name an optional credential of the placed agent the task cannot go without, at the target the pool's terms give it: the submit fails when this host cannot resolve it; one the host resolves is delivered without being named; repeatable |
 | `--credential NAME:file=FILE` or `--credential NAME:env=VAR` | | credential `NAME` from `credentials` in the client configuration, which the agent gets as the file `FILE` in `WHERRY_CREDENTIALS_DIR` or in the environment variable `VAR`; repeatable |
 | `--output NAME` | | file the agent must leave in `WHERRY_OUTPUT_DIR`: the run fails without it; one over the pool's output limit returns through the pool's bucket, at most 5 GiB; repeatable |
@@ -1439,7 +1439,21 @@ and needs `wherry host init` on a re-provisioned host.
 
 An input's delivered name, like an output's, is a relative path of file names
 joined by `/`, and no input name is a directory of another; `--input FILE`
-delivers the file under its base name.
+delivers the file under its base name. `--input DIR` delivers every file
+beneath the directory as `<base>/<relative path>`, `<base>` the directory's
+own name with a trailing slash removed, so `--input docs/` gives
+`docs/guide/a.md`; `--input .` uses the working directory's name, and
+`--input /` is refused. Entries named with a leading dot, files and
+directories alike, are skipped, since no input name starts with a dot, and
+`submit` prints `skipped N hidden entries under DIR` on standard error. A
+symbolic link, a device, a socket or a FIFO beneath the directory refuses the
+submission naming it, as does a directory with no file left to send. Names
+are checked before any file is read past its stat: every input's name,
+across every `--input`, must be a portable path, unique, a directory of no
+other and not under `previous/`, which is reserved for a continued run's
+outputs, and a run carries at most 256 parts and S3 inputs, the prompt
+included. The flag is repeatable and mixes with files; each file travels
+inline or through the pool's bucket by size, as a file given alone does.
 
 Each bound must fall after now, and travels in whole seconds. `submit`
 refuses, before it publishes, an `--end-by` later than `--start-by` plus
@@ -1591,21 +1605,39 @@ A run that failed, timed out or was canceled may have returned a
 `changes.bundle` too. It holds the commits up to the agent's last export, not
 the agent's final state, and `--continue` starts the next round from there.
 
+`--continue RUN_ID` of a run without a git input delivers the outputs
+[`result`](#wherry-host-result-run-id) collected for it as the inputs
+`previous/<name>`, `previous/report.md` for the output `report.md`, each
+read once from where `result` wrote it and hashed as it is sent, and joins
+the run's A2A context as a git continuation does. The previous prompt and
+reply do not travel; the reply arrives only when `reply.txt` was a collected
+output. The new run takes no git input and asks for no output of its own
+beyond `--output`; each previous output travels inline or through the pool's
+bucket by size, as any input does, and over the inline limits without storage
+the submission is refused as any input over them is. A run collected again
+with another `--outputs-dir` is continued from the files of that collect.
+
 `submit` refuses `--continue`, before it uploads or publishes:
 
 - with `--git`, `--git-path` or `--git-changes`;
-- with an `--input` or `--output` named `base.bundle` or `changes.bundle`;
-- for a run this host did not submit under its tenant, a run without a git
-  input, or one whose `changes.bundle` `result` has not collected or is
-  missing;
-- for a bundle that is not a git bundle with exactly one prerequisite and a
-  `HEAD` ref, the form `git bundle create` gives `refs/wherry/start..HEAD`;
-- on a pool without storage, or without a storage credential for it:
-  `continue needs a pool with storage and a host storage credential: the
-  bundles travel through S3`.
+- with an `--input` or `--output` named `base.bundle` or `changes.bundle`,
+  or an `--input` named under `previous/`;
+- for a run this host did not submit under its tenant;
+- for a `--git` run whose `changes.bundle` `result` has not collected or is
+  missing, or whose bundle is not a git bundle with exactly one prerequisite
+  and a `HEAD` ref, the form `git bundle create` gives
+  `refs/wherry/start..HEAD`;
+- for a `--git` run on a pool without storage, or without a storage
+  credential for it: `continue needs a pool with storage and a host storage
+  credential: the bundles travel through S3`;
+- for a run without a git input that `result` has not collected: `run <id>
+  has no collected outputs; run wherry result <id> first`;
+- for a collected output that is missing, is no longer a regular file or
+  cannot be read, naming it.
 
-After the upload, a bundle whose size or SHA-256 no longer matches what
-`result` verified is refused, and the upload deleted. A run that continues
+A bundle or a collected output whose bytes no longer hash to what `result`
+verified is refused: an inline one as it is read, one uploaded to the bucket
+after its upload, which is deleted. A run that continues
 needs receivers and custodians of this release or later
 ([Upgrade](upgrade.md)).
 
@@ -1812,10 +1844,11 @@ output=<name> path=<path> sha256=<hex> size=<bytes>
 
 For `changes.patch` it also prints `apply with: git am <path>`, and for
 `changes.bundle` `fetch with: git fetch <path> HEAD`, on standard error.
-`result` also records the verified `changes.bundle`, its absolute path, size
+`result` also records each verified output, its name, absolute path, size
 and SHA-256, in the run's local record, wherever `--outputs-dir` puts it,
-for [`submit --continue`](#wherry-host-submit). A later `result` that collects
-a bundle replaces the record; one that collects none keeps it.
+for [`submit --continue`](#wherry-host-submit); a `result` that cannot
+record them fails with `record outputs`. A later `result` replaces the
+record with the outputs it collects.
 
 For a run submitted with `--git .`, or a `--continue` of one, `result` also
 fetches the bundle into that repository, whose top level the run's record

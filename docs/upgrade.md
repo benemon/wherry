@@ -31,6 +31,22 @@ Restart a pool's receivers one at a time.
 A stopping key custodian needs a live successor to re-key its tasks.
 Follow [Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian).
 
+## Collected outputs and non-git continue
+
+A clean break, as every pre-1.0 change ([ADR-0032](design.md)); no
+compatibility path remains.
+
+- `result` records every verified output, not the `changes.bundle` alone, in
+  the run's local record, and fails with `record outputs` when it cannot. A
+  run record an earlier release wrote with a collected bundle no longer
+  decodes: such a run cannot be continued or collected again, and its
+  outputs stay where `result` wrote them.
+- `submit --continue` and the MCP `continue` take a run without a git input,
+  delivering its collected outputs as `previous/<name>`. No input of the
+  caller's is named under `previous/`, on any run.
+- `submit --input` and the MCP `inputs` take a directory, delivering its
+  files as `<name>/<relative path>`, hidden entries skipped.
+
 ## Nested input names and plugin protocol 13
 
 A clean break, as every pre-1.0 change ([ADR-0032](design.md)); no
@@ -39,7 +55,7 @@ compatibility path remains.
 - An input file's name may be a relative path of portable segments joined by
   `/`, as an output's name is, so inputs keep their directory structure. No
   input name is a directory of another, among input files, S3 inputs and
-  `known_hosts`. `previous/` is reserved for a later non-git continue.
+  `known_hosts`. `previous/` is reserved for a continued run's outputs.
 - The plugin protocol is 13. Receivers and plugins upgrade together: a
   protocol-12 plugin is refused at launch, and a protocol-13 plugin refuses a
   protocol-12 receiver. Use plugins built for protocol 13.
