@@ -10,7 +10,15 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 )
 
-// Collected is what Collect wrote for a run.
+// The steps of Collect a CollectError names.
+const (
+	StepWriteOutputs  = "write outputs"
+	StepS3Outputs     = "S3 outputs"
+	StepRecordOutputs = "record outputs"
+)
+
+// Collected is what Collect wrote for a run. On a StepRecordOutputs failure it is still what Collect wrote, since the
+// files are on disk and only the run's record misses them.
 type Collected struct {
 	// Outputs are the run's verified outputs, inline then S3, each with the Path it was written to.
 	Outputs []Output
@@ -23,7 +31,7 @@ type Collected struct {
 	NotFetched string
 }
 
-// CollectError is the step of Collect that failed: "write outputs" or "S3 outputs".
+// CollectError is the step of Collect that failed: StepWriteOutputs, StepS3Outputs or StepRecordOutputs.
 type CollectError struct {
 	Step string
 	Err  error
@@ -34,9 +42,10 @@ func (e *CollectError) Error() string { return e.Step + ": " + e.Err.Error() }
 func (e *CollectError) Unwrap() error { return e.Err }
 
 // Collect writes a run's verified outputs, S3 ones through DownloadOutputs, beneath dir, by default
-// <state_dir>/runs/<run>/outputs, records a verified changes.bundle for a run that continues it and, when the run's
-// record names a repository, fetches the bundle into that repository's wherry/<run>. A run whose task_started_by passed
-// unclaimed has nothing collected. Its error is a *CollectError.
+// <state_dir>/runs/<run>/outputs, records them for a run that continues it, merged by name into the outputs an earlier
+// collect recorded, and, when the run's record names a repository, fetches a collected changes.bundle into that
+// repository's wherry/<run>. A run whose task_started_by passed unclaimed has nothing collected. Its error is a
+// *CollectError; one at StepRecordOutputs comes with the outputs written.
 func (h *Host) Collect(ctx context.Context, runID string, result AwaitResult, dir string) (Collected, error) {
 	var collected Collected
 	if result.Unclaimed != "" {
@@ -50,7 +59,7 @@ func (h *Host) Collect(ctx context.Context, runID string, result AwaitResult, di
 	if len(result.Outputs) > 0 {
 		paths, err := h.WriteOutputs(runID, dir, result.Outputs)
 		if err != nil {
-			return Collected{}, &CollectError{Step: "write outputs", Err: err}
+			return Collected{}, &CollectError{Step: StepWriteOutputs, Err: err}
 		}
 		for i, output := range result.Outputs {
 			output.Path = paths[i]
@@ -59,34 +68,35 @@ func (h *Host) Collect(ctx context.Context, runID string, result AwaitResult, di
 	}
 	downloaded, rejected, err := h.DownloadOutputs(ctx, runID, result, dir)
 	if err != nil {
-		return Collected{}, &CollectError{Step: "S3 outputs", Err: err}
+		return Collected{}, &CollectError{Step: StepS3Outputs, Err: err}
 	}
 	collected.Outputs = append(collected.Outputs, downloaded...)
 	collected.Rejected = slices.Concat(result.Rejected, rejected)
-	i := slices.IndexFunc(collected.Outputs, func(output Output) bool { return output.Name == wire.GitBundle })
-	if i < 0 {
+	if len(collected.Outputs) == 0 {
 		return collected, nil
 	}
-	// The outputs are on disk: a continuation of this run refuses without the record rather than this collect failing.
-	path, err := filepath.Abs(collected.Outputs[i].Path)
-	if err != nil {
-		h.logger.Printf("run %s: record the collected %s: %v", runID, wire.GitBundle, err)
-		return collected, nil
+	outputs := make([]collectedOutput, len(collected.Outputs))
+	for i, output := range collected.Outputs {
+		path, err := filepath.Abs(output.Path)
+		if err != nil {
+			return collected, &CollectError{Step: StepRecordOutputs, Err: err}
+		}
+		outputs[i] = collectedOutput{Name: output.Name, Path: path, Size: output.Size, SHA256: output.SHA256}
 	}
 	// The lock of the run, and of the run it replaces, is held from the record through the fetch and its checks, so two
 	// collects of one run take their turns.
 	unlock, err := h.lockRuns(ctx, runs[max(len(runs)-2, 0):])
 	if err != nil {
-		h.logger.Printf("run %s: record the collected %s: %v", runID, wire.GitBundle, err)
-		return collected, nil
+		return collected, &CollectError{Step: StepRecordOutputs, Err: err}
 	}
 	defer unlock()
-	local, err := h.recordBundle(runs, path, collected.Outputs[i])
+	local, err := h.recordOutputs(runs, outputs)
 	if err != nil {
-		h.logger.Printf("run %s: record the collected %s: %v", runID, wire.GitBundle, err)
+		return collected, &CollectError{Step: StepRecordOutputs, Err: err}
 	}
-	if local != nil && local.Repo != "" {
-		collected.Fetched, collected.NotFetched = fetchBundle(ctx, local.Repo, runID, path)
+	i := slices.IndexFunc(outputs, func(output collectedOutput) bool { return output.Name == wire.GitBundle })
+	if local != nil && local.Repo != "" && i >= 0 {
+		collected.Fetched, collected.NotFetched = fetchBundle(ctx, local.Repo, runID, outputs[i].Path)
 	}
 	return collected, nil
 }

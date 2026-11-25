@@ -339,9 +339,9 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	gitRemote := flags.String("git", "", "REMOTE[@REF] or .: git repository the agent clones, an https or ssh URL or user@host:path, at a branch, tag or commit, or without @REF at its default branch's commit; . is this repository's origin at the current commit, which must be on it")
 	gitPath := flags.String("git-path", "", "checkout directory, relative (default: the repository name)")
 	gitChanges := flags.String("git-changes", "", "bundle, patch or none: the agent's commits come back as changes.bundle (default), as changes.patch, or not at all")
-	continueRun := flags.String("continue", "", "RUN_ID: continue from the changes.bundle result collected for a run of this host, in its repository, and return the next one through the pool's bucket")
+	continueRun := flags.String("continue", "", "RUN_ID: continue a run of this host with its context: from the changes.bundle result collected for a run with --git, in its repository, returning the next one through the pool's bucket, or with the outputs result collected for any other run as the inputs previous/<name>")
 	var inputs []string
-	flags.Func("input", "FILE: a file to deliver to the agent's input directory (repeatable)", func(value string) error {
+	flags.Func("input", "FILE|DIR: a file to deliver to the agent's input directory, or a directory whose files it gets under the directory's name, hidden entries skipped (repeatable)", func(value string) error {
 		if strings.HasSuffix(value, ":s3") {
 			return errors.New("inputs move to S3 by size; drop :s3")
 		}
@@ -373,19 +373,56 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry host submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] --prompt TEXT|@FILE|@- [--git REMOTE[@REF]|. [--git-path PATH] [--git-changes bundle|patch|none] | --continue RUN_ID] [--input FILE]... [--credential NAME|NAME:file=FILE|NAME:env=VAR]... [--output NAME]... [--start-by TIME|DURATION] [--end-by TIME|DURATION] [--wait [--outputs-dir DIR]]")
+		return errors.New("usage: wherry host submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] --prompt TEXT|@FILE|@- [--git REMOTE[@REF]|. [--git-path PATH] [--git-changes bundle|patch|none] | --continue RUN_ID] [--input FILE|DIR]... [--credential NAME|NAME:file=FILE|NAME:env=VAR]... [--output NAME]... [--start-by TIME|DURATION] [--end-by TIME|DURATION] [--wait [--outputs-dir DIR]]")
 	}
 	if wasSet(flags, "outputs-dir") && !*wait {
 		return errors.New("--outputs-dir requires --wait")
 	}
-	var files []busclient.S3File
+	// Names are checked before any file is opened past its stat: the host opens them once it has.
+	var files []busclient.InputFile
+	// hidden is the line for each --input DIR that skipped hidden entries, printed once the run is submitted.
+	var hidden []string
 	for _, path := range inputs {
-		file, err := os.Open(path)
+		info, err := os.Stat(path)
 		if err != nil {
 			return err
 		}
-		defer file.Close()
-		files = append(files, busclient.S3File{Name: filepath.Base(path), Body: file})
+		if !info.IsDir() {
+			// A FIFO is refused on this stat, before an open that would wait for a writer.
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("--input %s: not a regular file", path)
+			}
+			files = append(files, busclient.InputFile{Name: filepath.Base(path), Open: func() (io.ReadSeekCloser, error) {
+				file, err := os.Open(path)
+				if err != nil {
+					return nil, err
+				}
+				// The file opened is the file the stat saw, as a walked directory's files are.
+				if opened, err := file.Stat(); err != nil || !os.SameFile(info, opened) {
+					file.Close()
+					return nil, errors.New("not the file submit checked")
+				}
+				return file, nil
+			}})
+			continue
+		}
+		base, err := busclient.DirBase(path)
+		if err != nil {
+			return fmt.Errorf("--input %s: %w", path, err)
+		}
+		root, err := os.OpenRoot(path)
+		if err != nil {
+			return err
+		}
+		defer root.Close()
+		walked, skipped, err := busclient.DirInputs(root, base, nil)
+		if err != nil {
+			return fmt.Errorf("--input %s: %w", path, err)
+		}
+		files = append(files, walked...)
+		if skipped > 0 {
+			hidden = append(hidden, fmt.Sprintf("skipped %d hidden entries under %s", skipped, path))
+		}
 	}
 	var git *wire.GitInput
 	if *continueRun != "" && (wasSet(flags, "git") || wasSet(flags, "git-path") || wasSet(flags, "git-changes")) {
@@ -441,6 +478,9 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	}
 	if _, err := fmt.Fprintf(stdout, "run_id=%s pool=%s%s\n", result.RunID, result.Pool, unsupplied); err != nil {
 		return err
+	}
+	for _, line := range hidden {
+		fmt.Fprintln(stderr, line)
 	}
 	if *wait {
 		err := runWait(ctx, client, []string{result.RunID, "--outputs-dir", *outputsDir}, stdout, stderr)
@@ -602,7 +642,8 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 		}
 		return errors.New(result.Unclaimed)
 	}
-	if collectErr == nil {
+	// A collect that wrote its outputs but could not record them lists them all the same; its error follows.
+	if collectErr == nil || len(collected.Outputs) > 0 {
 		for _, output := range collected.Outputs {
 			fmt.Fprintf(stdout, "output=%s path=%s sha256=%s size=%d\n", output.Name, output.Path, output.SHA256, output.Size)
 			switch output.Name {

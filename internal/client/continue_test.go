@@ -3,12 +3,15 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -139,7 +142,7 @@ func replace(t *testing.T, f *fixture, run string) string {
 	task.Wherry.Run, task.Wherry.RunNonce, task.Wherry.Replaces, task.Wherry.S3InputRun = replacement.Run, nonce, run, run
 	task.Message.TaskID = replacement.Run
 	replacement.Task, replacement.Signed, replacement.Produced = &task, []byte("signed"), true
-	local.Replacement, local.ReplacementNonce, local.Bundle = replacement.Run, nonce, nil
+	local.Replacement, local.ReplacementNonce, local.Outputs = replacement.Run, nonce, nil
 	for _, record := range []runRecord{replacement, *local} {
 		if err := f.host.writeRun(record); err != nil {
 			t.Fatal(err)
@@ -253,29 +256,28 @@ func TestSubmitRefusesAContinuationBeforeUploadOrPublish(t *testing.T) {
 			rewrite(t, f, first, func(local *runRecord) { local.Task = nil })
 			return continueInput(first)
 		}, "is not a run this host submitted under its tenant"},
-		"no git": {func(t *testing.T, f *fixture, first string) SubmitInput {
-			rewrite(t, f, first, func(local *runRecord) { local.Task.Wherry.Git = nil })
-			return continueInput(first)
-		}, "has no git input"},
 		"no bundle collected": {func(t *testing.T, f *fixture, first string) SubmitInput {
-			rewrite(t, f, first, func(local *runRecord) { local.Bundle = nil })
+			rewrite(t, f, first, func(local *runRecord) { local.Outputs = nil })
+			return continueInput(first)
+		}, "result has collected no changes.bundle of run "},
+		"another output collected, no bundle": {func(t *testing.T, f *fixture, first string) SubmitInput {
+			rewrite(t, f, first, func(local *runRecord) { local.Outputs[0].Name = "report.md" })
 			return continueInput(first)
 		}, "result has collected no changes.bundle of run "},
 		"the bundle removed": {func(t *testing.T, f *fixture, first string) SubmitInput {
-			local, _ := f.host.localRun(first)
-			os.Remove(local.Bundle.Path)
+			os.Remove(recordedBundle(t, f, first).Path)
 			return continueInput(first)
 		}, "cannot be read"},
 		"the bundle a directory": {func(t *testing.T, f *fixture, first string) SubmitInput {
-			local, _ := f.host.localRun(first)
-			if err := os.Remove(local.Bundle.Path); err != nil || os.Mkdir(local.Bundle.Path, 0o700) != nil {
+			path := recordedBundle(t, f, first).Path
+			if err := os.Remove(path); err != nil || os.Mkdir(path, 0o700) != nil {
 				t.Fatal(err)
 			}
 			return continueInput(first)
 		}, "cannot be read"},
 		"the bundle a FIFO": {func(t *testing.T, f *fixture, first string) SubmitInput {
-			local, _ := f.host.localRun(first)
-			if err := os.Remove(local.Bundle.Path); err != nil || syscall.Mkfifo(local.Bundle.Path, 0o600) != nil {
+			path := recordedBundle(t, f, first).Path
+			if err := os.Remove(path); err != nil || syscall.Mkfifo(path, 0o600) != nil {
 				t.Fatal(err)
 			}
 			return continueInput(first)
@@ -432,8 +434,7 @@ func TestSubmitRefusesABundleChangedAfterCollect(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f, o, _ := continueFixture(t)
 			first := firstRun(t, f, testBundle)
-			local, _ := f.host.localRun(first)
-			if err := os.WriteFile(local.Bundle.Path, change(testBundle), 0o600); err != nil {
+			if err := os.WriteFile(recordedBundle(t, f, first).Path, change(testBundle), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := f.host.Submit(f.ctx, continueInput(first)); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "changed after result verified it") {
@@ -452,27 +453,48 @@ func TestSubmitRefusesABundleChangedAfterCollect(t *testing.T) {
 	}
 }
 
-// Collect records the absolute path, size and SHA-256 of an inline or S3 changes.bundle in the record of the run it
-// collected under, and keeps it when a later collect has none.
-func TestCollectRecordsTheBundle(t *testing.T) {
+// recordedBundle is the changes.bundle run's local record holds among its collected outputs.
+func recordedBundle(t *testing.T, f *fixture, run string) collectedOutput {
+	t.Helper()
+	local, err := f.host.localRun(run)
+	if err != nil || local == nil {
+		t.Fatalf("local record %v, %v", local, err)
+	}
+	i := slices.IndexFunc(local.Outputs, func(output collectedOutput) bool { return output.Name == wire.GitBundle })
+	if i < 0 {
+		t.Fatalf("recorded outputs %+v hold no %s", local.Outputs, wire.GitBundle)
+	}
+	return local.Outputs[i]
+}
+
+// Collect records the name, absolute path, size and SHA-256 of every inline and S3 output in the record of the run it
+// collected under, and a later collect's outputs replace the entries of their names, the rest kept.
+func TestCollectRecordsTheOutputs(t *testing.T) {
 	f, o, receiver := continueFixture(t)
 	first := firstRun(t, f, testBundle)
 	t.Chdir(t.TempDir())
 	inline := bundleBytes("# v2 git bundle\n-" + testBase + " inline\n" + testHead + " HEAD\n")
-	if _, err := f.host.Collect(f.ctx, first, AwaitResult{Outputs: []Output{{Name: wire.GitBundle, Data: inline, Size: int64(len(inline)), SHA256: hexSum(inline)}}}, "relative"); err != nil {
+	report := []byte("report")
+	outputs := []Output{{Name: wire.GitBundle, Data: inline, Size: int64(len(inline)), SHA256: hexSum(inline)}, {Name: "notes/report.md", Data: report, Size: int64(len(report)), SHA256: hexSum(report)}}
+	if _, err := f.host.Collect(f.ctx, first, AwaitResult{Outputs: outputs}, "relative"); err != nil {
 		t.Fatal(err)
 	}
 	cwd, _ := os.Getwd()
 	local, _ := f.host.localRun(first)
-	if want := (collectedBundle{Path: filepath.Join(cwd, "relative", wire.GitBundle), Size: int64(len(inline)), SHA256: hexSum(inline)}); local.Bundle == nil || *local.Bundle != want {
-		t.Fatalf("recorded %+v, want %+v", local.Bundle, want)
+	want := []collectedOutput{{Name: wire.GitBundle, Path: filepath.Join(cwd, "relative", wire.GitBundle), Size: int64(len(inline)), SHA256: hexSum(inline)},
+		{Name: "notes/report.md", Path: filepath.Join(cwd, "relative", "notes", "report.md"), Size: int64(len(report)), SHA256: hexSum(report)}}
+	if !slices.Equal(local.Outputs, want) {
+		t.Fatalf("recorded %+v, want %+v", local.Outputs, want)
 	}
-	report := []byte("report")
-	if _, err := f.host.Collect(f.ctx, first, AwaitResult{Outputs: []Output{{Name: "report.md", Data: report, Size: int64(len(report)), SHA256: hexSum(report)}}}, "again"); err != nil {
+	if _, err := f.host.Collect(f.ctx, first, AwaitResult{Outputs: outputs[1:]}, "again"); err != nil {
 		t.Fatal(err)
 	}
-	if kept, _ := f.host.localRun(first); kept.Bundle == nil || *kept.Bundle != *local.Bundle {
-		t.Fatalf("a collect without a bundle left %+v, want %+v", kept.Bundle, local.Bundle)
+	want[1].Path = filepath.Join(cwd, "again", "notes", "report.md")
+	if again, _ := f.host.localRun(first); !slices.Equal(again.Outputs, want) {
+		t.Fatalf("a later collect left %+v, want %+v: its own output moved and the bundle kept", again.Outputs, want)
+	}
+	if _, err := f.host.Collect(f.ctx, first, AwaitResult{Outputs: outputs}, "relative"); err != nil {
+		t.Fatal(err)
 	}
 	submitted, err := f.host.Submit(f.ctx, continueInput(first))
 	if err != nil {
@@ -488,12 +510,58 @@ func TestCollectRecordsTheBundle(t *testing.T) {
 	if _, err := f.host.Collect(f.ctx, submitted.RunID, result, "s3"); err != nil {
 		t.Fatal(err)
 	}
-	if local, _ := f.host.localRun(submitted.RunID); local.Bundle == nil || *local.Bundle != (collectedBundle{Path: filepath.Join(cwd, "s3", wire.GitBundle), Size: int64(len(stored)), SHA256: hexSum(stored)}) {
-		t.Fatalf("recorded %+v for the S3 bundle", local.Bundle)
+	if local, _ := f.host.localRun(submitted.RunID); !slices.Equal(local.Outputs, []collectedOutput{{Name: wire.GitBundle, Path: filepath.Join(cwd, "s3", wire.GitBundle), Size: int64(len(stored)), SHA256: hexSum(stored)}}) {
+		t.Fatalf("recorded %+v for the S3 bundle", local.Outputs)
 	}
 }
 
-// Collect records a replaced run's bundle in its final replacement's record, and nothing without a bundle.
+// A later result into another directory keeps the recorded outputs it cannot collect again: the run's S3 outputs are
+// gone from the bucket once a collect verified them, so the bundle stays recorded where the first collect wrote it, the
+// inline output moves to the later directory, and a continuation finds them all.
+func TestCollectKeepsTheOutputsALaterCollectCannotVerify(t *testing.T) {
+	f, o, receiver := continueFixture(t)
+	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "first round", Git: &wire.GitInput{Remote: "https://git.example.test/org/repo.git", Ref: "main", Path: "src/repo"},
+		GitChanges: "bundle", EndBy: time.Now().Add(30 * time.Minute), StartBy: time.Now().Add(10 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver.claim(t, f.ctx, submitted.RunID)
+	key := wire.S3OutputKey("tenant-a", submitted.RunID, wire.GitBundle)
+	o.mu.Lock()
+	o.objects["/"+testBucket+"/"+key] = testBundle
+	o.mu.Unlock()
+	report := []byte("report")
+	result := AwaitResult{Status: wire.TaskStatus{State: wire.TaskStateWorking},
+		Outputs: []Output{{Name: "report.md", Data: report, Size: int64(len(report)), SHA256: hexSum(report)}},
+		Stored:  []wire.ReturnedOutput{{Name: wire.GitBundle, SHA256: hexSum(testBundle), Size: int64(len(testBundle)), Key: key}}}
+	first, second := t.TempDir(), t.TempDir()
+	if collected, err := f.host.Collect(f.ctx, submitted.RunID, result, first); err != nil || len(collected.Outputs) != 2 || len(collected.Rejected) != 0 {
+		t.Fatalf("first collect %+v, %v; want both outputs", collected, err)
+	}
+	// What the prefix's deletion does once the run ends and every output verifies.
+	o.mu.Lock()
+	delete(o.objects, "/"+testBucket+"/"+key)
+	o.mu.Unlock()
+	collected, err := f.host.Collect(f.ctx, submitted.RunID, result, second)
+	if err != nil || len(collected.Outputs) != 1 || len(collected.Rejected) != 1 || collected.Rejected[0].Name != wire.GitBundle {
+		t.Fatalf("second collect %+v, %v; want the report alone, the bundle rejected", collected, err)
+	}
+	want := []collectedOutput{{Name: "report.md", Path: filepath.Join(second, "report.md"), Size: int64(len(report)), SHA256: hexSum(report)},
+		{Name: wire.GitBundle, Path: filepath.Join(first, wire.GitBundle), Size: int64(len(testBundle)), SHA256: hexSum(testBundle)}}
+	if local, _ := f.host.localRun(submitted.RunID); !slices.Equal(local.Outputs, want) {
+		t.Fatalf("recorded %+v, want %+v: the report moved and the bundle kept", local.Outputs, want)
+	}
+	next, err := f.host.Submit(f.ctx, continueInput(submitted.RunID))
+	if err != nil {
+		t.Fatalf("continue after the second collect: %v", err)
+	}
+	task := receiver.claim(t, f.ctx, next.RunID)[0].submission
+	if !slices.Equal(task.Wherry.S3Inputs, []wire.S3Input{{Name: "base.bundle", Size: int64(len(testBundle)), SHA256: hexSum(testBundle)}}) || !slices.Equal(task.Message.ReferenceTaskIDs, []string{submitted.RunID}) {
+		t.Fatalf("S3 inputs %+v and references %v; want the bundle the first collect wrote", task.Wherry.S3Inputs, task.Message.ReferenceTaskIDs)
+	}
+}
+
+// Collect records a replaced run's bundle in its final replacement's record, and nothing without an output.
 func TestCollectRecordsTheBundleInTheFinalReplacement(t *testing.T) {
 	f, _, _ := continueFixture(t)
 	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "first", Git: &wire.GitInput{Remote: "https://git.example.test/org/repo.git", Ref: "main"},
@@ -505,14 +573,13 @@ func TestCollectRecordsTheBundleInTheFinalReplacement(t *testing.T) {
 	if _, err := f.host.Collect(f.ctx, submitted.RunID, AwaitResult{Runs: []string{submitted.RunID, replacement}}, t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
-	if local, _ := f.host.localRun(replacement); local.Bundle != nil {
-		t.Fatalf("recorded %+v without a bundle", local.Bundle)
+	if local, _ := f.host.localRun(replacement); local.Outputs != nil {
+		t.Fatalf("recorded %+v without an output", local.Outputs)
 	}
 	collectBundle(t, f, []string{submitted.RunID, replacement}, testBundle)
 	original, _ := f.host.localRun(submitted.RunID)
-	last, _ := f.host.localRun(replacement)
-	if original.Bundle != nil || last.Bundle == nil || last.Bundle.SHA256 != hexSum(testBundle) {
-		t.Fatalf("recorded %+v on the original and %+v on the replacement; want the replacement's alone", original.Bundle, last.Bundle)
+	if original.Outputs != nil || recordedBundle(t, f, replacement).SHA256 != hexSum(testBundle) {
+		t.Fatalf("recorded %+v on the original; want the replacement's record alone to hold the bundle", original.Outputs)
 	}
 }
 
@@ -541,13 +608,14 @@ func TestCollectRecordsTheBundleUnderThePredecessorsLock(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if local, _ := f.host.localRun(replacement); local.Bundle == nil || local.Bundle.Path != filepath.Join(dir, wire.GitBundle) {
-		t.Fatalf("recorded %+v, want the bundle in %s", local.Bundle, dir)
+	if recorded := recordedBundle(t, f, replacement); recorded.Path != filepath.Join(dir, wire.GitBundle) {
+		t.Fatalf("recorded %+v, want the bundle in %s", recorded, dir)
 	}
 }
 
-// A collect whose bundle cannot be recorded still returns the outputs it wrote.
-func TestCollectReturnsItsOutputsWhenTheBundleIsNotRecorded(t *testing.T) {
+// A collect that cannot record its outputs fails naming the step, since a continuation would not find them, and still
+// returns the outputs it wrote, since they are on disk.
+func TestCollectFailsWhenItsOutputsAreNotRecorded(t *testing.T) {
 	f, _, _ := continueFixture(t)
 	first := firstRun(t, f, testBundle)
 	unlock, err := f.host.lockRun(f.ctx, first)
@@ -558,9 +626,256 @@ func TestCollectReturnsItsOutputsWhenTheBundleIsNotRecorded(t *testing.T) {
 	ctx, cancel := context.WithTimeout(f.ctx, 200*time.Millisecond)
 	defer cancel()
 	result := AwaitResult{Outputs: []Output{{Name: wire.GitBundle, Data: testBundle, Size: int64(len(testBundle)), SHA256: hexSum(testBundle)}}}
-	collected, err := f.host.Collect(ctx, first, result, t.TempDir())
-	if err != nil || len(collected.Outputs) != 1 || collected.Outputs[0].Name != wire.GitBundle {
-		t.Fatalf("collect = %+v, %v; want the bundle written", collected, err)
+	dir := t.TempDir()
+	collected, err := f.host.Collect(ctx, first, result, dir)
+	var failed *CollectError
+	if !errors.As(err, &failed) || failed.Step != StepRecordOutputs {
+		t.Fatalf("collect = %v; want the record outputs step failed", err)
+	}
+	if len(collected.Outputs) != 1 || collected.Outputs[0].Path != filepath.Join(dir, wire.GitBundle) || collected.Outputs[0].SHA256 != hexSum(testBundle) {
+		t.Fatalf("collected %+v with the record failed; want the bundle written at its path", collected.Outputs)
+	}
+}
+
+// plainRun submits a run without a git input to pool-a, a pool without storage, and has Collect write and record outputs
+// for it in a new directory, each file's content its name.
+func plainRun(t *testing.T, f *fixture, receiver *testReceiver, names ...string) (string, []Output) {
+	t.Helper()
+	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "first round", EndBy: time.Now().Add(30 * time.Minute), StartBy: time.Now().Add(10 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver.claim(t, f.ctx, submitted.RunID)
+	var outputs []Output
+	for _, name := range names {
+		outputs = append(outputs, Output{Name: name, Data: []byte(name), Size: int64(len(name)), SHA256: hexSum([]byte(name))})
+	}
+	if len(outputs) > 0 {
+		if _, err := f.host.Collect(f.ctx, submitted.RunID, AwaitResult{Outputs: outputs}, t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return submitted.RunID, outputs
+}
+
+// countingOutputs has openOutput count the outputs submit opens and the bytes it reads from them, and removes each file
+// once opened, so a second open by path fails.
+func countingOutputs(t *testing.T) (*atomic.Int64, *atomic.Int64) {
+	t.Helper()
+	previous := openOutput
+	t.Cleanup(func() { openOutput = previous })
+	var opens, read atomic.Int64
+	openOutput = func(path string) (io.ReadSeekCloser, error) {
+		file, err := previous(path)
+		if err != nil {
+			return nil, err
+		}
+		opens.Add(1)
+		if err := os.Remove(path); err != nil {
+			t.Error(err)
+		}
+		return &countingReader{ReadSeekCloser: file, read: &read}, nil
+	}
+	return &opens, &read
+}
+
+type countingReader struct {
+	io.ReadSeekCloser
+	read *atomic.Int64
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	n, err := r.ReadSeekCloser.Read(p)
+	r.read.Add(int64(n))
+	return n, err
+}
+
+// A continuation of a run without a git input delivers the outputs result collected as the inputs previous/<name>,
+// hashed from the one read of each that sends them, with the previous run's context and a reference to it; no git input,
+// bundle or storage is involved, and the chain's third round keeps the first run's context.
+func TestSubmitContinuesARunWithoutGit(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	first, outputs := plainRun(t, f, receiver, "report.md", "notes/next.md", wire.ReplyFile)
+	opens, read := countingOutputs(t)
+	submitted, err := f.host.Submit(f.ctx, continueInput(first))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := receiver.claim(t, f.ctx, submitted.RunID)[0].submission
+	var total int64
+	for i, output := range outputs {
+		if part := task.Message.Parts[i+1]; part.Filename != "previous/"+output.Name || hexSum(part.Raw) != output.SHA256 || int64(len(part.Raw)) != output.Size {
+			t.Fatalf("part %d is %s of %d bytes, want previous/%s with the collected bytes", i+1, part.Filename, len(part.Raw), output.Name)
+		}
+		total += output.Size
+	}
+	if len(task.Message.Parts) != len(outputs)+1 || task.Wherry.Git != nil || len(task.Wherry.S3Inputs) != 0 || len(task.Wherry.Outputs) != 0 {
+		t.Fatalf("task has %d parts, git %+v, S3 inputs %+v and outputs %+v; want the prompt and the previous outputs alone", len(task.Message.Parts), task.Wherry.Git, task.Wherry.S3Inputs, task.Wherry.Outputs)
+	}
+	if message := task.Message; message.ContextID != first || !slices.Equal(message.ReferenceTaskIDs, []string{first}) {
+		t.Fatalf("context %s and references %v, want the first run's context and a reference to it", message.ContextID, message.ReferenceTaskIDs)
+	}
+	if opens.Load() != int64(len(outputs)) || read.Load() != total {
+		t.Fatalf("submit opened %d outputs and read %d bytes, want %d and %d: each output read once", opens.Load(), read.Load(), len(outputs), total)
+	}
+	next := []Output{{Name: "report.md", Data: []byte("round two"), Size: 9, SHA256: hexSum([]byte("round two"))}}
+	if _, err := f.host.Collect(f.ctx, submitted.RunID, AwaitResult{Outputs: next}, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	third, err := f.host.Submit(f.ctx, continueInput(submitted.RunID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task = receiver.claim(t, f.ctx, third.RunID)[0].submission
+	if parts := task.Message.Parts; len(parts) != 2 || parts[1].Filename != "previous/report.md" || string(parts[1].Raw) != "round two" || task.Message.ContextID != first || !slices.Equal(task.Message.ReferenceTaskIDs, []string{submitted.RunID}) {
+		t.Fatalf("third round's parts %+v, context %s and references %v; want the second round's output, the first run's context and the second run", parts, task.Message.ContextID, task.Message.ReferenceTaskIDs)
+	}
+}
+
+// A continuation without git is refused, before anything is published: for a run never collected, with the hint; for an
+// output removed, replaced by a directory or a FIFO, naming it; for an output changed since result verified it; and
+// with an input of the caller's under previous/.
+func TestSubmitRefusesAContinuationWithoutGit(t *testing.T) {
+	for name, test := range map[string]struct {
+		setup func(t *testing.T, f *fixture, first string, outputs []Output) SubmitInput
+		want  string
+	}{
+		"never collected": {func(t *testing.T, f *fixture, first string, outputs []Output) SubmitInput {
+			rewrite(t, f, first, func(local *runRecord) { local.Outputs = nil })
+			return continueInput(first)
+		}, "run " + "%s has no collected outputs; run wherry result %s first"},
+		"an output removed": {func(t *testing.T, f *fixture, first string, outputs []Output) SubmitInput {
+			if err := os.Remove(outputs[1].Path); err != nil {
+				t.Fatal(err)
+			}
+			return continueInput(first)
+		}, "input previous/notes/next.md: the output notes/next.md collected for run %s cannot be read"},
+		"an output a directory": {func(t *testing.T, f *fixture, first string, outputs []Output) SubmitInput {
+			if err := os.Remove(outputs[0].Path); err != nil || os.Mkdir(outputs[0].Path, 0o700) != nil {
+				t.Fatal(err)
+			}
+			return continueInput(first)
+		}, "input previous/report.md: the output report.md collected for run %s cannot be read"},
+		"an output a FIFO": {func(t *testing.T, f *fixture, first string, outputs []Output) SubmitInput {
+			if err := os.Remove(outputs[0].Path); err != nil || syscall.Mkfifo(outputs[0].Path, 0o600) != nil {
+				t.Fatal(err)
+			}
+			return continueInput(first)
+		}, "input previous/report.md: the output report.md collected for run %s cannot be read"},
+		"an output changed, same size": {func(t *testing.T, f *fixture, first string, outputs []Output) SubmitInput {
+			if err := os.WriteFile(outputs[0].Path, []byte("REPORT.MD"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return continueInput(first)
+		}, "continue: the report.md collected for run %s changed after result verified it"},
+		"an output changed, longer": {func(t *testing.T, f *fixture, first string, outputs []Output) SubmitInput {
+			if err := os.WriteFile(outputs[1].Path, []byte("notes/next.md and more"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return continueInput(first)
+		}, "continue: the notes/next.md collected for run %s changed after result verified it"},
+		"an input under previous/": {func(t *testing.T, f *fixture, first string, outputs []Output) SubmitInput {
+			input := continueInput(first)
+			input.Parts = []wire.Part{{Raw: []byte("x"), Filename: "previous/mine.md"}}
+			return input
+		}, "input previous/mine.md: names under previous/ are reserved for a continued run's outputs"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			receiver := f.addReceiver(t, "receiver-a", "pool-a")
+			receiver.advertise(t, f.ctx, nil)
+			first, _ := plainRun(t, f, receiver, "report.md", "notes/next.md")
+			local, _ := f.host.localRun(first)
+			var outputs []Output
+			for _, output := range local.Outputs {
+				outputs = append(outputs, Output{Name: output.Name, Path: output.Path})
+			}
+			want := strings.ReplaceAll(test.want, "%s", first)
+			done := make(chan error, 1)
+			go func() { _, err := f.host.Submit(f.ctx, test.setup(t, f, first, outputs)); done <- err }()
+			var err error
+			select {
+			case err = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("submit blocked")
+			}
+			if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), want) {
+				t.Fatalf("submit = %v, want %q", err, want)
+			}
+			if strings.Contains(err.Error(), f.stateDir) || strings.Contains(err.Error(), os.TempDir()) {
+				t.Fatalf("refusal %q names a path", err)
+			}
+			if end := f.tasksEnd(t, "pool-a"); end != 1 {
+				t.Fatalf("%d tasks published, want the first run's alone", end)
+			}
+		})
+	}
+}
+
+// A previous output over the pool's record limit goes through the pool's bucket, hashed from the bytes uploaded; one
+// changed since result verified it at the same size is refused after its upload, which is deleted, and one of another
+// size is refused on its size, before any upload.
+func TestSubmitContinuesARunWithoutGitThroughS3(t *testing.T) {
+	f, o, receiver := recordLimitFixture(t, true)
+	big := make([]byte, 150000)
+	rand.Read(big)
+	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "first round", EndBy: time.Now().Add(30 * time.Minute), StartBy: time.Now().Add(10 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver.claim(t, f.ctx, submitted.RunID)
+	dir := t.TempDir()
+	outputs := []Output{{Name: "big.bin", Data: big, Size: int64(len(big)), SHA256: hexSum(big)}, {Name: "small.txt", Data: []byte("small"), Size: 5, SHA256: hexSum([]byte("small"))}}
+	if _, err := f.host.Collect(f.ctx, submitted.RunID, AwaitResult{Outputs: outputs}, dir); err != nil {
+		t.Fatal(err)
+	}
+	next, err := f.host.Submit(f.ctx, continueInput(submitted.RunID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := receiver.claim(t, f.ctx, next.RunID)[0].submission
+	if len(task.Message.Parts) != 2 || task.Message.Parts[1].Filename != "previous/small.txt" || !slices.Equal(task.Wherry.S3Inputs, []wire.S3Input{{Name: "previous/big.bin", Size: int64(len(big)), SHA256: hexSum(big)}}) {
+		t.Fatalf("parts %d and S3 inputs %+v; want small.txt inline and big.bin through S3", len(task.Message.Parts), task.Wherry.S3Inputs)
+	}
+	if got := o.object("/" + testBucket + "/" + wire.S3InputKey("tenant-a", next.RunID, "previous/big.bin")); !bytes.Equal(got, big) {
+		t.Fatalf("uploaded %d bytes, want the collected output", len(got))
+	}
+	changed := slices.Clone(big)
+	changed[0]++
+	if err := os.WriteFile(filepath.Join(dir, "big.bin"), changed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o.mu.Lock()
+	o.ops = nil
+	o.mu.Unlock()
+	if _, err := f.host.Submit(f.ctx, continueInput(submitted.RunID)); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "the big.bin collected for run "+submitted.RunID+" changed after result verified it") {
+		t.Fatalf("submit = %v, want the changed output refused", err)
+	}
+	o.mu.Lock()
+	ops := slices.Clone(o.ops)
+	o.mu.Unlock()
+	if len(ops) != 2 || !strings.HasPrefix(ops[0], "PUT ") || !strings.HasPrefix(ops[1], "DELETE ") || strings.TrimPrefix(ops[0], "PUT ") != strings.TrimPrefix(ops[1], "DELETE ") {
+		t.Fatalf("S3 requests %v, want the upload and its deletion", ops)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "big.bin"), append(slices.Clone(big), 'x'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o.mu.Lock()
+	o.ops = nil
+	o.mu.Unlock()
+	if _, err := f.host.Submit(f.ctx, continueInput(submitted.RunID)); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "the big.bin collected for run "+submitted.RunID+" changed after result verified it") {
+		t.Fatalf("submit = %v, want the longer output refused", err)
+	}
+	o.mu.Lock()
+	ops = slices.Clone(o.ops)
+	o.mu.Unlock()
+	if len(ops) != 0 {
+		t.Fatalf("S3 requests %v, want none for an output of another size", ops)
+	}
+	if end := f.tasksEnd(t, "pool-r"); end != 2 {
+		t.Fatalf("%d tasks published, want the first two alone", end)
 	}
 }
 

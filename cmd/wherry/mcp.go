@@ -62,12 +62,11 @@ func runMCP(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	connect, closeHost := sharedHost(func() (*busclient.Host, error) { return busclient.Connect(config, logger) })
 	defer closeHost()
-	open := inputOpener(dir, config)
 	wait, err := waitCommand(*configFile)
 	if err != nil {
 		return err
 	}
-	return newMCPServer(connect, open, wait, logger).Run(ctx, &mcp.StdioTransport{})
+	return newMCPServer(connect, inputOpener(dir, config), wait, logger).Run(ctx, &mcp.StdioTransport{})
 }
 
 // waitCommand returns the shell command that waits for a run and prints its reply, naming the config configFile, else
@@ -137,7 +136,11 @@ func invalidArgument(message string) error {
 // toolFailure maps a client error to a toolError. Errors from the bus, the broker or the local key are reported by
 // class only, since their text can name files, hosts or record contents.
 func toolFailure(err error) error {
+	// An input the roots refused carries its tool error through the submission.
+	var failed *toolError
 	switch {
+	case errors.As(err, &failed):
+		return failed
 	case errors.Is(err, busclient.ErrRunNotFound):
 		return &toolError{Code: "RUN_NOT_FOUND", Message: "this host has not submitted the run and no receiver has admitted it"}
 	case errors.Is(err, busclient.ErrNoMatchingReceiver):
@@ -163,6 +166,15 @@ func collectFailure(err error) error {
 	return &toolError{Code: "OUTPUTS_NOT_WRITTEN", Message: message}
 }
 
+// notRecorded is the note a result carries when Collect wrote the run's outputs but could not record them, and "" for
+// any other error: the files are on disk, so the reply lists them rather than failing.
+func notRecorded(err error) string {
+	if failed := (*busclient.CollectError)(nil); errors.As(err, &failed) && failed.Step == busclient.StepRecordOutputs {
+		return busclient.StepRecordOutputs + ": the outputs were written but not recorded in the run's record, so continue cannot deliver them; the MCP server's log holds the cause"
+	}
+	return ""
+}
+
 type receiversInput struct{}
 
 type receiversOutput struct {
@@ -183,7 +195,7 @@ type credentialInput struct {
 }
 
 type fileInput struct {
-	Path string `json:"path" jsonschema:"local file; it goes in the task, or through the pool's bucket, up to 5 GiB, when over the broker's record limit or a profile's declared limit and the pool has storage and the host a storage credential, else submit refuses"`
+	Path string `json:"path" jsonschema:"local file, or directory whose every file is sent with its path under the directory's name, entries named with a leading dot skipped; each goes in the task, or through the pool's bucket, up to 5 GiB, when over the broker's record limit or a profile's declared limit and the pool has storage and the host a storage credential, else submit refuses"`
 }
 
 type outputInput struct {
@@ -197,8 +209,8 @@ type submitInput struct {
 	Model       string             `json:"model,omitempty" jsonschema:"model the agent runs, one of its models as receivers lists them; default: the agent's default model"`
 	Selector    []wire.Requirement `json:"selector,omitempty" jsonschema:"labels the profile must carry, each {key, operator, values}; operator is In or NotIn (with values), Exists or DoesNotExist (without); keys are arbitrary operator labels such as gpu or example.com/segment"`
 	Git         *gitInput          `json:"git,omitempty" jsonschema:"repository the agent clones itself; its host must be one of the pool's vcs hosts, and its credential and an ssh remote's host key come from the git entry of this host's wherry config whose url is the longest prefix of the remote"`
-	Continue    string             `json:"continue,omitempty" jsonschema:"run id of a run of this host whose changes.bundle result collected: the agent clones that run's repository, continues from the bundle and returns changes.bundle through the pool's bucket, which needs a pool with storage and a host storage credential; not with git, nor an input or output named base.bundle or changes.bundle"`
-	Inputs      []fileInput        `json:"inputs,omitempty" jsonschema:"local files delivered to the agent's WHERRY_INPUT_DIR under their base names"`
+	Continue    string             `json:"continue,omitempty" jsonschema:"run id of a run of this host that result collected, which the new run continues with its context: for a run with git, the agent clones that run's repository, continues from its changes.bundle and returns changes.bundle through the pool's bucket, which needs a pool with storage and a host storage credential; for any other run, its collected outputs arrive as the inputs previous/<name>; not with git, nor an input or output named base.bundle or changes.bundle"`
+	Inputs      []fileInput        `json:"inputs,omitempty" jsonschema:"local files delivered to the agent's WHERRY_INPUT_DIR under their base names, and directories whose files are delivered as <directory name>/<relative path>; no input is named under previous/"`
 	Credentials []credentialInput  `json:"credentials,omitempty" jsonschema:"configured credentials delivered to the agent, each as a file in WHERRY_CREDENTIALS_DIR or in an environment variable, or by name alone a requirement for one of the placed agent's optional credentials, which submit then refuses to go without; no two share a target, and none takes the target of one of the agent's own credentials"`
 	Outputs     []outputInput      `json:"outputs,omitempty" jsonschema:"files the agent is asked to leave in WHERRY_OUTPUT_DIR; result writes the returned ones locally"`
 	StartBy     string             `json:"start_by,omitempty" jsonschema:"task_started_by, by which the agent's job starts or the task fails: an RFC 3339 time or a Go duration from now such as 30m; default 10m"`
@@ -212,6 +224,7 @@ type submitOutput struct {
 	Result     *waitReply `json:"result,omitempty"`
 	Error      *toolError `json:"error,omitempty"`
 	Unsupplied []string   `json:"unsupplied,omitempty" jsonschema:"the placed agent's optional credentials this host could not resolve, which the run goes without"`
+	Skipped    int        `json:"skipped_hidden,omitempty" jsonschema:"entries named with a leading dot skipped beneath the directories inputs name"`
 }
 
 type runInput struct {
@@ -275,6 +288,7 @@ type waitReply struct {
 	Reply       *replyFile              `json:"reply,omitempty" jsonschema:"set when the agent's answer is over 64 KiB"`
 	Artifacts   []resultArtifact        `json:"artifacts,omitempty"`
 	Outputs     []outputReply           `json:"outputs,omitempty" jsonschema:"the run's outputs, verified and written locally"`
+	NotRecorded string                  `json:"not_recorded,omitempty" jsonschema:"set when the outputs were written but could not be recorded in the run's record, so continue cannot deliver them; the server's log holds the cause"`
 	NotReturned []wire.UnreturnedOutput `json:"not_returned,omitempty" jsonschema:"outputs the run did not return or this host could not verify, each with its reason"`
 	FetchedRef  string                  `json:"fetched_ref,omitempty" jsonschema:"for a run submitted with git remote . whose changes.bundle came back: the branch, wherry/<run>, the bundle was fetched into in that repository, to merge from; the working tree, index and HEAD are untouched"`
 	NotFetched  string                  `json:"not_fetched,omitempty" jsonschema:"for such a run, why the bundle was not fetched: exists (wherry/<run> names another commit and was left alone), no git, no repository, git refused, unreadable bundle, wrong commit or timeout; the bundle at its output path can be fetched by hand with git fetch <path> HEAD"`
@@ -345,7 +359,7 @@ type logsReply struct {
 
 // newMCPServer serves the wherry tools. Every call uses the host connect returns, so the process runs one tenant-feed
 // follower.
-func newMCPServer(connect func() (*busclient.Host, error), openInput func(string) (*os.File, error), waitCommand func(id string) string, logger *log.Logger) *mcp.Server {
+func newMCPServer(connect func() (*busclient.Host, error), inputs *inputRoots, waitCommand func(id string) string, logger *log.Logger) *mcp.Server {
 	// The model sees an UNAVAILABLE's class alone; the server's log, which only the host's user reads, keeps its cause
 	// with every credential value the host resolved redacted.
 	failure := func(err error) error {
@@ -415,9 +429,12 @@ func newMCPServer(connect func() (*busclient.Host, error), openInput func(string
 		}
 		collected, err := client.Collect(ctx, input.ID, result, "")
 		if err != nil {
-			// The model sees the step that failed; the server's log keeps the cause.
+			// The model sees the step that failed; the server's log keeps the cause. Outputs written but not recorded are
+			// listed with the note, since they are on disk.
 			logger.Print("tool failed: " + busclient.Redact(err.Error()))
-			return nil, waitReply{}, collectFailure(err)
+			if output.NotRecorded = notRecorded(err); output.NotRecorded == "" {
+				return nil, waitReply{}, collectFailure(err)
+			}
 		}
 		for _, written := range collected.Outputs {
 			output.Outputs = append(output.Outputs, outputReply{Name: written.Name, Path: written.Path, SHA256: written.SHA256, Size: written.Size})
@@ -456,23 +473,23 @@ func newMCPServer(connect func() (*busclient.Host, error), openInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "submit",
-		Description: fmt.Sprintf("Sign and publish a task to the task topic of a signature, an agent and all the labels of the profiles that carry it, that live receivers offer matching the selector, preferring the default agent, then the greatest spare capacity, then the lowest topic name. Returns the run id; set wait only for runs expected to finish within %d seconds, otherwise collect the result with result, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR or in environment variables, or, by name alone, the placed agent's own optional credentials the task cannot go without: every agent credential this host can resolve is delivered at its target, required or optional, named or not, and unsupplied lists the optional ones it could not resolve, which the run goes without; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which result writes locally. Submit encrypts the agent's and the task's configured credentials into the task's envelope under the pool's key; the run needs nothing more from this host. Submit refuses with auth required when this host has no source for a credential the agent requires or the task names, when none of a catalog agent's model credentials resolves, and refuses a name that is not one of the placed agent's credentials.", int(waitBound.Seconds())),
+		Description: fmt.Sprintf("Sign and publish a task to the task topic of a signature, an agent and all the labels of the profiles that carry it, that live receivers offer matching the selector, preferring the default agent, then the greatest spare capacity, then the lowest topic name. Returns the run id; set wait only for runs expected to finish within %d seconds, otherwise collect the result with result, or check the run without waiting with status. Inputs are local files, or directories of them, the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR or in environment variables, or, by name alone, the placed agent's own optional credentials the task cannot go without: every agent credential this host can resolve is delivered at its target, required or optional, named or not, and unsupplied lists the optional ones it could not resolve, which the run goes without; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which result writes locally. Submit encrypts the agent's and the task's configured credentials into the task's envelope under the pool's key; the run needs nothing more from this host. Submit refuses with auth required when this host has no source for a credential the agent requires or the task names, when none of a catalog agent's model credentials resolves, and refuses a name that is not one of the placed agent's credentials.", int(waitBound.Seconds())),
 	}, func(ctx context.Context, request *mcp.CallToolRequest, input submitInput) (*mcp.CallToolResult, submitOutput, error) {
 		started := time.Now()
-		submission, err := submitFromInput(input, openInput)
-		defer closeFiles(submission.Files)
+		submission, err := submitFromInput(input, inputs)
 		if err != nil {
 			return nil, submitOutput{}, err
 		}
+		defer submission.close()
 		client, err := connect()
 		if err != nil {
 			return nil, submitOutput{}, failure(err)
 		}
-		result, err := client.Submit(ctx, submission)
+		result, err := client.Submit(ctx, submission.input)
 		if err != nil {
 			return nil, submitOutput{}, failure(err)
 		}
-		output := submitOutput{ID: result.RunID, Pool: result.Pool, Command: waitCommand(result.RunID), Unsupplied: result.Unsupplied}
+		output := submitOutput{ID: result.RunID, Pool: result.Pool, Command: waitCommand(result.RunID), Unsupplied: result.Unsupplied, Skipped: submission.skipped}
 		if input.Wait {
 			_, reply, err := collectResult(ctx, request, runInput{ID: result.RunID}, waitBound-time.Since(started))
 			if err != nil {
@@ -683,18 +700,26 @@ func droppedFields(next mcp.MethodHandler) mcp.MethodHandler {
 	}
 }
 
-func submitFromInput(input submitInput, openInput func(string) (*os.File, error)) (busclient.SubmitInput, error) {
+// mcpSubmission is a submit call's input, with the count of hidden entries its directory inputs skipped and the close
+// of the directories they opened, called once the submission is made.
+type mcpSubmission struct {
+	input   busclient.SubmitInput
+	skipped int
+	close   func()
+}
+
+func submitFromInput(input submitInput, inputs *inputRoots) (mcpSubmission, error) {
 	if input.Prompt == "" {
-		return busclient.SubmitInput{}, invalidArgument("prompt is required")
+		return mcpSubmission{}, invalidArgument("prompt is required")
 	}
 	// @FILE opens through the input roots as an input does; the server's standard input carries the MCP protocol, so
 	// @- is refused.
-	prompt, err := flagValue("prompt", input.Prompt, openInput, nil)
+	prompt, err := flagValue("prompt", input.Prompt, inputs.file, nil)
 	if err != nil {
-		return busclient.SubmitInput{}, argumentError(err)
+		return mcpSubmission{}, argumentError(err)
 	}
 	if prompt == "" {
-		return busclient.SubmitInput{}, invalidArgument("prompt is empty")
+		return mcpSubmission{}, invalidArgument("prompt is empty")
 	}
 	input.Prompt = prompt
 	selector := input.Selector
@@ -703,33 +728,43 @@ func submitFromInput(input submitInput, openInput func(string) (*os.File, error)
 	}
 	startBy, endBy, err := bounds(input.StartBy, input.EndBy, time.Now())
 	if err != nil {
-		return busclient.SubmitInput{}, err
+		return mcpSubmission{}, err
 	}
-	submission := busclient.SubmitInput{
+	submission := mcpSubmission{input: busclient.SubmitInput{
 		Agent: input.Agent, Model: input.Model, Selector: selector, Prompt: input.Prompt,
 		Continue: input.Continue, StartBy: startBy, EndBy: endBy,
-	}
+	}}
 	if input.Git != nil {
-		submission.Git = &wire.GitInput{Remote: input.Git.Remote, Ref: input.Git.Ref, Path: input.Git.Path}
-		submission.GitChanges = input.Git.Changes
+		submission.input.Git = &wire.GitInput{Remote: input.Git.Remote, Ref: input.Git.Ref, Path: input.Git.Path}
+		submission.input.GitChanges = input.Git.Changes
 	}
 	for _, credential := range input.Credentials {
 		if credential.Env == "" && credential.File == "" {
-			submission.Requested = append(submission.Requested, credential.Name)
+			submission.input.Requested = append(submission.input.Requested, credential.Name)
 			continue
 		}
-		submission.Credentials = append(submission.Credentials, wire.TaskCredential{Name: credential.Name, Env: credential.Env, File: credential.File})
+		submission.input.Credentials = append(submission.input.Credentials, wire.TaskCredential{Name: credential.Name, Env: credential.Env, File: credential.File})
 	}
 	for _, output := range input.Outputs {
-		submission.Outputs = append(submission.Outputs, wire.ExpectedOutput{Name: output.Name})
+		submission.input.Outputs = append(submission.input.Outputs, wire.ExpectedOutput{Name: output.Name})
+	}
+	var closes []func()
+	submission.close = func() {
+		for _, close := range closes {
+			close()
+		}
 	}
 	for _, inputFile := range input.Inputs {
-		file, err := openInput(inputFile.Path)
+		files, skipped, close, err := inputs.inputs(inputFile.Path)
 		if err != nil {
-			closeFiles(submission.Files)
-			return busclient.SubmitInput{}, err
+			submission.close()
+			return mcpSubmission{}, err
 		}
-		submission.Files = append(submission.Files, busclient.S3File{Name: filepath.Base(inputFile.Path), Body: file})
+		if close != nil {
+			closes = append(closes, close)
+		}
+		submission.input.Files = append(submission.input.Files, files...)
+		submission.skipped += skipped
 	}
 	return submission, nil
 }
@@ -818,12 +853,19 @@ func resultParts(parts []wire.Part) []resultPart {
 // resolveInput is a variable so tests can swap a link in between an input's resolution and its open.
 var resolveInput = filepath.EvalSymlinks
 
-// inputOpener opens an MCP input: a regular file beneath one of the configured input roots, or dir when there are
-// none, and none of the host's own files, so a client steered by its prompt cannot send the host key, the bundle, the
-// state or a credential, the storage keys included. Each input opens through the root containing its resolved path, so a
-// link that escapes it, even one swapped in after resolution, is refused. The host's files are compared by identity,
-// since path strings miss case-insensitive spellings and hard links. Relative paths resolve against dir.
-func inputOpener(dir string, config busclient.Config) func(string) (*os.File, error) {
+// inputRoots opens MCP inputs: regular files beneath one of the configured input roots, or dir when there are none,
+// and none of the host's own files, so a client steered by its prompt cannot send the host key, the bundle, the state or
+// a credential, the storage keys included. Each input opens through the root containing its resolved path, so a link
+// that escapes it, even one swapped in after resolution, is refused. The host's files are compared by identity, since
+// path strings miss case-insensitive spellings and hard links. Relative paths resolve against dir.
+type inputRoots struct {
+	dir       string
+	roots     map[string]*os.Root
+	protected []string
+	refused   error
+}
+
+func inputOpener(dir string, config busclient.Config) *inputRoots {
 	configured := config.InputRoots
 	if len(configured) == 0 {
 		configured = []string{dir}
@@ -845,57 +887,127 @@ func inputOpener(dir string, config busclient.Config) func(string) (*os.File, er
 		}
 	}
 	refused := invalidArgument("inputs must be readable regular files beneath one of the MCP server's input roots, outside the wherry configuration")
-	// The host's files are looked up on each call, since the state directory and host key can appear after startup.
-	allowed := func(resolved string, info os.FileInfo) bool {
-		var own []os.FileInfo
-		for _, path := range protected {
-			if info, err := os.Stat(path); err == nil {
-				own = append(own, info)
-			}
+	return &inputRoots{dir: dir, roots: roots, protected: protected, refused: refused}
+}
+
+// protects reports whether the file at resolved, whose stat is info, is one of the host's own files or lies beneath one.
+// The host's files are looked up on each call, since the state directory and host key can appear after startup.
+func (r *inputRoots) protects(resolved string, info os.FileInfo) bool {
+	var own []os.FileInfo
+	for _, path := range r.protected {
+		if info, err := os.Stat(path); err == nil {
+			own = append(own, info)
 		}
-		is := func(info os.FileInfo) bool {
-			return slices.ContainsFunc(own, func(other os.FileInfo) bool { return os.SameFile(other, info) })
+	}
+	is := func(info os.FileInfo) bool {
+		return slices.ContainsFunc(own, func(other os.FileInfo) bool { return os.SameFile(other, info) })
+	}
+	if is(info) {
+		return true
+	}
+	for ancestor := filepath.Dir(resolved); ; ancestor = filepath.Dir(ancestor) {
+		info, err := os.Stat(ancestor)
+		if err != nil || is(info) {
+			return true
 		}
-		if !info.Mode().IsRegular() || is(info) {
+		if ancestor == filepath.Dir(ancestor) {
 			return false
 		}
-		for ancestor := filepath.Dir(resolved); ; ancestor = filepath.Dir(ancestor) {
-			info, err := os.Stat(ancestor)
-			if err != nil || is(info) {
-				return false
-			}
-			if ancestor == filepath.Dir(ancestor) {
-				return true
-			}
-		}
 	}
-	return func(path string) (*os.File, error) {
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(dir, path)
+}
+
+// absolute is path as given, made absolute against dir.
+func (r *inputRoots) absolute(path string) string {
+	if !filepath.IsAbs(path) {
+		return filepath.Join(r.dir, path)
+	}
+	return path
+}
+
+// resolve resolves path to the root containing it, its path relative to that root and its resolved path.
+func (r *inputRoots) resolve(path string) (*os.Root, string, string, error) {
+	path = r.absolute(path)
+	resolved, err := resolveInput(path)
+	if err != nil {
+		return nil, "", "", r.refused
+	}
+	for path, root := range r.roots {
+		relative, err := filepath.Rel(path, resolved)
+		if err != nil || !filepath.IsLocal(relative) {
+			continue
 		}
-		resolved, err := resolveInput(path)
-		if err != nil {
-			return nil, refused
-		}
-		for path, root := range roots {
-			relative, err := filepath.Rel(path, resolved)
-			if err != nil || !filepath.IsLocal(relative) {
-				continue
-			}
-			// O_NONBLOCK keeps opening a FIFO from blocking until a writer appears; the regular-file check refuses it.
-			file, err := root.OpenFile(relative, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+		return root, relative, resolved, nil
+	}
+	return nil, "", "", r.refused
+}
+
+// file opens path as a regular file beneath a root, none of the host's own.
+func (r *inputRoots) file(path string) (*os.File, error) {
+	root, relative, resolved, err := r.resolve(path)
+	if err != nil {
+		return nil, err
+	}
+	// O_NONBLOCK keeps opening a FIFO from blocking until a writer appears; the regular-file check refuses it.
+	file, err := root.OpenFile(relative, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, r.refused
+	}
+	// The resolved path held no link; os.Root follows one swapped in since that stays inside the root, and the ancestor
+	// check over the path would miss where it leads, so the name must still hold the file opened.
+	info, err := file.Stat()
+	named, lstatErr := root.Lstat(relative)
+	if err != nil || lstatErr != nil || !info.Mode().IsRegular() || !os.SameFile(named, info) || r.protects(resolved, info) {
+		file.Close()
+		return nil, r.refused
+	}
+	return file, nil
+}
+
+// inputs returns the input files path names: a regular file under its base name, or a directory's files under its
+// name as given, a link's own and not its target's, as --input DIR names them, with the count of hidden entries skipped
+// and the close of the directory, which stays open for the files to open through, checked against the host's own files
+// one by one.
+func (r *inputRoots) inputs(path string) ([]busclient.InputFile, int, func(), error) {
+	root, relative, resolved, err := r.resolve(path)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	info, err := root.Stat(relative)
+	if err != nil {
+		return nil, 0, nil, r.refused
+	}
+	if !info.IsDir() {
+		return []busclient.InputFile{{Name: filepath.Base(path), Open: func() (io.ReadSeekCloser, error) {
+			file, err := r.file(path)
 			if err != nil {
-				return nil, refused
-			}
-			info, err := file.Stat()
-			if err != nil || !allowed(resolved, info) {
-				file.Close()
-				return nil, refused
+				return nil, err
 			}
 			return file, nil
-		}
-		return nil, refused
+		}}}, 0, nil, nil
 	}
+	if r.protects(resolved, info) {
+		return nil, 0, nil, r.refused
+	}
+	base, err := busclient.DirBase(r.absolute(path))
+	if err != nil {
+		return nil, 0, nil, invalidArgument(fmt.Sprintf("input %s: %v", path, err))
+	}
+	dir, err := root.OpenRoot(relative)
+	if err != nil {
+		return nil, 0, nil, r.refused
+	}
+	check := func(relative string, info os.FileInfo) error {
+		if r.protects(filepath.Join(resolved, relative), info) {
+			return r.refused
+		}
+		return nil
+	}
+	files, skipped, err := busclient.DirInputs(dir, base, check)
+	if err != nil {
+		dir.Close()
+		return nil, 0, nil, invalidArgument(fmt.Sprintf("input %s: %v", path, err))
+	}
+	return files, skipped, func() { dir.Close() }, nil
 }
 
 // inputReader reads at most limit bytes of an MCP input that open opens, named by the base name of its path.
@@ -911,13 +1023,6 @@ func inputReader(open func(string) (*os.File, error)) func(string, int64) (wire.
 			return wire.Part{}, invalidArgument("inputs must be readable regular files beneath one of the MCP server's input roots, outside the wherry configuration")
 		}
 		return wire.Part{Raw: append(wire.StdBytes{}, data...), Filename: filepath.Base(path)}, nil
-	}
-}
-
-// closeFiles closes the input files a submission opened.
-func closeFiles(files []busclient.S3File) {
-	for _, file := range files {
-		file.Body.(io.Closer).Close()
 	}
 }
 

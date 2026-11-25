@@ -366,6 +366,16 @@ the pool needs storage and the host a storage credential for it
 ([`submit`](commands.md#wherry-host-submit)). A continuation of a `--git .`
 run is fetched into its own `wherry/<run>` in the same repository.
 
+A run without a git input continues too: `--continue RUN_ID` delivers the
+outputs `result` collected for it as the inputs `previous/<name>`, read from
+where `result` wrote them and checked against the size and SHA-256 it
+recorded, with the run's context. Run `result` first, keep its outputs
+where it wrote them until the next round is submitted, and name no input of
+your own under `previous/`. The previous prompt and reply do not travel: ask
+for `reply.txt` as an output when the next round needs the reply. The MCP
+`submit` tool's `continue` does the same, reading the outputs as the host
+wherever `result` wrote them.
+
 The agent pushes only when the prompt asks it to and the credential allows
 it, and then only to the branch `wherry/<run>`; verify the commit it
 reports at that branch before trusting it, and delete the branch after.

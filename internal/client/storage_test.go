@@ -444,6 +444,11 @@ func randomFile(t *testing.T, name string, size int) (*os.File, []byte) {
 	return file, data
 }
 
+// opening is an InputFile's Open of an open file, which Submit then closes.
+func opening(file *os.File) func() (io.ReadSeekCloser, error) {
+	return func() (io.ReadSeekCloser, error) { return file, nil }
+}
+
 func hexSum(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
@@ -615,7 +620,7 @@ func TestSubmitUploadsAFileOverTheRecordLimitFromDisk(t *testing.T) {
 	}
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Files: []S3File{{Name: "big.bin", Body: big}, {Name: "small.bin", Body: small}},
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Files: []InputFile{{Name: "big.bin", Open: opening(big)}, {Name: "small.bin", Open: opening(small)}},
 		EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)

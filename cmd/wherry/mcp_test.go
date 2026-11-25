@@ -42,12 +42,12 @@ func (l testLog) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// mcpSessionReading is mcpSession with submit opening its inputs through openInput.
-func mcpSessionReading(t *testing.T, connect func() (*busclient.Host, error), progress *atomic.Int64, openInput func(string) (*os.File, error)) *mcp.ClientSession {
+// mcpSessionReading is mcpSession with submit opening its inputs through inputs.
+func mcpSessionReading(t *testing.T, connect func() (*busclient.Host, error), progress *atomic.Int64, inputs *inputRoots) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := newMCPServer(connect, openInput, func(id string) string { return "wherry result " + id }, log.New(testLog{t}, "mcp server: ", 0)).Connect(ctx, serverTransport, nil)
+	serverSession, err := newMCPServer(connect, inputs, func(id string) string { return "wherry result " + id }, log.New(testLog{t}, "mcp server: ", 0)).Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
