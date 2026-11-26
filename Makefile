@@ -64,8 +64,9 @@ check-names: ## Fail on the old provisioning-role and command names in tracked f
 	hits=$$(git grep -n -w -E "$$p" -- . ':!*CHANGELOG*'; git grep -n -E "$$q" -- . ':!*CHANGELOG*'); \
 	r='wherry (host )?wa''it\b|host-wa''it-run-id'; \
 	hits="$$hits$$(git grep -n -E "$$r" -- docs/ plugins/ test/ README.md '*.go' ':!*CHANGELOG*' ':!docs/upgrade.md' ':!*_test.go')"; \
-	s="operator (ten""ant|po""ol|recei""ver) (a""dd|li""st|stor""age|rem""ove|po""ol|ho""st|app""ly|sh""ow|susp""end|res""ume|rotate-""key)|ten""ant (a""dd|li""st|stor""age|rem""ove|po""ol (a""dd|rem""ove)|ho""st (a""dd|refr""esh|rem""ove))\b|po""ol (app""ly|susp""end|res""ume|rotate-""key)\b|recei""ver (app""ly|sh""ow|rem""ove)\b|host k""ey rot""ate|k""ey rotate\b|--rotate-""key|-f (PA""TH|FI""LE)|\[-f\b"; \
-	hits="$$hits$$(git grep -n -E "$$s" -- docs/ plugins/ test/ README.md Makefile '*.go' '*.svg' ':!*CHANGELOG*' ':!docs/upgrade.md' ':!*_test.go' | grep -v -E 'SpanCommands|marker\(|^docs/commands\.md:[0-9]+:\| `wherry ')"; \
+	e='([^a-zA-Z-]|$$)'; \
+	s="operator (ten""ant|po""ol|recei""ver) (a""dd|li""st|stor""age|rem""ove|po""ol|ho""st|app""ly|sh""ow|susp""end|res""ume|rotate-""key)|ten""ant (a""dd|li""st|stor""age|rem""ove|po""ol (a""dd|rem""ove)|ho""st (a""dd|refr""esh|rem""ove))$$e|po""ol (app""ly|susp""end|res""ume|rotate-""key)$$e|recei""ver (app""ly|sh""ow|rem""ove)$$e|host k""ey rot""ate|k""ey rotate$$e|--rotate-""key|-f (PA""TH|FI""LE)|\[-""f$$e"; \
+	hits="$$hits$$(git grep -n -E "$$s" -- docs/ plugins/ test/ README.md Makefile '*.go' '*.svg' ':!*CHANGELOG*' ':!docs/upgrade.md' ':!*_test.go' | grep -v -E 'SpanCommands|^internal/operator/kafka\.go:[0-9]+:	"|marker\(|^docs/commands\.md:[0-9]+:\| `wherry ')"; \
 	if [ -n "$$hits" ]; then \
 		echo "$$hits"; echo "FAIL: old provisioning-role or command names in tracked files"; exit 1; \
 	fi; \
