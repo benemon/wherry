@@ -428,6 +428,11 @@ holds another key than the state directory`.
 Each platform runs that command in the receiver's place. The steps below use
 the names of the install guides' examples.
 
+::: warning Not yet run on a platform
+The steps for systemd, Kubernetes and Nomad below have not yet been run against
+a live receiver. Check each step against your platform before you rely on it.
+:::
+
 ### On systemd
 
 The unit's bundle is a credential, at a path that exists only while the unit
