@@ -444,7 +444,7 @@ func TestReceiverInterruptBeforeWrite(t *testing.T) {
 					return scripted(q, f)
 				}
 			}
-			err := runOperator([]string{"receiver", "apply", "receiver-a"}, io.Discard, &out)
+			err := runOperator([]string{"apply", "--receiver", "receiver-a"}, io.Discard, &out)
 			if !errors.Is(err, errInterrupted) {
 				t.Fatalf("interrupt: %v", err)
 			}
@@ -486,8 +486,8 @@ func TestReceiverEligibility(t *testing.T) {
 			case "writer":
 				out = io.Discard
 			}
-			err := runOperator([]string{"receiver", "apply", "receiver-a"}, io.Discard, out)
-			want := path + " does not exist and there is no terminal to prompt on; write it, or give -f FILE, with " + receiverFields
+			err := runOperator([]string{"apply", "--receiver", "receiver-a"}, io.Discard, out)
+			want := path + " does not exist and there is no terminal to prompt on; write it, or give --file PATH, with " + receiverFields
 			if err == nil || err.Error() != want {
 				t.Fatalf("eligibility error: %v", err)
 			}
@@ -495,8 +495,8 @@ func TestReceiverEligibility(t *testing.T) {
 	}
 	stdin = tty
 	t.Setenv("TERM", "xterm")
-	err = runOperator([]string{"receiver", "apply", "receiver-a", "--dry-run"}, io.Discard, tty)
-	want := path + " does not exist and --dry-run writes nothing; write it, or give -f FILE, with " + receiverFields
+	err = runOperator([]string{"apply", "--receiver", "receiver-a", "--dry-run"}, io.Discard, tty)
+	want := path + " does not exist and --dry-run writes nothing; write it, or give --file PATH, with " + receiverFields
 	if err == nil || err.Error() != want {
 		t.Fatalf("dry-run refusal: %v", err)
 	}
@@ -509,9 +509,9 @@ func TestReceiverEligibility(t *testing.T) {
 		} else if err := os.WriteFile(file, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		got, isDir, err := objectFile(context.Background(), ".", "receivers", "receiver-a", map[string]string{"f": file}, false, tty, receiverFields, nil)
+		got, isDir, err := objectFile(context.Background(), ".", "receivers", "receiver-a", map[string]string{"file": file}, false, tty, receiverFields, nil)
 		if err != nil || got != file || isDir != directory {
-			t.Fatalf("-f %s: %s %t %v", file, got, isDir, err)
+			t.Fatalf("--file %s: %s %t %v", file, got, isDir, err)
 		}
 	}
 }

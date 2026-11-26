@@ -105,7 +105,7 @@ on `wherry.operator` when its last pass ended. A command still running can
 change Kafka after that, but its own passes then follow. A command that
 fails before it writes a record writes nothing to `wherry.operator`. Topics,
 a new host's or receiver's credential, or a new receiver's grants it made
-first stay, the grants until the next command's pass. A `tenant host add --force`
+first stay, the grants until the next command's pass. A `add --host --force`
 or receiver reissue that a revocation overtakes refuses with `cannot return
 after its membership end` and writes no bundle. A command's pass deletes the
 grants a concurrent command adding a receiver makes before its record. That
@@ -114,7 +114,7 @@ restarted by its supervisor.
 
 A recorded profile's signature topic exists before its record. A topic
 missing afterwards was deleted outside wherry: `operator check` names it, and
-`pool apply` of the pool with the same terms recreates it before its
+`apply --pool` of the pool with the same terms recreates it before its
 no-update path. A receiver never creates a topic: its poll of a missing one logs an error
 and retries every 2 seconds.
 
@@ -128,12 +128,12 @@ A pool's terms apply to every receiver in it. Write them as a
 working directory and create the pool:
 
 ```sh
-wherry operator pool apply build
+wherry operator apply --pool build
 ```
 
-Without the file, on a terminal, `pool apply` asks for the agents, their
+Without the file, on a terminal, `apply --pool` asks for the agents, their
 models and credentials, the default agent, the quotas and the start-by
-limit, writes `pools/build.yaml`, then applies it. `-f PATH` applies a file
+limit, writes `pools/build.yaml`, then applies it. `--file PATH` applies a file
 or directory elsewhere.
 
 The [pool terms example](configuration-operator.md#pool-terms-example) sets every field except a credential's `file`,
@@ -159,7 +159,7 @@ as [Signatures](configuration-operator.md#pool-terms) describes.
   apply` refuses a `delivery_limit` above the broker's
   `group.share.max.delivery.count.limit`.
 - `lock_duration` is how long a claim survives without renewal. Receivers
-  renew every 10 seconds. `pool apply` refuses a `lock_duration` above the
+  renew every 10 seconds. `apply --pool` refuses a `lock_duration` above the
   broker's `group.share.max.record.lock.duration.ms`.
 - `start_by_limit` is the latest `task_started_by` a task may ask for, from
   its submission, and bounds how long after its submission a run's task is
@@ -168,12 +168,12 @@ as [Signatures](configuration-operator.md#pool-terms) describes.
   See [Retention](#retention).
 - `reply_limit` bounds the redacted reply a result returns beyond the 64 KiB
   its text carries; it defaults to 1 MiB, or to `output_limit` when that is
-  lower, and `pool apply` refuses one over `output_limit`,
+  lower, and `apply --pool` refuses one over `output_limit`,
   which also bounds the outcome file. A longer reply is cut to it, and the
   result says so.
 - `output_limit` bounds a run's outputs; it defaults to 8 MiB. The
   broker's record limit bounds a task's inline input files, and
-  `pool apply` records it in the terms. See
+  `apply --pool` records it in the terms. See
   [Size a pool against the broker](#size-a-pool-against-the-broker).
 - An agent's `credentials` lists the credentials it takes, each
   `{name, env}` or `{name, file}`: the environment variable, or the file in
@@ -182,7 +182,7 @@ as [Signatures](configuration-operator.md#pool-terms) describes.
   it, from a configured source or, for a target the
   [catalog reads](credential-variables.md), from the submitting process's
   variable, and goes without it otherwise. A credential every run needs
-  stays required, the default. `pool apply` refuses a duplicate name, two credentials on
+  stays required, the default. `apply --pool` refuses a duplicate name, two credentials on
   one target, both or neither of `env` and `file`, and an `env` a plugin
   sets itself, such as `HOME` or `WHERRY_CREDENTIALS_DIR`:
 
@@ -213,7 +213,7 @@ Prerequisites: the working directory and the pool's new terms in
 1. Find the receivers the new terms would strand: a receiver in the pool
    whose membership has not ended, live or not, with a plugin profile whose
    agent the new terms drop.
-   `wherry operator receiver show RECEIVER` prints each profile's `agent`.
+   `wherry operator show --receiver RECEIVER` prints each profile's `agent`.
 
 2. Reconfigure each of those receivers without the profile, as in
    [Change a receiver's configuration](#change-a-receiver-s-configuration),
@@ -233,7 +233,7 @@ Prerequisites: the working directory and the pool's new terms in
 5. When the change alters an agent's `credentials`, suspend the pool:
 
    ```sh
-   wherry operator pool suspend build
+   wherry operator suspend --pool build
    ```
 
    The command waits only for the key custodian. For
@@ -250,10 +250,10 @@ Prerequisites: the working directory and the pool's new terms in
 6. Record the terms:
 
    ```sh
-   wherry operator pool apply build
+   wherry operator apply --pool build
    ```
 
-   `pool apply` checks every receiver in the pool whose membership has not
+   `apply --pool` checks every receiver in the pool whose membership has not
    ended against the new terms first, and refuses terms that would strand one, naming each
    receiver, plugin and profile:
 
@@ -269,7 +269,7 @@ Prerequisites: the working directory and the pool's new terms in
 7. If you suspended the pool in step 5, resume it:
 
    ```sh
-   wherry operator pool resume build
+   wherry operator resume --pool build
    ```
 
    Then start submitting the agent's work again.
@@ -283,10 +283,10 @@ refuses such a `task_started_by` before it publishes. Every run ends
 within six hours after `start_by_limit`. A longer limit keeps prompts on
 the broker longer. Lowering `start_by_limit` leaves the pool topics'
 retention where it is, so runs submitted under the longer limit keep their
-records; `pool apply` raises the retention, and waits until the brokers
+records; `apply --pool` raises the retention, and waits until the brokers
 apply it, before it records a longer limit.
 
-`pool apply` sets the retention of the pool's task and events topics, new and
+`apply --pool` sets the retention of the pool's task and events topics, new and
 existing, to at least `start_by_limit` plus the six-hour maximum run time plus a
 one-day margin, their timestamp type to `LogAppendTime`, since a run's age
 runs from the broker's time, their `retention.bytes` to `-1` and
@@ -299,13 +299,13 @@ topics of the pool's live receivers. With the 72-hour default that is `367200000
 and six hours, after which a run's prompts leave the broker. Tenant feeds keep
 statuses and results, and tenant transcript topics transcripts, outputs and
 replies over 64 KiB, for 30 days, and both must keep them for at least `start_by_limit` plus six
-hours, so `pool apply` refuses a limit above 29 days and 18 hours, and
-`tenant pool add` refuses a feed or transcript topic that keeps less. Identity and
+hours, so `apply --pool` refuses a limit above 29 days and 18 hours, and
+`allow` refuses a feed or transcript topic that keeps less. Identity and
 configuration topics stay forever. `wherry operator check` reports a topic whose
 retention drops below its bound, a pool topic whose timestamp type is not
 `LogAppendTime`, and a task or events topic without the hourly
 `segment.ms`, `cleanup.policy=delete` or `retention.bytes=-1`, or with more
-than one partition. `pool apply` refuses a task or events topic with more
+than one partition. `apply --pool` refuses a task or events topic with more
 than one partition; partitions cannot be removed, so recreate the pool's topics.
 
 A tenant transcript topic whose retention is shorter than its feed's loses an
@@ -321,12 +321,12 @@ the broker's record limit bounds what a pool can carry. The Kafka cluster
 must allow a topic `max.message.bytes` of 2 MiB (2097152): every tenant
 feed and transcript topic has it, and receivers batch up to it. A result
 names each output the run returned, so the largest result is a
-1259793-byte record batch, over a broker's default limit. `tenant add` creates a tenant's feed and transcript topic at 2 MiB, and
-`pool apply` sets existing ones to it. A
+1259793-byte record batch, over a broker's default limit. `add --tenant` creates a tenant's feed and transcript topic at 2 MiB, and
+`apply --pool` sets existing ones to it. A
 cluster policy that refuses the setting fails the command, and
 `wherry operator check` reports a tenant topic below 2 MiB.
 
-`pool apply` reads
+`apply --pool` reads
 `message.max.bytes` from every broker and `max.message.bytes` from the
 pool's task topics and its tenants' feeds and transcript topics, records the
 task topics' lowest record limit in the pool's terms, the brokers' and the
@@ -348,13 +348,13 @@ below the brokers' default `message.max.bytes` of 1048588, so the host's
 batch is the task topics' limit with brokers and the topics at their
 defaults. Raising `message.max.bytes` or a task
 topic's `max.message.bytes` leaves the limit there, and lowering either
-lowers it. Run `pool apply` after changing either, so the terms record the
+lowers it. Run `apply --pool` after changing either, so the terms record the
 new limit. An output chunk holds
 256 KiB whatever `output_limit` is, so `output_limit` spans as many records
 as it needs and the record limit does not bound it. A reply chunk is an
 output chunk, so the same holds for `reply_limit`.
 
-`tenant pool add` makes the same check with the new tenant's feed and
+`allow` makes the same check with the new tenant's feed and
 transcript topic counted.
 Lowering a broker or topic limit later can leave a pool's terms too large;
 [`wherry operator check`](#check-a-deployment) reports it. Receivers read
@@ -371,8 +371,8 @@ Prerequisites: the working directory
 1. Create the tenant and entitle it to a pool:
 
    ```sh
-   wherry operator tenant add acme
-   wherry operator tenant pool add acme build
+   wherry operator add --tenant acme
+   wherry operator allow --tenant acme --pool build
    ```
 
 2. When a pool has [S3 storage](operations-hosts.md#s3-storage), record the
@@ -380,7 +380,7 @@ Prerequisites: the working directory
    masked prompts or piped in:
 
    ```sh
-   wherry operator tenant storage acme
+   wherry operator storage --tenant acme
    ```
 
    Set a quota and a lifecycle rule on each pool's bucket. A run's receiver
@@ -397,7 +397,7 @@ Prerequisites: the working directory
 3. Add each host the tenant submits from:
 
    ```sh
-   wherry operator tenant host add acme laptop
+   wherry operator add --host laptop --tenant acme
    ```
 
    It prints the bundle's path and the command that installs it.
@@ -414,13 +414,13 @@ bundle, registers the host key and writes the
 for each credential the tenant's pools take, as in
 [Set up a host](install-host.md#_2-initialise-the-host).
 
-A tenant can be entitled to several pools; run `tenant pool add` once per pool.
+A tenant can be entitled to several pools; run `allow` once per pool.
 
 To rotate a host's Kafka password, replace a lost bundle or change the
-broker address a host uses, run `tenant host add` again with `--force`. It writes a
+broker address a host uses, run `add --host` again with `--force`. It writes a
 new bundle over the old one, and the old password stops working at once, so
 the host is offline until its user puts the new bundle in place.
-`receiver apply RECEIVER --force` does the same for a receiver.
+`apply --receiver RECEIVER --force` does the same for a receiver.
 
 ## Add a receiver
 
@@ -531,13 +531,13 @@ host that meets [Run a receiver](operations-receivers.md#run-a-receiver).
    the record would hold them, writing nothing:
 
    ```sh
-   wherry operator receiver apply nomad-1 -f nomad-1 --dry-run
+   wherry operator apply --receiver nomad-1 --file nomad-1 --dry-run
    ```
 
 3. Add the receiver:
 
    ```sh
-   wherry operator receiver apply nomad-1 -f nomad-1
+   wherry operator apply --receiver nomad-1 --file nomad-1
    ```
 
 4. Deliver the bundle, `bundles/receivers/nomad-1.bundle`, to the receiver
@@ -588,7 +588,7 @@ host that meets [Run a receiver](operations-receivers.md#run-a-receiver).
    profile container: credential "nomad-token" has no source in the receiver's configuration
    ```
 
-7. Check that `wherry operator receiver show nomad-1` reports
+7. Check that `wherry operator show --receiver nomad-1` reports
    `status: live`, which it does once the receiver's first advertisement is
    verified against its key topic. On a host of an entitled tenant,
    `wherry host receivers` shows the same status with each profile `ready=true`.
@@ -608,16 +608,16 @@ configuration, with a `plugin_sha256` pin for each plugin type, as
    plugin profile as the record would hold them, writing nothing:
 
    ```sh
-   wherry operator receiver apply nomad-1 -f nomad-1 --dry-run
+   wherry operator apply --receiver nomad-1 --file nomad-1 --dry-run
    ```
 
 2. Compare the output with what the receiver runs now, which
-   `wherry operator receiver show nomad-1` prints in the same format.
+   `wherry operator show --receiver nomad-1` prints in the same format.
 
 3. Record the configuration:
 
    ```sh
-   wherry operator receiver apply nomad-1 -f nomad-1
+   wherry operator apply --receiver nomad-1 --file nomad-1
    ```
 
 4. At its next configuration check, within 15 seconds, the receiver stops
@@ -627,12 +627,12 @@ configuration, with a `plugin_sha256` pin for each plugin type, as
    `wherry host receivers` shows it `live` with the new profiles.
 
 The password stays as it is. When the configuration's `broker` differs from
-the address in `bundles/receivers/nomad-1.bundle`, `receiver apply` rewrites
+the address in `bundles/receivers/nomad-1.bundle`, `apply --receiver` rewrites
 the bundle with the new address and the same password; deliver it to the
 receiver host before the old address stops working. Without the bundle in
-`bundles/receivers/`, `receiver apply` records nothing and fails;
-`receiver apply nomad-1 --force` writes a new bundle with a new password. Planned changes go
-through `receiver apply`, which drains with no window.
+`bundles/receivers/`, `apply --receiver` records nothing and fails;
+`apply --receiver nomad-1 --force` writes a new bundle with a new password. Planned changes go
+through `apply --receiver`, which drains with no window.
 
 To apply a change at once, restart the receiver through its platform, as
 with `kubectl rollout restart`, `nomad alloc restart` or
@@ -655,8 +655,8 @@ restored.
 1. Run the revocation:
 
    ```sh
-   wherry operator tenant host remove alice laptop
-   wherry operator receiver remove nomad-1
+   wherry operator remove --host laptop --tenant alice
+   wherry operator remove --receiver nomad-1
    ```
 
    The command prints one line per
@@ -664,7 +664,7 @@ restored.
    `step=<n> complete=<bool> name=<name>`. The wait in step 5 is usually the
    longest, so before it the command prints
    `step=5 started name=wait until=<time>`, the UTC time the wait ends;
-   `--wait DURATION` lengthens it, must be positive, and is
+   `--timeout DURATION` lengthens it, must be positive, and is
    refused below the broker-derived minimum. Once the six steps are
    complete, the command deletes the principal's bundle from `bundles/`:
    its password can never log in again.
@@ -717,7 +717,7 @@ deletes them again.
    has acknowledged the suspension; after that no new start opens:
 
    ```sh
-   wherry operator pool suspend build
+   wherry operator suspend --pool build
    ```
 
 2. Revoke the suspect receiver, as in
@@ -725,7 +725,7 @@ deletes them again.
    the hard stop for a receiver:
 
    ```sh
-   wherry operator receiver remove nomad-1
+   wherry operator remove --receiver nomad-1
    ```
 
 3. When the revoked receiver was the pool's key custodian, wait for a new
@@ -739,7 +739,7 @@ deletes them again.
    `custodian: published pool <pool> key <id> (<reason>)` log lines:
 
    ```sh
-   wherry operator pool rotate-key build --suspect-key <kid> --suspect-key <kid>
+   wherry operator rotate --pool build --suspect-key <kid> --suspect-key <kid>
    ```
 
    The command refuses a pool that is not suspended. It waits up to 5
@@ -767,7 +767,7 @@ deletes them again.
 7. Resume the pool, last:
 
    ```sh
-   wherry operator pool resume build
+   wherry operator resume --pool build
    ```
 
 A drain of the key custodian while the pool is suspended keeps its keys to
@@ -861,15 +861,15 @@ Run one operator command at a time.
 
 To onboard a tenant:
 
-1. Run `wherry operator tenant add acme`.
-2. Run `wherry operator tenant pool add acme build`.
-3. Run `wherry operator tenant storage acme` when a pool has storage.
-4. Run `wherry operator tenant host add acme laptop`.
+1. Run `wherry operator add --tenant acme`.
+2. Run `wherry operator allow --tenant acme --pool build`.
+3. Run `wherry operator storage --tenant acme` when a pool has storage.
+4. Run `wherry operator add --host laptop --tenant acme`.
 5. Deliver the bundle over a channel you trust.
 6. Run `wherry host init laptop.bundle` on the host.
 
 Collect results before removing an entitlement.
-`wherry operator tenant pool remove acme build` withdraws the hosts' pool access.
+`wherry operator deny --tenant acme --pool build` withdraws the hosts' pool access.
 Hosts lose access to those runs through `status`, `result` and `logs`.
 They also lose the ability to cancel them.
 A command whose state load overlaps removal can fail while reading receiver keys.
@@ -877,9 +877,9 @@ Run the next command with fresh state.
 
 To offboard:
 
-1. Remove one host with `wherry operator tenant host remove acme laptop`.
+1. Remove one host with `wherry operator remove --host laptop --tenant acme`.
    This waits for the broker-derived revocation minimum.
-2. To remove the whole tenant, run `wherry operator tenant remove acme`.
+2. To remove the whole tenant, run `wherry operator remove --tenant acme`.
    This ends all entitlements before revoking the hosts.
    Host revocations include the broker-derived wait.
    The command removes the tenant's bundle directory after successful removal.

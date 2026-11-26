@@ -34,7 +34,7 @@ Choose a Nomad plugin release that pairs with your wherry release.
   You set up your laptop as a host on a later page.
   Run the check at the end of this page from the operator machine instead.
 - The steps copy the example `config.yaml` to `receivers/nomad-1.config.yaml`.
-  Without this file, `receiver apply` asks only for a source for each platform credential the profiles name, and
+  Without this file, `apply --receiver` asks only for a source for each platform credential the profiles name, and
   writes nothing when there is none.
   [Receiver local configuration](configuration-receiver.md#receiver-local-configuration) describes the file and the
   defaults a receiver without one takes.
@@ -46,7 +46,7 @@ Choose a Nomad plugin release that pairs with your wherry release.
 On the operator machine, in `wherry-prod/`:
 
 ```sh
-wherry operator receiver show nomad-1
+wherry operator show --receiver nomad-1
 ```
 
 The first line is `status: live` once the receiver's first advertisement is verified against its key topic:
@@ -58,7 +58,7 @@ last_advertised: 2026-11-20T09:41:07.312Z
 
 A receiver that has not advertised shows `status: silent` and no `last_advertised` line.
 Read its logs as the steps above show.
-[`receiver show`](commands.md#wherry-operator-receiver-show-receiver) describes each status.
+[`show`](commands.md#wherry-operator-show) describes each status.
 
 Next, [set up a host](install-host.md).
 Its last step, `wherry host receivers`, shows the receiver `live` from your laptop.

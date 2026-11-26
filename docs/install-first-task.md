@@ -23,7 +23,7 @@ wherry result "$run"
 
 `result` prints the agent's reply once the run ends.
 It exits 0 when the run completed.
-To follow the transcript while the run is going, use `wherry logs -f "$run"` in another terminal.
+To follow the transcript while the run is going, use `wherry logs --follow "$run"` in another terminal.
 
 ## Check that it worked
 

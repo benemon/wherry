@@ -16,7 +16,7 @@ import (
 	"github.com/benemon/wherry/internal/operator"
 )
 
-// -f takes a file, or a directory holding a config in the directory form; pool apply and receiver apply refuse
+// --file takes a file, or a directory holding a config in the directory form; apply --pool and apply --receiver refuse
 // --config-file and --config-dir.
 func TestObjectFileTakesAFileOrADirectory(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "config.yaml")
@@ -25,11 +25,11 @@ func TestObjectFileTakesAFileOrADirectory(t *testing.T) {
 	}
 	dir := t.TempDir()
 	for path, want := range map[string]bool{file: false, dir: true} {
-		if got, directory, err := objectFile(context.Background(), t.TempDir(), "pools", "pool-a", map[string]string{"f": path}, false, io.Discard, poolFields, nil); err != nil || got != path || directory != want {
-			t.Errorf("objectFile(-f %s) = %s, %t, %v; want the path and directory %t", path, got, directory, err, want)
+		if got, directory, err := objectFile(context.Background(), t.TempDir(), "pools", "pool-a", map[string]string{"file": path}, false, io.Discard, poolFields, nil); err != nil || got != path || directory != want {
+			t.Errorf("objectFile(--file %s) = %s, %t, %v; want the path and directory %t", path, got, directory, err, want)
 		}
 	}
-	for _, command := range [][]string{{"pool", "apply", "pool-a"}, {"receiver", "apply", "receiver-a"}} {
+	for _, command := range [][]string{{"apply", "--pool", "pool-a"}, {"apply", "--receiver", "receiver-a"}} {
 		for _, option := range []string{"--config-file", "--config-dir"} {
 			if _, _, err := operatorArgs(append(command, option, file)); err == nil {
 				t.Errorf("operatorArgs(%q %s) accepted the option", command, option)
@@ -162,15 +162,13 @@ func TestPoolConfigDirectoryRejectsInvalidLayout(t *testing.T) {
 
 func TestOperatorArgsRejectsUnknownOptions(t *testing.T) {
 	for _, args := range [][]string{
-		{"pool", "apply", "pool-a", "--terms", "pool.yaml"},
-		{"receiver", "apply", "receiver-a", "--config", "receiver.yaml"},
-		{"tenant", "host", "add", "tenant-a", "host-a", "--bundle", "host.yaml"},
-		{"pool", "apply", "pool-a", "--tenant", "tenant-a"},
-		{"receiver", "apply", "receiver-a", "--platform-credential-file", "nomad=token"},
-		{"receiver", "apply", "receiver-a", "--pool", "pool-a"},
-		{"receiver", "apply", "receiver-a", "--plugin-sha256", "nomad=" + fakeSHA256},
-		{"tenant", "host", "add", "tenant-a", "host-a", "--bundle-file", "host.bundle"},
-		{"pool", "apply", "pool-a", "--super-user", "admin"},
+		{"apply", "--pool", "pool-a", "--terms", "pool.yaml"},
+		{"apply", "--receiver", "receiver-a", "--config", "receiver.yaml"},
+		{"add", "--host", "host-a", "--tenant", "tenant-a", "--bundle", "host.yaml"},
+		{"apply", "--receiver", "receiver-a", "--platform-credential-file", "nomad=token"},
+		{"apply", "--receiver", "receiver-a", "--plugin-sha256", "nomad=" + fakeSHA256},
+		{"add", "--host", "host-a", "--tenant", "tenant-a", "--bundle-file", "host.bundle"},
+		{"apply", "--pool", "pool-a", "--super-user", "admin"},
 	} {
 		_, _, err := operatorArgs(args)
 		option := strings.TrimPrefix(args[len(args)-2], "-")
@@ -183,22 +181,22 @@ func TestOperatorArgsRejectsUnknownOptions(t *testing.T) {
 // hostCommands are every command that reads the host config, each with extra after its command words.
 func hostCommands(extra ...string) map[string][]string {
 	commands := map[string][]string{
-		"host init":       {"host", "init"},
-		"host key rotate": {"host", "key", "rotate"},
-		"host receivers":  {"host", "receivers"},
-		"host submit":     {"host", "submit", "--prompt", "work"},
-		"host cancel":     {"host", "cancel", "run-a"},
-		"host result":     {"host", "result", "run-a"},
-		"host logs":       {"host", "logs", "run-a"},
-		"host status":     {"host", "status", "run-a"},
-		"host events":     {"host", "events", "run-a"},
-		"host mcp":        {"host", "mcp"},
-		"submit":          {"submit", "--prompt", "work"},
-		"cancel":          {"cancel", "run-a"},
-		"result":          {"result", "run-a"},
-		"logs":            {"logs", "run-a"},
-		"status":          {"status", "run-a"},
-		"events":          {"events", "run-a"},
+		"host init":      {"host", "init"},
+		"host rotate":    {"host", "rotate", "--key"},
+		"host receivers": {"host", "receivers"},
+		"host submit":    {"host", "submit", "--prompt", "work"},
+		"host cancel":    {"host", "cancel", "run-a"},
+		"host result":    {"host", "result", "run-a"},
+		"host logs":      {"host", "logs", "run-a"},
+		"host status":    {"host", "status", "run-a"},
+		"host events":    {"host", "events", "run-a"},
+		"host mcp":       {"host", "mcp"},
+		"submit":         {"submit", "--prompt", "work"},
+		"cancel":         {"cancel", "run-a"},
+		"result":         {"result", "run-a"},
+		"logs":           {"logs", "run-a"},
+		"status":         {"status", "run-a"},
+		"events":         {"events", "run-a"},
 	}
 	for name, args := range commands {
 		words := len(strings.Fields(name))

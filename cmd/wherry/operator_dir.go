@@ -255,7 +255,7 @@ func storageKeysPath(dir, tenant string, create bool) (string, error) {
 	return filepath.Join(storage, tenant+".yaml"), nil
 }
 
-// tenantStorageKeys is the pair tenant storage recorded for tenant in dir, zero when none was.
+// tenantStorageKeys is the pair storage --tenant recorded for tenant in dir, zero when none was.
 func tenantStorageKeys(dir, tenant string) (operator.StorageKeys, error) {
 	path, err := storageKeysPath(dir, tenant, false)
 	if err != nil {
@@ -317,7 +317,7 @@ func tenantStorage(ctx context.Context, service *operator.Service, dir, tenant s
 		return errors.New("standard input is a terminal; leave out - to be asked for the storage keys, or pipe them in, the access key then the secret key, one per line")
 	}
 	if !fromStdin && !promptsEligible(prompts) {
-		return errors.New("tenant storage has no terminal to prompt on; pipe the access key and the secret key in, one per line, with -")
+		return errors.New("storage has no terminal to prompt on; pipe the access key and the secret key in, one per line, with -")
 	}
 	state, err := service.LoadState(ctx)
 	if err != nil {
@@ -358,8 +358,8 @@ func tenantStorage(ctx context.Context, service *operator.Service, dir, tenant s
 	if err := ignore(filepath.Join(dir, ".gitignore"), "storage/"); err != nil {
 		return err
 	}
-	// The pair reaches a host only in its bundle, so each live host of the tenant is named with the refresh that
-	// rewrites it; a host added from now on gets it from tenant host add.
+	// The pair reaches a host only in its bundle, so each live host of the tenant is named with the rotation that
+	// rewrites it; a host added from now on gets it from add --host.
 	var hosts []string
 	for _, principal := range slices.Sorted(maps.Keys(state.Hosts)) {
 		host := state.Hosts[principal]
@@ -367,11 +367,11 @@ func tenantStorage(ctx context.Context, service *operator.Service, dir, tenant s
 			hosts = append(hosts, host.Name)
 		}
 	}
-	if _, err := fmt.Fprintf(stdout, "recorded the storage keys of %s in %s; tenant host add writes them into each new host's bundle\n", tenant, path); err != nil {
+	if _, err := fmt.Fprintf(stdout, "recorded the storage keys of %s in %s; add --host writes them into each new host's bundle\n", tenant, path); err != nil {
 		return err
 	}
 	for _, host := range hosts {
-		if _, err := fmt.Fprintf(stdout, "refresh %s's bundle: wherry operator tenant host refresh %s %s\n", host, tenant, host); err != nil {
+		if _, err := fmt.Fprintf(stdout, "refresh %s's bundle: wherry operator rotate --tenant %s --host %s --storage\n", host, tenant, host); err != nil {
 			return err
 		}
 	}
@@ -550,7 +550,7 @@ func refreshBundle(path string, kept, current operator.Bundle) (bool, error) {
 // that file written from prompt's answers. Without a terminal to prompt on, it refuses, naming fields; so does a dry run,
 // which writes nothing.
 func objectFile(ctx context.Context, dir, kind, name string, options map[string]string, dryRun bool, prompts io.Writer, fields string, prompt func(*questions) (any, error)) (string, bool, error) {
-	path := options["f"]
+	path := options["file"]
 	if path == "" {
 		if !wire.ValidName(name) {
 			return "", false, fmt.Errorf("%q is not a valid name", name)
@@ -558,10 +558,10 @@ func objectFile(ctx context.Context, dir, kind, name string, options map[string]
 		path = filepath.Join(dir, kind, name+".yaml")
 		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 			if dryRun {
-				return "", false, fmt.Errorf("%s does not exist and --dry-run writes nothing; write it, or give -f FILE, with %s", path, fields)
+				return "", false, fmt.Errorf("%s does not exist and --dry-run writes nothing; write it, or give --file PATH, with %s", path, fields)
 			}
 			if !promptsEligible(prompts) {
-				return "", false, fmt.Errorf("%s does not exist and there is no terminal to prompt on; write it, or give -f FILE, with %s", path, fields)
+				return "", false, fmt.Errorf("%s does not exist and there is no terminal to prompt on; write it, or give --file PATH, with %s", path, fields)
 			}
 			value, err := prompt(&questions{ctx, stdin, &promptLatch{out: prompts}})
 			if err != nil {
@@ -583,7 +583,7 @@ func objectFile(ctx context.Context, dir, kind, name string, options map[string]
 	return path, info.IsDir(), nil
 }
 
-// poolFields are what a pool file gives without a terminal, as pool apply's prompts ask for them.
+// poolFields are what a pool file gives without a terminal, as apply --pool's prompts ask for them.
 const poolFields = "agents (each with its name, models and credentials), default_agent, producer_byte_rate, request_percentage and start_by_limit"
 
 type poolFile struct {
@@ -779,7 +779,7 @@ func promptPool(q *questions) (any, error) {
 	return file, nil
 }
 
-// receiverFields are what a receiver file gives without a terminal, as receiver apply's prompts ask for them.
+// receiverFields are what a receiver file gives without a terminal, as apply --receiver's prompts ask for them.
 const receiverFields = "pool, plugin_sha256, plugins (each with its config and profiles, a profile with its agent, labels and optional replicas) and broker, which defaults to the operator's"
 
 type receiverFile struct {

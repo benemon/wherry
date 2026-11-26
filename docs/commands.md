@@ -12,9 +12,9 @@ Every command but `version` and the shortcuts runs under its role's word:
 
 | Role | Commands |
 | --- | --- |
-| Operator | `wherry operator init`; `wherry operator pool apply`, `suspend`, `resume` and `rotate-key`; `wherry operator tenant add`, `list`, `storage` and `remove`; `wherry operator tenant pool add` and `remove`; `wherry operator tenant host add`, `refresh` and `remove`; `wherry operator receiver apply`, `show` and `remove`; `wherry operator check`; `wherry operator view` |
-| Receiver | `wherry receiver run` |
-| Host user | `wherry host init`, `key rotate`, `receivers`, `mcp`, `submit`, `result`, `status`, `events`, `logs` and `cancel` |
+| Operator | `wherry operator init`, `check` and `view`; `wherry operator list`, `show`, `apply`, `add`, `remove`, `allow`, `deny`, `suspend`, `resume`, `rotate` and `storage`, each naming its pool, receiver, tenant or host as a flag |
+| Receiver | `wherry receiver run` and `rotate` |
+| Host user | `wherry host init`, `rotate`, `receivers`, `mcp`, `submit`, `result`, `status`, `events`, `logs` and `cancel` |
 | Development | [Development commands](commands-dev.md) |
 | None | `wherry version` |
 
@@ -22,6 +22,9 @@ Every command but `version` and the shortcuts runs under its role's word:
 [shortcuts](#shortcuts) for the `wherry host` commands of the same name.
 `wherry --help` and `wherry -h` print the tree and list the shortcuts.
 `-h` after `wherry operator`, `wherry host` or a command prints its usage on standard error and exits with status 0.
+Every command is its role word then a verb, one level deep; every flag is a
+long flag, `--name`, and the operator's resources are flags
+([Operator commands](#operator-commands)).
 
 ## Conventions
 
@@ -29,7 +32,7 @@ Every command but `version` and the shortcuts runs under its role's word:
   shape freezes at 1.0. The CLI's text output may change. `wherry host receivers
   --json` is the one CLI JSON form, and it prints the objects the MCP
   `receivers` tool returns.
-- `wherry operator`, `wherry receiver run` and `wherry version` read no client
+- `wherry operator`, `wherry receiver` and `wherry version` read no client
   configuration. Every `wherry host` command reads it first, and every one except `host mcp`
   then connects to Kafka.
 - Every `wherry host` command takes `--config-file FILE`. Without it, the
@@ -41,8 +44,8 @@ Every command but `version` and the shortcuts runs under its role's word:
 - A failed command prints `wherry: <error>` on standard error and exits
   with status 1. `result`, and `submit --wait`, have their own [exit codes](#exit-codes).
 - Durations use Go syntax, such as `90s`, `45m` or `720h`, and must be
-  positive. [`receiver remove`](#wherry-operator-receiver-remove-receiver)
-  gives the rules for `--wait`.
+  positive. [`remove`](#wherry-operator-remove) gives the rules for
+  `--timeout`.
 - `cancel`, `result`, `status`, `events` and `logs` print
   `skipped N unverifiable records` on standard error when N records of the
   run fail verification.
@@ -120,19 +123,57 @@ writes its `operator.yaml`; every other command reads it and connects as
 operator init`. [Working directory](configuration-operator.md#operator-working-directory)
 lists what the directory holds.
 
+Every operator command is `wherry operator <verb>`, one level deep, with the
+object it acts on as a resource flag: `--pool POOL`, `--receiver RECEIVER`,
+`--tenant TENANT`, or `--host HOST` beside the `--tenant` the host belongs
+to. The verbs are `init`, `check`, `view`, `list`, `show`, `apply`, `add`,
+`remove`, `allow`, `deny`, `suspend`, `resume`, `rotate` and `storage`.
+Resources are flags because a verb spans kinds: `apply` takes a
+pool or a receiver, `remove` a tenant, a host or a receiver. A verb whose
+operand is only ever one kind takes it positionally, as `list tenants`, `host
+init BUNDLE` and `result RUN_ID` do. A missing, extra, mixed, repeated or
+empty resource flag fails with the verb's usage, which lists its accepted
+forms. Each form takes the options its section states and no other; one it
+does not take fails with `unknown option --<name>`. This table maps the
+forms before v0.2.0 to today's; [Upgrade](upgrade.md#command-grammar) lists
+the break.
+
+| Before | Now |
+| --- | --- |
+| `wherry operator tenant list` | `wherry operator list tenants`; `list hosts [--tenant T]` for its host lines |
+| `wherry operator receiver show RECEIVER` | `wherry operator show --receiver RECEIVER` |
+| `wherry operator pool apply POOL [-f PATH] [--dry-run]` | `wherry operator apply --pool POOL [--file PATH] [--dry-run]` |
+| `wherry operator receiver apply RECEIVER [-f PATH] [--dry-run]` | `wherry operator apply --receiver RECEIVER [--file PATH] [--dry-run]` |
+| `wherry operator receiver apply RECEIVER --force` | `wherry operator apply --receiver RECEIVER --force` |
+| `wherry operator tenant add TENANT` | `wherry operator add --tenant TENANT` |
+| `wherry operator tenant host add TENANT HOST [--force]` | `wherry operator add --host HOST --tenant TENANT [--force]` |
+| `wherry operator tenant pool add TENANT POOL` | `wherry operator allow --tenant TENANT --pool POOL` |
+| `wherry operator tenant pool remove TENANT POOL` | `wherry operator deny --tenant TENANT --pool POOL` |
+| `wherry operator tenant remove TENANT` | `wherry operator remove --tenant TENANT` |
+| `wherry operator tenant host remove TENANT HOST [--wait D]` | `wherry operator remove --host HOST --tenant TENANT [--timeout D]` |
+| `wherry operator receiver remove RECEIVER [--wait D]` | `wherry operator remove --receiver RECEIVER [--timeout D]` |
+| `wherry operator pool suspend POOL` | `wherry operator suspend --pool POOL` |
+| `wherry operator pool resume POOL` | `wherry operator resume --pool POOL` |
+| `wherry operator pool rotate-key POOL [--suspect-key KID]...` | `wherry operator rotate --pool POOL [--suspect-key KID]...` |
+| `wherry operator tenant storage TENANT [-]` | `wherry operator storage --tenant TENANT [-]` |
+| `wherry operator tenant host refresh TENANT HOST` | `wherry operator rotate --tenant TENANT --host HOST --storage` |
+| `wherry host key rotate` | `wherry host rotate --key` |
+| `wherry receiver run --rotate-key` | `wherry receiver rotate --key`, a one-shot run while the receiver is stopped |
+| `wherry host logs RUN_ID -f` | `wherry host logs RUN_ID --follow` |
+
 `wherry operator` writes every `wherry.operator` record as
 `wherry.operator`, creating `wherry.operator` first if it is missing.
-`pool apply --dry-run` creates nothing, and reads a missing
+`apply --dry-run` creates nothing, and reads a missing
 `wherry.operator` as holding no records. Options parse as Go flags,
 in the forms `--name value`, `--name=value` and `-name value`, and the last of
-a repeated option wins. Options other than `--dry-run` and `--force` take a
+a repeated option other than a resource flag wins. Options other than `--dry-run` and `--force` take a
 value, and options can appear anywhere after `operator`. An option without a
-value fails with `flag needs an argument: -<name>`, one no operator command
+value fails with `flag needs an argument: -<name>`, or with the verb's usage when it is a resource flag, one no operator command
 takes with `flag provided but not defined: -<name>`, and one the command does
 not take with `unknown option --<name>`. `--suspect-key` is given once per key;
 any other repeated option takes its last value.
 
-Every operator command other than `init`, `check`, `receiver show`, `tenant list`
+Every operator command other than `init`, `check`, `view`, `show`, `list`
 and a `--dry-run` ends by converging Kafka on `wherry.operator`. A pass reads
 `wherry.operator` to its end and creates every ACL those records call for. It
 re-reads them and fails with `ACL plan incomplete` when one is missing. It
@@ -148,12 +189,12 @@ states what this guarantees.
 
 A recorded profile's signature topic exists before its record. A topic
 missing afterwards was deleted outside wherry: `operator check` names it, and
-`pool apply` of the pool with the same terms recreates it before its no-update
+`apply --pool` of the pool with the same terms recreates it before its no-update
 path. A receiver never creates a topic.
 
-`pool apply` and `receiver apply` read the object's file: `-f PATH`, else
+`apply --pool` and `apply --receiver` read the object's file: `--file PATH`, else
 `pools/<pool>.yaml` or `receivers/<receiver>.yaml` in the working directory.
-Either applies without a prompt. `-f PATH` names a file, or a directory,
+Either applies without a prompt. `--file PATH` names a file, or a directory,
 which selects the directory form of the
 [pool terms](configuration-operator.md#pool-terms) or
 [receiver configuration](configuration-receiver.md#receiver-configuration). With
@@ -167,22 +208,22 @@ creates no bundle directory. The pool and receiver object questions show one
 question per page under headings, with each answer collapsing to one line.
 Ctrl-C during those questions writes nothing.
 
-`tenant host add` and `receiver apply` write bundles under the working directory's
+`add --host` and `apply --receiver` write bundles under the working directory's
 `bundles/`: `bundles/hosts/<tenant>/<host>.bundle` and
 `bundles/receivers/<receiver>.bundle`, mode 0600, in directories mode 0700. A
 bundle holds the broker address, the principal and its password; its holder
 trusts the broker's certificate through its machine's trust store
 ([Broker and S3 trust](security.md#broker-and-s3-trust)). A host bundle also
 holds the tenant's S3 key pair as `storage` once
-[`tenant storage`](#wherry-operator-tenant-storage-tenant) recorded it; a
+[`storage`](#wherry-operator-storage) recorded it; a
 receiver bundle never does. Each command that writes or rewrites a bundle
 prints its path and the next step:
 `wherry host init <file>` for a host, and the platform's bundle step for a receiver.
-`tenant host add` refuses a host that exists unless given `--force`. `receiver apply` of a receiver that exists
+`add --host` refuses a host that exists unless given `--force`. `apply --receiver` of a receiver that exists
 updates its configuration, and replaces its bundle only when the broker
-address changed, keeping the password; `tenant host refresh` does
-the same for a host's bundle, the storage keys included. Without `--force`, `tenant host add` and
-`receiver apply` of a new receiver never replace a bundle: before they change
+address changed, keeping the password; `rotate --storage` does
+the same for a host's bundle, the storage keys included. Without `--force`, `add --host` and
+`apply --receiver` of a new receiver never replace a bundle: before they change
 anything in Kafka they create the bundle file, failing when a file is there,
 and write the bundle into it at the end. A
 command that fails leaves no bundle and no temporary file of its own, or, when
@@ -279,567 +320,6 @@ fail. A failure between steps 4 and 5 leaves `operator.password` holding the
 old password; running `init` again recovers. `init` always takes the super
 user from its flags or prompts, never from `operator.yaml`.
 
-### `wherry operator pool apply POOL`
-
-```sh
-wherry operator pool apply POOL [-f PATH] [--dry-run]
-```
-
-Creates the pool, or records new terms for it, from the
-[pool terms](configuration-operator.md#pool-terms) at `PATH` or in
-`pools/<pool>.yaml`. An agent named by a
-[credential catalog id](configuration-operator.md#catalog-agents) gets the
-model credentials its entry derives, before any it lists; the terms recorded
-are the expanded ones. The [guided path](#operator-commands) asks for the
-agents one at a time, each one's models and credentials, then the default agent
-from the entered names. After a catalog agent's name it prints the credentials
-the catalog derives and asks only for further ones. Each credential asks for its name, delivery as an
-environment variable or file, target, whether it is required, and an optional
-description. The remaining questions are `producer_byte_rate` (default
-1048576), `request_percentage` (default 10) and `start_by_limit` (default
-`72h0m0s`). You correct a refused value in place. Quotas must be positive and the
-start-by limit must be non-negative; apply enforces the tenant-feed retention
-and storage bounds.
-
-With no pool of that name, it records the terms, creates the pool's events,
-snapshot and receivers topics, and sets the configuration of its share group
-and topics. A new pool has no receivers, so it creates no task topic:
-`receiver apply` creates the signature topics of a receiver's profiles.
-
-| Resource | Settings |
-| --- | --- |
-| share group `p-<pool>` | `share.renew.acknowledge.enable=true`, `share.auto.offset.reset=earliest`, `share.isolation.level=read_committed`, `share.delivery.count.limit` from `delivery_limit` (default 5), `share.record.lock.duration.ms` from `lock_duration` (default `15s`) |
-| every task topic under `wherry.pool.<pool>.tasks.` | `retention.ms` of `start_by_limit` plus six hours plus one day, unless it is already longer; `message.timestamp.type=LogAppendTime`, `cleanup.policy=delete`, `retention.bytes=-1`, `segment.ms=3600000` |
-| events topic `wherry.pool.<pool>.events` | the greatest task topic's `retention.ms`, unless it is already longer; the task topics' other settings |
-| snapshot topic `wherry.pool.<pool>.custodian` | `cleanup.policy=compact`, `message.timestamp.type=LogAppendTime`, `retention.ms=-1` |
-| receivers topic `wherry.pool.<pool>.receivers` | `cleanup.policy=compact,delete`, `message.timestamp.type=LogAppendTime`, `retention.ms=604800000`, `segment.ms=3600000`, `max.compaction.lag.ms=3600000`, created when missing |
-| progress topic of each live receiver in the pool | the greatest task topic's `retention.ms`, or the terms' with none, unless it is already longer, created when missing |
-| feed and transcript topic of every tenant with a host or an entitlement | `max.message.bytes=2097152` (2 MiB), set before it measures the records |
-
-It sets these on new and existing topics. [Topics](design.md#topics-1) gives
-the reasons.
-
-It refuses, before it reads the broker, terms whose agent credentials
-break the [pool terms](configuration-operator.md#pool-terms) rules, a
-catalog agent listing a credential the catalog derives for it, and a
-`start_by_limit` above 29 days and 18 hours. For a pool with `storage` it
-refuses a `start_by_limit` that with six hours and ten minutes added
-exceeds 7 days, the longest an S3 SigV4 presigned URL lasts, with
-`start_by_limit plus the 6h run cap and the 10m upload grace exceeds 7
-days, the longest an S3 SigV4 presigned URL lasts`: a run's upload policy
-lasts ten minutes past its `task_ended_by`. It
-refuses a delivery limit above the lowest
-`group.share.max.delivery.count.limit` across the brokers, and terms whose
-[records do not fit the broker](configuration-operator.md#record-limit). Before it
-records anything it refuses a `lock_duration` above the brokers'
-`group.share.max.record.lock.duration.ms`, naming the field and the ceiling,
-and a `start_by_limit` that with six hours added exceeds the `retention.ms`
-of the feed or transcript topic of a tenant entitled to the pool. Before it
-records the terms it refuses a pool name that is not valid and an existing
-task or events topic with more than one partition. It creates and
-configures the pool's receivers topic before it records the terms, so a
-recorded pool always has one. It creates the other topics after it records
-the terms, which is when it checks the pool's names against every other
-recorded name. It fails when a topic configuration it
-sets is not applied within 10 seconds, or when a describe of it still fails
-then, naming the describe's error.
-
-For a pool of that name, before it records the terms, it creates the
-signature topic, under the new terms, of every recorded profile of each
-receiver in the pool whose membership has not ended, with the task topics'
-settings above, so a record never routes to a missing topic.
-
-With a pool of that name and other terms, it records the new terms, makes
-the checks and settings above, and sets the share group's `share.delivery.count.limit` and
-`share.record.lock.duration.ms` from the new terms. It first checks the recorded
-configuration of every receiver in the pool whose membership has not ended
-against the new terms, as `receiver apply` checks a new receiver, and refuses
-the terms when a plugin profile no longer fits, naming each receiver, plugin
-and profile and the reason. It sets the pool's topics before it records the terms, so a failure leaves the
-old terms in force, and never lowers their `retention.ms`: runs submitted
-under a longer `start_by_limit` keep their records. Receivers read the new terms from `wherry.operator`
-every 15 seconds, without a restart; a slow or failed read delays the update. A lowered
-`delivery_limit` applies to a task in flight at its next release.
-
-With a pool of that name and the terms recorded, it completes the pool,
-creating any missing topics, the missing signature topic of each recorded
-profile of each receiver whose membership has not ended included, before its
-no-update path, as after an `apply` that failed once it recorded them. When the
-task topics'
-[record limit](configuration-operator.md#record-limit) has changed since, it records
-the terms again with the new limit.
-
-With `--dry-run`, it makes the same checks, among them the stranded
-receivers, the lock duration ceiling, the record limit and the partitions of
-an existing task or events topic, prints nothing, and creates and writes
-nothing in Kafka; it measures a tenant topic below 2 MiB as `apply` would
-set it. Terms it refuses fail in the same way with or without
-`--dry-run`.
-
-### `wherry operator tenant pool add TENANT POOL`
-
-```sh
-wherry operator tenant pool add TENANT POOL
-```
-
-Entitles an existing live tenant to an existing pool and grants the tenant's hosts and the pool's receivers their ACLs. An ended entitlement can be added again. A live entitlement converges, applies quotas and reports `already entitled` with exit status zero. It refuses when the pool's records do not fit the
-[record limit](configuration-operator.md#record-limit) with the tenant's feed and
-transcript topic counted, or when the `retention.ms` of either is below the
-pool's `start_by_limit` plus six hours, and records nothing. It applies
-each host's [quotas](configuration-operator.md#quotas).
-
-### `wherry operator pool suspend POOL`
-
-```sh
-wherry operator pool suspend POOL
-```
-
-Records a `suspend` record for the pool on `wherry.operator` and reconciles the
-ACLs. A suspended pool's tenants' hosts hold no `WRITE` on its task-topic
-prefix. The receivers keep `READ` on it, and every other ACL stays. A host refuses a
-submission to the pool with `pool POOL is suspended; submit again once it is
-resumed` before it resolves any
-credential or uploads any input. Receivers fetch nothing from the pool's
-share group, so they claim no task. The key custodian refuses the open
-request of a run whose job has not started with `pool suspended`; the
-claimant publishes `released` and releases the task, which waits in the
-queue. Open requests of runs adopting a started job are served. Runs
-already holding a claim renew it and continue to their terminal status, and
-their tasks are acknowledged as on an unsuspended pool. A suspension does
-not stop a running job or take back the credentials it holds: rotating them
-at their issuers does, and
-[`wherry operator receiver remove`](#wherry-operator-receiver-remove-receiver)
-stops a receiver. A key custodian that drains while the pool is
-suspended does not scan the task topics or re-key any task. It keeps its
-pool keys to their deadlines and logs
-`custodian: hand over to <receiver>: pool <pool> is suspended; its re-key scan waits for resume; keeping the pool keys to their deadlines`.
-The key custodian keeps rotating.
-
-The key custodian reads `wherry.operator` once at the start of each pass over
-the open requests and decides every request of the pass by that read. A
-pass begins once every attempt wrap of the previous pass committed. The
-first pass that reads the `suspend` record republishes the custodian's
-snapshot with `suspended_for` set to the record's `wherry.operator` offset,
-before it decides any request. The command returns once the key custodian
-has acknowledged: it waits up to 5 minutes for a snapshot whose
-`suspended_for` is at or above its record's offset, writing
-`waiting for pool <pool>'s key custodian to acknowledge the suspend record at wherry.operator offset <offset>, up to <time>`
-to standard error every 10 seconds, `<time>` being the time left of the 5
-minutes, then prints
-`pool <pool> is suspended: its key custodian acknowledged the suspend record at wherry.operator offset <offset>; no new start opens`.
-After that no new start opens. With no acknowledgement it fails with
-`pool <pool>'s suspend record is written at wherry.operator offset <offset>, but its key custodian did not acknowledge it within 5m0s; it is not yet in effect`.
-When the pool has no snapshot it returns at once with
-`pool <pool>'s suspend record is written at wherry.operator offset <offset>; the pool has no key custodian yet, so nothing opens until one reads it`.
-A custodian whose advertisement has gone stale is still awaited, since it can still open requests.
-
-### `wherry operator pool resume POOL`
-
-```sh
-wherry operator pool resume POOL
-```
-
-Records a `resume` record for the pool on `wherry.operator` and reconciles the
-ACLs, granting the hosts' `WRITE` on the task-topic prefix again. Receivers claim
-from the pool again at their next refresh of `wherry.operator`. The key
-custodian serves first starts from the pass that acknowledges the record
-with `resumed_for` in its snapshot, and the command waits for that
-acknowledgement as `pool suspend` does, printing
-`pool <pool> is resumed: its key custodian acknowledged the resume record at wherry.operator offset <offset>; first starts open again`.
-
-### `wherry operator pool rotate-key POOL [--suspect-key KID]...`
-
-```sh
-wherry operator pool rotate-key POOL [--suspect-key KID]...
-```
-
-Refuses a pool that is not suspended with `pool <pool> is not suspended; run
-wherry operator pool suspend <pool> first`. Otherwise records a `rotate-key`
-record for the pool on `wherry.operator`. The pool's key custodian publishes a
-`rotation` snapshot with a new key on its first pass after it reads a
-`rotate-key` record whose `wherry.operator` offset is above the `rotated_for`
-its current snapshot carries, as at its daily rotation. A snapshot with a
-new key carries as `rotated_for` the offset of the latest `rotate-key`
-record its custodian read, and every later snapshot carries it on; append
-times do not decide it. Hosts encrypt to the new key once they read that
-snapshot.
-
-The command waits up to 5 minutes for a snapshot whose `rotated_for` is at
-or above its record's offset, writing
-`waiting for pool <pool>'s key custodian to rotate for the request at wherry.operator offset <offset>, up to <time>`
-to standard error every 10 seconds, `<time>` being the time left of the 5
-minutes. With none, it fails with
-`pool <pool>'s key custodian published no snapshot rotated for the rotate-key request at wherry.operator offset <offset> within 5m0s; the request stands`.
-It then lists the pool's task topics once, freezing that set as the report's
-topics, captures each one's end offset, reads each as `wherry.operator`
-through that offset, and lists every retained task record whose submit
-wrap's `kid` is one of the suspect keys. The listing is an inventory of the
-topics that existed when the scan started, not a proof that no other was
-created after it. Without
-`--suspect-key` the suspect key is the key the current snapshot names when
-the command starts; the command refuses when the pool has no snapshot or its
-current snapshot does not verify. A task record is listed whether or not its
-signature verifies. The output names runs, tenants and credentials, and
-holds no credential value:
-
-```
-pool <pool>'s key custodian rotated for the rotate-key request; tasks appended through that rotation are listed
-suspect_keys=<kid>[,<kid>...]
-horizon topic=<topic> oldest_retained_offset=<offset>
-horizon topic=<topic>: retention deleted the tasks at offsets <offset> to <offset> during the scan; they may not be listed
-horizon: the oldest retained task was appended at <time>, <age> ago; tasks deleted by retention before it are not listed
-horizon: the task topics retain no task; tasks deleted by retention are not listed
-task run=<run> tenant=<tenant> key=<kid> credentials=<name>[,<name>...] appended=<time>
-tasks=<n>
-```
-
-Each topic's horizon, one line per listed topic, is its log start listed
-after the scan, since a fetch below the log start begins at the start then in
-effect. Where retention moved a topic's start during the scan, a second
-`horizon` line for that topic names the offsets it deleted, from the start
-listed before the scan. The last `horizon` line is the first form when the
-topics retain a task and the second when they retain none.
-
-The credential names are the task's own credentials and every credential
-any terms record of the pool on `wherry.operator` gives the task's agent,
-whatever the task's `supplied_credentials` names, so a task written before
-v0.1.2 is covered too. The list can name a credential the envelope did not
-hold; it never omits one it did, so rotating every listed credential covers
-the exposure.
-
-### `wherry operator tenant add TENANT`
-
-Records a new tenant and creates its feed and transcript topics at 2 MiB per record batch and its trace topic `wherry.traces.<tenant>` at 1 MiB ([Tracing](tracing.md#topics-and-grants)). Refuses a tenant that exists or has ended: a tenant name can never return.
-
-### `wherry operator tenant list`
-
-Lists live tenants with their pools and live hosts, in deterministic name order, as plain text. Revoking and ended hosts are omitted.
-
-### `wherry operator tenant storage TENANT`
-
-```sh
-wherry operator tenant storage TENANT
-printf '%s\n%s\n' "$ACCESS_KEY" "$SECRET_KEY" | wherry operator tenant storage TENANT -
-```
-
-Records the S3 access key and secret key the store's administrator issued
-for a live tenant, once, in `storage/<tenant>.yaml` under the working
-directory, mode 0600 in a directory mode 0700, and adds `storage/` to the
-directory's `.gitignore`. The pair goes into every host bundle of the tenant
-that `tenant host add`, `--force` or `tenant host refresh` writes from then
-on ([S3 storage](operations-hosts.md#s3-storage)), and into no Kafka record.
-It prints the file and, for each live host of the tenant, the `tenant host
-refresh` that puts the pair into its kept bundle.
-
-On a terminal it asks for the access key, then the secret key, each with a
-masked input that prints nothing back and no answer line, as `operator init`
-asks for the super user's password. With `-` it reads both from standard
-input, as a password manager pipes them: exactly two non-empty lines, the
-access key then the secret key, with or without a final line break. Both
-keys are checked before anything is written, and the file is replaced
-atomically, so a refusal or a failed write keeps the pair on file. Ctrl-C at
-either question writes nothing. No value reaches an error, the output or a
-record. It refuses:
-
-| Refused | Message |
-| --- | --- |
-| standard input that is a terminal, with `-`, before it is read | `standard input is a terminal; leave out - to be asked for the storage keys, or pipe them in, the access key then the secret key, one per line` |
-| standard input holding other than two non-empty lines | `standard input must hold exactly two lines: the access key, then the secret key` |
-| no terminal and no `-` | `tenant storage has no terminal to prompt on; pipe the access key and the secret key in, one per line, with -` |
-| a key that is empty or holds whitespace or a control character, which would sign every request wrong | a fixed message naming which key |
-| a tenant that is absent or has ended | `tenant absent; use tenant add first` or `tenant has ended` |
-
-A changed pair reaches a host only through its bundle: run `tenant host
-refresh TENANT HOST` for each host and redistribute, as
-[Rotate a tenant's storage keys](runbooks.md#rotate-a-tenant-s-storage-keys)
-walks through. `tenant host remove` and `tenant remove` leave the pair where
-it is; the store's administrator disables it.
-
-### `wherry operator tenant pool remove TENANT POOL`
-
-Ends the entitlement immediately and converges access grants. Recomputes each live host's minimum
-quotas across its remaining pools, deleting quotas when none remain. An absent or ended entitlement
-converges and applies quotas again, reports `not entitled`, and exits zero. Both pool commands
-refuse absent tenants (use `tenant add`) and ended tenants.
-
-### `wherry operator tenant remove TENANT`
-
-Ends every entitlement, deletes live hosts' quotas, revokes the tenant's hosts, then ends the tenant
-and removes `bundles/hosts/<tenant>/`. Each host revocation waits for its broker-derived minimum;
-removing a tenant with hosts takes time. Record appends and final convergences are sequential;
-hosts' revocation steps 2-5 run in parallel. Re-run after failure to continue, including on a
-revoking host. On an ended tenant, converges and retries bundle directory removal. Refuses an absent
-tenant. Removal revokes access; retained data and receiver grants remain. There is no `--wait`
-option on tenant removal.
-
-Tenant command states:
-
-| Command | Absent tenant | Live tenant | Ended tenant |
-| --- | --- | --- | --- |
-| `tenant add` | Create | Refuse: exists | Refuse: final |
-| `tenant pool add` | Refuse; use `tenant add` | Add or converge and apply quotas when already entitled | Refuse |
-| `tenant pool remove` | Refuse | End or converge and apply quotas when not entitled | Refuse |
-| `tenant storage` | Refuse | Record the pair in the working directory | Refuse |
-| `tenant host add` | Refuse | Add; reissue a live host with `--force`; refuse revoking or ended hosts | Refuse |
-| `tenant host refresh` | Refuse | Rewrite a live host's kept bundle; refuse revoking or ended hosts | Refuse |
-| `tenant host remove` | Refuse | Revoke; retry from its record; converge when already ended | Refuse |
-| `tenant remove` | Refuse | End entitlements, revoke hosts, end tenant, remove bundles | Converge and retry bundle removal |
-
-### `wherry operator tenant host add TENANT HOST`
-
-```sh
-wherry operator tenant host add TENANT HOST [--force]
-```
-
-Records a host of an existing live tenant, creates its principal and key topic, grants its ACLs, applies its quotas, and writes
-its bundle to `bundles/hosts/<tenant>/<host>.bundle`, naming the broker in
-`operator.yaml` and carrying the tenant's S3 key pair as `storage` when
-[`tenant storage`](#wherry-operator-tenant-storage-tenant) recorded one. It
-prints
-`wrote <bundle>; hand it to the host, where wherry host init <file> installs it`.
-It refuses a host that exists, and an existing bundle file,
-unless given [`--force`](#operator-commands). For a host that exists,
-`--force` reissues its identity: it records nothing and creates no topic. It
-reapplies the host's quotas and [converges](#operator-commands) the ACLs as
-every operator command does, so it also repairs a host add that failed after
-its record was written. A revoking host or a host whose membership ended is refused, including with `--force`. Host names are unique
-within a tenant; hosts of the same name in other tenants have bundles of
-their own. A storage keys file that cannot be read refuses the add before
-anything changes in Kafka.
-
-### `wherry operator tenant host refresh TENANT HOST`
-
-```sh
-wherry operator tenant host refresh TENANT HOST
-```
-
-Rewrites the kept bundle, `bundles/hosts/<tenant>/<host>.bundle`, of a live
-host with the broker in `operator.yaml` and the tenant's S3 key pair as
-`storage`, keeping the principal and password. A new broker address or a
-rotated pair so reaches the host without a new password. It prints `refreshed <bundle>` with the
-next step when the bundle changed, or `<bundle> is current`. A rerun
-changes nothing, so a refresh interrupted between a tenant's hosts is run
-again for each of them. Hand the refreshed bundle to the host as the first
-was. Its user runs `wherry host init BUNDLE`, which replaces the host's
-copy. It appends no record and changes nothing in Kafka. It refuses a
-tenant or host that does not exist, is revoking or has ended; a missing
-bundle, or a kept one carrying the CA earlier operators wrote
-([Upgrade](upgrade.md#broker-trust)), naming
-`tenant host add TENANT HOST --force`, which reissues the host with a new
-password; and a bundle that is another principal's.
-
-### `wherry operator receiver apply RECEIVER`
-
-```sh
-wherry operator receiver apply RECEIVER [-f PATH] [--dry-run]
-wherry operator receiver apply RECEIVER --force
-```
-
-Reads the [receiver configuration](configuration-receiver.md#receiver-configuration)
-from `PATH` or `receivers/<receiver>.yaml`, a directory or a single file, and
-validates it against the pool's terms. Its `pool` names the receiver's pool;
-its `plugin_sha256` pins, for each plugin type, the SHA-256 of that type's
-binary as lowercase hex: the line for the binary in the plugin release's
-signed `checksums.txt` ([Install plugins](operations-receivers.md#install-plugins)).
-Every plugin type in the configuration needs a pin, and a pin that is not 64
-lowercase hex digits is an error; apply refuses such a file and records
-nothing. Its `broker` is the address the receiver's bundle
-names, the broker in `operator.yaml` when it is empty.
-
-The [guided path](#operator-commands) asks, in order:
-
-1. The pool, picked from the pools the operator has recorded, or another
-   name. An existing receiver's pool is listed first and selected.
-2. The plugin type, picked from `nomad` (selected), `kubernetes` and
-   `systemd`, or another name.
-3. The plugin's pin, 64 lowercase hex digits.
-4. The plugin's `config` as a YAML flow mapping (default `{}`). A blank
-   answer, `null` or `~` writes `config: {}`. A null at any depth, and a
-   `credential` that is not a valid name, are refused.
-5. One plugin profile at a time, at least one. Each asks for its agent,
-   picked from the pool's recorded agents, or another name; the profile is
-   named after its agent, and an agent that already has a profile is refused.
-   It then asks for labels one at a time as `KEY=VALUE`, a blank answer
-   ending the list; a key the profile already has is refused.
-6. The broker address the receiver connects to (default the operator's),
-   checked as `operator init` checks its broker.
-
-The guided path shows why it refuses a value on the same page, before it
-writes the file; you correct the value and continue. Apply still checks the
-written file, and a refused apply leaves it to correct.
-
-Before recording, you provide the receiver's [local configuration](configuration-receiver.md#generate-or-provide-the-local-configuration).
-Wherry uses `PATH/config.yaml` with `-f DIR` when present.
-Otherwise it uses `receivers/<receiver>.config.yaml` in your working directory.
-If absent, it asks in a terminal and writes that file with mode `0600`.
-Without a terminal, it fails naming the file and its fields.
-It checks each merged profile's credential source before provisioning.
-A provided local configuration is never rewritten.
-With `--dry-run`, standard error names the local file or says apply will ask.
-An absent local file does not prevent a dry run.
-With `--force`, it reissues the identity without reading local configuration.
-The local configuration questions come after the receiver's file is written.
-Ctrl-C or end of input there writes no local configuration and records no
-receiver, but keeps the receiver's file.
-
-With no receiver of that name, it records the configuration, creates the
-receiver's principal, key topic and progress topic,
-`wherry.receiver.<receiver>.progress`, and the signature topic of each of its
-profiles under the pool's recorded terms, with the task topics'
-[settings](#wherry-operator-pool-apply-pool), grants its ACLs, and writes its
-bundle to `bundles/receivers/<receiver>.bundle`, printing `wrote <bundle>`
-and the next step: the bundle goes to the receiver's platform, whose
-install guide's bundle step installs it, and the receiver starts. It creates every topic before
-it appends the record, so a create that fails leaves no record. The file must name a
-`pool`. It creates the progress topic of every other live receiver in the
-pool that lacks one, and sets the
-[progress topic configuration](design.md#topics-1) on each existing one, never lowering its `retention.ms`.
-The bundle holds the receiver's Kafka identity alone; the receiver's machine
-trusts the broker's certificate through its trust store. The receiver's [local
-configuration](configuration-receiver.md#receiver-local-configuration) gives the
-sources of its [platform credentials](configuration-receiver.md#platform-credentials).
-With `--dry-run`, it makes the same checks and prints each plugin profile as
-the record would hold it, with the pins, in the format of `receiver show`, and creates and
-writes nothing.
-
-With a receiver of that name, it creates the signature topics of the new
-configuration's profiles under the pool's recorded terms, then records the
-new configuration in the receiver's pool. The file's `pool` may be empty and
-otherwise must name that pool. Tasks on a signature the new configuration no
-longer has wait unless another member shares it. The record holds only the pins the file gives, so give one for every
-plugin type. The principal and password stay as they are. When the file's
-broker address differs from the receiver's bundle in `bundles/receivers/`,
-it rewrites the bundle with the new address and the same password, so a new
-address reaches the receiver without a new password, and prints
-`refreshed <bundle>` with the next step: install it on the platform and
-restart the receiver. Without that bundle it records nothing and fails, naming the
-missing bundle and that `--force` gives the receiver a new password and
-bundle; a kept bundle carrying the CA earlier operators wrote is refused
-the same way, naming the key and `--force`
-([Upgrade](upgrade.md#broker-trust)), and one whose principal is
-another receiver's is refused before anything is recorded or rewritten,
-naming both principals.
-When the receiver reads a record that differs
-from the configuration it runs, it stops claiming, lets each run it holds
-end and commit with no time limit, then exits, and its platform restarts it.
-To apply a change at once, restart the receiver through its platform, as
-with `kubectl rollout restart`, `nomad alloc restart` or `systemctl
-restart`: it stops within its `drain_timeout` and its held runs are
-released to other receivers.
-
-With `--dry-run`, it reads and validates the configuration as it does to
-record it, against the receiver's pool's terms, and prints the resolution
-in the format of [`receiver show`](#wherry-operator-receiver-show-receiver),
-writing nothing. A configuration it refuses fails in the same way
-with or without `--dry-run`.
-
-With `--force`, it [reissues](#operator-commands) an existing receiver's
-identity and writes its new bundle, naming the broker of
-`receivers/<receiver>.yaml` when that file names one, else that of the
-receiver's existing bundle, else that of `operator.yaml`. It does not change the
-receiver's configuration record, and takes no `-f` or `--dry-run`.
-
-### `wherry operator receiver show RECEIVER`
-
-```sh
-wherry operator receiver show RECEIVER
-```
-
-Prints the receiver's liveness and recorded configuration as YAML: `status`,
-then `last_advertised` when it has advertised, then `plugin_sha256`, the SHA-256 pinned for each plugin type, then
-`profiles`, each plugin profile resolved, in recorded order, with its
-`name`, `plugin`, `agent`, `replicas` when above 1, `labels` and merged `config`, in that order
-([Plugin profile merge](configuration-receiver.md#plugin-profile-merge)),
-its `signature`, the agent and every label, double-quoted with each line
-feed shown as `\n`, and the signature's task `topic`:
-
-```yaml
-status: live
-last_advertised: 2026-11-20T09:41:07.312Z
-plugin_sha256:
-    nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-profiles:
-    - name: claude
-      plugin: nomad
-      agent: claude
-      labels:
-        platform: nomad
-      config:
-        address: https://nomad.example.com:4646
-        credential: nomad-token
-        runtime:
-            config:
-                image: registry.example.com/claude-agent:1.0
-            driver: docker
-      signature: "claude\nplatform=nomad\n"
-      topic: wherry.pool.build.tasks.claude.ef900330120d94dc0ea8292aaff80030aa744d924e6723016308bd36255e19a4
-```
-
-A `credential` key shows the credential's name, which is all the record
-holds; neither `show` nor `--dry-run` prints a credential value.
-
-`status` is what [`wherry host receivers`](#wherry-host-receivers) reports
-for the receiver, read the same way: the operator reads the pool's receivers
-topic and verifies each advertisement against the receiver's key topic.
-The receiver is `live` when its latest authorised advertisement is dated
-within 120 seconds of now, either side; `stale` when it is dated beyond that,
-in the past or the future; `silent` when it has none; and `ended` once
-revoked. `last_advertised` is that advertisement's time, in UTC, and is
-absent for a silent or ended receiver. The latest advertisement is the one
-with the latest date, so one dated ahead counts until that time passes. A
-`--dry-run` of `receiver apply` prints no status: the record it would hold
-has no receiver to be live.
-
-### `wherry operator tenant host remove TENANT HOST`
-
-```sh
-wherry operator tenant host remove TENANT HOST [--wait DURATION]
-```
-
-Runs the [revocation](concepts.md#revocation) steps for the host, as
-[`receiver remove`](#wherry-operator-receiver-remove-receiver) does for a
-receiver, and once they are complete deletes the host's bundle,
-`bundles/hosts/TENANT/HOST.bundle`.
-
-### `wherry operator receiver remove RECEIVER`
-
-```sh
-wherry operator receiver remove RECEIVER [--wait DURATION]
-```
-
-Runs the [revocation](concepts.md#revocation) steps. It prints one line per
-step as the step ends:
-
-```
-step=<n> complete=<bool> name=<step name>
-```
-
-The line of a failed step ends in ` error=<cause>`. It stops at the first
-incomplete step and fails with `revocation incomplete`. Before step 5 waits,
-it prints when the wait ends, in UTC:
-
-```
-step=5 started name=wait until=<RFC 3339 time>
-```
-
-Once the revocation is complete, it deletes the receiver's bundle,
-`bundles/receivers/RECEIVER.bundle`: its principal can never log in again.
-An incomplete revocation keeps the bundle, and a rerun deletes it once it
-finds the principal ended; a bundle already gone is no error. When the
-deletion itself fails, the command fails naming the file, with the
-revocation complete. The probe asks every
-broker for the metadata of the principal's own key topic, and step 3
-completes when every broker answers `TOPIC_AUTHORIZATION_FAILED`. While a
-broker still authorises the principal, step 3 probes again every second for
-up to 2 minutes, and retries a refused login within the same 2 minutes. It
-fails at once when the probe returns any other error. Step 5 waits the largest of
-`connections.max.reauth.ms`, `group.share.max.record.lock.duration.ms` and
-`transaction.max.timeout.ms` across the brokers, and fails when one of them
-is unbounded. `--wait DURATION` lengthens that wait and cannot shorten it.
-The command refuses a `--wait` of zero or less before it revokes anything,
-and step 1 refuses a duration below the minimum, naming it, before it
-records anything.
-
 ### `wherry operator check`
 
 ```sh
@@ -853,7 +333,7 @@ Loads `wherry.operator` and checks, in order:
 - that every pool's [records still fit the broker](configuration-operator.md#record-limit);
 - that every profile of each receiver whose membership has not ended has its
   signature topic, naming the receiver, the profile and the topic, and that
-  `pool apply` of the pool with the same terms creates it;
+  `apply --pool` of the pool with the same terms creates it;
 - topic retention and timestamp type against the [bounds](design.md#topics-1):
   `retention.ms=-1` on `wherry.operator` and every host and receiver key
   topic, and `message.timestamp.type=LogAppendTime` on every topic under each
@@ -929,12 +409,619 @@ time on standard error. `--external-url` names the https or http origin a revers
 view never produces to Kafka. [Operator view](operator-view.md) describes the model, its bounds, freshness, the API
 and running it behind a proxy.
 
-## Receiver command
+### `wherry operator list`
+
+```sh
+wherry operator list tenants
+wherry operator list pools
+wherry operator list receivers
+wherry operator list hosts [--tenant TENANT]
+```
+
+Lists what `wherry.operator` records, as plain text in deterministic name
+order, and changes nothing. `list tenants` prints each live tenant's name on
+a line of its own, then `  pool <pool>` for each pool it is entitled to and
+`  host <host>` for each of its live hosts, two spaces indented:
+
+```
+acme
+  pool build
+  host laptop
+```
+
+`list hosts` prints the same tenant lines with their `  host <host>` lines
+alone, so a tenant without a live host is its name and nothing under it;
+`--tenant TENANT` restricts it to that tenant, and refuses one that is absent
+or has ended with `no tenant by that name`. `list pools` prints each recorded
+pool's name on a line, suspended pools included. `list receivers` prints the
+name of each live receiver. A host or receiver is live until its removal
+starts: revoking and ended ones are omitted from every form, as are ended
+tenants.
+
+### `wherry operator show`
+
+```sh
+wherry operator show --receiver RECEIVER
+```
+
+Prints the receiver's liveness and recorded configuration as YAML: `status`,
+then `last_advertised` when it has advertised, then `plugin_sha256`, the SHA-256 pinned for each plugin type, then
+`profiles`, each plugin profile resolved, in recorded order, with its
+`name`, `plugin`, `agent`, `replicas` when above 1, `labels` and merged `config`, in that order
+([Plugin profile merge](configuration-receiver.md#plugin-profile-merge)),
+its `signature`, the agent and every label, double-quoted with each line
+feed shown as `\n`, and the signature's task `topic`:
+
+```yaml
+status: live
+last_advertised: 2026-11-20T09:41:07.312Z
+plugin_sha256:
+    nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+profiles:
+    - name: claude
+      plugin: nomad
+      agent: claude
+      labels:
+        platform: nomad
+      config:
+        address: https://nomad.example.com:4646
+        credential: nomad-token
+        runtime:
+            config:
+                image: registry.example.com/claude-agent:1.0
+            driver: docker
+      signature: "claude\nplatform=nomad\n"
+      topic: wherry.pool.build.tasks.claude.ef900330120d94dc0ea8292aaff80030aa744d924e6723016308bd36255e19a4
+```
+
+A `credential` key shows the credential's name, which is all the record
+holds; neither `show` nor `--dry-run` prints a credential value.
+
+`status` is what [`wherry host receivers`](#wherry-host-receivers) reports
+for the receiver, read the same way: the operator reads the pool's receivers
+topic and verifies each advertisement against the receiver's key topic.
+The receiver is `live` when its latest authorised advertisement is dated
+within 120 seconds of now, either side; `stale` when it is dated beyond that,
+in the past or the future; `silent` when it has none; and `ended` once
+revoked. `last_advertised` is that advertisement's time, in UTC, and is
+absent for a silent or ended receiver. The latest advertisement is the one
+with the latest date, so one dated ahead counts until that time passes. A
+`--dry-run` of `apply --receiver` prints no status: the record it would hold
+has no receiver to be live.
+
+### `wherry operator apply`
+
+```sh
+wherry operator apply --pool POOL [--file PATH] [--dry-run]
+wherry operator apply --receiver RECEIVER [--file PATH] [--dry-run]
+wherry operator apply --receiver RECEIVER --force
+```
+
+`apply` creates or updates the object its resource flag names from that
+object's file, and `--receiver R --force` reissues an existing receiver's
+identity; `--force` takes no `--file` or `--dry-run`.
+
+#### `apply --pool POOL`
+
+Creates the pool, or records new terms for it, from the
+[pool terms](configuration-operator.md#pool-terms) at `PATH` or in
+`pools/<pool>.yaml`. An agent named by a
+[credential catalog id](configuration-operator.md#catalog-agents) gets the
+model credentials its entry derives, before any it lists; the terms recorded
+are the expanded ones. The [guided path](#operator-commands) asks for the
+agents one at a time, each one's models and credentials, then the default agent
+from the entered names. After a catalog agent's name it prints the credentials
+the catalog derives and asks only for further ones. Each credential asks for its name, delivery as an
+environment variable or file, target, whether it is required, and an optional
+description. The remaining questions are `producer_byte_rate` (default
+1048576), `request_percentage` (default 10) and `start_by_limit` (default
+`72h0m0s`). You correct a refused value in place. Quotas must be positive and the
+start-by limit must be non-negative; apply enforces the tenant-feed retention
+and storage bounds.
+
+With no pool of that name, it records the terms, creates the pool's events,
+snapshot and receivers topics, and sets the configuration of its share group
+and topics. A new pool has no receivers, so it creates no task topic:
+`apply --receiver` creates the signature topics of a receiver's profiles.
+
+| Resource | Settings |
+| --- | --- |
+| share group `p-<pool>` | `share.renew.acknowledge.enable=true`, `share.auto.offset.reset=earliest`, `share.isolation.level=read_committed`, `share.delivery.count.limit` from `delivery_limit` (default 5), `share.record.lock.duration.ms` from `lock_duration` (default `15s`) |
+| every task topic under `wherry.pool.<pool>.tasks.` | `retention.ms` of `start_by_limit` plus six hours plus one day, unless it is already longer; `message.timestamp.type=LogAppendTime`, `cleanup.policy=delete`, `retention.bytes=-1`, `segment.ms=3600000` |
+| events topic `wherry.pool.<pool>.events` | the greatest task topic's `retention.ms`, unless it is already longer; the task topics' other settings |
+| snapshot topic `wherry.pool.<pool>.custodian` | `cleanup.policy=compact`, `message.timestamp.type=LogAppendTime`, `retention.ms=-1` |
+| receivers topic `wherry.pool.<pool>.receivers` | `cleanup.policy=compact,delete`, `message.timestamp.type=LogAppendTime`, `retention.ms=604800000`, `segment.ms=3600000`, `max.compaction.lag.ms=3600000`, created when missing |
+| progress topic of each live receiver in the pool | the greatest task topic's `retention.ms`, or the terms' with none, unless it is already longer, created when missing |
+| feed and transcript topic of every tenant with a host or an entitlement | `max.message.bytes=2097152` (2 MiB), set before it measures the records |
+
+It sets these on new and existing topics. [Topics](design.md#topics-1) gives
+the reasons.
+
+It refuses, before it reads the broker, terms whose agent credentials
+break the [pool terms](configuration-operator.md#pool-terms) rules, a
+catalog agent listing a credential the catalog derives for it, and a
+`start_by_limit` above 29 days and 18 hours. For a pool with `storage` it
+refuses a `start_by_limit` that with six hours and ten minutes added
+exceeds 7 days, the longest an S3 SigV4 presigned URL lasts, with
+`start_by_limit plus the 6h run cap and the 10m upload grace exceeds 7
+days, the longest an S3 SigV4 presigned URL lasts`: a run's upload policy
+lasts ten minutes past its `task_ended_by`. It
+refuses a delivery limit above the lowest
+`group.share.max.delivery.count.limit` across the brokers, and terms whose
+[records do not fit the broker](configuration-operator.md#record-limit). Before it
+records anything it refuses a `lock_duration` above the brokers'
+`group.share.max.record.lock.duration.ms`, naming the field and the ceiling,
+and a `start_by_limit` that with six hours added exceeds the `retention.ms`
+of the feed or transcript topic of a tenant entitled to the pool. Before it
+records the terms it refuses a pool name that is not valid and an existing
+task or events topic with more than one partition. It creates and
+configures the pool's receivers topic before it records the terms, so a
+recorded pool always has one. It creates the other topics after it records
+the terms, which is when it checks the pool's names against every other
+recorded name. It fails when a topic configuration it
+sets is not applied within 10 seconds, or when a describe of it still fails
+then, naming the describe's error.
+
+For a pool of that name, before it records the terms, it creates the
+signature topic, under the new terms, of every recorded profile of each
+receiver in the pool whose membership has not ended, with the task topics'
+settings above, so a record never routes to a missing topic.
+
+With a pool of that name and other terms, it records the new terms, makes
+the checks and settings above, and sets the share group's `share.delivery.count.limit` and
+`share.record.lock.duration.ms` from the new terms. It first checks the recorded
+configuration of every receiver in the pool whose membership has not ended
+against the new terms, as `apply --receiver` checks a new receiver, and refuses
+the terms when a plugin profile no longer fits, naming each receiver, plugin
+and profile and the reason. It sets the pool's topics before it records the terms, so a failure leaves the
+old terms in force, and never lowers their `retention.ms`: runs submitted
+under a longer `start_by_limit` keep their records. Receivers read the new terms from `wherry.operator`
+every 15 seconds, without a restart; a slow or failed read delays the update. A lowered
+`delivery_limit` applies to a task in flight at its next release.
+
+With a pool of that name and the terms recorded, it completes the pool,
+creating any missing topics, the missing signature topic of each recorded
+profile of each receiver whose membership has not ended included, before its
+no-update path, as after an `apply` that failed once it recorded them. When the
+task topics'
+[record limit](configuration-operator.md#record-limit) has changed since, it records
+the terms again with the new limit.
+
+With `--dry-run`, it makes the same checks, among them the stranded
+receivers, the lock duration ceiling, the record limit and the partitions of
+an existing task or events topic, prints nothing, and creates and writes
+nothing in Kafka; it measures a tenant topic below 2 MiB as `apply` would
+set it. Terms it refuses fail in the same way with or without
+`--dry-run`.
+
+#### `apply --receiver RECEIVER`
+
+Reads the [receiver configuration](configuration-receiver.md#receiver-configuration)
+from `PATH` or `receivers/<receiver>.yaml`, a directory or a single file, and
+validates it against the pool's terms. Its `pool` names the receiver's pool;
+its `plugin_sha256` pins, for each plugin type, the SHA-256 of that type's
+binary as lowercase hex: the line for the binary in the plugin release's
+signed `checksums.txt` ([Install plugins](operations-receivers.md#install-plugins)).
+Every plugin type in the configuration needs a pin, and a pin that is not 64
+lowercase hex digits is an error; apply refuses such a file and records
+nothing. Its `broker` is the address the receiver's bundle
+names, the broker in `operator.yaml` when it is empty.
+
+The [guided path](#operator-commands) asks, in order:
+
+1. The pool, picked from the pools the operator has recorded, or another
+   name. An existing receiver's pool is listed first and selected.
+2. The plugin type, picked from `nomad` (selected), `kubernetes` and
+   `systemd`, or another name.
+3. The plugin's pin, 64 lowercase hex digits.
+4. The plugin's `config` as a YAML flow mapping (default `{}`). A blank
+   answer, `null` or `~` writes `config: {}`. A null at any depth, and a
+   `credential` that is not a valid name, are refused.
+5. One plugin profile at a time, at least one. Each asks for its agent,
+   picked from the pool's recorded agents, or another name; the profile is
+   named after its agent, and an agent that already has a profile is refused.
+   It then asks for labels one at a time as `KEY=VALUE`, a blank answer
+   ending the list; a key the profile already has is refused.
+6. The broker address the receiver connects to (default the operator's),
+   checked as `operator init` checks its broker.
+
+The guided path shows why it refuses a value on the same page, before it
+writes the file; you correct the value and continue. Apply still checks the
+written file, and a refused apply leaves it to correct.
+
+Before recording, you provide the receiver's [local configuration](configuration-receiver.md#generate-or-provide-the-local-configuration).
+Wherry uses `PATH/config.yaml` with `--file DIR` when present.
+Otherwise it uses `receivers/<receiver>.config.yaml` in your working directory.
+If absent, it asks in a terminal and writes that file with mode `0600`.
+Without a terminal, it fails naming the file and its fields.
+It checks each merged profile's credential source before provisioning.
+A provided local configuration is never rewritten.
+With `--dry-run`, standard error names the local file or says apply will ask.
+An absent local file does not prevent a dry run.
+With `--force`, it reissues the identity without reading local configuration.
+The local configuration questions come after the receiver's file is written.
+Ctrl-C or end of input there writes no local configuration and records no
+receiver, but keeps the receiver's file.
+
+With no receiver of that name, it records the configuration, creates the
+receiver's principal, key topic and progress topic,
+`wherry.receiver.<receiver>.progress`, and the signature topic of each of its
+profiles under the pool's recorded terms, with the task topics'
+[settings](#wherry-operator-apply), grants its ACLs, and writes its
+bundle to `bundles/receivers/<receiver>.bundle`, printing `wrote <bundle>`
+and the next step: the bundle goes to the receiver's platform, whose
+install guide's bundle step installs it, and the receiver starts. It creates every topic before
+it appends the record, so a create that fails leaves no record. The file must name a
+`pool`. It creates the progress topic of every other live receiver in the
+pool that lacks one, and sets the
+[progress topic configuration](design.md#topics-1) on each existing one, never lowering its `retention.ms`.
+The bundle holds the receiver's Kafka identity alone; the receiver's machine
+trusts the broker's certificate through its trust store. The receiver's [local
+configuration](configuration-receiver.md#receiver-local-configuration) gives the
+sources of its [platform credentials](configuration-receiver.md#platform-credentials).
+With `--dry-run`, it makes the same checks and prints each plugin profile as
+the record would hold it, with the pins, in the format of `show`, and creates and
+writes nothing.
+
+With a receiver of that name, it creates the signature topics of the new
+configuration's profiles under the pool's recorded terms, then records the
+new configuration in the receiver's pool. The file's `pool` may be empty and
+otherwise must name that pool. Tasks on a signature the new configuration no
+longer has wait unless another member shares it. The record holds only the pins the file gives, so give one for every
+plugin type. The principal and password stay as they are. When the file's
+broker address differs from the receiver's bundle in `bundles/receivers/`,
+it rewrites the bundle with the new address and the same password, so a new
+address reaches the receiver without a new password, and prints
+`refreshed <bundle>` with the next step: install it on the platform and
+restart the receiver. Without that bundle it records nothing and fails, naming the
+missing bundle and that `--force` gives the receiver a new password and
+bundle; a kept bundle carrying the CA earlier operators wrote is refused
+the same way, naming the key and `--force`
+([Upgrade](upgrade.md#broker-trust)), and one whose principal is
+another receiver's is refused before anything is recorded or rewritten,
+naming both principals.
+When the receiver reads a record that differs
+from the configuration it runs, it stops claiming, lets each run it holds
+end and commit with no time limit, then exits, and its platform restarts it.
+To apply a change at once, restart the receiver through its platform, as
+with `kubectl rollout restart`, `nomad alloc restart` or `systemctl
+restart`: it stops within its `drain_timeout` and its held runs are
+released to other receivers.
+
+With `--dry-run`, it reads and validates the configuration as it does to
+record it, against the receiver's pool's terms, and prints the resolution
+in the format of [`show`](#wherry-operator-show),
+writing nothing. A configuration it refuses fails in the same way
+with or without `--dry-run`.
+
+With `--force`, it [reissues](#operator-commands) an existing receiver's
+identity and writes its new bundle, naming the broker of
+`receivers/<receiver>.yaml` when that file names one, else that of the
+receiver's existing bundle, else that of `operator.yaml`. It does not change the
+receiver's configuration record, and takes no `-f` or `--dry-run`.
+
+### `wherry operator add`
+
+```sh
+wherry operator add --tenant TENANT
+wherry operator add --host HOST --tenant TENANT [--force]
+```
+
+`add` records a new tenant, or a new host of a live tenant. Entitling the
+tenant to a pool is [`allow`](#wherry-operator-allow): a tenant cannot be
+added twice, so `add` does not take `--pool`.
+
+#### `add --tenant TENANT`
+
+Records a new tenant and creates its feed and transcript topics at 2 MiB per record batch and its trace topic `wherry.traces.<tenant>` at 1 MiB ([Tracing](tracing.md#topics-and-grants)). Refuses a tenant that exists or has ended: a tenant name can never return.
+
+#### `add --host HOST --tenant TENANT`
+
+Records a host of an existing live tenant, creates its principal and key topic, grants its ACLs, applies its quotas, and writes
+its bundle to `bundles/hosts/<tenant>/<host>.bundle`, naming the broker in
+`operator.yaml` and carrying the tenant's S3 key pair as `storage` when
+[`storage`](#wherry-operator-storage) recorded one. It
+prints
+`wrote <bundle>; hand it to the host, where wherry host init <file> installs it`.
+It refuses a host that exists, and an existing bundle file,
+unless given [`--force`](#operator-commands). For a host that exists,
+`--force` reissues its identity: it records nothing and creates no topic. It
+reapplies the host's quotas and [converges](#operator-commands) the ACLs as
+every operator command does, so it also repairs a host add that failed after
+its record was written. A revoking host or a host whose membership ended is refused, including with `--force`. Host names are unique
+within a tenant; hosts of the same name in other tenants have bundles of
+their own. A storage keys file that cannot be read refuses the add before
+anything changes in Kafka.
+
+### `wherry operator remove`
+
+```sh
+wherry operator remove --tenant TENANT
+wherry operator remove --host HOST --tenant TENANT [--timeout DURATION]
+wherry operator remove --receiver RECEIVER [--timeout DURATION]
+```
+
+`remove` ends the membership of the object its resource flag names:
+[revocation](concepts.md#revocation) for a host or a receiver, and for a
+tenant every entitlement, every host, then the tenant.
+
+#### `remove --tenant TENANT`
+
+Ends every entitlement, deletes live hosts' quotas, revokes the tenant's hosts, then ends the tenant
+and removes `bundles/hosts/<tenant>/`. Each host revocation waits for its broker-derived minimum;
+removing a tenant with hosts takes time. Record appends and final convergences are sequential;
+hosts' revocation steps 2-5 run in parallel. Re-run after failure to continue, including on a
+revoking host. On an ended tenant, converges and retries bundle directory removal. Refuses an absent
+tenant. Removal revokes access; retained data and receiver grants remain. There is no `--timeout`
+option on tenant removal.
+
+Tenant command states:
+
+| Command | Absent tenant | Live tenant | Ended tenant |
+| --- | --- | --- | --- |
+| `add --tenant` | Create | Refuse: exists | Refuse: final |
+| `allow` | Refuse; use `add --tenant` | Add or converge and apply quotas when already entitled | Refuse |
+| `deny` | Refuse | End or converge and apply quotas when not entitled | Refuse |
+| `storage` | Refuse | Record the pair in the working directory | Refuse |
+| `add --host` | Refuse | Add; reissue a live host with `--force`; refuse revoking or ended hosts | Refuse |
+| `rotate --storage` | Refuse | Rewrite a live host's kept bundle; refuse revoking or ended hosts | Refuse |
+| `remove --host` | Refuse | Revoke; retry from its record; converge when already ended | Refuse |
+| `remove --tenant` | Refuse | End entitlements, revoke hosts, end tenant, remove bundles | Converge and retry bundle removal |
+
+#### `remove --host HOST --tenant TENANT`
+
+Runs the [revocation](concepts.md#revocation) steps for the host, as
+[`remove --receiver`](#wherry-operator-remove) does for a
+receiver, and once they are complete deletes the host's bundle,
+`bundles/hosts/TENANT/HOST.bundle`.
+
+#### `remove --receiver RECEIVER`
+
+Runs the [revocation](concepts.md#revocation) steps. It prints one line per
+step as the step ends:
+
+```
+step=<n> complete=<bool> name=<step name>
+```
+
+The line of a failed step ends in ` error=<cause>`. It stops at the first
+incomplete step and fails with `revocation incomplete`. Before step 5 waits,
+it prints when the wait ends, in UTC:
+
+```
+step=5 started name=wait until=<RFC 3339 time>
+```
+
+Once the revocation is complete, it deletes the receiver's bundle,
+`bundles/receivers/RECEIVER.bundle`: its principal can never log in again.
+An incomplete revocation keeps the bundle, and a rerun deletes it once it
+finds the principal ended; a bundle already gone is no error. When the
+deletion itself fails, the command fails naming the file, with the
+revocation complete. The probe asks every
+broker for the metadata of the principal's own key topic, and step 3
+completes when every broker answers `TOPIC_AUTHORIZATION_FAILED`. While a
+broker still authorises the principal, step 3 probes again every second for
+up to 2 minutes, and retries a refused login within the same 2 minutes. It
+fails at once when the probe returns any other error. Step 5 waits the largest of
+`connections.max.reauth.ms`, `group.share.max.record.lock.duration.ms` and
+`transaction.max.timeout.ms` across the brokers, and fails when one of them
+is unbounded. `--timeout DURATION` lengthens that wait and cannot shorten it.
+The command refuses a `--timeout` of zero or less before it revokes anything,
+and step 1 refuses a duration below the minimum, naming it, before it
+records anything.
+
+### `wherry operator allow`
+
+```sh
+wherry operator allow --tenant TENANT --pool POOL
+```
+
+Entitles an existing live tenant to an existing pool and grants the tenant's hosts and the pool's receivers their ACLs. An ended entitlement can be added again. A live entitlement converges, applies quotas and reports `already entitled` with exit status zero. It refuses when the pool's records do not fit the
+[record limit](configuration-operator.md#record-limit) with the tenant's feed and
+transcript topic counted, or when the `retention.ms` of either is below the
+pool's `start_by_limit` plus six hours, and records nothing. It applies
+each host's [quotas](configuration-operator.md#quotas).
+
+### `wherry operator deny`
+
+```sh
+wherry operator deny --tenant TENANT --pool POOL
+```
+
+Ends the entitlement immediately and converges access grants. Recomputes each live host's minimum
+quotas across its remaining pools, deleting quotas when none remain. An absent or ended entitlement
+converges and applies quotas again, reports `not entitled`, and exits zero. Both pool commands
+refuse absent tenants (use `add --tenant`) and ended tenants.
+
+### `wherry operator suspend`
+
+```sh
+wherry operator suspend --pool POOL
+```
+
+Records a `suspend` record for the pool on `wherry.operator` and reconciles the
+ACLs. A suspended pool's tenants' hosts hold no `WRITE` on its task-topic
+prefix. The receivers keep `READ` on it, and every other ACL stays. A host refuses a
+submission to the pool with `pool POOL is suspended; submit again once it is
+resumed` before it resolves any
+credential or uploads any input. Receivers fetch nothing from the pool's
+share group, so they claim no task. The key custodian refuses the open
+request of a run whose job has not started with `pool suspended`; the
+claimant publishes `released` and releases the task, which waits in the
+queue. Open requests of runs adopting a started job are served. Runs
+already holding a claim renew it and continue to their terminal status, and
+their tasks are acknowledged as on an unsuspended pool. A suspension does
+not stop a running job or take back the credentials it holds: rotating them
+at their issuers does, and
+[`wherry operator remove --receiver`](#wherry-operator-remove)
+stops a receiver. A key custodian that drains while the pool is
+suspended does not scan the task topics or re-key any task. It keeps its
+pool keys to their deadlines and logs
+`custodian: hand over to <receiver>: pool <pool> is suspended; its re-key scan waits for resume; keeping the pool keys to their deadlines`.
+The key custodian keeps rotating.
+
+The key custodian reads `wherry.operator` once at the start of each pass over
+the open requests and decides every request of the pass by that read. A
+pass begins once every attempt wrap of the previous pass committed. The
+first pass that reads the `suspend` record republishes the custodian's
+snapshot with `suspended_for` set to the record's `wherry.operator` offset,
+before it decides any request. The command returns once the key custodian
+has acknowledged: it waits up to 5 minutes for a snapshot whose
+`suspended_for` is at or above its record's offset, writing
+`waiting for pool <pool>'s key custodian to acknowledge the suspend record at wherry.operator offset <offset>, up to <time>`
+to standard error every 10 seconds, `<time>` being the time left of the 5
+minutes, then prints
+`pool <pool> is suspended: its key custodian acknowledged the suspend record at wherry.operator offset <offset>; no new start opens`.
+After that no new start opens. With no acknowledgement it fails with
+`pool <pool>'s suspend record is written at wherry.operator offset <offset>, but its key custodian did not acknowledge it within 5m0s; it is not yet in effect`.
+When the pool has no snapshot it returns at once with
+`pool <pool>'s suspend record is written at wherry.operator offset <offset>; the pool has no key custodian yet, so nothing opens until one reads it`.
+A custodian whose advertisement has gone stale is still awaited, since it can still open requests.
+
+### `wherry operator resume`
+
+```sh
+wherry operator resume --pool POOL
+```
+
+Records a `resume` record for the pool on `wherry.operator` and reconciles the
+ACLs, granting the hosts' `WRITE` on the task-topic prefix again. Receivers claim
+from the pool again at their next refresh of `wherry.operator`. The key
+custodian serves first starts from the pass that acknowledges the record
+with `resumed_for` in its snapshot, and the command waits for that
+acknowledgement as `suspend` does, printing
+`pool <pool> is resumed: its key custodian acknowledged the resume record at wherry.operator offset <offset>; first starts open again`.
+
+### `wherry operator rotate`
+
+```sh
+wherry operator rotate --pool POOL [--suspect-key KID]...
+wherry operator rotate --tenant TENANT --host HOST --storage
+```
+
+`rotate` replaces a secret in use: a suspended pool's key, or with
+`--storage` the S3 key pair in a host's kept bundle. `--storage` is required
+with a host, and an empty `--suspect-key` is refused.
+
+#### `rotate --pool POOL`
+
+Refuses a pool that is not suspended with `pool <pool> is not suspended; run
+wherry operator suspend --pool <pool> first`. Otherwise records a `rotate-key`
+record for the pool on `wherry.operator`. The pool's key custodian publishes a
+`rotation` snapshot with a new key on its first pass after it reads a
+`rotate-key` record whose `wherry.operator` offset is above the `rotated_for`
+its current snapshot carries, as at its daily rotation. A snapshot with a
+new key carries as `rotated_for` the offset of the latest `rotate-key`
+record its custodian read, and every later snapshot carries it on; append
+times do not decide it. Hosts encrypt to the new key once they read that
+snapshot.
+
+The command waits up to 5 minutes for a snapshot whose `rotated_for` is at
+or above its record's offset, writing
+`waiting for pool <pool>'s key custodian to rotate for the request at wherry.operator offset <offset>, up to <time>`
+to standard error every 10 seconds, `<time>` being the time left of the 5
+minutes. With none, it fails with
+`pool <pool>'s key custodian published no snapshot rotated for the rotate-key request at wherry.operator offset <offset> within 5m0s; the request stands`.
+It then lists the pool's task topics once, freezing that set as the report's
+topics, captures each one's end offset, reads each as `wherry.operator`
+through that offset, and lists every retained task record whose submit
+wrap's `kid` is one of the suspect keys. The listing is an inventory of the
+topics that existed when the scan started, not a proof that no other was
+created after it. Without
+`--suspect-key` the suspect key is the key the current snapshot names when
+the command starts; the command refuses when the pool has no snapshot or its
+current snapshot does not verify. A task record is listed whether or not its
+signature verifies. The output names runs, tenants and credentials, and
+holds no credential value:
+
+```
+pool <pool>'s key custodian rotated for the rotate-key request; tasks appended through that rotation are listed
+suspect_keys=<kid>[,<kid>...]
+horizon topic=<topic> oldest_retained_offset=<offset>
+horizon topic=<topic>: retention deleted the tasks at offsets <offset> to <offset> during the scan; they may not be listed
+horizon: the oldest retained task was appended at <time>, <age> ago; tasks deleted by retention before it are not listed
+horizon: the task topics retain no task; tasks deleted by retention are not listed
+task run=<run> tenant=<tenant> key=<kid> credentials=<name>[,<name>...] appended=<time>
+tasks=<n>
+```
+
+Each topic's horizon, one line per listed topic, is its log start listed
+after the scan, since a fetch below the log start begins at the start then in
+effect. Where retention moved a topic's start during the scan, a second
+`horizon` line for that topic names the offsets it deleted, from the start
+listed before the scan. The last `horizon` line is the first form when the
+topics retain a task and the second when they retain none.
+
+The credential names are the task's own credentials and every credential
+any terms record of the pool on `wherry.operator` gives the task's agent,
+whatever the task's `supplied_credentials` names, so a task written before
+v0.1.2 is covered too. The list can name a credential the envelope did not
+hold; it never omits one it did, so rotating every listed credential covers
+the exposure.
+
+#### `rotate --tenant TENANT --host HOST --storage`
+
+Rewrites the kept bundle, `bundles/hosts/<tenant>/<host>.bundle`, of a live
+host with the broker in `operator.yaml` and the tenant's S3 key pair as
+`storage`, keeping the principal and password. A new broker address or a
+rotated pair so reaches the host without a new password. It prints `refreshed <bundle>` with the
+next step when the bundle changed, or `<bundle> is current`. A rerun
+changes nothing, so a refresh interrupted between a tenant's hosts is run
+again for each of them. Hand the refreshed bundle to the host as the first
+was. Its user runs `wherry host init BUNDLE`, which replaces the host's
+copy. It appends no record and changes nothing in Kafka. It refuses a
+tenant or host that does not exist, is revoking or has ended; a missing
+bundle, or a kept one carrying the CA earlier operators wrote
+([Upgrade](upgrade.md#broker-trust)), naming
+`add --host HOST --tenant TENANT --force`, which reissues the host with a new
+password; and a bundle that is another principal's.
+
+### `wherry operator storage`
+
+```sh
+wherry operator storage --tenant TENANT
+printf '%s\n%s\n' "$ACCESS_KEY" "$SECRET_KEY" | wherry operator storage --tenant TENANT -
+```
+
+Records the S3 access key and secret key the store's administrator issued
+for a live tenant, once, in `storage/<tenant>.yaml` under the working
+directory, mode 0600 in a directory mode 0700, and adds `storage/` to the
+directory's `.gitignore`. The pair goes into every host bundle of the tenant
+that `add --host`, `--force` or `rotate --storage` writes from then
+on ([S3 storage](operations-hosts.md#s3-storage)), and into no Kafka record.
+It prints the file and, for each live host of the tenant, the `rotate
+--storage` that puts the pair into its kept bundle.
+
+On a terminal it asks for the access key, then the secret key, each with a
+masked input that prints nothing back and no answer line, as `operator init`
+asks for the super user's password. With `-` it reads both from standard
+input, as a password manager pipes them: exactly two non-empty lines, the
+access key then the secret key, with or without a final line break. Both
+keys are checked before anything is written, and the file is replaced
+atomically, so a refusal or a failed write keeps the pair on file. Ctrl-C at
+either question writes nothing. No value reaches an error, the output or a
+record. It refuses:
+
+| Refused | Message |
+| --- | --- |
+| standard input that is a terminal, with `-`, before it is read | `standard input is a terminal; leave out - to be asked for the storage keys, or pipe them in, the access key then the secret key, one per line` |
+| standard input holding other than two non-empty lines | `standard input must hold exactly two lines: the access key, then the secret key` |
+| no terminal and no `-` | `storage has no terminal to prompt on; pipe the access key and the secret key in, one per line, with -` |
+| a key that is empty or holds whitespace or a control character, which would sign every request wrong | a fixed message naming which key |
+| a tenant that is absent or has ended | `tenant absent; use add --tenant first` or `tenant has ended` |
+
+A changed pair reaches a host only through its bundle: run `rotate --tenant
+TENANT --host HOST --storage` for each host and redistribute, as
+[Rotate a tenant's storage keys](runbooks.md#rotate-a-tenant-s-storage-keys)
+walks through. `remove --host` and `remove --tenant` leave the pair where
+it is; the store's administrator disables it.
+
+## Receiver commands
 
 ### `wherry receiver run`
 
 ```sh
-wherry receiver run [--config-file FILE] [--rotate-key]
+wherry receiver run [--config-file FILE]
 ```
 
 Runs a receiver as the principal of the bundle its [local
@@ -962,21 +1049,24 @@ time of the committed snapshot first read back naming it current, and its
 deadline.
 On start it:
 
-1. settles a leftover `signing.key.next` as a host command settles
-   [`<host_key>.next`](#wherry-host-key-rotate);
+1. takes an exclusive lock on `receiver.lock` in `state_dir`, held until it
+   exits, so a second receiver on the directory, or a
+   [`receiver rotate`](#wherry-receiver-rotate), fails with
+   `state directory <dir> is held by another receiver process`, and a lock
+   the file system refuses fails with `lock state directory <dir>` and its
+   error;
+   then settles a leftover `signing.key.next` as a host command settles
+   [`<host_key>.next`](#wherry-host-rotate);
 2. registers its public key on its key topic when the topic is empty, and
    fails when the topic holds another key;
-3. with `--rotate-key`, replaces `signing.key` as
-   [`wherry host key rotate`](#wherry-host-key-rotate) replaces the host key, through
-   `signing.key.next`, and logs `rotated key: old=<id> new=<id>`;
-4. waits for its configuration record on `wherry.operator` and validates it
+3. waits for its configuration record on `wherry.operator` and validates it
    against the pool's terms;
-5. for each plugin profile in turn, resolves its [platform
+4. for each plugin profile in turn, resolves its [platform
    credential](configuration-receiver.md#platform-credentials), starts its
    [plugin](#plugins) from `plugin_dir` when no earlier profile has, and
    configures the profile;
-6. reads its pool's events once, and starts advertising and claiming;
-7. joins the pool's custodian group, `p-<pool>.custodian`, on
+5. reads its pool's events once, and starts advertising and claiming;
+6. joins the pool's custodian group, `p-<pool>.custodian`, on
    `wherry.pool.<pool>.custodian` with its receiver ID as the static
    instance ID, and acts as the pool's key custodian while the group
    assigns it the topic's partition. A receiver whose membership ended
@@ -1035,7 +1125,32 @@ a custodian's drain ends within `drain_timeout` plus 5 seconds of the stop.
 
 A snapshot commit with an unknown outcome counts in
 `wherry_ambiguous_commits_total`. The custodian's suspended-pool drain logs
-the line [`pool suspend`](#wherry-operator-pool-suspend-pool) shows.
+the line [`suspend`](#wherry-operator-suspend) shows.
+
+### `wherry receiver rotate`
+
+```sh
+wherry receiver rotate --key [--config-file FILE]
+```
+
+Replaces the receiver's signing key while the receiver is stopped. It reads
+the local configuration as `run` does, connects as the bundle's principal and
+takes the lock `run` holds on `state_dir`, so beside a running receiver it
+fails with `state directory <dir> is held by another receiver process` and
+changes nothing, and a receiver started beside it fails the same way. It
+refuses a receiver that has never started, whose key topic is empty, with
+`receiver has never started, so it has no key to rotate: its first start
+registers one`, and a state directory whose key is not the key topic's
+current key, as a restored backup or the wrong volume holds, with `receiver
+key topic holds another key than the state directory`; neither writes
+anything. A rotation Kafka refuses for want of a grant fails with `denied
+rotate key` and Kafka's error. Otherwise it settles a leftover `signing.key.next`, writes
+the new key to `signing.key.next`, publishes a `rotate`
+[key record](a2a-extension-v1.md#key-records) signed by the old and new keys
+to the receiver's key topic, renames the file over `signing.key` as
+[`wherry host rotate --key`](#wherry-host-rotate) does, and prints
+`old_key_id=<id> new_key_id=<id>`. The procedure is stop, rotate, start:
+[Rotate a receiver key](operations-receivers.md#rotate-a-receiver-key).
 
 ### Plugins
 
@@ -1051,9 +1166,9 @@ names. When the receiver starts a plugin,
 [go-plugin's `SecureConfig`](https://pkg.go.dev/github.com/hashicorp/go-plugin#SecureConfig)
 checks the binary's SHA-256 against the pin the receiver's record holds for
 its type (`plugin_sha256` in the file
-[`receiver apply`](#wherry-operator-receiver-apply-receiver) reads). The receiver
+[`apply --receiver`](#wherry-operator-apply) reads). The receiver
 refuses a plugin whose type has no pin, with
-`plugin type <type> has no pinned SHA-256; set plugin_sha256.<type> in the receiver's file and run receiver apply`,
+`plugin type <type> has no pinned SHA-256; set plugin_sha256.<type> in the receiver's file and run apply --receiver`,
 and a binary whose SHA-256 differs, exiting with
 `profile <name>: plugin type <type>: <path> has SHA-256 <hex> and the pin is <hex>`.
 A type with no binary in the directory is a configuration error, and the
@@ -1313,9 +1428,14 @@ storage, the last only when the bundle carries no pair. Stdout carries only the 
 ID. Summary appears even with no entitlement, with the instruction to run
 init again once the operator entitles the tenant to a pool.
 
-### `wherry host key rotate`
+### `wherry host rotate`
 
-Replaces the host key with a new one:
+```sh
+wherry host rotate --key [--config-file FILE]
+```
+
+Replaces the host key with a new one; `--key` names the key, the one
+credential the command rotates:
 
 1. It refuses while a run this host submitted has a latest state that is
    not terminal, as `wherry status` shows it, and names those runs. A
@@ -1415,7 +1535,7 @@ credential, or a named optional one, with no value.
 Before it publishes, it folds the host's key topic and refuses when the host
 key is not the topic's current key, since receivers admit a task only under
 that key. When `<host_key>.next` exists, the next host command completes the
-interrupted `wherry host key rotate`; otherwise the host was re-keyed elsewhere
+interrupted `wherry host rotate --key`; otherwise the host was re-keyed elsewhere
 and needs `wherry host init` on a re-provisioned host.
 
 | Flag | Default | Meaning |
@@ -1651,7 +1771,7 @@ pool's receivers' profiles that launch the placed agent and satisfy the
 selector, read from each receiver's last advertisement, live or stale; an
 ended receiver does not count, and an undeclared profile limit is zero and
 sets none. The second is the pool's [record limit](configuration-operator.md#record-limit), which
-`pool apply` records in the terms: `submit` measures the signed submission
+`apply --pool` records in the terms: `submit` measures the signed submission
 record against it. `submit` applies the profile limit to the input files
 together, then the record limit to the record. Over either, a pool with
 storage and a configured host storage credential uploads every inline input
@@ -2060,23 +2180,23 @@ the highest earlier attempt that has them, as
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `-f`, `--follow` | off | print lines as the agent prints them, until the run ends |
+| `--follow` | off | print lines as the agent prints them, until the run ends |
 
 `logs` reads the lines from the tenant's transcript topic, from the
 first offset at or after one minute before the append time of the run's
 earliest echo on the tenant feed. Once the feed holds the run's terminal status, it reads the
 transcript topic to its last stable offset, and waits until that reaches the
 high watermark it lists after it sees the terminal, before it prints.
-Without `-f`, it prints the lines the topic holds and exits.
+Without `--follow`, it prints the lines the topic holds and exits.
 
-With `-f`, `logs` follows the tenant's transcript topic with one consumer
+With `--follow`, `logs` follows the tenant's transcript topic with one consumer
 from the run's echo, so each line prints as it is written, once and in
 order. When the run reaches a terminal status, it reads the transcript
 topic to the high watermark as above, prints the lines it has not printed,
 and exits with status 0.
 
 A run that ended with the wherry event `key-lost` never started, so it has
-no transcript. `logs -f` resubmits such a run of this host, as `submit`
+no transcript. `logs --follow` resubmits such a run of this host, as `submit`
 does. The replacement's lines are under its own run ID, which
 `wherry status RUN_ID` prints as `replaced_by=<id>`.
 

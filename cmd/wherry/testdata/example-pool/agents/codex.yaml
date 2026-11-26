@@ -1,3 +1,3 @@
 # Without models, a task names no model and the profile's command picks one.
-# codex is a catalog id: pool apply adds codex-api-key (CODEX_API_KEY), required.
+# codex is a catalog id: apply --pool adds codex-api-key (CODEX_API_KEY), required.
 name: codex

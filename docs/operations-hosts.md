@@ -3,7 +3,7 @@
 ## Enrol a host
 
 1. Ask your operator to create your tenant and entitle it to a pool.
-2. Ask for a host bundle from `wherry operator tenant host add TENANT HOST`.
+2. Ask for a host bundle from `wherry operator add --host HOST --tenant TENANT`.
    Your machine trusts the broker's certificate through its trust store, or through `ca_cert`, which
    `host init --ca-cert` writes ([Broker and S3 trust](security.md#broker-and-s3-trust)).
 3. Run `wherry host init HOST.bundle`.
@@ -31,7 +31,7 @@ For a host:
 3. Run the rotation:
 
    ```sh
-   wherry host key rotate
+   wherry host rotate --key
    ```
 
    It prints `old_key_id=<id> new_key_id=<id>`. It refuses while a run the
@@ -122,13 +122,13 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
    ```
 
    Record the pair once with
-   [`wherry operator tenant storage alice`](commands.md#wherry-operator-tenant-storage-tenant),
+   [`wherry operator storage --tenant alice`](commands.md#wherry-operator-storage),
    from its masked prompts or piped in with `-`. It lives in the operator's
    working directory, and every host bundle of the tenant carries it: the
    host's user installs the bundle with `wherry host init`, which asks
    nothing about storage, and the host uses the pair for every entitled
    pool with storage. Hosts added before the pair was recorded get it from
-   `wherry operator tenant host refresh alice HOST` and the redistributed
+   `wherry operator rotate --tenant alice --host HOST --storage` and the redistributed
    bundle. To change the pair, follow
    [Rotate a tenant's storage keys](runbooks.md#rotate-a-tenant-s-storage-keys).
 

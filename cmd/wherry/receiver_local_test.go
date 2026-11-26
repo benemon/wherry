@@ -385,7 +385,7 @@ func TestReceiverApplyAsksForCredentialsAlone(t *testing.T) {
 	service, _ := receiverApplyEnv(t)
 	without := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": "pool: pool-a\nplugin_sha256: {nomad: " + fakeSHA256 + "}\nplugins:\n  nomad:\n    profiles:\n      - name: a\n        agent: claude\n"}), "receiver.yaml")
 	var out bytes.Buffer
-	if err := runOperator([]string{"receiver", "apply", "r", "-f", without}, io.Discard, &out); err != nil {
+	if err := runOperator([]string{"apply", "--receiver", "r", "--file", without}, io.Discard, &out); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), filepath.Join("receivers", "r.config.yaml")+" is absent and no profile names a platform credential; the receiver runs without a file\n") {
@@ -401,7 +401,7 @@ func TestReceiverApplyAsksForCredentialsAlone(t *testing.T) {
 	named := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": "pool: pool-a\nplugin_sha256: {nomad: " + fakeSHA256 + "}\nplugins:\n  nomad:\n    profiles:\n      - name: a\n        agent: claude\n        config: {credential: nomad-token}\n"}), "receiver.yaml")
 	out.Reset()
 	scriptReceiver(t, &out, localForms("NOMAD_TOKEN")...)
-	if err := runOperator([]string{"receiver", "apply", "r", "-f", named}, io.Discard, &out); err != nil {
+	if err := runOperator([]string{"apply", "--receiver", "r", "--file", named}, io.Discard, &out); err != nil {
 		t.Fatal(err)
 	}
 	written, err := os.ReadFile(filepath.Join("receivers", "r.config.yaml"))
@@ -438,7 +438,7 @@ func TestReceiverLocalInterrupts(t *testing.T) {
 					return scripted(q, f)
 				}
 			}
-			err := runOperator([]string{"receiver", "apply", "r", "-f", file}, io.Discard, &out)
+			err := runOperator([]string{"apply", "--receiver", "r", "--file", file}, io.Discard, &out)
 			if !errors.Is(err, errInterrupted) {
 				t.Fatalf("interrupt: %v", err)
 			}
@@ -471,7 +471,7 @@ func TestReceiverLocalEligibility(t *testing.T) {
 			case "writer":
 				out = io.Discard
 			}
-			err := runOperator([]string{"receiver", "apply", "r", "-f", file}, io.Discard, out)
+			err := runOperator([]string{"apply", "--receiver", "r", "--file", file}, io.Discard, out)
 			want := filepath.Join("receivers", "r.config.yaml") + " does not exist and there is no terminal to prompt on; write it with a credentials source for nomad-token"
 			if err == nil || err.Error() != want {
 				t.Fatalf("eligibility error: %v", err)
@@ -486,7 +486,7 @@ func TestReceiverLocalFailedWriter(t *testing.T) {
 	old := promptsEligible
 	t.Cleanup(func() { promptsEligible = old })
 	promptsEligible = func(io.Writer) bool { return true }
-	if err := runOperator([]string{"receiver", "apply", "r", "-f", file}, io.Discard, failingPrompt{}); !errors.Is(err, io.ErrClosedPipe) {
+	if err := runOperator([]string{"apply", "--receiver", "r", "--file", file}, io.Discard, failingPrompt{}); !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("writer error: %v", err)
 	}
 	receiverUnapplied(t, service)
@@ -535,7 +535,7 @@ func TestReceiverLocalApplyRefusals(t *testing.T) {
 			}
 			before := end()
 			var out bytes.Buffer
-			err := runOperator([]string{"receiver", "apply", "r", "-f", file}, io.Discard, &out)
+			err := runOperator([]string{"apply", "--receiver", "r", "--file", file}, io.Discard, &out)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error = %v, want %s", err, test.want)
 			}
@@ -575,7 +575,7 @@ func TestReceiverLocalApplyDryRun(t *testing.T) {
 					scriptForms(t)
 				}
 				var stdout, stderr bytes.Buffer
-				if err := runOperator([]string{"receiver", "apply", "r", "-f", file, "--dry-run"}, &stdout, &stderr); err != nil {
+				if err := runOperator([]string{"apply", "--receiver", "r", "--file", file, "--dry-run"}, &stdout, &stderr); err != nil {
 					t.Fatal(err)
 				}
 				if !strings.Contains(stderr.String(), "receivers/r.config.yaml") {
@@ -594,11 +594,11 @@ func TestReceiverLocalApplyDryRun(t *testing.T) {
 					}
 					localFixture(t, ".", "r")
 				}
-				if err := runOperator([]string{"receiver", "apply", "r", "-f", file}, io.Discard, io.Discard); err != nil {
+				if err := runOperator([]string{"apply", "--receiver", "r", "--file", file}, io.Discard, io.Discard); err != nil {
 					t.Fatal(err)
 				}
 				var show bytes.Buffer
-				if err := runOperator([]string{"receiver", "show", "r"}, &show, io.Discard); err != nil {
+				if err := runOperator([]string{"show", "--receiver", "r"}, &show, io.Discard); err != nil {
 					t.Fatal(err)
 				}
 				// show reports the recorded receiver's liveness first; a dry run has no receiver to report on.

@@ -1669,7 +1669,7 @@
       "id": 39,
       "type": "table",
       "title": "Profiles and signature topics",
-      "description": "Each profile of each selected receiver, its signature topic, and whether it is in the receiver's current ready offers. receiver show maps a topic to its labels. Ready describes the desired subscription when claiming is permitted, not live Kafka membership.",
+      "description": "Each profile of each selected receiver, its signature topic, and whether it is in the receiver's current ready offers. wherry operator show --receiver maps a topic to its labels. Ready describes the desired subscription when claiming is permitted, not live Kafka membership.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

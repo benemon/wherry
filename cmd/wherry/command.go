@@ -26,17 +26,12 @@ import (
 const usage = `usage: wherry <command>
 
 operator:
-  wherry operator init
-  wherry operator pool apply|suspend|resume|rotate-key
-  wherry operator tenant add|list|storage|remove
-  wherry operator tenant pool add|remove
-  wherry operator tenant host add|refresh|remove
-  wherry operator receiver apply|show|remove
-  wherry operator check|view
+  wherry operator init|check|view
+  wherry operator list|show|apply|add|remove|allow|deny|suspend|resume|rotate|storage
 receiver:
-  wherry receiver run
+  wherry receiver run|rotate
 host:
-  wherry host init|key rotate|receivers|mcp
+  wherry host init|rotate|receivers|mcp
   wherry host submit|result|status|events|logs|cancel
 shortcuts for wherry host submit|result|status|events|logs|cancel:
   wherry submit|result|status|events|logs|cancel
@@ -99,7 +94,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 }
 
 func runHost(args []string, stdout, stderr io.Writer) error {
-	const hostUsage = "usage: wherry host <init|key rotate|receivers|mcp|submit|result|status|events|logs|cancel>"
+	const hostUsage = "usage: wherry host <init|rotate|receivers|mcp|submit|result|status|events|logs|cancel>"
 	if len(args) == 0 {
 		return errors.New(hostUsage)
 	}
@@ -133,19 +128,17 @@ func runHost(args []string, stdout, stderr io.Writer) error {
 			ca = &text
 		}
 		return hostInit(context.Background(), path, strings.Join(positional, ""), ca, stdout, stderr)
-	case "key":
-		const keyUsage = "usage: wherry host key rotate [--config-file FILE]"
-		if len(args) < 2 || args[1] != "rotate" {
-			return errors.New(keyUsage)
-		}
-		flags := flag.NewFlagSet("host key rotate", flag.ContinueOnError)
+	case "rotate":
+		const rotateUsage = "usage: wherry host rotate --key [--config-file FILE]"
+		flags := flag.NewFlagSet("host rotate", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		configFile := flags.String("config-file", "", "host configuration file")
-		if err := flags.Parse(args[2:]); err != nil {
+		key := flags.Bool("key", false, "replace the host's signing key")
+		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		if flags.NArg() != 0 {
-			return errors.New(keyUsage)
+		if flags.NArg() != 0 || !*key {
+			return errors.New(rotateUsage)
 		}
 		config, err := loadConfig(*configFile)
 		if err != nil {
@@ -223,7 +216,7 @@ func runReceivers(ctx context.Context, client *busclient.Host, args []string, st
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry host receivers [--json]")
+		return errors.New("usage: wherry host receivers [--json] [--config-file FILE]")
 	}
 	client, closeClient, err := commandClient(client, *configFile, stderr)
 	if err != nil {
@@ -310,7 +303,7 @@ func runCancel(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if len(positional) != 1 {
-		return errors.New("usage: wherry host cancel RUN_ID")
+		return errors.New("usage: wherry host cancel RUN_ID [--config-file FILE]")
 	}
 	client, closeClient, err := commandClient(client, *configFile, stderr)
 	if err != nil {
@@ -373,7 +366,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry host submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] --prompt TEXT|@FILE|@- [--git REMOTE[@REF]|. [--git-path PATH] [--git-changes bundle|patch|none] | --continue RUN_ID] [--input FILE|DIR]... [--credential NAME|NAME:file=FILE|NAME:env=VAR]... [--output NAME]... [--start-by TIME|DURATION] [--end-by TIME|DURATION] [--wait [--outputs-dir DIR]]")
+		return errors.New("usage: wherry host submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] --prompt TEXT|@FILE|@- [--git REMOTE[@REF]|. [--git-path PATH] [--git-changes bundle|patch|none] | --continue RUN_ID] [--input FILE|DIR]... [--credential NAME|NAME:file=FILE|NAME:env=VAR]... [--output NAME]... [--start-by TIME|DURATION] [--end-by TIME|DURATION] [--wait [--outputs-dir DIR]] [--config-file FILE]")
 	}
 	if wasSet(flags, "outputs-dir") && !*wait {
 		return errors.New("--outputs-dir requires --wait")
@@ -584,7 +577,7 @@ var stateCodes = map[wire.TaskState]int{
 const timeoutCode = 6
 
 func runWait(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
-	const waitUsage = "usage: wherry host result RUN_ID [--timeout DURATION] [--outputs-dir DIR]"
+	const waitUsage = "usage: wherry host result RUN_ID [--timeout DURATION] [--outputs-dir DIR] [--config-file FILE]"
 	flags := flag.NewFlagSet("result", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() {
@@ -711,7 +704,7 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if len(positional) > 1 {
-		return errors.New("usage: wherry host status [RUN_ID]")
+		return errors.New("usage: wherry host status [RUN_ID] [--config-file FILE]")
 	}
 	client, closeClient, err := commandClient(client, *configFile, stderr)
 	if err != nil {
@@ -759,7 +752,7 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 		warnSkipped(stderr, result.Skipped)
 		return nil
 	}
-	return errors.New("usage: wherry host status [RUN_ID]")
+	return errors.New("usage: wherry host status [RUN_ID] [--config-file FILE]")
 }
 
 // replyPreview reports whether part is the preview of result's verified reply, which prints whole in its place.
@@ -791,7 +784,7 @@ func runEvents(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if len(positional) != 1 {
-		return errors.New("usage: wherry host events RUN_ID")
+		return errors.New("usage: wherry host events RUN_ID [--config-file FILE]")
 	}
 	client, closeClient, err := commandClient(client, *configFile, stderr)
 	if err != nil {
@@ -826,13 +819,11 @@ func runEvents(ctx context.Context, client *busclient.Host, args []string, stdou
 }
 
 func runLogs(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
-	const logsUsage = "usage: wherry host logs RUN_ID [-f|--follow]"
+	const logsUsage = "usage: wherry host logs RUN_ID [--follow] [--config-file FILE]"
 	flags := flag.NewFlagSet("logs", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configFile := flags.String("config-file", "", "host configuration file")
-	var follow bool
-	flags.BoolVar(&follow, "f", false, "print lines as the agent prints them until the run ends")
-	flags.BoolVar(&follow, "follow", false, "print lines as the agent prints them until the run ends")
+	follow := flags.Bool("follow", false, "print lines as the agent prints them until the run ends")
 	positional, err := parseAnywhere(flags, args)
 	if err != nil {
 		return err
@@ -866,7 +857,7 @@ func runLogs(ctx context.Context, client *busclient.Host, args []string, stdout,
 			}
 		}
 	}
-	if follow {
+	if *follow {
 		stream := client.StreamTranscript(runID)
 		for {
 			transcript, err := stream.Next(ctx)

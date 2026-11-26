@@ -896,7 +896,7 @@ func devDefaultAgent(defaultHarness string, copied map[string]credential.Source)
 	return defaultHarness
 }
 
-// devTerms are pool dev's terms, in which a catalog agent lists no credential, since pool apply derives them, and mock's
+// devTerms are pool dev's terms, in which a catalog agent lists no credential, since apply --pool derives them, and mock's
 // explicit credential is required where up copied a source for it.
 func devTerms(agents []string, defaultHarness string, storage bool, copied map[string]credential.Source) operator.Terms {
 	optional := false
@@ -963,20 +963,20 @@ func devOperator(ctx context.Context, env devEnv, broker string) (*operator.Serv
 func devBootstrap(ctx context.Context, env devEnv, agents []string, sources map[string]credential.Source, service operator.Service) error {
 	instance, dir := env.instance, env.instance.env("operator")
 	if err := service.PoolApply(ctx, devPool, devTerms(agents, env.manifest.DefaultAgent, env.storage(), sources), false); err != nil {
-		return fmt.Errorf("pool apply: %w", err)
+		return fmt.Errorf("apply --pool: %w", err)
 	}
 	if err := service.TenantAdd(ctx, devTenant); err != nil {
-		return fmt.Errorf("tenant add: %w", err)
+		return fmt.Errorf("add --tenant: %w", err)
 	}
 	if err := service.TenantPoolAdd(ctx, devTenant, devPool); err != nil {
-		return fmt.Errorf("tenant pool add: %w", err)
+		return fmt.Errorf("allow: %w", err)
 	}
 	hostBundle, err := bundlePath(dir, "hosts", true, devTenant, devHost)
 	if err != nil {
 		return err
 	}
 	if err := service.HostAdd(ctx, devTenant, devHost, hostBundle, false); err != nil {
-		return fmt.Errorf("tenant host add: %w", err)
+		return fmt.Errorf("add --host: %w", err)
 	}
 	receiverBundle, err := bundlePath(dir, "receivers", true, devReceiver)
 	if err != nil {
@@ -985,7 +985,7 @@ func devBootstrap(ctx context.Context, env devEnv, agents []string, sources map[
 	receiver := operator.ReceiverConfig{Receiver: devReceiver, Pool: devPool, Profiles: devProfiles(env, agents),
 		PluginSHA256: map[string]string{"nomad": env.manifest.Plugin.SHA256}}
 	if err := service.ReceiverAdd(ctx, receiver, service.Broker, receiverBundle); err != nil {
-		return fmt.Errorf("receiver apply: %w", err)
+		return fmt.Errorf("apply --receiver: %w", err)
 	}
 	local := map[string]string{"bundle": receiverBundle, "state_dir": instance.env("receiver", "state"), "plugin_dir": instance.cache("plugins"), "ca_cert": env.caCert}
 	return writeYAML(instance.env("receiver", "config.yaml"), local)

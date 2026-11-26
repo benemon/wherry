@@ -43,7 +43,7 @@ ID in lowercase hex. A trace spans the roles, so a run's trace is several
 records with the same key, in append order. Records of different traces are
 never mixed.
 
-The operator creates the topics and the grants. `wherry operator tenant add`
+The operator creates the topics and the grants. `wherry operator add --tenant`
 creates `wherry.traces.<tenant>` and `wherry operator init` creates
 `wherry.traces`; on an install that predates them, running `init` again
 creates every live tenant's topic too

@@ -100,16 +100,16 @@ the topics an apply created before it failed. No topic is deleted, so removing o
 relabelling a profile leaves its old topic: the count depends on the
 configuration and its history, with no fixed bound.
 
-`pool apply` creates a pool's receivers topic before it records the pool, so
-a recorded pool always has one. `receiver apply` creates the signature topics
+`apply --pool` creates a pool's receivers topic before it records the pool, so
+a recorded pool always has one. `apply --receiver` creates the signature topics
 of the receiver's profiles before it appends its record, so a record never
-routes to a topic that does not exist. `pool apply` creates the missing
+routes to a topic that does not exist. `apply --pool` creates the missing
 signature topic of each recorded profile of each receiver whose membership has
 not ended, the recovery for a topic deleted outside wherry. Pools do not end, and no topic is deleted.
 A host reads the receivers topics of all its tenant's entitled pools in one
 pass. If one of them was deleted by hand, the read waits 10 seconds for it
 and then fails, so the host's submissions and receiver listings fail for
-every pool until `pool apply` creates the topic again; `operator check`
+every pool until `apply --pool` creates the topic again; `operator check`
 reports it missing. A host of a tenant entitled to no pool reads no topic
 and lists no receivers.
 
@@ -203,7 +203,7 @@ is assigned again.
 snapshot first read back naming it plus 24 hours plus a jitter under one
 hour derived from the pool and key ID, publishing a `rotation` snapshot. It
 rotates at once on a
-[`rotate-key`](commands.md#wherry-operator-pool-rotate-key-pool-suspect-key-kid)
+[`rotate-key`](commands.md#wherry-operator-rotate)
 record whose `wherry.operator` offset is above the snapshot's
 `rotated_for`. It republishes its snapshot with the same reason after its
 signing key rotates, and a republish does not move the rotation.
@@ -274,7 +274,7 @@ closes and compacts within an hour, and a pool's snapshot topic
 bound, and `retention.bytes=-1`, so no size limit, the broker's
 `log.retention.bytes` included, deletes one sooner; `operator check` verifies
 both, their `cleanup.policy=delete` and their single partition. Partitions
-cannot be removed, so `pool apply` and `operator check` refuse a
+cannot be removed, so `apply --pool` and `operator check` refuse a
 task or events topic with more than one; the remedy is to recreate the pool's topics. A tenant feed and transcript topic also
 have `max.message.bytes=2097152`, the 2 MiB a receiver batches, so a result
 naming 256 outputs fits.
@@ -282,17 +282,17 @@ naming 256 outputs fits.
 | Topic | Created by | `retention.ms` |
 | --- | --- | --- |
 | `wherry.operator` | `operator init`, then any recording command when missing | `-1` |
-| `wherry.pool.<pool>.tasks.<agent>.<hex>` | `receiver apply`, `pool apply` | at least `start_by_limit` plus 30 hours, in milliseconds; default `367200000`; never lowered |
-| `wherry.pool.<pool>.events` | `pool apply` | at least the greatest task topic's; `pool apply` raises it to that and never lowers it |
-| `wherry.pool.<pool>.custodian` | `pool apply` | `-1`, outside the pool retention bound |
-| `wherry.pool.<pool>.receivers` | `pool apply` | `604800000` (7 days), outside the pool retention bound |
-| `wherry.tenant.<tenant>` | `tenant add` | `2592000000` (30 days) |
-| `wherry.tenant.<tenant>.transcript` | `tenant add` | as the tenant feed, `2592000000` (30 days) |
-| `wherry.receiver.<receiver>` | `receiver apply` | `-1`, kept after revocation |
-| `wherry.receiver.<receiver>.progress` | `receiver apply`, `pool apply` | at least the pool's greatest task topic; never lowered |
-| `wherry.host.<tenant>.<host>` | `tenant host add` | `-1`, kept after revocation |
+| `wherry.pool.<pool>.tasks.<agent>.<hex>` | `apply --receiver`, `apply --pool` | at least `start_by_limit` plus 30 hours, in milliseconds; default `367200000`; never lowered |
+| `wherry.pool.<pool>.events` | `apply --pool` | at least the greatest task topic's; `apply --pool` raises it to that and never lowers it |
+| `wherry.pool.<pool>.custodian` | `apply --pool` | `-1`, outside the pool retention bound |
+| `wherry.pool.<pool>.receivers` | `apply --pool` | `604800000` (7 days), outside the pool retention bound |
+| `wherry.tenant.<tenant>` | `add --tenant` | `2592000000` (30 days) |
+| `wherry.tenant.<tenant>.transcript` | `add --tenant` | as the tenant feed, `2592000000` (30 days) |
+| `wherry.receiver.<receiver>` | `apply --receiver` | `-1`, kept after revocation |
+| `wherry.receiver.<receiver>.progress` | `apply --receiver`, `apply --pool` | at least the pool's greatest task topic; never lowered |
+| `wherry.host.<tenant>.<host>` | `add --host` | `-1`, kept after revocation |
 | `wherry.traces` | `operator init` | `604800000` (7 days) |
-| `wherry.traces.<tenant>` | `tenant add`; `operator init` for a live tenant whose topic is missing | `604800000` (7 days), kept after tenant removal |
+| `wherry.traces.<tenant>` | `add --tenant`; `operator init` for a live tenant whose topic is missing | `604800000` (7 days), kept after tenant removal |
 
 The task topics' retention keeps `start_by_limit`, the six-hour maximum run
 time, and a one-day margin. Events and the pool's progress topics stay at
@@ -302,19 +302,19 @@ default requirement of `280800000`. Identity and configuration topics stay
 at `-1`, and a pool's receivers topic remains a seven-day liveness topic.
 
 `wherry operator` leaves an existing topic's configuration as it is, except
-that `pool apply` sets the retention, never
+that `apply --pool` sets the retention, never
 lowering it, timestamp type, `cleanup.policy`, `retention.bytes` and `segment.ms` of every task topic under the pool's prefix and its events topic and
-the configuration of its snapshot and receivers topics, and `receiver apply` and `pool apply` set every
+the configuration of its snapshot and receivers topics, and `apply --receiver` and `apply --pool` set every
 configuration above on the progress topics of the pool's live receivers, never lowering their retention.
-`tenant add` and `pool apply` set `max.message.bytes` on
+`add --tenant` and `apply --pool` set `max.message.bytes` on
 existing tenant feeds and transcript topics. The trace topics have
 `cleanup.policy=delete`, `message.timestamp.type=LogAppendTime` and
-`max.message.bytes=1048576`, the 1 MiB the trace client batches; `tenant add`
+`max.message.bytes=1048576`, the 1 MiB the trace client batches; `add --tenant`
 sets them on the tenant's and `operator init` on `wherry.traces` and every
 live tenant's, creating the missing ones, so a re-run gives an install that
 predates the trace topics every one of them ([Tracing](tracing.md#topics-and-grants)). A
 tenant feed's or transcript topic's retention can be changed with Kafka's
-own tools. `pool apply` and `tenant pool add` refuse terms that need more than
+own tools. `apply --pool` and `allow` refuse terms that need more than
 an entitled tenant's feed or transcript topic keeps, and `wherry operator
 check` reports a profile of a receiver whose membership has not ended whose
 signature topic is missing, a
@@ -370,7 +370,7 @@ creates nothing.
 | receiver | topic `wherry.traces` | Write, Describe |
 
 A principal whose membership has ended, or whose revocation is under way,
-has no grants. While a pool is [suspended](commands.md#wherry-operator-pool-suspend-pool),
+has no grants. While a pool is [suspended](commands.md#wherry-operator-suspend),
 its hosts hold Describe alone on its task-topic prefix: they lose Write. Every
 other grant stays.
 
@@ -401,4 +401,4 @@ command has written a record, it makes these passes on every return, failed
 or not. [Concurrent operator commands](operations-operator.md#concurrent-operator-commands)
 states what this guarantees.
 
-A receiver’s own revocation withdraws every grant and its credential. Tenant and entitlement ends preserve receiver access to retained run resources: feed and transcript writes and public host key reads, derived from current pool membership. Tenant topics are created only by `tenant add`.
+A receiver’s own revocation withdraws every grant and its credential. Tenant and entitlement ends preserve receiver access to retained run resources: feed and transcript writes and public host key reads, derived from current pool membership. Tenant topics are created only by `add --tenant`.

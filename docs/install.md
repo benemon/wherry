@@ -34,8 +34,8 @@ The names used throughout are pool `build`, agent `claude-code`, tenant `acme` a
 | `pools/build.yaml` | you | `wherry-prod/` | the pool's terms: its agents and limits |
 | `receivers/<name>.yaml` | you, on your receiver page | `wherry-prod/` | the receiver's configuration: its pool, plugin pin and profiles |
 | `receivers/<name>.config.yaml` | you, on your receiver page | `wherry-prod/` | the receiver's local configuration: where it finds its files on its platform |
-| `bundles/receivers/<name>.bundle` | `receiver apply` | `wherry-prod/` | the receiver's Kafka identity: broker, principal and password |
-| `bundles/hosts/acme/laptop.bundle` | `tenant host add` | `wherry-prod/` | your laptop's Kafka identity and, once `tenant storage` records it, the tenant's S3 key pair |
+| `bundles/receivers/<name>.bundle` | `apply --receiver` | `wherry-prod/` | the receiver's Kafka identity: broker, principal and password |
+| `bundles/hosts/acme/laptop.bundle` | `add --host` | `wherry-prod/` | your laptop's Kafka identity and, once `storage` records it, the tenant's S3 key pair |
 | `config.yaml`, `bundle.yaml`, `host.key` | `host init` | `~/.config/wherry/` on your laptop | your laptop's configuration |
 
 The bundles hold passwords.

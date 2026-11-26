@@ -139,7 +139,7 @@ func loadReceiverLocalConfig(path string) (receiverLocalConfig, *x509.CertPool, 
 	return config, roots, nil
 }
 
-// readReceiverLocalConfig decodes and checks the receiver's local configuration at path, as receiver apply does on the
+// readReceiverLocalConfig decodes and checks the receiver's local configuration at path, as apply --receiver does on the
 // operator's machine, and builds the pool its ca_cert gives, the machine's trust store plus the CA, refusing a ca_cert
 // from which Go appends no certificate; the pool is built here once and carried to the dial. The paths the file leaves
 // out stay empty.
@@ -184,20 +184,27 @@ func readReceiverLocalConfig(path string) (receiverLocalConfig, *x509.CertPool, 
 }
 
 func runReceiver(args []string, stdout, stderr io.Writer) error {
-	const usage = "usage: wherry receiver run [--config-file FILE] [--rotate-key]"
+	const usage = "usage: wherry receiver <run|rotate --key> [--config-file FILE]"
+	const rotateUsage = "usage: wherry receiver rotate --key [--config-file FILE]"
 	if len(args) == 1 && slices.Contains([]string{"-h", "-help", "--help"}, args[0]) {
 		fmt.Fprintln(stderr, usage)
 		return flag.ErrHelp
 	}
-	if len(args) == 0 || args[0] != "run" {
+	if len(args) == 0 || (args[0] != "run" && args[0] != "rotate") {
 		return errors.New(usage)
 	}
-	flags := flag.NewFlagSet("receiver run", flag.ContinueOnError)
+	flags := flag.NewFlagSet("receiver "+args[0], flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config-file", defaultReceiverConfig, "the receiver's local configuration file")
-	rotateKey := flags.Bool("rotate-key", false, "replace the receiver's signing key at start, before it claims anything")
+	var key *bool
+	if args[0] == "rotate" {
+		key = flags.Bool("key", false, "replace the receiver's signing key")
+	}
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
+	}
+	if key != nil && (flags.NArg() != 0 || !*key) {
+		return errors.New(rotateUsage)
 	}
 	if flags.NArg() != 0 {
 		return errors.New(usage)
@@ -222,6 +229,14 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if key != nil {
+		old, next, err := receiver.RotateKey(context.Background(), bundle, roots, config.StateDir)
+		if err != nil {
+			return operator.ExplainUnknownAuthority(err, ca)
+		}
+		fmt.Fprintf(stdout, "old_key_id=%s new_key_id=%s\n", old, next)
+		return nil
+	}
 	logger := log.New(stdout, "receiver: ", log.LstdFlags|log.LUTC)
 	registry := newRegistry()
 	if config.MetricsAddr != "" {
@@ -233,7 +248,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	}
 	plugins := &plugins{dir: config.PluginDir, credentials: config.Credentials, logger: logger, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
-	r, err := receiver.New(bundle, roots, config.StateDir, *rotateKey, config.DrainTimeout, plugins.profile, logger, registry)
+	r, err := receiver.New(bundle, roots, config.StateDir, config.DrainTimeout, plugins.profile, logger, registry)
 	if err != nil {
 		return operator.ExplainUnknownAuthority(err, ca)
 	}
@@ -311,7 +326,7 @@ func (p *plugins) profile(pool string, settings operator.ProfileSettings, plugin
 	if !ok {
 		checksum, err := hex.DecodeString(pluginSHA256)
 		if err != nil || len(checksum) != sha256.Size {
-			return receiver.Named{}, fmt.Errorf("plugin type %s has no pinned SHA-256; set plugin_sha256.%s in the receiver's file and run receiver apply", settings.Plugin, settings.Plugin)
+			return receiver.Named{}, fmt.Errorf("plugin type %s has no pinned SHA-256; set plugin_sha256.%s in the receiver's file and run apply --receiver", settings.Plugin, settings.Plugin)
 		}
 		running, err = pluginsdk.Launch(settings.Plugin, func() (string, error) { return pluginPath(p.dir, settings.Plugin) }, checksum, p.logs)
 		if err != nil {

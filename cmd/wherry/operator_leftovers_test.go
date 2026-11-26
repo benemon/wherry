@@ -45,10 +45,10 @@ func TestCheckReportsLeftovers(t *testing.T) {
 	}
 	pool := filepath.Join(writeTree(t, map[string]string{"pool.yaml": "agents:\n  - name: claude\nproducer_byte_rate: 1048576\nrequest_percentage: 10\n"}), "pool.yaml")
 	for _, args := range [][]string{
-		{"pool", "apply", "pool-a", "-f", pool},
-		{"tenant", "add", "ta"}, {"tenant", "pool", "add", "ta", "pool-a"}, {"tenant", "host", "add", "ta", "ha"},
-		{"tenant", "add", "tb"}, {"tenant", "pool", "add", "tb", "pool-a"}, {"tenant", "host", "add", "tb", "hb-live"},
-		{"tenant", "host", "add", "tb", "hb-ended"}, {"tenant", "host", "add", "tb", "hb-revoking"},
+		{"apply", "--pool", "pool-a", "--file", pool},
+		{"add", "--tenant", "ta"}, {"allow", "--tenant", "ta", "--pool", "pool-a"}, {"add", "--host", "ha", "--tenant", "ta"},
+		{"add", "--tenant", "tb"}, {"allow", "--tenant", "tb", "--pool", "pool-a"}, {"add", "--host", "hb-live", "--tenant", "tb"},
+		{"add", "--host", "hb-ended", "--tenant", "tb"}, {"add", "--host", "hb-revoking", "--tenant", "tb"},
 	} {
 		wherry(args...)
 	}
@@ -59,8 +59,8 @@ func TestCheckReportsLeftovers(t *testing.T) {
 	for _, receiver := range []string{"ra", "rb"} {
 		localFixture(t, dir, receiver)
 	}
-	wherry("receiver", "apply", "ra", "-f", filepath.Join(writeTree(t, map[string]string{"receiver.yaml": profile("a")}), "receiver.yaml"))
-	wherry("receiver", "apply", "rb", "-f", filepath.Join(writeTree(t, map[string]string{"receiver.yaml": profile("b")}), "receiver.yaml"))
+	wherry("apply", "--receiver", "ra", "--file", filepath.Join(writeTree(t, map[string]string{"receiver.yaml": profile("a")}), "receiver.yaml"))
+	wherry("apply", "--receiver", "rb", "--file", filepath.Join(writeTree(t, map[string]string{"receiver.yaml": profile("b")}), "receiver.yaml"))
 	revoking, err := operator.EncodeRecord(operator.Record{Kind: "revoking", Tenant: "tb", Host: "hb-revoking"})
 	if err != nil {
 		t.Fatal(err)
@@ -71,11 +71,11 @@ func TestCheckReportsLeftovers(t *testing.T) {
 	if out, err := check(); err != nil || out != "" {
 		t.Fatalf("check with every actor live or revoking printed %q, %v; want nothing", out, err)
 	}
-	wherry("receiver", "apply", "ra", "-f", filepath.Join(writeTree(t, map[string]string{"receiver.yaml": profile("b")}), "receiver.yaml"))
+	wherry("apply", "--receiver", "ra", "--file", filepath.Join(writeTree(t, map[string]string{"receiver.yaml": profile("b")}), "receiver.yaml"))
 	stale := operator.SignatureTopic("pool-a", "claude", map[string]string{"platform": "nomad", "tier": "base", "zone": "a"})
 	revocationBounds(t, &operator.Service{Operator: b.root}, "1")
 	stubProbe(t, deniedProbe)
-	for _, args := range [][]string{{"tenant", "host", "remove", "ta", "ha"}, {"tenant", "remove", "ta"}, {"tenant", "host", "remove", "tb", "hb-ended"}, {"receiver", "remove", "rb"}} {
+	for _, args := range [][]string{{"remove", "--host", "ha", "--tenant", "ta"}, {"remove", "--tenant", "ta"}, {"remove", "--host", "hb-ended", "--tenant", "tb"}, {"remove", "--receiver", "rb"}} {
 		wherry(args...)
 	}
 	// Five records on ta's feed, the first two deleted, and two on rb's key topic: the offsets are what is retained.

@@ -69,7 +69,7 @@ prefixed grant per receiver on its pool's transactional IDs.
 are prefixed: topics `wherry.` and groups `p-`
 ([The operator principal](security.md#the-operator-principal)). The `wherry operator` command that
 records a host or receiver on `wherry.operator` also issues its principal and ACLs,
-and `tenant pool add` records an entitlement with its ACLs; no other approval step
+and `allow` records an entitlement with its ACLs; no other approval step
 exists. [Design](design.md#acls) lists the matrix.
 
 ## Placement
@@ -133,7 +133,7 @@ while ready. It admits a fresh task through that profile.
 [What a receiver subscribes to](operations-receivers.md#what-a-receiver-subscribes-to)
 describes what you observe.
 
-**A label change moves a signature.** `receiver apply` creating a profile's
+**A label change moves a signature.** `apply --receiver` creating a profile's
 new signature creates its topic before the record; the receiver restarts on
 the new record and subscribes to the new topic. Tasks queued on the old topic
 wait there unless another member shares the old signature, and their host
@@ -146,7 +146,7 @@ submissions that target the affected signature first.
 Everything the task receives lands as files. A submission's `raw` and
 `data` parts are input files that the agent finds in the directory
 `WHERRY_INPUT_DIR` names. They travel inline in the submission record,
-within the broker's record limit, which `pool apply` records, and the
+within the broker's record limit, which `apply --pool` records, and the
 limit each plugin profile declares. Over either, they go through S3 when the pool
 has storage and the host a storage credential; otherwise submit refuses,
 naming the limit. Credentials are files in the directory
@@ -273,7 +273,7 @@ Queued tasks can still open under retained keys.
 
 A replaced key is retained until its replacing snapshot's append time plus `start_by_limit` plus seven hours.
 [Key custody](design.md#key-custody) explains restart deadlines.
-For incident response, suspend the pool before using `wherry operator pool rotate-key`.
+For incident response, suspend the pool before using `wherry operator rotate`.
 See [Respond to a compromised receiver or pool key](operations-operator.md#respond-to-a-compromised-receiver-or-pool-key).
 
 ### Planned drain and re-key
@@ -315,7 +315,7 @@ Tasks submitted before a crash is detected can use the lost key and need resubmi
 
 ### Suspension
 
-Use `wherry operator pool suspend POOL` to stop new starts.
+Use `wherry operator suspend --pool POOL` to stop new starts.
 The operator withdraws host Write access to the pool's task topics.
 Receivers stop claiming new work.
 The custodian refuses first starts and continues serving adoptions.
@@ -328,7 +328,7 @@ New starts can still open until the custodian reads the suspension.
 
 Suspension does not take credentials back from running jobs.
 Rotate credentials at their issuer to invalidate them.
-`wherry operator pool resume POOL` restores the grants and queued work can run.
+`wherry operator resume --pool POOL` restores the grants and queued work can run.
 See [Incident response](operations-operator.md#respond-to-a-compromised-receiver-or-pool-key).
 
 ## Cancellation
@@ -400,13 +400,13 @@ rotation.
 ![Tenants and their hosts entitled to shared receiver pools](diagrams/tenants.svg)
 
 A tenant groups hosts and their access to pools.
-Create it explicitly with `wherry operator tenant add TENANT`.
+Create it explicitly with `wherry operator add --tenant TENANT`.
 That command creates its feed and transcript topics.
 Host creation and entitlement changes require a live tenant.
 
 An **entitlement** gives a tenant access to a pool.
-Add it with `wherry operator tenant pool add TENANT POOL`.
-Remove it with `wherry operator tenant pool remove TENANT POOL`.
+Add it with `wherry operator allow --tenant TENANT --pool POOL`.
+Remove it with `wherry operator deny --tenant TENANT --pool POOL`.
 Removal stops new admissions and placement for that tenant in the pool.
 You can add the entitlement again.
 
@@ -416,7 +416,7 @@ A tenant moves through three states:
 2. Live: hosts and entitlements can belong to it.
 3. Ended: its name cannot be reused.
 
-Remove a tenant with `wherry operator tenant remove TENANT`.
+Remove a tenant with `wherry operator remove --tenant TENANT`.
 The operator ends its entitlements first.
 It then revokes its hosts before recording the tenant's end.
 Removal keeps retained data and host keys.

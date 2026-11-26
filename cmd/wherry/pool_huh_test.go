@@ -189,7 +189,7 @@ func TestPoolInterruptBeforeWrite(t *testing.T) {
 				}
 			}
 			dir := "."
-			err := runOperator([]string{"pool", "apply", "a"}, io.Discard, io.Discard)
+			err := runOperator([]string{"apply", "--pool", "a"}, io.Discard, io.Discard)
 			if !errors.Is(err, errInterrupted) {
 				t.Fatalf("interrupt: %v", err)
 			}
@@ -229,7 +229,7 @@ func TestPoolEligibility(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "pools", "a.yaml")
 			_, _, err := objectFile(context.Background(), dir, "pools", "a", nil, false, out, poolFields, func(*questions) (any, error) { t.Fatal("ineligible prompt called"); return nil, nil })
-			want := path + " does not exist and there is no terminal to prompt on; write it, or give -f FILE, with " + poolFields
+			want := path + " does not exist and there is no terminal to prompt on; write it, or give --file PATH, with " + poolFields
 			if err == nil || err.Error() != want {
 				t.Fatalf("eligibility error: %v", err)
 			}
@@ -292,7 +292,7 @@ func TestPoolObjectFileBypasses(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pools", "a.yaml")
 	_, _, err := objectFile(context.Background(), dir, "pools", "a", nil, true, io.Discard, poolFields, nil)
-	want := path + " does not exist and --dry-run writes nothing; write it, or give -f FILE, with " + poolFields
+	want := path + " does not exist and --dry-run writes nothing; write it, or give --file PATH, with " + poolFields
 	if err == nil || err.Error() != want {
 		t.Fatalf("dry-run refusal: %v", err)
 	}
@@ -379,7 +379,7 @@ func TestPoolExistingDirectoryNoPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := runOperator([]string{"pool", "apply", "directory"}, io.Discard, &out); err != nil || out.Len() != 0 {
+	if err := runOperator([]string{"apply", "--pool", "directory"}, io.Discard, &out); err != nil || out.Len() != 0 {
 		t.Fatalf("existing directory apply: %v, prompts %q", err, out.String())
 	}
 	state, err := service.LoadState(context.Background())

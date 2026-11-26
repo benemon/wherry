@@ -625,7 +625,7 @@ func strandedReceivers(state State, pool string, terms Terms) error {
 	return nil
 }
 
-// sameTerms reports whether terms are recorded's but for the record limit, which pool apply reads from the broker.
+// sameTerms reports whether terms are recorded's but for the record limit, which apply --pool reads from the broker.
 func sameTerms(recorded, terms Terms) bool {
 	terms = withDefaults(terms)
 	terms.RecordLimit = recorded.RecordLimit
@@ -905,9 +905,9 @@ func (service *Service) HostRefresh(ctx context.Context, tenant, host, bundlePat
 	}
 	kept, err := ReadBundle(bundlePath)
 	if errors.Is(err, os.ErrNotExist) {
-		return false, fmt.Errorf("%s does not exist; tenant host add %s %s --force gives the host a new password and bundle", bundlePath, tenant, host)
+		return false, fmt.Errorf("%s does not exist; add --host %s --tenant %s --force gives the host a new password and bundle", bundlePath, host, tenant)
 	} else if errors.Is(err, ErrBundleCA) {
-		return false, fmt.Errorf("%w; tenant host add %s %s --force gives the host a new password and bundle", err, tenant, host)
+		return false, fmt.Errorf("%w; add --host %s --tenant %s --force gives the host a new password and bundle", err, host, tenant)
 	} else if err != nil {
 		return false, err
 	}
@@ -1152,7 +1152,7 @@ func (service *Service) checkSignatureTopics(ctx context.Context, state State) e
 			}
 			for _, profile := range config.Profiles {
 				if topic := SignatureTopic(pool, profile.Agent, profile.Labels); !slices.Contains(tasks, topic) {
-					return fmt.Errorf("receiver %s profile %s: signature topic %s is missing; pool apply %s with the same terms creates it", receiver, profile.Name, topic, pool)
+					return fmt.Errorf("receiver %s profile %s: signature topic %s is missing; apply --pool %s with the same terms creates it", receiver, profile.Name, topic, pool)
 				}
 			}
 		}
@@ -1168,7 +1168,7 @@ func (service *Service) LoadState(ctx context.Context) (State, error) {
 // the most a receiver's producer batches: a result lists a reference artifact for each output it returns.
 const FeedRecordLimit = 2 << 20
 
-// feedConfigs are the configs tenant add and pool apply set on tenant feeds beyond the
+// feedConfigs are the configs add --tenant and apply --pool set on tenant feeds beyond the
 // retention they are created with.
 var feedConfigs = map[string]string{"max.message.bytes": strconv.Itoa(FeedRecordLimit)}
 

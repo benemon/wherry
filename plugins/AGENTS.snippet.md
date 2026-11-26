@@ -93,7 +93,7 @@ clones itself.
 8. `wherry status RUN_ID` prints a run's state without waiting.
    `wherry status` alone lists every run this host can see, latest update
    first. `wherry logs RUN_ID` prints the agent's output lines, and
-   `wherry logs -f RUN_ID` prints them as the agent runs until the run ends.
+   `wherry logs --follow RUN_ID` prints them as the agent runs until the run ends.
 
 Where the `wherry` MCP server (`wherry host mcp`) is configured, its tools do the
 same: `receivers`, `submit`, `status`, `result`, `cancel`, `events`

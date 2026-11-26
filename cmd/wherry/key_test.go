@@ -5,16 +5,20 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/benemon/wherry/internal/operator"
+	"github.com/benemon/wherry/internal/receiver"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -99,7 +103,7 @@ func TestKeyRotateReplacesTheHostKey(t *testing.T) {
 	h := newKeyHost(t)
 	old := h.key(t)
 	var stdout, stderr bytes.Buffer
-	if err := run([]string{"host", "key", "rotate", "--config-file", h.config}, &stdout, &stderr); err != nil {
+	if err := run([]string{"host", "rotate", "--key", "--config-file", h.config}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	next := h.key(t)
@@ -135,7 +139,7 @@ func TestKeyRotateRefusesWhileARunIsUnfinished(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	err := run([]string{"host", "key", "rotate", "--config-file", h.config}, &stdout, &stderr)
+	err := run([]string{"host", "rotate", "--key", "--config-file", h.config}, &stdout, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "run-open") || !strings.Contains(err.Error(), "MCP server") {
 		t.Fatalf("rotate with an unfinished run: %v; want a refusal naming it", err)
 	}
@@ -195,7 +199,7 @@ func TestKeyRotateKeepsTheKeyFileWhenTheTopicRefusesTheRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	if err := run([]string{"host", "key", "rotate", "--config-file", h.config}, &stdout, &stderr); err == nil {
+	if err := run([]string{"host", "rotate", "--key", "--config-file", h.config}, &stdout, &stderr); err == nil {
 		t.Fatal("rotation the key topic refused reported success")
 	}
 	if !h.key(t).Equal(stray) || stdout.Len() != 0 {
@@ -259,29 +263,93 @@ func TestReceiverRotateKey(t *testing.T) {
 		return stdout.String()
 	}
 
-	logs := start("--rotate-key")
-	records, state := folded()
-	key := fileKey()
-	if len(records) != 2 || !state.Current.Equal(key.Public()) || len(state.Retired) != 1 {
-		t.Fatalf("key topic of %d records; want a registration and a rotation to the state directory's key", len(records))
+	rotate := func() (string, error) {
+		t.Helper()
+		var stdout bytes.Buffer
+		err := run([]string{"receiver", "rotate", "--key", "--config-file", localConfig}, &stdout, io.Discard)
+		return stdout.String(), err
 	}
-	if want := "rotated key: old=" + signed.KeyID(state.Retired[0].Key) + " new=" + keyID(key); !strings.Contains(logs, want) || strings.Contains(logs, "configured:") {
-		t.Fatalf("logs %q; want %q before configuration", logs, want)
+	// A receiver that has never started has an empty key topic and nothing to rotate.
+	if _, err := rotate(); err == nil || err.Error() != "receiver has never started, so it has no key to rotate: its first start registers one" {
+		t.Fatalf("rotate before the first start = %v; want it refused", err)
+	}
+	if records, _ := folded(); len(records) != 0 {
+		t.Fatalf("a refused rotation left %d records on the key topic", len(records))
+	}
+	start()
+	key := fileKey()
+	if records, state := folded(); len(records) != 1 || !state.Current.Equal(key.Public()) {
+		t.Fatalf("key topic of %d records after the first start; want the registration alone", len(records))
+	}
+	// A running receiver holds the state directory, so a rotation beside it is refused and changes nothing.
+	held, err := os.OpenFile(filepath.Join(stateDir, receiver.LockFile), os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rotate(); err == nil || !strings.Contains(err.Error(), "state directory "+stateDir+" is held by another receiver process") {
+		t.Fatalf("rotate beside a held state directory = %v; want it refused", err)
+	}
+	held.Close()
+	if records, _ := folded(); len(records) != 1 || !fileKey().Equal(key) {
+		t.Fatal("a refused rotation rotated the key")
+	}
+	// A state directory holding another key than the topic's current one, as a restored backup or the wrong volume
+	// does, is refused before anything is written; with its key back the receiver starts as before.
+	kept, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(keyPath); err != nil {
+		t.Fatal(err)
+	}
+	other, err := trust.GenerateSigningKeyFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rotate(); err == nil || err.Error() != "receiver key topic holds another key than the state directory" {
+		t.Fatalf("rotate with another key in the state directory = %v; want it refused", err)
 	}
 	noNextKey(t, keyPath)
+	if records, state := folded(); len(records) != 1 || !state.Current.Equal(key.Public()) || !fileKey().Equal(other) {
+		t.Fatalf("a refused rotation left %d records, or changed the state directory's key", len(records))
+	}
+	if err := os.WriteFile(keyPath, kept, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start()
+	if records, _ := folded(); len(records) != 1 || !fileKey().Equal(key) {
+		t.Fatal("the receiver did not start with its registered key after the refused rotation")
+	}
+	out, err := rotate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, state := folded()
+	next := fileKey()
+	if len(records) != 2 || !state.Current.Equal(next.Public()) || len(state.Retired) != 1 || !state.Retired[0].Key.Equal(key.Public()) {
+		t.Fatalf("key topic of %d records; want a registration and a rotation to the state directory's key", len(records))
+	}
+	if want := "old_key_id=" + keyID(key) + " new_key_id=" + keyID(next) + "\n"; out != want {
+		t.Fatalf("rotate printed %q; want %q", out, want)
+	}
+	noNextKey(t, keyPath)
+	key = next
 
-	// Without the flag a start never rotates, and settles a next key nothing published by removing it.
+	// A start never rotates, and settles a next key nothing published by removing it.
 	if _, err := trust.GenerateSigningKeyFile(keyPath + ".next"); err != nil {
 		t.Fatal(err)
 	}
 	start()
 	noNextKey(t, keyPath)
 	if records, _ := folded(); len(records) != 2 || !fileKey().Equal(key) {
-		t.Fatal("a start without --rotate-key rotated the key")
+		t.Fatal("a start rotated the key")
 	}
 
 	// It settles a published next key by renaming it over the key file.
-	next, err := trust.GenerateSigningKeyFile(keyPath + ".next")
+	next, err = trust.GenerateSigningKeyFile(keyPath + ".next")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,5 +364,21 @@ func TestReceiverRotateKey(t *testing.T) {
 	noNextKey(t, keyPath)
 	if !fileKey().Equal(next) {
 		t.Fatal("the key file does not hold the published next key")
+	}
+
+	// A rotation Kafka refuses for want of the write grant is named a denial, as a running receiver names one.
+	acl := kadm.NewACLs().Topics(topic).Operations(kadm.OpWrite).Allow(operator.ReceiverPrincipal("receiver-a")).AllowHosts("*").ResourcePatternType(kadm.ACLPatternAny)
+	acl.PrefixUser()
+	results, err := kadm.NewClient(service.Operator).DeleteACLs(ctx, acl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range results {
+		if result.Err != nil {
+			t.Fatal(result.Err)
+		}
+	}
+	if _, err := rotate(); err == nil || !strings.HasPrefix(err.Error(), "denied rotate key: rotate key: publish key rotation: ") {
+		t.Fatalf("rotate without the write grant = %v; want it named a denial", err)
 	}
 }

@@ -466,7 +466,7 @@ func hostInit(ctx context.Context, path, bundle string, caCert *string, stdout, 
 		}
 	}
 	if len(pools) == 0 {
-		if err = q.line("this host's tenant is entitled to no pool yet; run wherry host init again once the operator runs tenant pool add\n"); err != nil {
+		if err = q.line("this host's tenant is entitled to no pool yet; run wherry host init again once the operator runs allow --tenant TENANT --pool POOL\n"); err != nil {
 			return err
 		}
 	}

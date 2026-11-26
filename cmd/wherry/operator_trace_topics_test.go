@@ -59,7 +59,7 @@ func TestOperatorInitCreatesTheTraceTopics(t *testing.T) {
 	root := kadm.NewClient(b.root)
 	expectTraceTopics(t, root, telemetry.TraceTopic(""))
 	for _, tenant := range []string{"ta", "tb", "tc"} {
-		if err := runOperator([]string{"tenant", "add", tenant, "--dir", dir}, io.Discard, io.Discard); err != nil {
+		if err := runOperator([]string{"add", "--tenant", tenant, "--dir", dir}, io.Discard, io.Discard); err != nil {
 			t.Fatal(err)
 		}
 	}

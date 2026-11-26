@@ -920,7 +920,7 @@ func tenantEndReceiver(t *testing.T, ctx context.Context, b brokerPool) *Receive
 	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
 		t.Fatal(err)
 	}
-	r, err := New(bundle, trustRoots(t), t.TempDir(), false, time.Second, nil, log.New(&syncBuffer{}, "", 0), prometheus.NewRegistry())
+	r, err := New(bundle, trustRoots(t), t.TempDir(), time.Second, nil, log.New(&syncBuffer{}, "", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}

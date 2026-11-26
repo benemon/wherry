@@ -141,7 +141,7 @@ func (service *Service) PoolRotateKey(ctx context.Context, pool string, suspects
 	}
 	// A pool taking tasks would add to the inventory after it is taken.
 	if !state.Suspended[pool] {
-		return RotateReport{}, fmt.Errorf("pool %s is not suspended; run wherry operator pool suspend %s first", pool, pool)
+		return RotateReport{}, fmt.Errorf("pool %s is not suspended; run wherry operator suspend --pool %s first", pool, pool)
 	}
 	reader := NewReader(service.Operator)
 	defer reader.Close()

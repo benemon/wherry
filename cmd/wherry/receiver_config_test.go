@@ -448,17 +448,17 @@ func TestReceiverConfigFileRefusesIdentity(t *testing.T) {
 
 func TestOperatorArgsParseAsFlags(t *testing.T) {
 	for _, args := range [][]string{
-		{"pool", "apply", "p", "-f=x", "--dry-run"},
-		{"pool", "apply", "p", "-f", "x", "-dry-run=true"},
-		{"pool", "apply", "-f", "y", "p", "--f", "x", "--dry-run"},
+		{"apply", "--pool", "p", "--file=x", "--dry-run"},
+		{"apply", "--pool", "p", "--file", "x", "-dry-run=true"},
+		{"apply", "--file", "y", "--pool", "p", "--file", "x", "--dry-run"},
 	} {
 		positional, options, err := operatorArgs(args)
-		if err != nil || !slices.Equal(positional, []string{"pool", "apply", "p"}) || !maps.Equal(options, map[string]string{"f": "x", "dry-run": "true"}) {
-			t.Errorf("operatorArgs(%q) = %q, %v, %v; want pool apply p with -f x and --dry-run", args, positional, options, err)
+		if err != nil || !slices.Equal(positional, []string{"apply"}) || !maps.Equal(options, map[string]string{"file": "x", "dry-run": "true", "pool": "p"}) {
+			t.Errorf("operatorArgs(%q) = %q, %v, %v; want apply --pool p with --file x and --dry-run", args, positional, options, err)
 		}
 	}
-	if _, options, err := operatorArgs([]string{"receiver", "apply", "r", "--force=false"}); err != nil || len(options) != 0 {
-		t.Errorf("operatorArgs with --force=false = %v, %v; want no options", options, err)
+	if _, options, err := operatorArgs([]string{"apply", "--receiver", "r", "--force=false"}); err != nil || !maps.Equal(options, map[string]string{"receiver": "r"}) {
+		t.Errorf("operatorArgs with --force=false = %v, %v; want the resource alone", options, err)
 	}
 }
 
@@ -505,7 +505,7 @@ func TestReceiverRejectsCapacity(t *testing.T) {
 						return nil, nil, false
 					})
 				}
-				err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", path}, io.Discard, io.Discard)
+				err := runOperator([]string{"apply", "--receiver", "receiver-a", "--file", path}, io.Discard, io.Discard)
 				if got := reads.Load(); got != 0 {
 					t.Fatalf("wherry.operator metadata/offset/fetch reads = %d, want 0", got)
 				}

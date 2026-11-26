@@ -108,7 +108,7 @@ func TestUsageNamesEveryDispatchedCommand(t *testing.T) {
 	hidden := map[string]bool{"dev mock": true}
 	named := usageCommands()
 	commands := dispatched(t)
-	for _, want := range []string{"operator init", "operator pool apply", "host key", "host submit", "receiver run", "dev up", "version"} {
+	for _, want := range []string{"operator init", "operator apply", "operator list", "host rotate", "host submit", "receiver run", "receiver rotate", "dev up", "version"} {
 		if !slices.Contains(commands, want) {
 			t.Fatalf("dispatched commands %v lack %q", commands, want)
 		}
@@ -133,17 +133,18 @@ func TestHelpPrintsUsage(t *testing.T) {
 		{[]string{"operator", "-h"}, operatorUsage[""] + "\n"},
 		{[]string{"operator", "--help"}, operatorUsage[""] + "\n"},
 		{[]string{"operator", "init", "-h"}, operatorUsage["init"] + "\n"},
-		{[]string{"operator", "pool", "apply", "-h"}, operatorUsage["pool apply"] + "\n"},
-		{[]string{"operator", "receiver", "remove", "nomad-1", "-h"}, operatorUsage["receiver remove"] + "\n"},
-		{[]string{"host", "-h"}, "usage: wherry host <init|key rotate|receivers|mcp|submit|result|status|events|logs|cancel>\n"},
+		{[]string{"operator", "apply", "-h"}, operatorUsage["apply"] + "\n"},
+		{[]string{"operator", "remove", "--receiver", "nomad-1", "-h"}, operatorUsage["remove"] + "\n"},
+		{[]string{"operator", "list", "hosts", "-h"}, operatorUsage["list"] + "\n"},
+		{[]string{"host", "-h"}, "usage: wherry host <init|rotate|receivers|mcp|submit|result|status|events|logs|cancel>\n"},
 		{[]string{"host", "init", "-h"}, "Usage of host init:\n"},
-		{[]string{"host", "key", "rotate", "-h"}, "Usage of host key rotate:\n"},
+		{[]string{"host", "rotate", "--key", "-h"}, "Usage of host rotate:\n"},
 		{[]string{"host", "receivers", "-h"}, "Usage of receivers:\n"},
 		{[]string{"host", "submit", "-h"}, "Usage of submit:\n"},
 		{[]string{"submit", "-h"}, "Usage of submit:\n"},
 		{[]string{"host", "mcp", "-h"}, "Usage of mcp:\n"},
 		{[]string{"version", "-h"}, "usage: wherry version\n"},
-		{[]string{"receiver", "-h"}, "usage: wherry receiver run [--config-file FILE] [--rotate-key]\n"},
+		{[]string{"receiver", "-h"}, "usage: wherry receiver <run|rotate --key> [--config-file FILE]\n"},
 		{[]string{"dev", "-h"}, "usage: wherry dev <init|up|down [--reset]> [--instance NAME]\n"},
 	} {
 		var stdout, stderr bytes.Buffer

@@ -193,7 +193,7 @@ func TestTracedRoundTrip(t *testing.T) {
 	plugins := &plugins{dir: pluginDir, credentials: map[string]credential.Source{"fake-token": {Env: "WHERRY_TRACED_PLATFORM"}}, logger: log.New(io.Discard, "", 0), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	logs := &syncBuffer{}
-	r, err := receiver.New(receiverBundled, testRoots(t, bucket.ca), filepath.Join(dir, "receiver-state"), false, 0, plugins.profile, log.New(logs, "receiver: ", 0), prometheus.NewRegistry())
+	r, err := receiver.New(receiverBundled, testRoots(t, bucket.ca), filepath.Join(dir, "receiver-state"), 0, plugins.profile, log.New(logs, "receiver: ", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}

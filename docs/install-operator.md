@@ -58,14 +58,14 @@ lock_duration: 15s
 The pool runs one agent, `claude-code`.
 Each host of the pool gets the default quotas, `1048576` bytes per second and `10` percent of broker request time.
 The name is a [catalog id](configuration-operator.md#catalog-agents), so the agent lists no model credential.
-`pool apply` adds the credential `claude-code-oauth-token`, which targets `CLAUDE_CODE_OAUTH_TOKEN`, the variable
+`apply --pool` adds the credential `claude-code-oauth-token`, which targets `CLAUDE_CODE_OAUTH_TOKEN`, the variable
 Claude Code reads.
 Your laptop supplies its value on [Set up a host](install-host.md).
 
 Apply the terms:
 
 ```sh
-wherry operator pool apply build
+wherry operator apply --pool build
 ```
 
 [Pool terms](configuration-operator.md#pool-terms) explains every field. Re-applying a pool file that leaves out
@@ -74,14 +74,14 @@ wherry operator pool apply build
 ## 3. Add the tenant and give it the pool
 
 ```sh
-wherry operator tenant add acme
-wherry operator tenant pool add acme build
+wherry operator add --tenant acme
+wherry operator allow --tenant acme --pool build
 ```
 
 ## 4. Add your laptop
 
 ```sh
-wherry operator tenant host add acme laptop
+wherry operator add --host laptop --tenant acme
 ```
 
 This writes your laptop's bundle to `bundles/hosts/acme/laptop.bundle`.
@@ -93,7 +93,7 @@ This writes your laptop's bundle to `bundles/hosts/acme/laptop.bundle`.
 ## Check that it worked
 
 ```sh
-wherry operator tenant list
+wherry operator list tenants
 ```
 
 The output lists the tenant, its pool and its host:

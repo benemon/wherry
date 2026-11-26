@@ -14,7 +14,7 @@ Verify the new binary as described in [Install the wherry CLI](install-cli.md).
 For compatible record formats, upgrade in place:
 
 1. Replace the binary on each host.
-2. Verify each new plugin and record its SHA-256 pin with `wherry operator receiver apply`.
+2. Verify each new plugin and record its SHA-256 pin with `wherry operator apply --receiver`.
    Follow [Install plugins](operations-receivers.md#install-plugins).
    Use plugins built for the receiver's protocol version.
 3. Update each receiver's binary and plugins together.
@@ -30,6 +30,51 @@ Kind `working`, which a receiver publishes from an agent's [working file](config
 Restart a pool's receivers one at a time.
 A stopping key custodian needs a live successor to re-key its tasks.
 Follow [Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian).
+
+## Command grammar
+
+Every command is its role word then a verb, one level deep, and the
+operator's resources are flags: `wherry operator <verb>` with `--pool POOL`,
+`--receiver RECEIVER`, `--tenant TENANT` or `--host HOST --tenant TENANT`.
+The commands below are renamed in a clean break: the old forms fail with
+`unknown operator command`, and there are no aliases. Short flags are gone
+everywhere, and the option that lengthens a removal's wait is `--timeout`;
+the table gives each. Output
+and exit codes of every renamed command are unchanged. Update scripts that
+call the old forms; the plugin READMEs' and e2e scripts' examples follow with
+their next release.
+
+| Before | Now |
+| --- | --- |
+| `wherry operator tenant list` | `wherry operator list tenants`; `list hosts [--tenant T]` for its host lines |
+| `wherry operator receiver show RECEIVER` | `wherry operator show --receiver RECEIVER` |
+| `wherry operator pool apply POOL [-f PATH] [--dry-run]` | `wherry operator apply --pool POOL [--file PATH] [--dry-run]` |
+| `wherry operator receiver apply RECEIVER [-f PATH] [--dry-run]` | `wherry operator apply --receiver RECEIVER [--file PATH] [--dry-run]` |
+| `wherry operator receiver apply RECEIVER --force` | `wherry operator apply --receiver RECEIVER --force` |
+| `wherry operator tenant add TENANT` | `wherry operator add --tenant TENANT` |
+| `wherry operator tenant host add TENANT HOST [--force]` | `wherry operator add --host HOST --tenant TENANT [--force]` |
+| `wherry operator tenant pool add TENANT POOL` | `wherry operator allow --tenant TENANT --pool POOL` |
+| `wherry operator tenant pool remove TENANT POOL` | `wherry operator deny --tenant TENANT --pool POOL` |
+| `wherry operator tenant remove TENANT` | `wherry operator remove --tenant TENANT` |
+| `wherry operator tenant host remove TENANT HOST [--wait D]` | `wherry operator remove --host HOST --tenant TENANT [--timeout D]` |
+| `wherry operator receiver remove RECEIVER [--wait D]` | `wherry operator remove --receiver RECEIVER [--timeout D]` |
+| `wherry operator pool suspend POOL` | `wherry operator suspend --pool POOL` |
+| `wherry operator pool resume POOL` | `wherry operator resume --pool POOL` |
+| `wherry operator pool rotate-key POOL [--suspect-key KID]...` | `wherry operator rotate --pool POOL [--suspect-key KID]...` |
+| `wherry operator tenant storage TENANT [-]` | `wherry operator storage --tenant TENANT [-]` |
+| `wherry operator tenant host refresh TENANT HOST` | `wherry operator rotate --tenant TENANT --host HOST --storage` |
+| `wherry host key rotate` | `wherry host rotate --key` |
+| `wherry receiver run --rotate-key` | `wherry receiver rotate --key`, a one-shot run while the receiver is stopped |
+| `wherry host logs RUN_ID -f` | `wherry host logs RUN_ID --follow` |
+
+[`wherry receiver rotate --key`](commands.md#wherry-receiver-rotate) is a
+one-shot: it runs while the receiver is stopped, takes the lock `run` holds on
+the state directory, and refuses a receiver that has never started.
+`receiver run` no longer rotates the key at its start;
+[Rotate a receiver key](operations-receivers.md#rotate-a-receiver-key) gives
+the procedure. The operator's trace span names keep the old command names:
+readers of the trace topics, the [operator view](operator-view.md) among them,
+match on them.
 
 ## Collected outputs and non-git continue
 
@@ -89,8 +134,8 @@ naming the key. Upgrade the operator first: an older operator with a
 
 1. On the operator's machine, install the binary and replace `ca_file` in
    `operator.yaml` with `ca_cert` holding the PEM.
-2. Reissue every bundle with `--force`: `wherry operator tenant host add
-   TENANT HOST --force` for each host and `wherry operator receiver apply
+2. Reissue every bundle with `--force`: `wherry operator add --host
+   HOST --tenant TENANT --force` for each host and `wherry operator apply --receiver
    RECEIVER --force` for each receiver. Each holder is locked out from its
    reissue until it installs its new bundle.
 3. For each holder: stop it, install the binary and the new bundle, replace
@@ -128,8 +173,8 @@ host cannot resolve it.
 - Existing pools keep working as they are. An agent whose name is no
   [credential catalog id](configuration-operator.md#catalog-agents), such
   as `claude` or `gemini`, stays supported with the credential list the
-  operator wrote, and `pool apply` records it as before. Renaming is needed
-  only to adopt catalog expansion, under which `wherry operator pool apply`
+  operator wrote, and `apply --pool` records it as before. Renaming is needed
+  only to adopt catalog expansion, under which `wherry operator apply --pool`
   derives an agent's model credentials from its name, for example
   `claude-code` for Claude Code and `google` for Gemini, and the operator
   writes none. Follow [Rename an agent to its catalog id](#rename-an-agent-to-its-catalog-id)
@@ -159,7 +204,7 @@ host cannot resolve it.
 
 ### Rename an agent to its catalog id
 
-A receiver's profiles name their agent, and `pool apply` checks every live
+A receiver's profiles name their agent, and `apply --pool` checks every live
 receiver of the pool against the new terms before it records them, so
 terms that only rename an agent are refused, in a dry run and in an apply,
 and the recorded terms stay as they were:
@@ -178,7 +223,7 @@ Rename in three stages. The example takes `claude`, with
    is, and apply the pool:
 
    ```sh
-   wherry operator pool apply build
+   wherry operator apply --pool build
    ```
 
    Copy `default_model` with `models`: an agent with several models and no
@@ -195,8 +240,8 @@ Rename in three stages. The example takes `claude`, with
    profile's `config` names, then check and apply it:
 
    ```sh
-   wherry operator receiver apply nomad-1 -f nomad-1 --dry-run
-   wherry operator receiver apply nomad-1 -f nomad-1
+   wherry operator apply --receiver nomad-1 --file nomad-1 --dry-run
+   wherry operator apply --receiver nomad-1 --file nomad-1
    ```
 
    The receiver exits once its held runs end and its platform restarts it
@@ -220,8 +265,8 @@ Rename in three stages. The example takes `claude`, with
    name when it named the old one, and apply the pool again:
 
    ```sh
-   wherry operator pool apply build --dry-run
-   wherry operator pool apply build
+   wherry operator apply --pool build --dry-run
+   wherry operator apply --pool build
    ```
 
    The dry run refuses, naming the receiver and profile, while any live
@@ -243,7 +288,7 @@ now go without the credential, and their prompt names it as not supplied.
   `unrequested`, naming the optional credentials a task left out.
 - Make a credential every run needs required in the pool's terms, by
   removing `required: false`, and apply the terms with
-  `wherry operator pool apply`.
+  `wherry operator apply --pool`.
 - `wherry dev up` makes each credential it copies required, except
   `anthropic-api-key` beside `claude-oauth-token`; see
   [`wherry dev`](commands-dev.md). A dev run that needs the API key while
@@ -338,7 +383,7 @@ that loses its pool key, not only of continued runs.
 ## Trace topics and the operator's group grant
 
 Spans go to a trace topic per tenant, `wherry.traces.<tenant>`, and to
-`wherry.traces` ([Tracing](tracing.md)). `tenant add` now creates the
+`wherry.traces` ([Tracing](tracing.md)). `add --tenant` now creates the
 tenant's topic, and `wherry.operator` needs `Describe` on the pool groups for
 the operator view's share-group state. An existing install gets the topics of
 its tenants and the grant by running `init` again:
@@ -402,11 +447,11 @@ Each receiver page gives its platform's upgrade and uninstall steps.
 1. On the operator machine, in the working directory, remove the host:
 
    ```sh
-   wherry operator tenant host remove TENANT HOST
+   wherry operator remove --host HOST --tenant TENANT
    ```
 
-   For this guide's host, that is `wherry operator tenant host remove acme laptop`.
-   [`tenant host remove`](commands.md#wherry-operator-tenant-host-remove-tenant-host) runs the host's revocation steps.
+   For this guide's host, that is `wherry operator remove --host laptop --tenant acme`.
+   [`remove --host`](commands.md#wherry-operator-remove) runs the host's revocation steps.
 
 2. After it succeeds, delete `~/.config/wherry/` on the laptop.
    It holds `config.yaml`, `bundle.yaml` and `host.key`.
@@ -416,7 +461,7 @@ Each receiver page gives its platform's upgrade and uninstall steps.
 
 Removing the host does not revoke the Claude token.
 
-Check that it worked: `wherry operator tenant list` no longer lists the host under its tenant.
+Check that it worked: `wherry operator list tenants` no longer lists the host under its tenant.
 
 ## Outputs are required, `--git` returns a bundle, inputs go to S3 by size
 
@@ -453,7 +498,7 @@ compatibility path remains.
   host submitted before the upgrade that declared an `:s3` output fails to
   read its record, so collect such runs first.
 - The upload policy lasts ten minutes past `task_ended_by`, so a run
-  stopped at the bound or by a cancel still uploads. `pool apply` now
+  stopped at the bound or by a cancel still uploads. `apply --pool` now
   refuses a `start_by_limit` that with six hours and ten minutes added
   exceeds seven days; a pool at the old bound needs ten minutes less.
 - The policy covers the run's whole output prefix, so set a quota and a
@@ -472,7 +517,7 @@ scripts are updated with their next release.
 The host command `wherry wait` is now `wherry result`, also under
 `wherry host`. There is no alias. Update scripts and skills that call it.
 The MCP tool is now `result`, and submit's `wait` response member is
-`command`. Operator `--wait` flags are unchanged.
+`command`. The option that lengthens a removal's wait is now `--timeout` ([Command grammar](#command-grammar)).
 
 For a short run, `wherry submit --wait` submits and collects the result in
 one command. MCP submit accepts `wait: true` and returns the reply under

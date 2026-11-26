@@ -17,7 +17,7 @@ func TestLogsFollowPrintsEachLineOnceUntilTheRunEnds(t *testing.T) {
 	b.feed(t, runID, b.chunk(t, admitted, 1, 0, wire.Part{Text: "first"}), b.chunk(t, admitted, 1, 6, wire.Part{Text: "second"}))
 	stdout, stderr := &syncBuffer{}, &syncBuffer{}
 	followed := make(chan error, 1)
-	go func() { followed <- runLogs(b.ctx, b.client, []string{runID, "-f"}, stdout, stderr) }()
+	go func() { followed <- runLogs(b.ctx, b.client, []string{runID, "--follow"}, stdout, stderr) }()
 	for !strings.Contains(stdout.String(), "second\n") {
 		select {
 		case err := <-followed:
@@ -53,7 +53,7 @@ func TestLogsFollowPrintsEachLineOnceUntilTheRunEnds(t *testing.T) {
 	if stdout.String() != "first\nsecond\nthird\n" || stderr.String() != "" {
 		t.Fatalf("stdout %q stderr %q", stdout.String(), stderr.String())
 	}
-	if err := runLogs(b.ctx, b.client, []string{"run-missing", "-f"}, stdout, stderr); err == nil || err.Error() != "transcript run-missing: run not found" {
+	if err := runLogs(b.ctx, b.client, []string{"run-missing", "--follow"}, stdout, stderr); err == nil || err.Error() != "transcript run-missing: run not found" {
 		t.Fatalf("logs -f of an unknown run: %v", err)
 	}
 }

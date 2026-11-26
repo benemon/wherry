@@ -1055,10 +1055,10 @@ func TestUsageErrors(t *testing.T) {
 		}, "timeout must be positive"},
 		{"receiver without run", func(stderr *bytes.Buffer) error {
 			return run([]string{"receiver", "--bundle-file", "x"}, stderr, stderr)
-		}, "usage: wherry receiver run"},
+		}, "usage: wherry receiver <run|rotate --key>"},
 		{"receiver with another verb", func(stderr *bytes.Buffer) error {
 			return run([]string{"receiver", "start", "--bundle-file", "x"}, stderr, stderr)
-		}, "usage: wherry receiver run"},
+		}, "usage: wherry receiver <run|rotate --key>"},
 		{"removed enrol", func(stderr *bytes.Buffer) error {
 			return run([]string{"enrol", "list"}, stderr, stderr)
 		}, "unknown command \"enrol\""},
@@ -1087,8 +1087,20 @@ func TestUsageErrors(t *testing.T) {
 			return run([]string{"cleanup"}, stderr, stderr)
 		}, "unknown command \"cleanup\""},
 		{"removed host key", func(stderr *bytes.Buffer) error {
-			return run([]string{"host", "key"}, stderr, stderr)
-		}, "usage: wherry host key rotate"},
+			return run([]string{"host", "key", "rotate"}, stderr, stderr)
+		}, "unknown host command \"key\""},
+		{"host rotate without --key", func(stderr *bytes.Buffer) error {
+			return run([]string{"host", "rotate"}, stderr, stderr)
+		}, "usage: wherry host rotate --key [--config-file FILE]"},
+		{"receiver rotate without --key", func(stderr *bytes.Buffer) error {
+			return run([]string{"receiver", "rotate"}, stderr, stderr)
+		}, "usage: wherry receiver rotate --key [--config-file FILE]"},
+		{"receiver rotate with an extra argument", func(stderr *bytes.Buffer) error {
+			return run([]string{"receiver", "rotate", "--key", "extra"}, stderr, stderr)
+		}, "usage: wherry receiver rotate --key [--config-file FILE]"},
+		{"receiver run with the removed rotation flag", func(stderr *bytes.Buffer) error {
+			return run([]string{"receiver", "run", "--rotate-key"}, stderr, stderr)
+		}, "flag provided but not defined: -rotate-key"},
 		{"removed host cleanup", func(stderr *bytes.Buffer) error {
 			return run([]string{"host", "cleanup", "run-a"}, stderr, stderr)
 		}, "unknown host command \"cleanup\""},
@@ -1126,8 +1138,8 @@ func TestKeyAndInit(t *testing.T) {
 	if again, err := trust.LoadSigningKeyFile(keyPath); err != nil || !again.Equal(key) {
 		t.Fatal("second init replaced the host key")
 	}
-	if err := run([]string{"host", "key", "rotate", "--config-file", config, "extra"}, &stdout, &stderr); err == nil || err.Error() != "usage: wherry host key rotate [--config-file FILE]" {
-		t.Fatalf("got %v, want key rotate usage error", err)
+	if err := run([]string{"host", "rotate", "--key", "--config-file", config, "extra"}, &stdout, &stderr); err == nil || err.Error() != "usage: wherry host rotate --key [--config-file FILE]" {
+		t.Fatalf("got %v, want host rotate usage error", err)
 	}
 }
 
