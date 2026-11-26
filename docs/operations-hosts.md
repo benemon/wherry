@@ -128,7 +128,7 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
    host's user installs the bundle with `wherry host init`, which asks
    nothing about storage, and the host uses the pair for every entitled
    pool with storage. Hosts added before the pair was recorded get it from
-   `wherry operator refresh --host HOST --tenant alice` and the redistributed
+   `wherry operator rotate --tenant alice --host HOST --storage` and the redistributed
    bundle. To change the pair, follow
    [Rotate a tenant's storage keys](runbooks.md#rotate-a-tenant-s-storage-keys).
 

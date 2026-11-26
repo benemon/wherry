@@ -27,7 +27,7 @@ const usage = `usage: wherry <command>
 
 operator:
   wherry operator init|check|view
-  wherry operator list|show|apply|add|remove|allow|deny|suspend|resume|rotate|storage|refresh
+  wherry operator list|show|apply|add|remove|allow|deny|suspend|resume|rotate|storage
 receiver:
   wherry receiver run|rotate
 host:

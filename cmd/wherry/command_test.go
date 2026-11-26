@@ -1095,6 +1095,9 @@ func TestUsageErrors(t *testing.T) {
 		{"receiver rotate without --key", func(stderr *bytes.Buffer) error {
 			return run([]string{"receiver", "rotate"}, stderr, stderr)
 		}, "usage: wherry receiver rotate --key [--config-file FILE]"},
+		{"receiver rotate with an extra argument", func(stderr *bytes.Buffer) error {
+			return run([]string{"receiver", "rotate", "--key", "extra"}, stderr, stderr)
+		}, "usage: wherry receiver rotate --key [--config-file FILE]"},
 		{"receiver run with the removed rotation flag", func(stderr *bytes.Buffer) error {
 			return run([]string{"receiver", "run", "--rotate-key"}, stderr, stderr)
 		}, "flag provided but not defined: -rotate-key"},

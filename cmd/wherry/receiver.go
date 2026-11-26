@@ -203,11 +203,11 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
+	if key != nil && (flags.NArg() != 0 || !*key) {
+		return errors.New(rotateUsage)
+	}
 	if flags.NArg() != 0 {
 		return errors.New(usage)
-	}
-	if key != nil && !*key {
-		return errors.New(rotateUsage)
 	}
 	// Without --config-file and without the default file, the platform's paths and the defaults configure the receiver.
 	var config receiverLocalConfig

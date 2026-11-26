@@ -12,7 +12,7 @@ Every command but `version` and the shortcuts runs under its role's word:
 
 | Role | Commands |
 | --- | --- |
-| Operator | `wherry operator init`, `check` and `view`; `wherry operator list`, `show`, `apply`, `add`, `remove`, `allow`, `deny`, `suspend`, `resume`, `rotate`, `storage` and `refresh`, each naming its pool, receiver, tenant or host as a flag |
+| Operator | `wherry operator init`, `check` and `view`; `wherry operator list`, `show`, `apply`, `add`, `remove`, `allow`, `deny`, `suspend`, `resume`, `rotate` and `storage`, each naming its pool, receiver, tenant or host as a flag |
 | Receiver | `wherry receiver run` and `rotate` |
 | Host user | `wherry host init`, `rotate`, `receivers`, `mcp`, `submit`, `result`, `status`, `events`, `logs` and `cancel` |
 | Development | [Development commands](commands-dev.md) |
@@ -127,8 +127,8 @@ Every operator command is `wherry operator <verb>`, one level deep, with the
 object it acts on as a resource flag: `--pool POOL`, `--receiver RECEIVER`,
 `--tenant TENANT`, or `--host HOST` beside the `--tenant` the host belongs
 to. The verbs are `init`, `check`, `view`, `list`, `show`, `apply`, `add`,
-`remove`, `allow`, `deny`, `suspend`, `resume`, `rotate`, `storage` and
-`refresh`. Resources are flags because a verb spans kinds: `apply` takes a
+`remove`, `allow`, `deny`, `suspend`, `resume`, `rotate` and `storage`.
+Resources are flags because a verb spans kinds: `apply` takes a
 pool or a receiver, `remove` a tenant, a host or a receiver. A verb whose
 operand is only ever one kind takes it positionally, as `list tenants`, `host
 init BUNDLE` and `result RUN_ID` do. A missing, extra, mixed, repeated or
@@ -156,7 +156,7 @@ the break.
 | `wherry operator pool resume POOL` | `wherry operator resume --pool POOL` |
 | `wherry operator pool rotate-key POOL [--suspect-key KID]...` | `wherry operator rotate --pool POOL [--suspect-key KID]...` |
 | `wherry operator tenant storage TENANT [-]` | `wherry operator storage --tenant TENANT [-]` |
-| `wherry operator tenant host refresh TENANT HOST` | `wherry operator refresh --host HOST --tenant TENANT` |
+| `wherry operator tenant host refresh TENANT HOST` | `wherry operator rotate --tenant TENANT --host HOST --storage` |
 | `wherry host key rotate` | `wherry host rotate --key` |
 | `wherry receiver run --rotate-key` | `wherry receiver rotate --key`, a one-shot run while the receiver is stopped |
 | `wherry host logs RUN_ID -f` | `wherry host logs RUN_ID --follow` |
@@ -168,7 +168,7 @@ the break.
 in the forms `--name value`, `--name=value` and `-name value`, and the last of
 a repeated option other than a resource flag wins. Options other than `--dry-run` and `--force` take a
 value, and options can appear anywhere after `operator`. An option without a
-value fails with `flag needs an argument: -<name>`, one no operator command
+value fails with `flag needs an argument: -<name>`, or with the verb's usage when it is a resource flag, one no operator command
 takes with `flag provided but not defined: -<name>`, and one the command does
 not take with `unknown option --<name>`. `--suspect-key` is given once per key;
 any other repeated option takes its last value.
@@ -221,7 +221,7 @@ prints its path and the next step:
 `wherry host init <file>` for a host, and the platform's bundle step for a receiver.
 `add --host` refuses a host that exists unless given `--force`. `apply --receiver` of a receiver that exists
 updates its configuration, and replaces its bundle only when the broker
-address changed, keeping the password; `refresh` does
+address changed, keeping the password; `rotate --storage` does
 the same for a host's bundle, the storage keys included. Without `--force`, `add --host` and
 `apply --receiver` of a new receiver never replace a bundle: before they change
 anything in Kafka they create the bundle file, failing when a file is there,
@@ -430,11 +430,13 @@ acme
 ```
 
 `list hosts` prints the same tenant lines with their `  host <host>` lines
-alone; `--tenant TENANT` restricts it to that tenant, and refuses one that
-is absent or has ended with `no tenant by that name`. `list pools` prints
-each recorded pool's name on a line, suspended pools included. `list
-receivers` prints the name of each receiver whose membership has not ended.
-Revoking and ended hosts, ended tenants and ended receivers are omitted.
+alone, so a tenant without a live host is its name and nothing under it;
+`--tenant TENANT` restricts it to that tenant, and refuses one that is absent
+or has ended with `no tenant by that name`. `list pools` prints each recorded
+pool's name on a line, suspended pools included. `list receivers` prints the
+name of each live receiver. A host or receiver is live until its removal
+starts: revoking and ended ones are omitted from every form, as are ended
+tenants.
 
 ### `wherry operator show`
 
@@ -762,7 +764,7 @@ Tenant command states:
 | `deny` | Refuse | End or converge and apply quotas when not entitled | Refuse |
 | `storage` | Refuse | Record the pair in the working directory | Refuse |
 | `add --host` | Refuse | Add; reissue a live host with `--force`; refuse revoking or ended hosts | Refuse |
-| `refresh` | Refuse | Rewrite a live host's kept bundle; refuse revoking or ended hosts | Refuse |
+| `rotate --storage` | Refuse | Rewrite a live host's kept bundle; refuse revoking or ended hosts | Refuse |
 | `remove --host` | Refuse | Revoke; retry from its record; converge when already ended | Refuse |
 | `remove --tenant` | Refuse | End entitlements, revoke hosts, end tenant, remove bundles | Converge and retry bundle removal |
 
@@ -894,7 +896,14 @@ acknowledgement as `suspend` does, printing
 
 ```sh
 wherry operator rotate --pool POOL [--suspect-key KID]...
+wherry operator rotate --tenant TENANT --host HOST --storage
 ```
+
+`rotate` replaces a secret in use: a suspended pool's key, or with
+`--storage` the S3 key pair in a host's kept bundle. `--storage` is required
+with a host, and an empty `--suspect-key` is refused.
+
+#### `rotate --pool POOL`
 
 Refuses a pool that is not suspended with `pool <pool> is not suspended; run
 wherry operator suspend --pool <pool> first`. Otherwise records a `rotate-key`
@@ -950,6 +959,23 @@ v0.1.2 is covered too. The list can name a credential the envelope did not
 hold; it never omits one it did, so rotating every listed credential covers
 the exposure.
 
+#### `rotate --tenant TENANT --host HOST --storage`
+
+Rewrites the kept bundle, `bundles/hosts/<tenant>/<host>.bundle`, of a live
+host with the broker in `operator.yaml` and the tenant's S3 key pair as
+`storage`, keeping the principal and password. A new broker address or a
+rotated pair so reaches the host without a new password. It prints `refreshed <bundle>` with the
+next step when the bundle changed, or `<bundle> is current`. A rerun
+changes nothing, so a refresh interrupted between a tenant's hosts is run
+again for each of them. Hand the refreshed bundle to the host as the first
+was. Its user runs `wherry host init BUNDLE`, which replaces the host's
+copy. It appends no record and changes nothing in Kafka. It refuses a
+tenant or host that does not exist, is revoking or has ended; a missing
+bundle, or a kept one carrying the CA earlier operators wrote
+([Upgrade](upgrade.md#broker-trust)), naming
+`add --host HOST --tenant TENANT --force`, which reissues the host with a new
+password; and a bundle that is another principal's.
+
 ### `wherry operator storage`
 
 ```sh
@@ -961,10 +987,10 @@ Records the S3 access key and secret key the store's administrator issued
 for a live tenant, once, in `storage/<tenant>.yaml` under the working
 directory, mode 0600 in a directory mode 0700, and adds `storage/` to the
 directory's `.gitignore`. The pair goes into every host bundle of the tenant
-that `add --host`, `--force` or `refresh` writes from then
+that `add --host`, `--force` or `rotate --storage` writes from then
 on ([S3 storage](operations-hosts.md#s3-storage)), and into no Kafka record.
-It prints the file and, for each live host of the tenant, the `tenant host
-refresh` that puts the pair into its kept bundle.
+It prints the file and, for each live host of the tenant, the `rotate
+--storage` that puts the pair into its kept bundle.
 
 On a terminal it asks for the access key, then the secret key, each with a
 masked input that prints nothing back and no answer line, as `operator init`
@@ -984,32 +1010,11 @@ record. It refuses:
 | a key that is empty or holds whitespace or a control character, which would sign every request wrong | a fixed message naming which key |
 | a tenant that is absent or has ended | `tenant absent; use add --tenant first` or `tenant has ended` |
 
-A changed pair reaches a host only through its bundle: run `tenant host
-refresh TENANT HOST` for each host and redistribute, as
+A changed pair reaches a host only through its bundle: run `rotate --tenant
+TENANT --host HOST --storage` for each host and redistribute, as
 [Rotate a tenant's storage keys](runbooks.md#rotate-a-tenant-s-storage-keys)
 walks through. `remove --host` and `remove --tenant` leave the pair where
 it is; the store's administrator disables it.
-
-### `wherry operator refresh`
-
-```sh
-wherry operator refresh --host HOST --tenant TENANT
-```
-
-Rewrites the kept bundle, `bundles/hosts/<tenant>/<host>.bundle`, of a live
-host with the broker in `operator.yaml` and the tenant's S3 key pair as
-`storage`, keeping the principal and password. A new broker address or a
-rotated pair so reaches the host without a new password. It prints `refreshed <bundle>` with the
-next step when the bundle changed, or `<bundle> is current`. A rerun
-changes nothing, so a refresh interrupted between a tenant's hosts is run
-again for each of them. Hand the refreshed bundle to the host as the first
-was. Its user runs `wherry host init BUNDLE`, which replaces the host's
-copy. It appends no record and changes nothing in Kafka. It refuses a
-tenant or host that does not exist, is revoking or has ended; a missing
-bundle, or a kept one carrying the CA earlier operators wrote
-([Upgrade](upgrade.md#broker-trust)), naming
-`add --host HOST --tenant TENANT --force`, which reissues the host with a new
-password; and a bundle that is another principal's.
 
 ## Receiver commands
 
@@ -1044,9 +1049,12 @@ time of the committed snapshot first read back naming it current, and its
 deadline.
 On start it:
 
-1. takes an exclusive lock on `state_dir`, held until it exits, so a second
-   receiver on the directory, or a [`receiver rotate`](#wherry-receiver-rotate),
-   fails with `state directory <dir> is held by another receiver process`;
+1. takes an exclusive lock on `receiver.lock` in `state_dir`, held until it
+   exits, so a second receiver on the directory, or a
+   [`receiver rotate`](#wherry-receiver-rotate), fails with
+   `state directory <dir> is held by another receiver process`, and a lock
+   the file system refuses fails with `lock state directory <dir>` and its
+   error;
    then settles a leftover `signing.key.next` as a host command settles
    [`<host_key>.next`](#wherry-host-rotate);
 2. registers its public key on its key topic when the topic is empty, and
@@ -1132,7 +1140,11 @@ fails with `state directory <dir> is held by another receiver process` and
 changes nothing, and a receiver started beside it fails the same way. It
 refuses a receiver that has never started, whose key topic is empty, with
 `receiver has never started, so it has no key to rotate: its first start
-registers one`. Otherwise it settles a leftover `signing.key.next`, writes
+registers one`, and a state directory whose key is not the key topic's
+current key, as a restored backup or the wrong volume holds, with `receiver
+key topic holds another key than the state directory`; neither writes
+anything. A rotation Kafka refuses for want of a grant fails with `denied
+rotate key` and Kafka's error. Otherwise it settles a leftover `signing.key.next`, writes
 the new key to `signing.key.next`, publishes a `rotate`
 [key record](a2a-extension-v1.md#key-records) signed by the old and new keys
 to the receiver's key topic, renames the file over `signing.key` as

@@ -55,18 +55,21 @@ check-markers: ## Fail on tool-attribution markers in tracked files
 # The provisioning role is the operator and its record topic wherry.operator;
 # every command is scoped by its role word, then a verb, with the operator's
 # resources as flags. The old names went in a clean break. CHANGELOG-style
-# history keeps them, upgrade.md's and commands.md's mapping tables name them,
-# and the operator's span names, a telemetry contract, keep the pre-verb forms.
-# The patterns are assembled from fragments, as in check-markers.
+# history keeps them, and so do the rows of upgrade.md's and commands.md's
+# mapping tables, an old command beside its new one, and upgrade.md's note on
+# the command result replaced. The operator's span names, a telemetry contract,
+# keep the pre-verb forms. The patterns are assembled from fragments, as in
+# check-markers, and end a word with a character class: git grep's \b is GNU's
+# alone.
 check-names: ## Fail on the old provisioning-role and command names in tracked files
 	@p="wherry[ .]adm""in|WHERRY_TRUST_ADM""IN[A-Z_]*|wherry (k""ey|clean""up)|dev re""set|receiver (a""dd|up""date|re""voke)|pool (cre""ate|up""date)|host re""voke"; \
 	q="#wherry-adm""in-|internal/adm""in"; \
 	hits=$$(git grep -n -w -E "$$p" -- . ':!*CHANGELOG*'; git grep -n -E "$$q" -- . ':!*CHANGELOG*'); \
-	r='wherry (host )?wa''it\b|host-wa''it-run-id'; \
-	hits="$$hits$$(git grep -n -E "$$r" -- docs/ plugins/ test/ README.md '*.go' ':!*CHANGELOG*' ':!docs/upgrade.md' ':!*_test.go')"; \
 	e='([^a-zA-Z-]|$$)'; \
-	s="operator (ten""ant|po""ol|recei""ver) (a""dd|li""st|stor""age|rem""ove|po""ol|ho""st|app""ly|sh""ow|susp""end|res""ume|rotate-""key)|ten""ant (a""dd|li""st|stor""age|rem""ove|po""ol (a""dd|rem""ove)|ho""st (a""dd|refr""esh|rem""ove))$$e|po""ol (app""ly|susp""end|res""ume|rotate-""key)$$e|recei""ver (app""ly|sh""ow|rem""ove)$$e|host k""ey rot""ate|k""ey rotate$$e|--rotate-""key|-f (PA""TH|FI""LE)|\[-""f$$e"; \
-	hits="$$hits$$(git grep -n -E "$$s" -- docs/ plugins/ test/ README.md Makefile '*.go' '*.svg' ':!*CHANGELOG*' ':!docs/upgrade.md' ':!*_test.go' | grep -v -E 'SpanCommands|^internal/operator/kafka\.go:[0-9]+:	"|marker\(|^docs/commands\.md:[0-9]+:\| `wherry ')"; \
+	r="wherry (host )?wa""it$$e|host-wa""it-run-id"; \
+	hits="$$hits$$(git grep -n -E "$$r" -- docs/ plugins/ test/ contrib/ docs-site/ README.md '*.go' ':!*CHANGELOG*' ':!docs/upgrade.md' ':!*_test.go')"; \
+	s="operator (ten""ant|po""ol|recei""ver|refr""esh) (a""dd|li""st|stor""age|rem""ove|po""ol|ho""st|app""ly|sh""ow|susp""end|res""ume|rotate-""key|--)|ten""ant (a""dd|li""st|stor""age|rem""ove|po""ol (a""dd|rem""ove)|ho""st (a""dd|refr""esh|rem""ove))$$e|po""ol (app""ly|susp""end|res""ume|rotate-""key)$$e|recei""ver (app""ly|sh""ow|rem""ove)$$e|refr""esh --ho""st|host k""ey rot""ate|k""ey rotate$$e|--rotate-""key|-f (PA""TH|FI""LE)|\[-""f$$e|lo""gs( [^ |\`]+)? -""f$$e|(operator|rem""ove) [^|]*--wa""it$$e"; \
+	hits="$$hits$$(git grep -n -E "$$s" -- docs/ plugins/ test/ contrib/ docs-site/ README.md Makefile '*.go' '*.svg' ':!*CHANGELOG*' ':!*_test.go' | grep -v -E 'SpanCommands|^internal/operator/kafka\.go:[0-9]+:	"|marker\(|^docs/(commands|upgrade)\.md:[0-9]+:\| `wherry [^|]*` \| `wherry ')"; \
 	if [ -n "$$hits" ]; then \
 		echo "$$hits"; echo "FAIL: old provisioning-role or command names in tracked files"; exit 1; \
 	fi; \

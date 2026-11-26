@@ -89,7 +89,12 @@ func TestOperatorCommandUsage(t *testing.T) {
 		{[]string{"skip", "42", "--sha256", strings.Repeat("0", 64)}, "unknown operator command"},
 		{[]string{"skip", "42"}, "unknown operator command"},
 		{[]string{"apply"}, operatorUsage["apply"]},
-		{[]string{"apply", "--receiver"}, "flag needs an argument: -receiver"},
+		{[]string{"apply", "--receiver"}, operatorUsage["apply"]},
+		{[]string{"add", "--tenant"}, operatorUsage["add"]},
+		{[]string{"refresh", "--host", "host-a", "--tenant", "tenant-a"}, "unknown operator command"},
+		{[]string{"rotate", "--tenant", "tenant-a", "--host", "host-a"}, operatorUsage["rotate"]},
+		{[]string{"rotate", "--pool", "pool-a", "--storage"}, "unknown option --storage"},
+		{[]string{"rotate", "--pool", "pool-a", "--suspect-key", ""}, "invalid value \"\" for flag -suspect-key: a key id is required"},
 		{[]string{"pool", "create", "pool-a"}, "unknown operator command"},
 		{[]string{"pool", "update", "pool-a"}, "unknown operator command"},
 		{[]string{"receiver", "add", "receiver-a"}, "unknown operator command"},
@@ -1020,5 +1025,85 @@ func TestTenantTreeAndList(t *testing.T) {
 	}
 	if out, err := command("list", "tenants"); err != nil || out != "a\n  host live\n" {
 		t.Fatalf("list=%q %v", out, err)
+	}
+}
+
+// list hosts, pools and receivers print what is live: a tenant without a live host keeps its line, a suspended pool is
+// still a pool, and a revoking or ended host or receiver is gone. suspend and resume record what they say.
+func TestListFormsAndSuspend(t *testing.T) {
+	service := operatorEnv(t)
+	ctx := t.Context()
+	command := func(args ...string) (string, error) {
+		var out bytes.Buffer
+		err := runOperator(args, &out, io.Discard)
+		return out.String(), err
+	}
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+	for _, pool := range []string{"q", "p"} {
+		if err := service.PoolApply(ctx, pool, terms, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tenant := range []string{"z", "a"} {
+		if _, err := command("add", "--tenant", tenant); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, host := range []string{"live", "revoking", "ended"} {
+		if _, err := command("add", "--host", host, "--tenant", "a"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, receiver := range []string{"r-live", "r-revoking", "r-ended"} {
+		config := operator.ReceiverConfig{Receiver: receiver, Pool: "p", Profiles: []operator.ProfileSettings{{Name: "claude", Plugin: "nomad", Agent: "claude"}}, PluginSHA256: map[string]string{"nomad": fakeSHA256}}
+		if err := service.ReceiverAdd(ctx, config, service.Broker, filepath.Join(t.TempDir(), "receiver.bundle")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, record := range []operator.Record{
+		{Kind: "revoking", Tenant: "a", Host: "revoking"}, {Kind: "end", Tenant: "a", Host: "ended"},
+		{Kind: "revoking", Receiver: "r-revoking"}, {Kind: "end", Receiver: "r-ended"},
+	} {
+		encoded, err := operator.EncodeRecord(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: operator.OperatorTopic, Key: []byte(record.Kind + record.Host + record.Receiver), Value: encoded}).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"list", "hosts"}, "a\n  host live\nz\n"},
+		{[]string{"list", "hosts", "--tenant", "a"}, "a\n  host live\n"},
+		{[]string{"list", "hosts", "--tenant", "z"}, "z\n"},
+		{[]string{"list", "pools"}, "p\nq\n"},
+		{[]string{"list", "receivers"}, "r-live\n"},
+	} {
+		if out, err := command(test.args...); err != nil || out != test.want {
+			t.Errorf("%q = %q, %v; want %q", test.args, out, err, test.want)
+		}
+	}
+	if out, err := command("list", "hosts", "--tenant", "absent"); err == nil || err.Error() != "no tenant by that name" || out != "" {
+		t.Errorf("list hosts of an absent tenant = %q, %v; want it refused", out, err)
+	}
+	suspended := func() map[string]bool {
+		t.Helper()
+		state, err := service.LoadState(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return state.Suspended
+	}
+	if out, err := command("suspend", "--pool", "q"); err != nil || !strings.HasPrefix(out, "pool q's suspend record is written") || !suspended()["q"] || suspended()["p"] {
+		t.Fatalf("suspend --pool q = %q, %v, suspended %v; want q alone suspended", out, err, suspended())
+	}
+	if out, err := command("list", "pools"); err != nil || out != "p\nq\n" {
+		t.Errorf("list pools with q suspended = %q, %v", out, err)
+	}
+	if out, err := command("resume", "--pool", "q"); err != nil || !strings.HasPrefix(out, "pool q's resume record is written") || suspended()["q"] {
+		t.Fatalf("resume --pool q = %q, %v, suspended %v; want none suspended", out, err, suspended())
 	}
 }

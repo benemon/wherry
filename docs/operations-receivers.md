@@ -409,25 +409,184 @@ within the stop window.
 
 A receiver signs with the key in its state directory for as long as it runs,
 and [`wherry receiver rotate --key`](commands.md#wherry-receiver-rotate) takes
-the lock the running receiver holds on that directory, so the order is stop,
-rotate, start. The rotation reads the receiver's local configuration, so it
-runs where the receiver runs, with its bundle and `state_dir` in place:
+the lock the running receiver holds on `receiver.lock` in that directory, so
+the order is stop, rotate, start. The rotation reads the receiver's local
+configuration, so it runs where the receiver runs, with its bundle and
+`state_dir` in place:
 
 ```sh
 wherry receiver rotate --key --config-file /etc/wherry/config.yaml
 ```
 
-It refuses a running receiver with `state directory <dir> is held by another
-receiver process`, and a receiver that has never started, whose key topic is
-empty. It prints `old_key_id=<id> new_key_id=<id>`.
+It prints `old_key_id=<id> new_key_id=<id>`. It writes nothing and fails for
+a running receiver, with `state directory <dir> is held by another receiver
+process`; for a receiver that has never started, whose key topic is empty;
+and for a state directory whose key is not the key topic's current key, as a
+restored backup or another receiver's volume holds, with `receiver key topic
+holds another key than the state directory`.
 
-- systemd: stop the unit, run the command as the unit's user against the
-  unit's configuration, state directory and bundle, then start the unit.
-- Nomad: stop the job, run the command as a batch job, or on the client host,
-  with the same volume and bundle, then start the job again.
-- Kubernetes: scale the receiver to zero, run a Job that mounts the state
-  PersistentVolumeClaim and the bundle Secret at the receiver's paths and runs
-  the command, then scale it back up.
+Each platform runs that command in the receiver's place. The steps below use
+the names of the install guides' examples.
+
+### On systemd
+
+The unit's bundle is a credential, at a path that exists only while the unit
+runs, so the rotation reads a copy of the configuration that names the
+bundle's file. As root, as the unit runs:
+
+```sh
+systemctl stop wherry-receiver
+sed 's|^bundle:.*|bundle: /etc/wherry/receiver.bundle|' /etc/wherry/config.yaml > /run/wherry-rotate.yaml
+wherry receiver rotate --key --config-file /run/wherry-rotate.yaml
+rm /run/wherry-rotate.yaml
+systemctl start wherry-receiver
+```
+
+### On Kubernetes
+
+Scale the receiver to zero, run the rotation as a Job that mounts what the
+Deployment mounts, then scale it back:
+
+```sh
+kubectl scale deployment wherry-receiver --replicas=0
+kubectl wait --for=delete pod -l app=wherry-receiver --timeout=60s
+kubectl apply -f rotate-key.yaml
+kubectl wait --for=condition=complete job/wherry-receiver-rotate-key --timeout=120s
+kubectl logs job/wherry-receiver-rotate-key
+kubectl delete job wherry-receiver-rotate-key
+kubectl scale deployment wherry-receiver --replicas=1
+```
+
+`rotate-key.yaml`, with the Deployment's image and, where the Deployment's
+pod has an `fsGroup`, the same one:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata: {name: wherry-receiver-rotate-key}
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: rotate
+          image: wherry-receiver
+          args: [receiver, rotate, --key, --config-file, /etc/wherry/config/config.yaml]
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, readOnlyRootFilesystem: true}
+          volumeMounts:
+            - {name: config, mountPath: /etc/wherry/config, readOnly: true}
+            - {name: bundle, mountPath: /etc/wherry/bundle, readOnly: true}
+            - {name: state, mountPath: /var/lib/wherry}
+      volumes:
+        - {name: config, configMap: {name: wherry-receiver-config}}
+        - {name: bundle, secret: {secretName: wherry-receiver-bundle, defaultMode: 0440}}
+        - {name: state, persistentVolumeClaim: {claimName: wherry-receiver-state}}
+```
+
+`backoffLimit: 0` keeps a failed rotation from running again unread. The
+receiver's Deployment keeps `strategy: Recreate` for the same lock: a rolling
+update starts the new pod while the old one still holds the state directory,
+and the new pod fails until the old one has exited. The lock is a `flock` on
+a file in the state directory. A file system that does not carry locks
+between nodes excludes only the receivers of one node, so the state claim
+stays `ReadWriteOnce` as well.
+
+### On Nomad
+
+The receiver's bundle and configuration are items of the Nomad variable
+`nomad/jobs/wherry-receiver`, which Nomad lets the job of that name read. The
+rotation is another job, so with ACLs enabled it needs a policy of its own on
+that variable. Stop the receiver, run the rotation as a batch job on the
+receiver's volume, then run the receiver's job again:
+
+```sh
+nomad job stop wherry-receiver
+nomad acl policy apply -namespace default -job wherry-receiver-rotate-key \
+  wherry-receiver-rotate-key rotate-key.policy.hcl
+nomad job run -var image=IMAGE rotate-key.nomad.hcl
+nomad alloc logs -job wherry-receiver-rotate-key
+nomad job stop -purge wherry-receiver-rotate-key
+nomad job run -var image=IMAGE wherry-receiver.nomad.hcl
+```
+
+`rotate-key.policy.hcl`:
+
+```hcl
+namespace "default" {
+  variables {
+    path "nomad/jobs/wherry-receiver" {
+      capabilities = ["read"]
+    }
+  }
+}
+```
+
+`rotate-key.nomad.hcl`, with the receiver job's image, driver and volume:
+
+```hcl
+variable "image" {
+  type = string
+}
+
+job "wherry-receiver-rotate-key" {
+  type = "batch"
+
+  group "rotate" {
+    volume "state" {
+      type            = "host"
+      source          = "wherry-receiver"
+      access_mode     = "single-node-single-writer"
+      attachment_mode = "file-system"
+    }
+
+    restart {
+      attempts = 0
+      mode     = "fail"
+    }
+
+    reschedule {
+      attempts  = 0
+      unlimited = false
+    }
+
+    task "rotate" {
+      driver = "docker"
+
+      config {
+        image = var.image
+        args  = ["receiver", "rotate", "--key", "--config-file", "/local/config.yaml"]
+      }
+
+      template {
+        destination = "secrets/receiver.bundle"
+        perms       = "0600"
+        uid         = 1001
+        gid         = 0
+        data        = <<-EOT
+          {{ with nomadVar "nomad/jobs/wherry-receiver" }}{{ .bundle }}{{ end }}
+        EOT
+      }
+
+      template {
+        destination = "local/config.yaml"
+        data        = <<-EOT
+          {{ with nomadVar "nomad/jobs/wherry-receiver" }}{{ .config }}{{ end }}
+        EOT
+      }
+
+      volume_mount {
+        volume      = "state"
+        destination = "/var/lib/wherry"
+      }
+    }
+  }
+}
+```
 
 Keep `signing.key.next` if a rotation is interrupted.
 The next start reconciles it against the key topic.

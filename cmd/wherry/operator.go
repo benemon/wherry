@@ -24,7 +24,7 @@ import (
 
 // operatorUsage is each operator verb's usage, under "" the operator's. A verb with several forms lists them with |.
 var operatorUsage = map[string]string{
-	"":        "usage: wherry operator <init|check|view|list|show|apply|add|remove|allow|deny|suspend|resume|rotate|storage|refresh> [--dir DIR]",
+	"":        "usage: wherry operator <init|check|view|list|show|apply|add|remove|allow|deny|suspend|resume|rotate|storage> [--dir DIR]",
 	"init":    "usage: wherry operator init [--dir DIR] [--broker ADDR] [--super-user NAME --super-user-password @FILE|@-] [--super-user-mechanism SCRAM-SHA-512|SCRAM-SHA-256] [--ca-cert PEM|@FILE|@-]",
 	"check":   "usage: wherry operator check",
 	"view":    "usage: wherry operator view [--dir DIR] [--window 24h] [--port N] [--external-url URL]",
@@ -37,36 +37,36 @@ var operatorUsage = map[string]string{
 	"deny":    "usage: wherry operator deny --tenant TENANT --pool POOL",
 	"suspend": "usage: wherry operator suspend --pool POOL",
 	"resume":  "usage: wherry operator resume --pool POOL",
-	"rotate":  "usage: wherry operator rotate --pool POOL [--suspect-key KID]...",
+	"rotate":  "usage: wherry operator rotate --pool POOL [--suspect-key KID]... | rotate --tenant TENANT --host HOST --storage",
 	"storage": "usage: wherry operator storage --tenant TENANT [-]",
-	"refresh": "usage: wherry operator refresh --host HOST --tenant TENANT",
 }
 
-// operatorForm is one form of a verb: the resource flags it takes, sorted, and the other options allowed beside --dir.
+// operatorForm is one form of a verb: the resource flags it takes, sorted, the other options allowed beside --dir, and
+// the one of them the form needs, which says what a verb spanning several things acts on.
 type operatorForm struct {
 	resources []string
 	options   []string
+	required  string
 }
 
 // operatorForms are each verb's forms. A verb's resource flags are matched against them as a set, so a missing, extra
 // or mixed resource flag fits no form and is the verb's usage error; an option outside the matched form is refused by
 // name. list takes --tenant for hosts alone, which operatorArgs checks against the kind.
 var operatorForms = map[string][]operatorForm{
-	"init":    {{nil, []string{"broker", "super-user", "super-user-password", "super-user-mechanism", "ca-cert"}}},
-	"check":   {{nil, nil}},
-	"view":    {{nil, []string{"window", "port", "external-url"}}},
-	"list":    {{nil, nil}, {[]string{"tenant"}, nil}},
-	"show":    {{[]string{"receiver"}, nil}},
-	"apply":   {{[]string{"pool"}, []string{"file", "dry-run"}}, {[]string{"receiver"}, []string{"file", "dry-run", "force"}}},
-	"add":     {{[]string{"tenant"}, nil}, {[]string{"host", "tenant"}, []string{"force"}}},
-	"remove":  {{[]string{"tenant"}, nil}, {[]string{"host", "tenant"}, []string{"timeout"}}, {[]string{"receiver"}, []string{"timeout"}}},
-	"allow":   {{[]string{"pool", "tenant"}, nil}},
-	"deny":    {{[]string{"pool", "tenant"}, nil}},
-	"suspend": {{[]string{"pool"}, nil}},
-	"resume":  {{[]string{"pool"}, nil}},
-	"rotate":  {{[]string{"pool"}, []string{"suspect-key"}}},
-	"storage": {{[]string{"tenant"}, nil}},
-	"refresh": {{[]string{"host", "tenant"}, nil}},
+	"init":    {{options: []string{"broker", "super-user", "super-user-password", "super-user-mechanism", "ca-cert"}}},
+	"check":   {{}},
+	"view":    {{options: []string{"window", "port", "external-url"}}},
+	"list":    {{}, {resources: []string{"tenant"}}},
+	"show":    {{resources: []string{"receiver"}}},
+	"apply":   {{resources: []string{"pool"}, options: []string{"file", "dry-run"}}, {resources: []string{"receiver"}, options: []string{"file", "dry-run", "force"}}},
+	"add":     {{resources: []string{"tenant"}}, {resources: []string{"host", "tenant"}, options: []string{"force"}}},
+	"remove":  {{resources: []string{"tenant"}}, {resources: []string{"host", "tenant"}, options: []string{"timeout"}}, {resources: []string{"receiver"}, options: []string{"timeout"}}},
+	"allow":   {{resources: []string{"pool", "tenant"}}},
+	"deny":    {{resources: []string{"pool", "tenant"}}},
+	"suspend": {{resources: []string{"pool"}}},
+	"resume":  {{resources: []string{"pool"}}},
+	"rotate":  {{resources: []string{"pool"}, options: []string{"suspect-key"}}, {resources: []string{"host", "tenant"}, options: []string{"storage"}, required: "storage"}},
+	"storage": {{resources: []string{"tenant"}}},
 }
 
 // operatorResources are the resource flags, each naming one object of its kind.
@@ -302,6 +302,22 @@ func runOperator(args []string, stdout, stderr io.Writer) (err error) {
 		fmt.Fprintln(stdout, outcome)
 		return nil
 	case "rotate":
+		if host != "" {
+			// The bundle must already be kept, so no directory is made.
+			bundle, err := bundlePath(dir, "hosts", false, tenant, host)
+			if err != nil {
+				return err
+			}
+			changed, err := service.HostRefresh(ctx, tenant, host, bundle)
+			if err != nil {
+				return err
+			}
+			if !changed {
+				fmt.Fprintf(stdout, "%s is current\n", bundle)
+				return nil
+			}
+			return hostBundleNext(stdout, "refreshed", bundle)
+		}
 		var suspects []string
 		if options["suspect-key"] != "" {
 			suspects = strings.Split(options["suspect-key"], "\n")
@@ -312,21 +328,6 @@ func runOperator(args []string, stdout, stderr io.Writer) (err error) {
 		}
 		writeRotateReport(stdout, pool, report, time.Now())
 		return nil
-	case "refresh":
-		// The bundle must already be kept, so no directory is made.
-		bundle, err := bundlePath(dir, "hosts", false, tenant, host)
-		if err != nil {
-			return err
-		}
-		changed, err := service.HostRefresh(ctx, tenant, host, bundle)
-		if err != nil {
-			return err
-		}
-		if !changed {
-			fmt.Fprintf(stdout, "%s is current\n", bundle)
-			return nil
-		}
-		return hostBundleNext(stdout, "refreshed", bundle)
 	case "remove":
 		if host == "" && receiver == "" {
 			if !wire.ValidName(tenant) {
@@ -405,7 +406,7 @@ func runOperator(args []string, stdout, stderr io.Writer) (err error) {
 
 // listState prints the live objects of kind in state: tenants as each tenant's name over its entitled pools and live
 // hosts, hosts as each tenant's name over its live hosts, of tenant alone when given, and pools and receivers as one
-// name per line.
+// name per line. A revoking host or receiver is not live.
 func listState(out io.Writer, state operator.State, kind, tenant string) error {
 	tenants := slices.Sorted(maps.Keys(state.Tenants))
 	if tenant != "" {
@@ -442,7 +443,7 @@ func listState(out io.Writer, state operator.State, kind, tenant string) error {
 		}
 	case "receivers":
 		for _, receiver := range slices.Sorted(maps.Keys(state.Receivers)) {
-			if !state.Ended[operator.ReceiverPrincipal(receiver)] {
+			if principal := operator.ReceiverPrincipal(receiver); !state.Ended[principal] && !state.Revoking[principal] {
 				fmt.Fprintln(out, receiver)
 			}
 		}
@@ -604,9 +605,16 @@ func operatorArgs(args []string) ([]string, map[string]string, error) {
 		flags.String(name, "", "")
 	}
 	var suspects []string
-	flags.Func("suspect-key", "", func(value string) error { suspects = append(suspects, value); return nil })
+	flags.Func("suspect-key", "", func(value string) error {
+		if value == "" {
+			return errors.New("a key id is required")
+		}
+		suspects = append(suspects, value)
+		return nil
+	})
 	flags.Bool("dry-run", false, "")
 	flags.Bool("force", false, "")
+	flags.Bool("storage", false, "")
 	// A resource flag names one object, so one given twice or empty fits no form.
 	resources := map[string]string{}
 	malformed := false
@@ -621,6 +629,10 @@ func operatorArgs(args []string) ([]string, map[string]string, error) {
 	}
 	positional, err := parseAnywhere(flags, args)
 	if err != nil {
+		// A resource flag given last with no value is empty like one given as --name=, not the flag package's error.
+		if name, missing := strings.CutPrefix(err.Error(), "flag needs an argument: -"); missing && slices.Contains(operatorResources, name) && len(positional) > 0 && operatorUsage[positional[0]] != "" {
+			err = errors.New(operatorUsage[positional[0]])
+		}
 		return positional, nil, err
 	}
 	options := map[string]string{}
@@ -654,6 +666,9 @@ func operatorArgs(args []string) ([]string, map[string]string, error) {
 		if !slices.Contains(forms[at].options, name) && !slices.Contains(given, name) && name != "dir" {
 			return nil, nil, fmt.Errorf("unknown option --%s", name)
 		}
+	}
+	if required := forms[at].required; required != "" && options[required] == "" {
+		return positional, nil, errors.New(operatorUsage[verb])
 	}
 	for name, value := range resources {
 		options[name] = value

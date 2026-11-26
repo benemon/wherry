@@ -112,7 +112,7 @@ func TestTenantStorageCommand(t *testing.T) {
 	if err := runOperator([]string{"storage", "--tenant", "tenant-a", "-"}, &stdout, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if want := "recorded the storage keys of tenant-a in " + keysPath + "; add --host writes them into each new host's bundle\nrefresh host-a's bundle: wherry operator refresh --host host-a --tenant tenant-a\n"; stdout.String() != want {
+	if want := "recorded the storage keys of tenant-a in " + keysPath + "; add --host writes them into each new host's bundle\nrefresh host-a's bundle: wherry operator rotate --tenant tenant-a --host host-a --storage\n"; stdout.String() != want {
 		t.Fatalf("tenant storage printed %q; want %q", stdout.String(), want)
 	}
 	keys := operator.StorageKeys{AccessKey: access, SecretKey: secret}
@@ -143,7 +143,7 @@ func TestTenantStorageCommand(t *testing.T) {
 		t.Fatalf("bundle %+v, %v; want no storage keys before the refresh", before, err)
 	}
 	stdout.Reset()
-	if err := runOperator([]string{"refresh", "--host", "host-a", "--tenant", "tenant-a"}, &stdout, io.Discard); err != nil {
+	if err := runOperator([]string{"rotate", "--tenant", "tenant-a", "--host", "host-a", "--storage"}, &stdout, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if want := "refreshed " + hostA + "; hand it to the host, where wherry host init host-a.bundle installs it\n"; stdout.String() != want {
@@ -154,7 +154,7 @@ func TestTenantStorageCommand(t *testing.T) {
 		t.Fatalf("refreshed bundle %+v, %v; want the pair with the password of %+v", after, err, before)
 	}
 	stdout.Reset()
-	if err := runOperator([]string{"refresh", "--host", "host-a", "--tenant", "tenant-a"}, &stdout, io.Discard); err != nil || stdout.String() != hostA+" is current\n" {
+	if err := runOperator([]string{"rotate", "--tenant", "tenant-a", "--host", "host-a", "--storage"}, &stdout, io.Discard); err != nil || stdout.String() != hostA+" is current\n" {
 		t.Fatalf("refresh again: %v, %q", err, stdout.String())
 	}
 	// A host added now carries the pair, and the add names the next step; a reissue keeps the pair under its new password.
@@ -197,10 +197,10 @@ func TestTenantStorageCommand(t *testing.T) {
 	if err := runOperator([]string{"storage", "--tenant", "tenant-a", "-"}, &stdout, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if want := "recorded the storage keys of tenant-a in " + keysPath + "; add --host writes them into each new host's bundle\nrefresh host-a's bundle: wherry operator refresh --host host-a --tenant tenant-a\nrefresh host-b's bundle: wherry operator refresh --host host-b --tenant tenant-a\n"; stdout.String() != want {
+	if want := "recorded the storage keys of tenant-a in " + keysPath + "; add --host writes them into each new host's bundle\nrefresh host-a's bundle: wherry operator rotate --tenant tenant-a --host host-a --storage\nrefresh host-b's bundle: wherry operator rotate --tenant tenant-a --host host-b --storage\n"; stdout.String() != want {
 		t.Fatalf("tenant storage printed %q; want %q", stdout.String(), want)
 	}
-	if err := runOperator([]string{"refresh", "--host", "host-a", "--tenant", "tenant-a"}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"rotate", "--tenant", "tenant-a", "--host", "host-a", "--storage"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if stale, err := operator.ReadBundle(hostB); err != nil || stale.Storage != keys {
@@ -208,7 +208,7 @@ func TestTenantStorageCommand(t *testing.T) {
 	}
 	for host, want := range map[string]string{"host-a": hostA + " is current\n", "host-b": "refreshed " + hostB + "; hand it to the host, where wherry host init host-b.bundle installs it\n"} {
 		stdout.Reset()
-		if err := runOperator([]string{"refresh", "--host", host, "--tenant", "tenant-a"}, &stdout, io.Discard); err != nil || stdout.String() != want {
+		if err := runOperator([]string{"rotate", "--tenant", "tenant-a", "--host", host, "--storage"}, &stdout, io.Discard); err != nil || stdout.String() != want {
 			t.Fatalf("rerun refresh of %s: %v, %q; want %q", host, err, stdout.String(), want)
 		}
 	}

@@ -358,7 +358,7 @@ func tenantStorage(ctx context.Context, service *operator.Service, dir, tenant s
 	if err := ignore(filepath.Join(dir, ".gitignore"), "storage/"); err != nil {
 		return err
 	}
-	// The pair reaches a host only in its bundle, so each live host of the tenant is named with the refresh that
+	// The pair reaches a host only in its bundle, so each live host of the tenant is named with the rotation that
 	// rewrites it; a host added from now on gets it from add --host.
 	var hosts []string
 	for _, principal := range slices.Sorted(maps.Keys(state.Hosts)) {
@@ -371,7 +371,7 @@ func tenantStorage(ctx context.Context, service *operator.Service, dir, tenant s
 		return err
 	}
 	for _, host := range hosts {
-		if _, err := fmt.Fprintf(stdout, "refresh %s's bundle: wherry operator refresh --host %s --tenant %s\n", host, host, tenant); err != nil {
+		if _, err := fmt.Fprintf(stdout, "refresh %s's bundle: wherry operator rotate --tenant %s --host %s --storage\n", host, tenant, host); err != nil {
 			return err
 		}
 	}

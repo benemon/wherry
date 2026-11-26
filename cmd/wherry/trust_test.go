@@ -708,7 +708,7 @@ func TestKeptBundleWithACAIsReissuedWithForce(t *testing.T) {
 		refresh    []string
 		force      []string
 	}{
-		{"host", filepath.Join("bundles", "hosts", "tenant-a", "host-a.bundle"), []string{"refresh", "--host", "host-a", "--tenant", "tenant-a"}, []string{"add", "--host", "host-a", "--tenant", "tenant-a", "--force"}},
+		{"host", filepath.Join("bundles", "hosts", "tenant-a", "host-a.bundle"), []string{"rotate", "--tenant", "tenant-a", "--host", "host-a", "--storage"}, []string{"add", "--host", "host-a", "--tenant", "tenant-a", "--force"}},
 		{"receiver", filepath.Join("bundles", "receivers", "receiver-a.bundle"), []string{"apply", "--receiver", "receiver-a"}, []string{"apply", "--receiver", "receiver-a", "--force"}},
 	} {
 		before, err := operator.ReadBundle(c.path)

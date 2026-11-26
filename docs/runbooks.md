@@ -330,7 +330,7 @@ Confirm it:
 Then:
 
 - The hosts resubmit each run before its `task_started_by` when `submit` or
-  `status` next runs there, or `result`, `logs -f` or `status` for the run, or
+  `status` next runs there, or `result`, `logs --follow` or `status` for the run, or
   the MCP server's `submit`, `status` or `result`
   ([Lost pool keys](concepts.md#lost-pool-keys));
   `wherry status RUN_ID` then shows `replaced_by=<run>`. A run past its
@@ -442,7 +442,7 @@ host loses its storage:
 2. Run `wherry operator storage --tenant TENANT`, or pipe the new pair in
    with `-`. It checks both keys before it writes and replaces the file
    atomically, so a refused or failed run keeps the old pair; run it again.
-3. Run `wherry operator refresh --host HOST --tenant TENANT` for each remaining
+3. Run `wherry operator rotate --tenant TENANT --host HOST --storage` for each remaining
    host of the tenant. Each rewrites the host's kept bundle with the new pair
    and the same password; a rerun reports a refreshed bundle as current, so
    a run interrupted part way is run again for every host and converges.

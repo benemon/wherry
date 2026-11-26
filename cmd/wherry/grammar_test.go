@@ -11,9 +11,9 @@ import (
 // the verb or is the verb's usage error, as is one repeated or empty, --host without --tenant and no resource flag
 // where the verb takes one; and an option outside the form is refused by name.
 func TestOperatorResourceFlagRules(t *testing.T) {
-	options := []string{"file", "dry-run", "force", "timeout", "suspect-key", "broker", "super-user", "super-user-password", "super-user-mechanism", "ca-cert", "window", "port", "external-url"}
+	options := []string{"file", "dry-run", "force", "storage", "timeout", "suspect-key", "broker", "super-user", "super-user-password", "super-user-mechanism", "ca-cert", "window", "port", "external-url"}
 	given := func(name string) []string {
-		if name == "dry-run" || name == "force" {
+		if name == "dry-run" || name == "force" || name == "storage" {
 			return []string{"--" + name}
 		}
 		return []string{"--" + name, "x"}
@@ -43,6 +43,12 @@ func TestOperatorResourceFlagRules(t *testing.T) {
 			for _, resource := range form.resources {
 				args = append(args, "--"+resource, resource+"-a")
 			}
+			if form.required != "" {
+				if got := parse(args...); got != usage {
+					t.Errorf("%q without --%s = %q; want its usage", args, form.required, got)
+				}
+				args = append(args, given(form.required)...)
+			}
 			if got := parse(args...); got != "" {
 				t.Errorf("%q = %q; want it accepted", args, got)
 			}
@@ -50,6 +56,9 @@ func TestOperatorResourceFlagRules(t *testing.T) {
 				t.Errorf("%q with --dir = %q; want it accepted", args, got)
 			}
 			for _, name := range options {
+				if name == form.required {
+					continue
+				}
 				got, want := parse(append(slices.Clone(args), given(name)...)...), ""
 				if !slices.Contains(form.options, name) {
 					want = "unknown option --" + name
@@ -80,10 +89,17 @@ func TestOperatorResourceFlagRules(t *testing.T) {
 				if got := parse(empty...); got != usage {
 					t.Errorf("%q = %q; want its usage", empty, got)
 				}
+				last := []string{verb}
+				if verb == "list" {
+					last = append(last, "hosts")
+				}
+				if got := parse(append(last, "--"+resource)...); got != usage {
+					t.Errorf("%q with no value = %q; want its usage", last, got)
+				}
 			}
 		}
 	}
-	for _, verb := range []string{"add", "remove", "refresh"} {
+	for _, verb := range []string{"add", "remove", "rotate"} {
 		if got := parse(verb, "--host", "host-a"); got != operatorUsage[verb] {
 			t.Errorf("%s --host alone = %q; want its usage", verb, got)
 		}

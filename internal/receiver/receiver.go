@@ -149,6 +149,9 @@ func New(bundle operator.Bundle, roots *x509.CertPool, stateDir string, drainTim
 	return &Receiver{id: id, base: base, storage: storageClient(roots), reader: operator.NewReader(base), signing: signing, stateDir: stateDir, lock: lock, drainTimeout: drainTimeout, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
 }
 
+// LockFile is the file in the state directory a receiver process locks for as long as it uses the directory.
+const LockFile = "receiver.lock"
+
 // openState is the receiver id bundle names, its Kafka client and the exclusive lock on stateDir, which the caller
 // closes.
 func openState(bundle operator.Bundle, roots *x509.CertPool, stateDir string) (string, *kgo.Client, *os.File, error) {
@@ -166,13 +169,18 @@ func openState(bundle operator.Bundle, roots *x509.CertPool, stateDir string) (s
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return "", nil, nil, err
 	}
-	lock, err := os.Open(stateDir)
+	// A file opened for writing, as internal/client locks its runs: flock on NFS is a byte-range lock, which a
+	// directory or a read-only descriptor cannot take.
+	lock, err := os.OpenFile(filepath.Join(stateDir, LockFile), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return "", nil, nil, err
 	}
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		lock.Close()
-		return "", nil, nil, fmt.Errorf("state directory %s is held by another receiver process: %w", stateDir, err)
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return "", nil, nil, fmt.Errorf("state directory %s is held by another receiver process", stateDir)
+		}
+		return "", nil, nil, fmt.Errorf("lock state directory %s: %w", stateDir, err)
 	}
 	base, err := kgo.NewClient(feedBatches(opts)...)
 	if err != nil {
@@ -182,9 +190,11 @@ func openState(bundle operator.Bundle, roots *x509.CertPool, stateDir string) (s
 	return id, base, lock, nil
 }
 
-// RotateKey replaces the signing key in stateDir of the receiver bundle names, as Run would have, and returns the old
-// and new key ids. It holds the lock a running receiver holds, so it runs only while the receiver is stopped, and it
-// refuses a receiver that has never started, whose key topic is empty: that receiver's first start registers its key.
+// RotateKey replaces the signing key in stateDir of the receiver bundle names and returns the old and new key ids. It
+// holds the lock a running receiver holds, so it runs only while the receiver is stopped. Before it writes anything it
+// refuses a receiver that has never started, whose key topic is empty, and a state directory whose key is not the
+// topic's current key, as a start refuses one: a rotation signed by another key would not fold, and the topic keeps
+// every record.
 func RotateKey(ctx context.Context, bundle operator.Bundle, roots *x509.CertPool, stateDir string) (string, string, error) {
 	id, base, lock, err := openState(bundle, roots, stateDir)
 	if err != nil {
@@ -197,20 +207,37 @@ func RotateKey(ctx context.Context, bundle operator.Bundle, roots *x509.CertPool
 	defer reader.Close()
 	records, err := reader.ReadFrom(ctx, topic, 0)
 	if err != nil {
-		return "", "", fmt.Errorf("read key topic: %w", err)
+		return "", "", denied(fmt.Errorf("read key topic: %w", err))
 	}
 	if len(records) == 0 {
 		return "", "", errors.New("receiver has never started, so it has no key to rotate: its first start registers one")
+	}
+	var state signed.KeyState
+	for _, record := range records {
+		if state, err = signed.ApplyKeyRecord(state, id, record.Value, record.Timestamp); err != nil {
+			return "", "", errors.New("receiver key topic holds a record that does not fold")
+		}
 	}
 	key, err := operator.RecoverKey(ctx, base, id, topic, keyFile)
 	if err != nil {
 		return "", "", fmt.Errorf("signing key: %w", err)
 	}
+	if !key.Public().(ed25519.PublicKey).Equal(state.Current) {
+		return "", "", errors.New("receiver key topic holds another key than the state directory")
+	}
 	next, err := operator.RotateKey(ctx, base, id, topic, keyFile, key)
 	if err != nil {
-		return "", "", err
+		return "", "", denied(fmt.Errorf("rotate key: %w", err))
 	}
 	return signed.KeyID(key.Public().(ed25519.PublicKey)), signed.KeyID(next.Public().(ed25519.PublicKey)), nil
+}
+
+// denied is err named as a denial when Kafka refused it for want of a grant, as a running receiver names one.
+func denied(err error) error {
+	if authorisationError(err) {
+		return fmt.Errorf("denied rotate key: %w", err)
+	}
+	return err
 }
 
 // feedBatches is opts with producer batches up to what a tenant's feed takes, so the largest result fits. Every client
