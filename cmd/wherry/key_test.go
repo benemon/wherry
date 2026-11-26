@@ -5,9 +5,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -99,7 +101,7 @@ func TestKeyRotateReplacesTheHostKey(t *testing.T) {
 	h := newKeyHost(t)
 	old := h.key(t)
 	var stdout, stderr bytes.Buffer
-	if err := run([]string{"host", "key", "rotate", "--config-file", h.config}, &stdout, &stderr); err != nil {
+	if err := run([]string{"host", "rotate", "--key", "--config-file", h.config}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	next := h.key(t)
@@ -135,7 +137,7 @@ func TestKeyRotateRefusesWhileARunIsUnfinished(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	err := run([]string{"host", "key", "rotate", "--config-file", h.config}, &stdout, &stderr)
+	err := run([]string{"host", "rotate", "--key", "--config-file", h.config}, &stdout, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "run-open") || !strings.Contains(err.Error(), "MCP server") {
 		t.Fatalf("rotate with an unfinished run: %v; want a refusal naming it", err)
 	}
@@ -195,7 +197,7 @@ func TestKeyRotateKeepsTheKeyFileWhenTheTopicRefusesTheRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	if err := run([]string{"host", "key", "rotate", "--config-file", h.config}, &stdout, &stderr); err == nil {
+	if err := run([]string{"host", "rotate", "--key", "--config-file", h.config}, &stdout, &stderr); err == nil {
 		t.Fatal("rotation the key topic refused reported success")
 	}
 	if !h.key(t).Equal(stray) || stdout.Len() != 0 {
@@ -259,29 +261,66 @@ func TestReceiverRotateKey(t *testing.T) {
 		return stdout.String()
 	}
 
-	logs := start("--rotate-key")
-	records, state := folded()
+	rotate := func() (string, error) {
+		t.Helper()
+		var stdout bytes.Buffer
+		err := run([]string{"receiver", "rotate", "--key", "--config-file", localConfig}, &stdout, io.Discard)
+		return stdout.String(), err
+	}
+	// A receiver that has never started has an empty key topic and nothing to rotate.
+	if _, err := rotate(); err == nil || err.Error() != "receiver has never started, so it has no key to rotate: its first start registers one" {
+		t.Fatalf("rotate before the first start = %v; want it refused", err)
+	}
+	if records, _ := folded(); len(records) != 0 {
+		t.Fatalf("a refused rotation left %d records on the key topic", len(records))
+	}
+	start()
 	key := fileKey()
-	if len(records) != 2 || !state.Current.Equal(key.Public()) || len(state.Retired) != 1 {
+	if records, state := folded(); len(records) != 1 || !state.Current.Equal(key.Public()) {
+		t.Fatalf("key topic of %d records after the first start; want the registration alone", len(records))
+	}
+	// A running receiver holds the state directory, so a rotation beside it is refused and changes nothing.
+	held, err := os.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rotate(); err == nil || !strings.Contains(err.Error(), "state directory "+stateDir+" is held by another receiver process") {
+		t.Fatalf("rotate beside a held state directory = %v; want it refused", err)
+	}
+	held.Close()
+	if records, _ := folded(); len(records) != 1 || !fileKey().Equal(key) {
+		t.Fatal("a refused rotation rotated the key")
+	}
+	out, err := rotate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, state := folded()
+	next := fileKey()
+	if len(records) != 2 || !state.Current.Equal(next.Public()) || len(state.Retired) != 1 || !state.Retired[0].Key.Equal(key.Public()) {
 		t.Fatalf("key topic of %d records; want a registration and a rotation to the state directory's key", len(records))
 	}
-	if want := "rotated key: old=" + signed.KeyID(state.Retired[0].Key) + " new=" + keyID(key); !strings.Contains(logs, want) || strings.Contains(logs, "configured:") {
-		t.Fatalf("logs %q; want %q before configuration", logs, want)
+	if want := "old_key_id=" + keyID(key) + " new_key_id=" + keyID(next) + "\n"; out != want {
+		t.Fatalf("rotate printed %q; want %q", out, want)
 	}
 	noNextKey(t, keyPath)
+	key = next
 
-	// Without the flag a start never rotates, and settles a next key nothing published by removing it.
+	// A start never rotates, and settles a next key nothing published by removing it.
 	if _, err := trust.GenerateSigningKeyFile(keyPath + ".next"); err != nil {
 		t.Fatal(err)
 	}
 	start()
 	noNextKey(t, keyPath)
 	if records, _ := folded(); len(records) != 2 || !fileKey().Equal(key) {
-		t.Fatal("a start without --rotate-key rotated the key")
+		t.Fatal("a start rotated the key")
 	}
 
 	// It settles a published next key by renaming it over the key file.
-	next, err := trust.GenerateSigningKeyFile(keyPath + ".next")
+	next, err = trust.GenerateSigningKeyFile(keyPath + ".next")
 	if err != nil {
 		t.Fatal(err)
 	}

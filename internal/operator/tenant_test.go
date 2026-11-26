@@ -178,7 +178,7 @@ func TestAbsentTenantCommands(t *testing.T) {
 		"remove":      func() error { return removeTenantFixture(service, ctx, "absent") },
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := command(); err == nil || !strings.Contains(err.Error(), "tenant add") {
+			if err := command(); err == nil || !strings.Contains(err.Error(), "add --tenant") {
 				t.Fatalf("error=%v", err)
 			}
 		})

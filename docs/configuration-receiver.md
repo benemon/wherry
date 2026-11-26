@@ -8,12 +8,12 @@ A receiver that needs a platform credential source, a `ca_cert`, tracing, anothe
 
 ### Generate or provide the local configuration
 
-1. Run `wherry operator receiver apply NAME` in your operator working directory.
+1. Run `wherry operator apply --receiver RECEIVER` in your operator working directory.
    Wherry checks the receiver configuration against the pool's terms first.
-2. Provide `DIR/config.yaml` when you use `-f DIR`, or keep
+2. Provide `DIR/config.yaml` when you use `--file DIR`, or keep
    `receivers/NAME.config.yaml` in your working directory.
    The directory's file takes precedence.
-   With `-f FILE`, the local configuration still lives under `receivers/`.
+   With `--file FILE`, the local configuration still lives under `receivers/`.
    Wherry validates a provided file and preserves its bytes, permissions and modification time.
    A provided file must give every platform credential the merged profiles name a source.
 3. If neither file exists and the merged profiles name no platform credential, Wherry writes nothing and says the receiver runs without a file.
@@ -140,9 +140,9 @@ successor publishes a `takeover` either way, which raises
 ([Pool keys](concepts.md#pool-keys-and-the-key-custodian)).
 
 Planned changes go through
-[`receiver apply`](operations-operator.md#change-a-receiver-s-configuration), which
+[`apply --receiver`](operations-operator.md#change-a-receiver-s-configuration), which
 drains with no time limit.
-[`receiver remove`](operations-operator.md#revoke-a-host-or-receiver) is a hard stop.
+[`remove --receiver`](operations-operator.md#revoke-a-host-or-receiver) is a hard stop.
 A Kafka authorisation error or a plugin process's exit also stops the
 receiver at once, with no drain and no key custodian re-key, leaving its
 runs' jobs for an adopter. The receiver exits non-zero and relies on its
@@ -183,7 +183,7 @@ tracing: true
 
 ## Receiver configuration
 
-What `receiver apply` reads, recorded on
+What `apply --receiver` reads, recorded on
 `wherry.operator` but for `broker`: a
 [directory](#receiver-configuration-directory) or a single YAML file with the
 same entries in maps and lists, named by `-f`, or the single file
@@ -295,9 +295,9 @@ driver, the resources and the label `platform: nomad`, and the image
 same address, credential and resources, the `exec` driver with `command`
 alone in its driver configuration, and the labels `platform: nomad` and
 `isolation: host`.
-`wherry operator receiver apply ID --dry-run` prints what a file resolves
-to, with the pins, and `wherry operator receiver show ID` prints what a receiver's record
-holds ([commands](commands.md#wherry-operator-receiver-show-receiver)).
+`wherry operator apply --receiver RECEIVER --dry-run` prints what a file resolves
+to, with the pins, and `wherry operator show --receiver RECEIVER` prints what a receiver's record
+holds ([commands](commands.md#wherry-operator-show)).
 
 ### Receiver configuration directory
 
@@ -337,7 +337,7 @@ plugin profile's `config` holds only what the example needs; the
 lists every setting. Neither profile names an agent credential: each
 delivers its agent's credentials at the targets the pool's terms give them.
 As one file for
-`receiver apply nomad-1 -f nomad-1.yaml`, or kept as `receivers/nomad-1.yaml`:
+`apply --receiver nomad-1 --file nomad-1.yaml`, or kept as `receivers/nomad-1.yaml`:
 
 ```yaml
 pool: build
@@ -379,7 +379,7 @@ plugins:
 ```
 
 The same configuration as a directory for
-`receiver apply nomad-1 -f nomad-1`:
+`apply --receiver nomad-1 --file nomad-1`:
 
 ```
 nomad-1/

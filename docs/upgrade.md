@@ -31,6 +31,51 @@ Restart a pool's receivers one at a time.
 A stopping key custodian needs a live successor to re-key its tasks.
 Follow [Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian).
 
+## Command grammar
+
+Every command is its role word then a verb, one level deep, and the
+operator's resources are flags: `wherry operator <verb>` with `--pool POOL`,
+`--receiver RECEIVER`, `--tenant TENANT` or `--host HOST --tenant TENANT`.
+The commands below are renamed in a clean break: the old forms fail with
+`unknown operator command`, and there are no aliases. Short flags are gone
+everywhere: `-f PATH` is `--file PATH` and `logs -f` is `logs --follow`. The
+operator's `--wait` is `--timeout`, so `--wait` is `submit`'s alone. Output
+and exit codes of every renamed command are unchanged. Update scripts that
+call the old forms; the plugin READMEs' and e2e scripts' examples follow with
+their next release.
+
+| Before | Now |
+| --- | --- |
+| `wherry operator tenant list` | `wherry operator list tenants`; `list hosts [--tenant T]` for its host lines |
+| `wherry operator receiver show RECEIVER` | `wherry operator show --receiver RECEIVER` |
+| `wherry operator pool apply POOL [-f PATH] [--dry-run]` | `wherry operator apply --pool POOL [--file PATH] [--dry-run]` |
+| `wherry operator receiver apply RECEIVER [-f PATH] [--dry-run]` | `wherry operator apply --receiver RECEIVER [--file PATH] [--dry-run]` |
+| `wherry operator receiver apply RECEIVER --force` | `wherry operator apply --receiver RECEIVER --force` |
+| `wherry operator tenant add TENANT` | `wherry operator add --tenant TENANT` |
+| `wherry operator tenant host add TENANT HOST [--force]` | `wherry operator add --host HOST --tenant TENANT [--force]` |
+| `wherry operator tenant pool add TENANT POOL` | `wherry operator allow --tenant TENANT --pool POOL` |
+| `wherry operator tenant pool remove TENANT POOL` | `wherry operator deny --tenant TENANT --pool POOL` |
+| `wherry operator tenant remove TENANT` | `wherry operator remove --tenant TENANT` |
+| `wherry operator tenant host remove TENANT HOST [--wait D]` | `wherry operator remove --host HOST --tenant TENANT [--timeout D]` |
+| `wherry operator receiver remove RECEIVER [--wait D]` | `wherry operator remove --receiver RECEIVER [--timeout D]` |
+| `wherry operator pool suspend POOL` | `wherry operator suspend --pool POOL` |
+| `wherry operator pool resume POOL` | `wherry operator resume --pool POOL` |
+| `wherry operator pool rotate-key POOL [--suspect-key KID]...` | `wherry operator rotate --pool POOL [--suspect-key KID]...` |
+| `wherry operator tenant storage TENANT [-]` | `wherry operator storage --tenant TENANT [-]` |
+| `wherry operator tenant host refresh TENANT HOST` | `wherry operator refresh --host HOST --tenant TENANT` |
+| `wherry host key rotate` | `wherry host rotate --key` |
+| `wherry receiver run --rotate-key` | `wherry receiver rotate --key`, a one-shot run while the receiver is stopped |
+| `wherry host logs RUN_ID -f` | `wherry host logs RUN_ID --follow` |
+
+[`wherry receiver rotate --key`](commands.md#wherry-receiver-rotate) is a
+one-shot: it runs while the receiver is stopped, takes the lock `run` holds on
+the state directory, and refuses a receiver that has never started.
+`receiver run` no longer takes `--rotate-key`;
+[Rotate a receiver key](operations-receivers.md#rotate-a-receiver-key) gives
+the procedure. The operator's trace span names keep the old command names:
+readers of the trace topics, the [operator view](operator-view.md) among them,
+match on them.
+
 ## Collected outputs and non-git continue
 
 A clean break, as every pre-1.0 change ([ADR-0032](design.md)); no
@@ -402,11 +447,11 @@ Each receiver page gives its platform's upgrade and uninstall steps.
 1. On the operator machine, in the working directory, remove the host:
 
    ```sh
-   wherry operator tenant host remove TENANT HOST
+   wherry operator remove --host HOST --tenant TENANT
    ```
 
-   For this guide's host, that is `wherry operator tenant host remove acme laptop`.
-   [`tenant host remove`](commands.md#wherry-operator-tenant-host-remove-tenant-host) runs the host's revocation steps.
+   For this guide's host, that is `wherry operator remove --host laptop --tenant acme`.
+   [`remove --host`](commands.md#wherry-operator-remove) runs the host's revocation steps.
 
 2. After it succeeds, delete `~/.config/wherry/` on the laptop.
    It holds `config.yaml`, `bundle.yaml` and `host.key`.
@@ -472,7 +517,7 @@ scripts are updated with their next release.
 The host command `wherry wait` is now `wherry result`, also under
 `wherry host`. There is no alias. Update scripts and skills that call it.
 The MCP tool is now `result`, and submit's `wait` response member is
-`command`. Operator `--wait` flags are unchanged.
+`command`. The operator's `--wait` is now `--timeout` ([Command grammar](#command-grammar)).
 
 For a short run, `wherry submit --wait` submits and collects the result in
 one command. MCP submit accepts `wait: true` and returns the reply under

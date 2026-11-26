@@ -1,5 +1,5 @@
 agents:
-  # claude-code is a credential catalog id: pool apply adds claude-code-oauth-token (CLAUDE_CODE_OAUTH_TOKEN), required.
+  # claude-code is a credential catalog id: apply --pool adds claude-code-oauth-token (CLAUDE_CODE_OAUTH_TOKEN), required.
   - name: claude-code
     credentials:
       # A credential outside the catalog, beside the derived one; a run gets it when the host resolves it.
@@ -12,7 +12,7 @@ agents:
     credentials:
       - {name: model-api-key, env: MODEL_API_KEY}
   # Without models, a task names no model and the profile's command picks one.
-  # codex is a catalog id: pool apply adds codex-api-key (CODEX_API_KEY), required.
+  # codex is a catalog id: apply --pool adds codex-api-key (CODEX_API_KEY), required.
   - name: codex
 default_agent: claude-code
 start_by_limit: 72h

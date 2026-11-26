@@ -76,7 +76,7 @@ func TestSIGKILLAdoptionChildProcess(t *testing.T) {
 	}
 	r := &Receiver{
 		id: id, base: base, reader: operator.NewReader(base), signing: signing,
-		keyFile: filepath.Join(stateDir, "signing.key"), stateDir: stateDir, drainTimeout: 5 * time.Second,
+		stateDir: stateDir, drainTimeout: 5 * time.Second,
 		logger: logger, metrics: newMetrics(registry),
 		factory: func(pool string, settings operator.ProfileSettings, _ string) (Named, error) {
 			plugin.mu.Lock()

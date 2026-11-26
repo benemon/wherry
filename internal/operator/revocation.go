@@ -343,7 +343,7 @@ func (service *Service) removeTenant(ctx context.Context, tenant string, probe f
 	}
 	ended, exists := state.Tenants[tenant]
 	if !exists {
-		return errors.New("tenant absent; use tenant add first")
+		return errors.New("tenant absent; use add --tenant first")
 	}
 	if ended {
 		return service.converge(ctx)

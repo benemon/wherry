@@ -203,28 +203,28 @@ func operatorCommands(t *testing.T, root *kgo.Client, dir, suffix string, check,
 		}
 		return nil
 	}
-	if err := wherry("pool", "apply", pool, "-f", filepath.Join(files, "pool.yaml")); err != nil {
+	if err := wherry("apply", "--pool", pool, "--file", filepath.Join(files, "pool.yaml")); err != nil {
 		return err
 	}
 	if err := root.ProduceSync(context.Background(), &kgo.Record{Topic: operator.CustodianTopic(pool), Key: []byte("not-a-snapshot")}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{
-		{"tenant", "add", tenant},
-		{"tenant", "pool", "add", tenant, pool},
-		{"tenant", "host", "add", tenant, host},
-		{"receiver", "apply", receiver, "-f", filepath.Join(files, "receiver.yaml")},
-		{"receiver", "show", receiver},
-		{"pool", "suspend", pool},
+		{"add", "--tenant", tenant},
+		{"allow", "--tenant", tenant, "--pool", pool},
+		{"add", "--host", host, "--tenant", tenant},
+		{"apply", "--receiver", receiver, "--file", filepath.Join(files, "receiver.yaml")},
+		{"show", "--receiver", receiver},
+		{"suspend", "--pool", pool},
 	} {
 		if err := wherry(args...); err != nil {
 			return err
 		}
 	}
-	if err := wherry("pool", "rotate-key", pool); err == nil || !strings.Contains(err.Error(), "name the suspect keys with --suspect-key") {
+	if err := wherry("rotate", "--pool", pool); err == nil || !strings.Contains(err.Error(), "name the suspect keys with --suspect-key") {
 		return fmt.Errorf("pool rotate-key = %v; want it to find no key custodian", err)
 	}
-	if err := wherry("pool", "resume", pool); err != nil {
+	if err := wherry("resume", "--pool", pool); err != nil {
 		return err
 	}
 	if check {
@@ -236,7 +236,7 @@ func operatorCommands(t *testing.T, root *kgo.Client, dir, suffix string, check,
 		return nil
 	}
 	var errs []error
-	for _, args := range [][]string{{"tenant", "host", "remove", tenant, host}, {"receiver", "remove", receiver}} {
+	for _, args := range [][]string{{"remove", "--host", host, "--tenant", tenant}, {"remove", "--receiver", receiver}} {
 		errs = append(errs, wherry(args...))
 	}
 	return errors.Join(errs...)
@@ -605,17 +605,17 @@ func TestPoolApplyGuidedPath(t *testing.T) {
 	t.Run("kept", func(t *testing.T) {
 		scriptForms(t)
 		var prompts bytes.Buffer
-		if err := runOperator([]string{"pool", "apply", "kept"}, io.Discard, &prompts); err != nil || prompts.Len() != 0 {
+		if err := runOperator([]string{"apply", "--pool", "kept"}, io.Discard, &prompts); err != nil || prompts.Len() != 0 {
 			t.Fatalf("pool apply with its kept file = %v, asking %q; want it applied without a prompt", err, prompts.String())
 		}
 	})
 	noTerminal(t)
-	if err := runOperator([]string{"pool", "apply", "absent"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "no terminal") || !strings.Contains(err.Error(), poolFields) {
+	if err := runOperator([]string{"apply", "--pool", "absent"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "no terminal") || !strings.Contains(err.Error(), poolFields) {
 		t.Fatalf("pool apply without a file or a terminal = %v; want it refused naming %s", err, poolFields)
 	}
 	// A start-by limit the tenant feeds' retention cannot hold is refused by apply, after the prompts.
 	scriptForms(t, keys("claude\r"), keys("haiku\r"), keys("sonnet\r"), keys("\r"), keys("\r"), keys("claude-token\r"), keys("\r"), keys("CLAUDE_CODE_OAUTH_TOKEN\r"), keys("\r"), keys("\r"), keys(down+"\r"), keys("\r"), keys("codex\r"), keys("\r"), keys("\r"), keys("openai\r"), keys("\r"), keys("OPENAI_API_KEY\r"), keys("\r"), keys("\r"), keys("\r"), keys("deploy\r"), keys(down+"\r"), keys("deploy-key\r"), keys("\r"), keys("\r"), keys(down+"\r"), keys(down+"\r"), keys("\r"), keys("\x152097152\r"), keys("\r"), keys("\x159999h\r"))
-	if err := runOperator([]string{"pool", "apply", "guided"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "start_by_limit") {
+	if err := runOperator([]string{"apply", "--pool", "guided"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "start_by_limit") {
 		t.Fatalf("guided pool apply = %v; want apply to refuse the start-by limit", err)
 	}
 	terms, err := readPoolConfig(filepath.Join("pools", "guided.yaml"), false)
@@ -641,12 +641,12 @@ func TestReceiverApplyGuidedPath(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := runOperator([]string{"receiver", "apply", "receiver-a"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), receiverFields) {
+	if err := runOperator([]string{"apply", "--receiver", "receiver-a"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), receiverFields) {
 		t.Fatalf("receiver apply without a file or a terminal = %v; want it refused naming %s", err, receiverFields)
 	}
 	scriptForms(t, keys("\r"), keys("\r"), keys(fakeSHA256+"\r"), keys("\x15{address: https://nomad.example:4646, credential: nomad-token}\r"), keys("\r"), keys("tier=batch\r"), keys("\r"), keys(down+"\r"), keys("\r"))
 
-	if err := runOperator([]string{"receiver", "apply", "receiver-a"}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"apply", "--receiver", "receiver-a"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	config, err := readReceiverConfig(filepath.Join("receivers", "receiver-a.yaml"), false)
@@ -694,7 +694,7 @@ func TestReceiverApplyNewBrokerKeepsThePassword(t *testing.T) {
 		}
 	}
 	write("")
-	if err := runOperator([]string{"receiver", "apply", "receiver-a"}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"apply", "--receiver", "receiver-a"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join("bundles", "receivers", "receiver-a.bundle")
@@ -703,7 +703,7 @@ func TestReceiverApplyNewBrokerKeepsThePassword(t *testing.T) {
 		t.Fatalf("bundle %+v, %v; want the operator's broker", before, err)
 	}
 	write("kafka.platform.internal:9093")
-	if err := runOperator([]string{"receiver", "apply", "receiver-a"}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"apply", "--receiver", "receiver-a"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	after, err := operator.ReadBundle(path)
@@ -728,7 +728,7 @@ func TestReceiverApplyWithoutItsBundleIsRefused(t *testing.T) {
 	file := func(broker string) string {
 		return filepath.Join(writeTree(t, map[string]string{"receiver.yaml": "pool: pool-a\nbroker: " + broker + "\nplugin_sha256: {nomad: " + fakeSHA256 + "}\n" + basePlugin + item("name: claude\nagent: claude\n", "      ")}), "receiver.yaml")
 	}
-	if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", file(service.Broker)}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"apply", "--receiver", "receiver-a", "--file", file(service.Broker)}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join("bundles", "receivers", "receiver-a.bundle")
@@ -746,7 +746,7 @@ func TestReceiverApplyWithoutItsBundleIsRefused(t *testing.T) {
 	}
 	before := end()
 	want := path + " does not exist, so a new broker could not reach the receiver; --force gives the receiver a new password and bundle"
-	if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", file("kafka.platform.internal:9093")}, io.Discard, io.Discard); err == nil || err.Error() != want {
+	if err := runOperator([]string{"apply", "--receiver", "receiver-a", "--file", file("kafka.platform.internal:9093")}, io.Discard, io.Discard); err == nil || err.Error() != want {
 		t.Fatalf("receiver apply without its bundle = %v; want %q", err, want)
 	}
 	if after := end(); after != before {
@@ -768,7 +768,7 @@ func TestReceiverApplyForceKeepsTheBundlesBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	file := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": "pool: pool-a\nbroker: kafka.platform.internal:9093\nplugin_sha256: {nomad: " + fakeSHA256 + "}\n" + basePlugin + item("name: claude\nagent: claude\n", "      ")}), "receiver.yaml")
-	if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", file}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"apply", "--receiver", "receiver-a", "--file", file}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join("bundles", "receivers", "receiver-a.bundle")
@@ -776,7 +776,7 @@ func TestReceiverApplyForceKeepsTheBundlesBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := runOperator([]string{"receiver", "apply", "receiver-a", "--force"}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"apply", "--receiver", "receiver-a", "--force"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if after, err := operator.ReadBundle(path); err != nil || after.Broker != "kafka.platform.internal:9093" || after.Password == before.Password {
@@ -799,7 +799,7 @@ func TestHostAddRestrictsExistingBundleDirectories(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := runOperator([]string{"tenant", "host", "add", "tenant-a", "host-a"}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"add", "--host", "host-a", "--tenant", "tenant-a"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	for _, directory := range directories {
@@ -819,7 +819,7 @@ func TestDryRunWritesNothingToTheWorkingDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	file := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": "pool: pool-a\nplugin_sha256: {nomad: " + fakeSHA256 + "}\n" + basePlugin + item("name: claude\nagent: claude\n", "      ")}), "receiver.yaml")
-	if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", file, "--dry-run"}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"apply", "--receiver", "receiver-a", "--file", file, "--dry-run"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat("bundles"); !errors.Is(err, os.ErrNotExist) {
@@ -828,14 +828,14 @@ func TestDryRunWritesNothingToTheWorkingDirectory(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join("bundles", "receivers"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", file, "--dry-run"}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"apply", "--receiver", "receiver-a", "--file", file, "--dry-run"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if info, err := os.Stat(filepath.Join("bundles", "receivers")); err != nil || info.Mode().Perm() != 0o755 {
 		t.Fatalf("bundles/receivers after a dry run: %v, %v; want its mode left 0755", info, err)
 	}
 	scriptForms(t)
-	if err := runOperator([]string{"pool", "apply", "prompted", "--dry-run"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "--dry-run writes nothing") {
+	if err := runOperator([]string{"apply", "--pool", "prompted", "--dry-run"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "--dry-run writes nothing") {
 		t.Fatalf("pool apply --dry-run without a kept file = %v; want it refused", err)
 	}
 	if _, err := os.Stat(filepath.Join("pools", "prompted.yaml")); !errors.Is(err, os.ErrNotExist) {
@@ -853,7 +853,7 @@ func TestReceiverApplyForceTakesTheKeptFilesBroker(t *testing.T) {
 	}
 	body := "pool: pool-a\nplugin_sha256: {nomad: " + fakeSHA256 + "}\n" + basePlugin + item("name: claude\nagent: claude\n", "      ")
 	file := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": "broker: kafka.old.internal:9093\n" + body}), "receiver.yaml")
-	if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", file}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"apply", "--receiver", "receiver-a", "--file", file}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll("receivers", 0o755); err != nil {
@@ -862,7 +862,7 @@ func TestReceiverApplyForceTakesTheKeptFilesBroker(t *testing.T) {
 	if err := os.WriteFile(filepath.Join("receivers", "receiver-a.yaml"), []byte("broker: kafka.kept.internal:9093\n"+body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := runOperator([]string{"receiver", "apply", "receiver-a", "--force"}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"apply", "--receiver", "receiver-a", "--force"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if bundle, err := operator.ReadBundle(filepath.Join("bundles", "receivers", "receiver-a.bundle")); err != nil || bundle.Broker != "kafka.kept.internal:9093" {

@@ -13,7 +13,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// rotateSelf rotates f.receiver's own key as `wherry receiver run --rotate-key` does at start, then refreshes.
+// rotateSelf rotates f.receiver's own key as `wherry receiver rotate --key` does, then refreshes.
 func rotateSelf(t *testing.T, f *fixture) {
 	t.Helper()
 	// A retired key counts only strictly before its rotation's broker time, which has millisecond resolution.
@@ -36,7 +36,7 @@ func rotatePeer(t *testing.T, f fixture, id string, old ed25519.PrivateKey) {
 	}
 }
 
-// A completed run whose ack was lost is acknowledged on redelivery after its receiver restarts with --rotate-key.
+// A completed run whose ack was lost is acknowledged on redelivery after its receiver's key is rotated and it restarts.
 func TestCompletedRunRedeliveredAfterSelfRotation(t *testing.T) {
 	for _, rotate := range []bool{false, true} {
 		t.Run(map[bool]string{false: "control", true: "rotated"}[rotate], func(t *testing.T) {

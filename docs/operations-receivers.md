@@ -21,7 +21,7 @@ For Nomad, follow the plugin's [receiver policy](https://github.com/benemon/wher
    Without the flag, it reads `/etc/wherry/config.yaml` when that exists, and runs without a file otherwise.
 6. Check the logs for `registered key: signing=<key id>` and `configured: pool=<pool> profiles=<n> replicas=<n>`.
    `waiting for configuration` means the configuration record is missing.
-7. Run `wherry operator receiver show RECEIVER` and check `status: live`
+7. Run `wherry operator show --receiver RECEIVER` and check `status: live`
    after the receiver's first advertisement. `wherry host receivers` from an
    entitled tenant's host shows the same status.
 
@@ -101,7 +101,7 @@ which holds one for each plugin type the configuration names, and apply it,
 here the configuration directory of [Add a receiver](operations-operator.md#add-a-receiver):
 
 ```sh
-wherry operator receiver apply nomad-1 -f nomad-1
+wherry operator apply --receiver nomad-1 --file nomad-1
 ```
 
 The receiver drains and restarts as in
@@ -117,7 +117,7 @@ An upgrade or rollback takes the same steps with the other version, in this
 order:
 
 1. Verify the new version's `checksums.txt` and record its pin with
-   `wherry operator receiver apply`.
+   `wherry operator apply --receiver`.
 2. Roll the receiver's binary, or its image, to the new version at once.
 
 The receiver reads the new record, drains and exits, and from its next start
@@ -163,12 +163,12 @@ does not wait for a join. Any other end of a claim closes the client, which
 releases what it holds. When its profile becomes unready it closes its idle
 client; when ready again it rejoins after that close completes. Other profiles'
 idle clients keep their share group membership. Held clients keep renewing through readiness
-changes. A label, agent or replica change through `receiver apply` exits the
+changes. A label, agent or replica change through `apply --receiver` exits the
 receiver after its held runs end, so its platform restarts it on the new record.
 
 `wherry_profile_ready` names each configured profile's signature topic and
 whether its latest local readiness evaluation included it in the ready
-offers; `receiver show` maps a topic to its labels. It describes the desired
+offers; `show` maps a topic to its labels. It describes the desired
 subscription when claiming is permitted, not live Kafka membership. It
 reflects the latest completed local offer evaluation: advertisements are
 scheduled every 30 seconds, but each profile's sweep and readiness check run
@@ -407,14 +407,27 @@ within the stop window.
 
 ## Rotate a receiver key
 
-For a receiver, restart it once with `--rotate-key`:
+A receiver signs with the key in its state directory for as long as it runs,
+and [`wherry receiver rotate --key`](commands.md#wherry-receiver-rotate) takes
+the lock the running receiver holds on that directory, so the order is stop,
+rotate, start. The rotation reads the receiver's local configuration, so it
+runs where the receiver runs, with its bundle and `state_dir` in place:
 
 ```sh
-wherry receiver run --rotate-key
+wherry receiver rotate --key --config-file /etc/wherry/config.yaml
 ```
 
-It rotates `signing.key` before it claims anything and logs
-`rotated key: old=<id> new=<id>`. Start it without the flag afterwards.
+It refuses a running receiver with `state directory <dir> is held by another
+receiver process`, and a receiver that has never started, whose key topic is
+empty. It prints `old_key_id=<id> new_key_id=<id>`.
+
+- systemd: stop the unit, run the command as the unit's user against the
+  unit's configuration, state directory and bundle, then start the unit.
+- Nomad: stop the job, run the command as a batch job, or on the client host,
+  with the same volume and bundle, then start the job again.
+- Kubernetes: scale the receiver to zero, run a Job that mounts the state
+  PersistentVolumeClaim and the bundle Secret at the receiver's paths and runs
+  the command, then scale it back up.
 
 Keep `signing.key.next` if a rotation is interrupted.
 The next start reconciles it against the key topic.

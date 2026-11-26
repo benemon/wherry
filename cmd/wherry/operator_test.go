@@ -79,26 +79,51 @@ func TestOperatorCommandUsage(t *testing.T) {
 		{[]string{"host", "add", "tenant-a", "host-a"}, "unknown operator command"},
 		{[]string{"init", "extra"}, "usage: wherry operator init [--dir DIR]"},
 		{[]string{"host", "remove", "host-a"}, "unknown operator command"},
-		{[]string{"receiver", "remove"}, "usage: wherry operator receiver remove RECEIVER"},
-		{[]string{"receiver", "remove", "receiver-a", "receiver-b"}, "usage: wherry operator receiver remove RECEIVER"},
+		{[]string{"remove"}, operatorUsage["remove"]},
+		{[]string{"remove", "--receiver", "receiver-a", "receiver-b"}, operatorUsage["remove"]},
 		{[]string{"pool", "entitle", "build"}, "unknown operator command"},
-		{[]string{"tenant", "add", "tenant-a", "extra"}, "usage: wherry operator tenant add TENANT"},
+		{[]string{"add", "--tenant", "tenant-a", "extra"}, operatorUsage["add"]},
 		{[]string{"revoke", "host", "tenant-a", "host-a"}, "unknown operator command"},
 		{[]string{"revoke", "receiver", "receiver-a"}, "unknown operator command"},
 		{[]string{"receiver", "configure", "receiver-a"}, "unknown operator command"},
 		{[]string{"skip", "42", "--sha256", strings.Repeat("0", 64)}, "unknown operator command"},
 		{[]string{"skip", "42"}, "unknown operator command"},
-		{[]string{"pool", "apply"}, "usage: wherry operator pool apply NAME [-f PATH]"},
-		{[]string{"receiver", "apply"}, "usage: wherry operator receiver apply NAME"},
+		{[]string{"apply"}, operatorUsage["apply"]},
+		{[]string{"apply", "--receiver"}, "flag needs an argument: -receiver"},
 		{[]string{"pool", "create", "pool-a"}, "unknown operator command"},
 		{[]string{"pool", "update", "pool-a"}, "unknown operator command"},
 		{[]string{"receiver", "add", "receiver-a"}, "unknown operator command"},
 		{[]string{"receiver", "update", "receiver-a"}, "unknown operator command"},
 		{[]string{"receiver", "revoke", "receiver-a"}, "unknown operator command"},
-		{[]string{"pool", "suspend"}, "usage: wherry operator pool suspend POOL"},
-		{[]string{"pool", "resume", "pool-a", "pool-b"}, "usage: wherry operator pool resume POOL"},
-		{[]string{"pool", "rotate-key"}, "usage: wherry operator pool rotate-key POOL [--suspect-key KID]..."},
-		{[]string{"pool", "suspend", "pool-a", "--suspect-key", "kid"}, "unknown option --suspect-key"},
+		{[]string{"suspend"}, operatorUsage["suspend"]},
+		{[]string{"resume", "--pool", "pool-a", "pool-b"}, operatorUsage["resume"]},
+		{[]string{"rotate"}, operatorUsage["rotate"]},
+		{[]string{"suspend", "--pool", "pool-a", "--suspect-key", "kid"}, "unknown option --suspect-key"},
+		{[]string{"list"}, operatorUsage["list"]},
+		{[]string{"list", "pools", "extra"}, operatorUsage["list"]},
+		{[]string{"list", "hosts", "--tenant", "tenant-a", "extra"}, operatorUsage["list"]},
+		{[]string{"list", "all"}, operatorUsage["list"]},
+		{[]string{"storage", "--tenant", "tenant-a", "x"}, operatorUsage["storage"]},
+		// The forms before the verb-first grammar are unknown commands, as are their shortest prefixes.
+		{[]string{"tenant", "add", "tenant-a"}, "unknown operator command"},
+		{[]string{"tenant", "list"}, "unknown operator command"},
+		{[]string{"tenant", "storage", "tenant-a", "-"}, "unknown operator command"},
+		{[]string{"tenant", "remove", "tenant-a"}, "unknown operator command"},
+		{[]string{"tenant", "pool", "add", "tenant-a", "pool-a"}, "unknown operator command"},
+		{[]string{"tenant", "pool", "remove", "tenant-a", "pool-a"}, "unknown operator command"},
+		{[]string{"tenant", "host", "add", "tenant-a", "host-a"}, "unknown operator command"},
+		{[]string{"tenant", "host", "refresh", "tenant-a", "host-a"}, "unknown operator command"},
+		{[]string{"tenant", "host", "remove", "tenant-a", "host-a"}, "unknown operator command"},
+		{[]string{"pool", "apply", "pool-a"}, "unknown operator command"},
+		{[]string{"pool", "suspend", "pool-a"}, "unknown operator command"},
+		{[]string{"pool", "resume", "pool-a"}, "unknown operator command"},
+		{[]string{"pool", "rotate-key", "pool-a"}, "unknown operator command"},
+		{[]string{"receiver", "apply", "receiver-a"}, "unknown operator command"},
+		{[]string{"receiver", "show", "receiver-a"}, "unknown operator command"},
+		{[]string{"receiver", "remove", "receiver-a"}, "unknown operator command"},
+		{[]string{"tenant"}, "unknown operator command"},
+		{[]string{"pool"}, "unknown operator command"},
+		{[]string{"receiver"}, "unknown operator command"},
 	} {
 		var stdout, stderr bytes.Buffer
 		if err := runOperator(test.args, &stdout, &stderr); err == nil || !strings.HasPrefix(err.Error(), test.want) {
@@ -143,7 +168,7 @@ tasks=1
 func TestRevokePrintsTheCauseOfAFailedStep(t *testing.T) {
 	operatorEnv(t)
 	var stdout, stderr bytes.Buffer
-	err := runOperator([]string{"receiver", "remove", "receiver-a", "--wait", "1ms"}, &stdout, &stderr)
+	err := runOperator([]string{"remove", "--receiver", "receiver-a", "--timeout", "1ms"}, &stdout, &stderr)
 	if err == nil || err.Error() != "revocation incomplete" {
 		t.Fatalf("revoke = %v, want revocation incomplete", err)
 	}
@@ -161,12 +186,12 @@ func TestRevokePrintsTheCauseOfAFailedStep(t *testing.T) {
 
 func TestRevokeRefusesAWaitThatIsNotPositive(t *testing.T) {
 	operatorEnv(t)
-	const want = "--wait must be positive; omit it to compute the safe wait from the broker's timeouts"
+	const want = "--timeout must be positive; omit it to compute the safe wait from the broker's timeouts"
 	for _, args := range [][]string{
-		{"receiver", "remove", "receiver-a", "--wait", "0s"},
-		{"receiver", "remove", "receiver-a", "--wait", "-1s"},
-		{"tenant", "host", "remove", "tenant-a", "host-a", "--wait", "0s"},
-		{"tenant", "host", "remove", "tenant-a", "host-a", "--wait", "-1s"},
+		{"remove", "--receiver", "receiver-a", "--timeout", "0s"},
+		{"remove", "--receiver", "receiver-a", "--timeout", "-1s"},
+		{"remove", "--host", "host-a", "--tenant", "tenant-a", "--timeout", "0s"},
+		{"remove", "--host", "host-a", "--tenant", "tenant-a", "--timeout", "-1s"},
 	} {
 		var stdout bytes.Buffer
 		if err := runOperator(args, &stdout, io.Discard); err == nil || err.Error() != want || stdout.Len() != 0 {
@@ -174,7 +199,7 @@ func TestRevokeRefusesAWaitThatIsNotPositive(t *testing.T) {
 		}
 	}
 	var stdout bytes.Buffer
-	if err := runOperator([]string{"receiver", "remove", "receiver-a"}, &stdout, io.Discard); err != nil && err.Error() == want || !strings.HasPrefix(stdout.String(), "step=1 ") {
+	if err := runOperator([]string{"remove", "--receiver", "receiver-a"}, &stdout, io.Discard); err != nil && err.Error() == want || !strings.HasPrefix(stdout.String(), "step=1 ") {
 		t.Fatalf("revoke without --wait = %v with output %q, want the revocation steps run", err, stdout.String())
 	}
 }
@@ -244,7 +269,7 @@ func TestReceiverShowReportsLiveness(t *testing.T) {
 	status := func() (string, string) {
 		t.Helper()
 		var stdout bytes.Buffer
-		if err := runOperator([]string{"receiver", "show", "receiver-a"}, &stdout, io.Discard); err != nil {
+		if err := runOperator([]string{"show", "--receiver", "receiver-a"}, &stdout, io.Discard); err != nil {
 			t.Fatal(err)
 		}
 		lines := strings.SplitN(stdout.String(), "\n", 3)
@@ -338,7 +363,7 @@ profiles:
       topic: wherry.pool.pool-a.tasks.claude.98038b25280788a45a2f06c209513024c99adee81c6416b691b4b5872db7e027
 `
 	// Nothing has advertised as receiver-a, so show reports it silent before the record.
-	if got := wherry("receiver", "show", "receiver-a"); got != "status: silent\n"+shown {
+	if got := wherry("show", "--receiver", "receiver-a"); got != "status: silent\n"+shown {
 		t.Fatalf("show printed\n%s\nwant\n%s", got, "status: silent\n"+shown)
 	}
 	profile := item("name: claude\nagent: claude\nlabels: {tier: batch}\nconfig: {runtime: {config: {image: claude:1}}}\n", "      ")
@@ -348,14 +373,14 @@ profiles:
 	file := receiverFile("plugin_sha256: {nomad: " + fakeSHA256 + "}\n")
 	before := records()
 	for _, bad := range []string{"{nomad: " + strings.ToUpper(fakeSHA256) + "}", "{nomad: " + fakeSHA256[1:] + "}", "{nomad: " + fakeSHA256 + "0}", "{nomad: " + strings.Repeat("g", 64) + "}", "{Nomad: " + fakeSHA256 + "}", "nomad"} {
-		if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", receiverFile("plugin_sha256: " + bad + "\n")}, io.Discard, io.Discard); err == nil || records() != before {
+		if err := runOperator([]string{"apply", "--receiver", "receiver-a", "--file", receiverFile("plugin_sha256: " + bad + "\n")}, io.Discard, io.Discard); err == nil || records() != before {
 			t.Fatalf("apply with plugin_sha256 %s: %v; want it refused before writing", bad, err)
 		}
 	}
-	if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", receiverFile("")}, io.Discard, io.Discard); err == nil || err.Error() != "plugin type nomad has no pinned SHA-256; set plugin_sha256.nomad in the receiver's file and run receiver apply" || records() != before {
+	if err := runOperator([]string{"apply", "--receiver", "receiver-a", "--file", receiverFile("")}, io.Discard, io.Discard); err == nil || err.Error() != "plugin type nomad has no pinned SHA-256; set plugin_sha256.nomad in the receiver's file and run apply --receiver" || records() != before {
 		t.Fatalf("apply without a pin: %v; want it refused before writing", err)
 	}
-	dryRun := wherry("receiver", "apply", "receiver-a", "-f", file, "--dry-run")
+	dryRun := wherry("apply", "--receiver", "receiver-a", "--file", file, "--dry-run")
 	if records() != before {
 		t.Fatal("apply --dry-run produced a record")
 	}
@@ -386,26 +411,26 @@ profiles:
 	if dryRun != resolved {
 		t.Fatalf("dry run printed\n%s\nwant\n%s", dryRun, resolved)
 	}
-	if got := wherry("receiver", "apply", "receiver-b", "-f", receiverFile("pool: pool-a\nplugin_sha256: {nomad: "+fakeSHA256+"}\n"), "--dry-run"); got != resolved || records() != before {
+	if got := wherry("apply", "--receiver", "receiver-b", "--file", receiverFile("pool: pool-a\nplugin_sha256: {nomad: "+fakeSHA256+"}\n"), "--dry-run"); got != resolved || records() != before {
 		t.Fatalf("apply --dry-run of a new receiver printed\n%s\nand left %d records; want the resolution and %d records", got, records(), before)
 	}
-	if err := runOperator([]string{"receiver", "show", "receiver-b"}, io.Discard, io.Discard); err == nil {
+	if err := runOperator([]string{"show", "--receiver", "receiver-b"}, io.Discard, io.Discard); err == nil {
 		t.Fatal("apply --dry-run recorded receiver-b")
 	}
-	if got := wherry("receiver", "show", "receiver-a"); got != "status: silent\n"+shown {
+	if got := wherry("show", "--receiver", "receiver-a"); got != "status: silent\n"+shown {
 		t.Fatalf("after a dry run, show printed\n%s\nwant the recorded configuration", got)
 	}
 	outside := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": "plugin_sha256: {nomad: " + fakeSHA256 + "}\n" + basePlugin + item("name: codex\nagent: codex\n", "      ")}), "receiver.yaml")
-	if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", outside, "--dry-run"}, io.Discard, io.Discard); err == nil || err.Error() != "receiver agent is outside pool terms" {
+	if err := runOperator([]string{"apply", "--receiver", "receiver-a", "--file", outside, "--dry-run"}, io.Discard, io.Discard); err == nil || err.Error() != "receiver agent is outside pool terms" {
 		t.Fatalf("dry run of an agent outside the pool's terms: %v; want it refused", err)
 	}
-	if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", receiverFile("pool: pool-b\nplugin_sha256: {nomad: " + fakeSHA256 + "}\n")}, io.Discard, io.Discard); err == nil || err.Error() != "receiver cannot move pool" || records() != before {
+	if err := runOperator([]string{"apply", "--receiver", "receiver-a", "--file", receiverFile("pool: pool-b\nplugin_sha256: {nomad: " + fakeSHA256 + "}\n")}, io.Discard, io.Discard); err == nil || err.Error() != "receiver cannot move pool" || records() != before {
 		t.Fatalf("apply naming another pool: %v; want it refused before writing", err)
 	}
-	if got := wherry("receiver", "apply", "receiver-a", "-f", receiverFile("pool: pool-a\nplugin_sha256: {nomad: "+fakeSHA256+"}\n")); got != "" || records() != before+1 {
+	if got := wherry("apply", "--receiver", "receiver-a", "--file", receiverFile("pool: pool-a\nplugin_sha256: {nomad: "+fakeSHA256+"}\n")); got != "" || records() != before+1 {
 		t.Fatalf("apply printed %q and left %d records; want nothing printed and one record more than %d", got, records(), before)
 	}
-	if got := wherry("receiver", "show", "receiver-a"); got != "status: silent\n"+dryRun {
+	if got := wherry("show", "--receiver", "receiver-a"); got != "status: silent\n"+dryRun {
 		t.Fatalf("show printed\n%s\nwant what the dry run printed, after the status\n%s", got, dryRun)
 	}
 }
@@ -471,7 +496,7 @@ func TestRemoveDeletesTheBundleOnceRevocationCompletes(t *testing.T) {
 	if err := service.TenantAdd(ctx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := runOperator([]string{"tenant", "host", "add", "tenant-a", "host-a"}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"add", "--host", "host-a", "--tenant", "tenant-a"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	hostBundle := filepath.Join("bundles", "hosts", "tenant-a", "host-a.bundle")
@@ -501,7 +526,7 @@ func TestRemoveDeletesTheBundleOnceRevocationCompletes(t *testing.T) {
 		return func(context.Context, string, string) error { return errors.New("injected probe failure") }
 	})
 	var stdout bytes.Buffer
-	if err := runOperator([]string{"tenant", "host", "remove", "tenant-a", "host-a"}, &stdout, io.Discard); err == nil || err.Error() != "revocation incomplete" {
+	if err := runOperator([]string{"remove", "--host", "host-a", "--tenant", "tenant-a"}, &stdout, io.Discard); err == nil || err.Error() != "revocation incomplete" {
 		t.Fatalf("remove with a failing probe = %v; want revocation incomplete", err)
 	}
 	if !exists(hostBundle) {
@@ -535,7 +560,7 @@ func TestRemoveDeletesTheBundleOnceRevocationCompletes(t *testing.T) {
 	}}
 	done := make(chan error, 1)
 	go func() {
-		done <- runOperator([]string{"tenant", "host", "remove", "tenant-a", "host-a", "--wait", wait.String()}, out, io.Discard)
+		done <- runOperator([]string{"remove", "--host", "host-a", "--tenant", "tenant-a", "--timeout", wait.String()}, out, io.Discard)
 	}()
 	select {
 	case <-started:
@@ -569,20 +594,20 @@ func TestRemoveDeletesTheBundleOnceRevocationCompletes(t *testing.T) {
 		t.Fatalf("remove kept %s after a complete revocation:\n%s", hostBundle, printed())
 	}
 	// A rerun finds the host already ended; it deletes a bundle an earlier run left, and a missing one is no error.
-	if err := runOperator([]string{"tenant", "host", "remove", "tenant-a", "host-a"}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"remove", "--host", "host-a", "--tenant", "tenant-a"}, io.Discard, io.Discard); err != nil {
 		t.Fatalf("rerun without a bundle = %v", err)
 	}
 	if err := os.WriteFile(hostBundle, []byte("left over"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	stdout.Reset()
-	if err := runOperator([]string{"tenant", "host", "remove", "tenant-a", "host-a"}, &stdout, io.Discard); err != nil || !strings.HasPrefix(stdout.String(), "step=6 complete=true name=already ended") {
+	if err := runOperator([]string{"remove", "--host", "host-a", "--tenant", "tenant-a"}, &stdout, io.Discard); err != nil || !strings.HasPrefix(stdout.String(), "step=6 complete=true name=already ended") {
 		t.Fatalf("rerun = %v with output %q; want the already-ended step", err, stdout.String())
 	}
 	if exists(hostBundle) {
 		t.Fatalf("rerun kept %s after finding the host ended", hostBundle)
 	}
-	if err := runOperator([]string{"receiver", "remove", "receiver-a"}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"remove", "--receiver", "receiver-a"}, io.Discard, io.Discard); err != nil {
 		t.Fatalf("receiver remove = %v", err)
 	}
 	if exists(receiverBundle) {
@@ -617,13 +642,13 @@ func TestReceiverRemoveRetryDeletesTheBundleOfAnEndedReceiver(t *testing.T) {
 	revocationBounds(t, service, "0")
 	stubProbe(t, deniedProbe)
 	var stdout bytes.Buffer
-	if err := runOperator([]string{"receiver", "remove", "receiver-a"}, &stdout, io.Discard); err != nil || !strings.HasPrefix(stdout.String(), "step=6 complete=true name=already ended") {
+	if err := runOperator([]string{"remove", "--receiver", "receiver-a"}, &stdout, io.Discard); err != nil || !strings.HasPrefix(stdout.String(), "step=6 complete=true name=already ended") {
 		t.Fatalf("retry = %v with output %q; want the already-ended step", err, stdout.String())
 	}
 	if _, err := os.Stat(bundle); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("retry left %s (%v); want the ended receiver's bundle deleted", bundle, err)
 	}
-	if err := runOperator([]string{"receiver", "remove", "receiver-a"}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"remove", "--receiver", "receiver-a"}, io.Discard, io.Discard); err != nil {
 		t.Fatalf("rerun without a bundle = %v", err)
 	}
 }
@@ -678,7 +703,7 @@ func TestPoolApply(t *testing.T) {
 		return group["share.delivery.count.limit"], group["share.record.lock.duration.ms"], state.Pools["pool-a"]
 	}
 	apply := func(path string, options ...string) error {
-		return runOperator(append([]string{"pool", "apply", "pool-a", "-f", path}, options...), io.Discard, io.Discard)
+		return runOperator(append([]string{"apply", "--pool", "pool-a", "--file", path}, options...), io.Discard, io.Discard)
 	}
 	// A dry run and a refused apply on a fresh cluster record nothing and create no wherry.operator. The metadata request
 	// goes through its own client, whose cache of the absent topic the later listings must not read.
@@ -722,7 +747,7 @@ func TestPoolApply(t *testing.T) {
 		t.Fatalf("apply of the same terms = %v with %d records; want %d", err, records(), before)
 	}
 	var stdout bytes.Buffer
-	if err := runOperator([]string{"pool", "apply", "pool-a", "-f", pool(3, "30s"), "--dry-run"}, &stdout, io.Discard); err != nil {
+	if err := runOperator([]string{"apply", "--pool", "pool-a", "--file", pool(3, "30s"), "--dry-run"}, &stdout, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if limit, lock, recorded := terms(); records() != before || stdout.Len() != 0 || limit != "5" || lock != "15000" || recorded.DeliveryLimit != 5 || recorded.LockDurationMS != 15000 {
@@ -765,9 +790,9 @@ func TestReceiverApplyForceReissuesTheIdentity(t *testing.T) {
 	file := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": "pool: pool-a\nplugin_sha256: {nomad: " + fakeSHA256 + "}\n" + basePlugin + item("name: claude\nagent: claude\n", "      ")}), "receiver.yaml")
 	bundle := filepath.Join("bundles", "receivers", "receiver-a.bundle")
 	apply := func(options ...string) error {
-		return runOperator(append([]string{"receiver", "apply", "receiver-a"}, options...), io.Discard, io.Discard)
+		return runOperator(append([]string{"apply", "--receiver", "receiver-a"}, options...), io.Discard, io.Discard)
 	}
-	if err := apply("-f", file); err != nil {
+	if err := apply("--file", file); err != nil {
 		t.Fatal(err)
 	}
 	for path, mode := range map[string]os.FileMode{"bundles": 0o700, filepath.Join("bundles", "receivers"): 0o700, bundle: 0o600} {
@@ -796,13 +821,13 @@ func TestReceiverApplyForceReissuesTheIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := apply("-f", file); err != nil {
+	if err := apply("--file", file); err != nil {
 		t.Fatal(err)
 	}
 	if again, err := os.ReadFile(bundle); err != nil || !bytes.Equal(again, old) || records() != before+1 || !bundleWorks(t, service, bundle) {
 		t.Fatalf("apply of an existing receiver left %d records and changed its bundle (%v) or password; want an update record alone", records(), err)
 	}
-	if err := apply("--force", "-f", file); err == nil || !strings.HasPrefix(err.Error(), "usage: wherry operator receiver apply NAME --force") {
+	if err := apply("--force", "--file", file); err == nil || !strings.HasPrefix(err.Error(), "usage: wherry operator apply --receiver RECEIVER --force") {
 		t.Fatalf("apply --force with a config = %v; want it refused", err)
 	}
 	if err := apply("--force"); err != nil {
@@ -838,7 +863,7 @@ func TestHostAddForceReissuesTheIdentity(t *testing.T) {
 	}
 	bundle := filepath.Join("bundles", "hosts", "tenant-a", "host-a.bundle")
 	add := func(tenant string, options ...string) error {
-		return runOperator(append([]string{"tenant", "host", "add", tenant, "host-a"}, options...), io.Discard, io.Discard)
+		return runOperator(append([]string{"add", "--host", "host-a", "--tenant", tenant}, options...), io.Discard, io.Discard)
 	}
 	if err := add("tenant-a"); err != nil {
 		t.Fatal(err)
@@ -937,26 +962,26 @@ func TestTenantTreeAndList(t *testing.T) {
 		return out.String(), err
 	}
 	for _, tenant := range []string{"z", "a"} {
-		if _, err := command("tenant", "add", tenant); err != nil {
+		if _, err := command("add", "--tenant", tenant); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := service.PoolApply(t.Context(), "p", agentTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := command("tenant", "pool", "add", "a", "p"); err != nil {
+	if _, err := command("allow", "--tenant", "a", "--pool", "p"); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := command("tenant", "pool", "add", "a", "p"); err != nil || out != "already entitled\n" {
+	if out, err := command("allow", "--tenant", "a", "--pool", "p"); err != nil || out != "already entitled\n" {
 		t.Fatalf("already path: %q %v", out, err)
 	}
-	if _, err := command("tenant", "host", "add", "a", "live"); err != nil {
+	if _, err := command("add", "--host", "live", "--tenant", "a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := command("tenant", "host", "add", "a", "revoking"); err != nil {
+	if _, err := command("add", "--host", "revoking", "--tenant", "a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := command("tenant", "host", "add", "a", "ended"); err != nil {
+	if _, err := command("add", "--host", "ended", "--tenant", "a"); err != nil {
 		t.Fatal(err)
 	}
 	for _, record := range []operator.Record{{Kind: "revoking", Tenant: "a", Host: "revoking"}, {Kind: "end", Tenant: "a", Host: "ended"}} {
@@ -968,16 +993,16 @@ func TestTenantTreeAndList(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if out, err := command("tenant", "list"); err != nil || out != "a\n  pool p\n  host live\nz\n" {
+	if out, err := command("list", "tenants"); err != nil || out != "a\n  pool p\n  host live\nz\n" {
 		t.Fatalf("list=%q %v", out, err)
 	}
-	if _, err := command("tenant", "pool", "remove", "a", "p"); err != nil {
+	if _, err := command("deny", "--tenant", "a", "--pool", "p"); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := command("tenant", "pool", "remove", "a", "p"); err != nil || out != "not entitled\n" {
+	if out, err := command("deny", "--tenant", "a", "--pool", "p"); err != nil || out != "not entitled\n" {
 		t.Fatalf("absent path: %q %v", out, err)
 	}
-	if _, err := command("tenant", "remove", "z"); err != nil {
+	if _, err := command("remove", "--tenant", "z"); err != nil {
 		t.Fatal(err)
 	}
 	bundleDir := filepath.Join("bundles", "hosts", "z")
@@ -987,13 +1012,13 @@ func TestTenantTreeAndList(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bundleDir, "leftover.bundle"), []byte("leftover"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := command("tenant", "remove", "z"); err != nil || out != "done\n" {
+	if out, err := command("remove", "--tenant", "z"); err != nil || out != "done\n" {
 		t.Fatalf("ended retry: %q %v", out, err)
 	}
 	if _, err := os.Stat(bundleDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("bundle directory remains: %v", err)
 	}
-	if out, err := command("tenant", "list"); err != nil || out != "a\n  host live\n" {
+	if out, err := command("list", "tenants"); err != nil || out != "a\n  host live\n" {
 		t.Fatalf("list=%q %v", out, err)
 	}
 }

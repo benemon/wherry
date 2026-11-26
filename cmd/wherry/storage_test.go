@@ -49,7 +49,7 @@ func TestTenantStorageCommand(t *testing.T) {
 	}
 	localFixture(t, ".", "receiver-a")
 	receiverFile := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": "pool: pool-a\nplugin_sha256: {nomad: " + fakeSHA256 + "}\n" + basePlugin + item("name: claude\nagent: claude\n", "      ")}), "receiver.yaml")
-	for _, args := range [][]string{{"tenant", "add", "tenant-a"}, {"tenant", "host", "add", "tenant-a", "host-a"}} {
+	for _, args := range [][]string{{"add", "--tenant", "tenant-a"}, {"add", "--host", "host-a", "--tenant", "tenant-a"}} {
 		if err := runOperator(args, io.Discard, io.Discard); err != nil {
 			t.Fatal(err)
 		}
@@ -57,7 +57,7 @@ func TestTenantStorageCommand(t *testing.T) {
 	hostA, hostB := filepath.Join("bundles", "hosts", "tenant-a", "host-a.bundle"), filepath.Join("bundles", "hosts", "tenant-a", "host-b.bundle")
 	receiverBundle := filepath.Join("bundles", "receivers", "receiver-a.bundle")
 	var stdout bytes.Buffer
-	if err := runOperator([]string{"receiver", "apply", "receiver-a", "-f", receiverFile}, &stdout, io.Discard); err != nil {
+	if err := runOperator([]string{"apply", "--receiver", "receiver-a", "--file", receiverFile}, &stdout, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if want := "wrote " + receiverBundle + "; hand it to the receiver's platform, whose install guide's bundle step installs it, then start the receiver\n"; stdout.String() != want {
@@ -88,20 +88,20 @@ func TestTenantStorageCommand(t *testing.T) {
 		"empty":        "\n",
 	} {
 		t.Run(name, func(t *testing.T) {
-			refuse(t, []string{"tenant", "storage", "tenant-a", "-"}, input, "standard input must hold exactly two lines: the access key, then the secret key")
+			refuse(t, []string{"storage", "--tenant", "tenant-a", "-"}, input, "standard input must hold exactly two lines: the access key, then the secret key")
 		})
 	}
-	refuse(t, []string{"tenant", "storage", "tenant-a", "-"}, access+"\nother secret\n", "secret key holds whitespace or a control character")
-	refuse(t, []string{"tenant", "storage", "tenant-a", "-"}, "AKIA\tOTHER\n"+secret+"\n", "access key holds whitespace or a control character")
-	refuse(t, []string{"tenant", "storage", "tenant-b", "-"}, access+"\n"+secret+"\n", "tenant absent")
-	refuse(t, []string{"tenant", "storage", "tenant-a"}, "", "tenant storage has no terminal to prompt on; pipe the access key and the secret key in, one per line, with -")
-	refuse(t, []string{"tenant", "storage", "not a name", "-"}, access+"\n"+secret+"\n", "is not a valid name")
-	for _, args := range [][]string{{"tenant", "storage"}, {"tenant", "storage", "tenant-a", "extra"}, {"tenant", "storage", "tenant-a", "-", "extra"}, {"tenant", "storage", "tenant-a", "-", "-"}} {
-		if err := runOperator(args, io.Discard, io.Discard); err == nil || err.Error() != operatorUsage["tenant storage"] {
+	refuse(t, []string{"storage", "--tenant", "tenant-a", "-"}, access+"\nother secret\n", "secret key holds whitespace or a control character")
+	refuse(t, []string{"storage", "--tenant", "tenant-a", "-"}, "AKIA\tOTHER\n"+secret+"\n", "access key holds whitespace or a control character")
+	refuse(t, []string{"storage", "--tenant", "tenant-b", "-"}, access+"\n"+secret+"\n", "tenant absent")
+	refuse(t, []string{"storage", "--tenant", "tenant-a"}, "", "storage has no terminal to prompt on; pipe the access key and the secret key in, one per line, with -")
+	refuse(t, []string{"storage", "--tenant", "not a name", "-"}, access+"\n"+secret+"\n", "is not a valid name")
+	for _, args := range [][]string{{"storage"}, {"storage", "--tenant", "tenant-a", "extra"}, {"storage", "--tenant", "tenant-a", "-", "extra"}, {"storage", "--tenant", "tenant-a", "-", "-"}} {
+		if err := runOperator(args, io.Discard, io.Discard); err == nil || err.Error() != operatorUsage["storage"] {
 			t.Fatalf("%v = %v; want its usage", args, err)
 		}
 	}
-	if err := runOperator([]string{"tenant", "storage", "tenant-a", "--force"}, io.Discard, io.Discard); err == nil || err.Error() != "unknown option --force" {
+	if err := runOperator([]string{"storage", "--tenant", "tenant-a", "--force"}, io.Discard, io.Discard); err == nil || err.Error() != "unknown option --force" {
 		t.Fatalf("tenant storage --force = %v; want it refused", err)
 	}
 	if _, err := os.Stat("storage"); !errors.Is(err, os.ErrNotExist) {
@@ -109,10 +109,10 @@ func TestTenantStorageCommand(t *testing.T) {
 	}
 	pipeStandardInput(t, access+"\n"+secret)
 	stdout.Reset()
-	if err := runOperator([]string{"tenant", "storage", "tenant-a", "-"}, &stdout, io.Discard); err != nil {
+	if err := runOperator([]string{"storage", "--tenant", "tenant-a", "-"}, &stdout, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if want := "recorded the storage keys of tenant-a in " + keysPath + "; tenant host add writes them into each new host's bundle\nrefresh host-a's bundle: wherry operator tenant host refresh tenant-a host-a\n"; stdout.String() != want {
+	if want := "recorded the storage keys of tenant-a in " + keysPath + "; add --host writes them into each new host's bundle\nrefresh host-a's bundle: wherry operator refresh --host host-a --tenant tenant-a\n"; stdout.String() != want {
 		t.Fatalf("tenant storage printed %q; want %q", stdout.String(), want)
 	}
 	keys := operator.StorageKeys{AccessKey: access, SecretKey: secret}
@@ -143,7 +143,7 @@ func TestTenantStorageCommand(t *testing.T) {
 		t.Fatalf("bundle %+v, %v; want no storage keys before the refresh", before, err)
 	}
 	stdout.Reset()
-	if err := runOperator([]string{"tenant", "host", "refresh", "tenant-a", "host-a"}, &stdout, io.Discard); err != nil {
+	if err := runOperator([]string{"refresh", "--host", "host-a", "--tenant", "tenant-a"}, &stdout, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if want := "refreshed " + hostA + "; hand it to the host, where wherry host init host-a.bundle installs it\n"; stdout.String() != want {
@@ -154,12 +154,12 @@ func TestTenantStorageCommand(t *testing.T) {
 		t.Fatalf("refreshed bundle %+v, %v; want the pair with the password of %+v", after, err, before)
 	}
 	stdout.Reset()
-	if err := runOperator([]string{"tenant", "host", "refresh", "tenant-a", "host-a"}, &stdout, io.Discard); err != nil || stdout.String() != hostA+" is current\n" {
+	if err := runOperator([]string{"refresh", "--host", "host-a", "--tenant", "tenant-a"}, &stdout, io.Discard); err != nil || stdout.String() != hostA+" is current\n" {
 		t.Fatalf("refresh again: %v, %q", err, stdout.String())
 	}
 	// A host added now carries the pair, and the add names the next step; a reissue keeps the pair under its new password.
 	stdout.Reset()
-	if err := runOperator([]string{"tenant", "host", "add", "tenant-a", "host-b"}, &stdout, io.Discard); err != nil {
+	if err := runOperator([]string{"add", "--host", "host-b", "--tenant", "tenant-a"}, &stdout, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if want := "wrote " + hostB + "; hand it to the host, where wherry host init host-b.bundle installs it\n"; stdout.String() != want {
@@ -169,7 +169,7 @@ func TestTenantStorageCommand(t *testing.T) {
 		t.Fatalf("bundle %+v, %v; want the pair in a host added after it was recorded", added, err)
 	}
 	stdout.Reset()
-	if err := runOperator([]string{"tenant", "host", "add", "tenant-a", "host-a", "--force"}, &stdout, io.Discard); err != nil {
+	if err := runOperator([]string{"add", "--host", "host-a", "--tenant", "tenant-a", "--force"}, &stdout, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if want := "wrote " + hostA + "; hand it to the host, where wherry host init host-a.bundle installs it\n"; stdout.String() != want {
@@ -179,14 +179,14 @@ func TestTenantStorageCommand(t *testing.T) {
 		t.Fatalf("bundle after --force %+v, %v; want the pair under a new password", reissued, err)
 	}
 	// Receiver bundles never carry it, reissued or not.
-	if err := runOperator([]string{"receiver", "apply", "receiver-a", "--force"}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"apply", "--receiver", "receiver-a", "--force"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if encoded, err := os.ReadFile(receiverBundle); err != nil || strings.Contains(string(encoded), "storage") || strings.Contains(string(encoded), access) {
 		t.Fatalf("receiver bundle holds\n%s\n%v; want no storage keys", encoded, err)
 	}
 	// A refused rerun keeps the pair on file.
-	refuse(t, []string{"tenant", "storage", "tenant-a", "-"}, "AKIAOTHER\n", "exactly two lines")
+	refuse(t, []string{"storage", "--tenant", "tenant-a", "-"}, "AKIAOTHER\n", "exactly two lines")
 	if kept, err := operator.ReadStorageKeys(keysPath); err != nil || kept != keys {
 		t.Fatalf("after a refused tenant storage %s holds %+v, %v; want the old pair", keysPath, kept, err)
 	}
@@ -194,13 +194,13 @@ func TestTenantStorageCommand(t *testing.T) {
 	next := operator.StorageKeys{AccessKey: "AKIAOTHER", SecretKey: "other-secret"}
 	pipeStandardInput(t, next.AccessKey+"\n"+next.SecretKey+"\n")
 	stdout.Reset()
-	if err := runOperator([]string{"tenant", "storage", "tenant-a", "-"}, &stdout, io.Discard); err != nil {
+	if err := runOperator([]string{"storage", "--tenant", "tenant-a", "-"}, &stdout, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if want := "recorded the storage keys of tenant-a in " + keysPath + "; tenant host add writes them into each new host's bundle\nrefresh host-a's bundle: wherry operator tenant host refresh tenant-a host-a\nrefresh host-b's bundle: wherry operator tenant host refresh tenant-a host-b\n"; stdout.String() != want {
+	if want := "recorded the storage keys of tenant-a in " + keysPath + "; add --host writes them into each new host's bundle\nrefresh host-a's bundle: wherry operator refresh --host host-a --tenant tenant-a\nrefresh host-b's bundle: wherry operator refresh --host host-b --tenant tenant-a\n"; stdout.String() != want {
 		t.Fatalf("tenant storage printed %q; want %q", stdout.String(), want)
 	}
-	if err := runOperator([]string{"tenant", "host", "refresh", "tenant-a", "host-a"}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"refresh", "--host", "host-a", "--tenant", "tenant-a"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if stale, err := operator.ReadBundle(hostB); err != nil || stale.Storage != keys {
@@ -208,7 +208,7 @@ func TestTenantStorageCommand(t *testing.T) {
 	}
 	for host, want := range map[string]string{"host-a": hostA + " is current\n", "host-b": "refreshed " + hostB + "; hand it to the host, where wherry host init host-b.bundle installs it\n"} {
 		stdout.Reset()
-		if err := runOperator([]string{"tenant", "host", "refresh", "tenant-a", host}, &stdout, io.Discard); err != nil || stdout.String() != want {
+		if err := runOperator([]string{"refresh", "--host", host, "--tenant", "tenant-a"}, &stdout, io.Discard); err != nil || stdout.String() != want {
 			t.Fatalf("rerun refresh of %s: %v, %q; want %q", host, err, stdout.String(), want)
 		}
 	}
@@ -255,7 +255,7 @@ func TestTenantStoragePrompts(t *testing.T) {
 		t.Cleanup(func() { stdin = saved })
 		stdin = tty
 		io.WriteString(master, "AKIATYPED\ntyped-secret-marker\n")
-		err = runOperator([]string{"tenant", "storage", "tenant-a", "-"}, io.Discard, io.Discard)
+		err = runOperator([]string{"storage", "--tenant", "tenant-a", "-"}, io.Discard, io.Discard)
 		if err == nil || !strings.Contains(err.Error(), "standard input is a terminal") || strings.Contains(err.Error(), "typed-secret-marker") {
 			t.Fatalf("tenant storage - on a terminal = %v; want it refused naming no value", err)
 		}
@@ -278,7 +278,7 @@ func TestTenantStoragePrompts(t *testing.T) {
 	t.Run("cancel", func(t *testing.T) {
 		scriptForms(t, keys(access+"\r"), []string{secret, "\x03"})
 		var out bytes.Buffer
-		err := runOperator([]string{"tenant", "storage", "tenant-a"}, io.Discard, &out)
+		err := runOperator([]string{"storage", "--tenant", "tenant-a"}, io.Discard, &out)
 		if !errors.Is(err, errInterrupted) {
 			t.Fatalf("cancelled prompt = %v; want interrupted", err)
 		}
@@ -290,7 +290,7 @@ func TestTenantStoragePrompts(t *testing.T) {
 	t.Run("recorded", func(t *testing.T) {
 		scriptForms(t, []string{"\r", access + "\r"}, keys(secret+"\r"))
 		var stdout, out bytes.Buffer
-		if err := runOperator([]string{"tenant", "storage", "tenant-a"}, &stdout, &out); err != nil {
+		if err := runOperator([]string{"storage", "--tenant", "tenant-a"}, &stdout, &out); err != nil {
 			t.Fatalf("%v\n%s", err, out.String())
 		}
 		leaked(t, out.String(), nil)

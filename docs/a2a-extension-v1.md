@@ -1422,7 +1422,7 @@ writes, each with `v`, `kind` and `at_ms` (Unix milliseconds).
 | `rotate-key` | `pool` | asks the pool's key custodian for a new key ([Custodian snapshot](#custodian-snapshot)) |
 
 `terms` has the members of the [pool terms](configuration-operator.md#pool-terms) file
-and `record_limit`, the lowest record limit of the pool's task topics that `pool apply` reads
+and `record_limit`, the lowest record limit of the pool's task topics that `apply --pool` reads
 from the broker, with `start_by_limit_ms` and `lock_duration_ms` in milliseconds for its
 `start_by_limit` and `lock_duration`. `config` holds `receiver` and `pool`,
 which equal the record's, the receiver's `plugin_sha256`, the

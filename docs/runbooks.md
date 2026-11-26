@@ -57,7 +57,7 @@ Confirm it:
    - `configuration changed; exiting once held runs end` comes before a
      restart the supervisor is expected to make, once the runs the
      receiver holds have ended.
-3. Run `wherry operator receiver show RECEIVER` to check the receiver has a
+3. Run `wherry operator show --receiver RECEIVER` to check the receiver has a
    configuration, and its `status`: `live` within 120 seconds of its latest
    advertisement, `stale` beyond that, `silent` when it has never advertised.
 
@@ -180,7 +180,7 @@ that none fetched by its `task_started_by` with
 1. Run `wherry host receivers` and check that a `live` receiver of the pool
    has a profile with `ready=true` for the run's agent whose labels satisfy
    its selector.
-2. Run `wherry operator receiver show RECEIVER` for that receiver: the
+2. Run `wherry operator show --receiver RECEIVER` for that receiver: the
    profile's `topic` is the signature topic it subscribes to.
 
 Then start or reconfigure a receiver with a profile of that signature, or
@@ -194,7 +194,7 @@ key-lost run keeps its original signature's topic.
 means the run's profile is full: each profile claims one task per replica,
 whatever room `wherry host receivers` shows on the receiver line, whose
 `capacity` and `in_flight` are totals over its profiles. Wait for a held run
-to end, or raise the profile's `replicas` with `wherry operator receiver apply`.
+to end, or raise the profile's `replicas` with `wherry operator apply --receiver`.
 `is not claiming (<gated>)` names the receiver's gate: resume a suspended
 pool, make a profile ready, or see [A receiver with a pending run](operations-receivers.md#a-receiver-with-a-pending-run).
 `no live profile offers the run's signature` is the case below.
@@ -206,25 +206,25 @@ receiver with a ready profile for its agent sat idle was on a signature that
 peer does not serve. Two members share a queue only when the profile's agent
 and every label are identical; one differing label, or a label one has and the
 other lacks, is a different signature, and queued tasks never overflow to
-another signature. A receiver whose labels changed through `receiver apply`
+another signature. A receiver whose labels changed through `apply --receiver`
 has moved to a new signature, leaving the tasks queued on its old one.
 
-1. Run `wherry operator receiver show RECEIVER` for the receiver the task was
+1. Run `wherry operator show --receiver RECEIVER` for the receiver the task was
    placed on and for the idle peer, and compare each profile's `signature`
    and `topic`.
 2. To make the peers interchangeable, give their profiles identical labels
-   and run `receiver apply` for the one that differs.
+   and run `apply --receiver` for the one that differs.
 
 Then resubmit the unclaimed run.
 
 ## `operator check` names a missing signature topic
 
 `wherry operator check` fails with
-`receiver <receiver> profile <profile>: signature topic <topic> is missing; pool apply <pool> with the same terms creates it`
+`receiver <receiver> profile <profile>: signature topic <topic> is missing; apply --pool <pool> with the same terms creates it`
 when the profile of a receiver whose membership has not ended has no task
 topic: a recorded profile's topic exists before its record, so it was deleted
 outside wherry. Run
-`wherry operator pool apply <pool>` with the pool's recorded terms, then
+`wherry operator apply --pool <pool>` with the pool's recorded terms, then
 `wherry operator check` again.
 
 ## WherryOpenRequestsUnanswered
@@ -302,8 +302,8 @@ Then:
 | a planned stop whose previous custodian logged `custodian: re-keyed <n> tasks to pool key <id> and deleted <n> pool keys` | none |
 | a crash or a lost state directory | none: the hosts of the lost tasks resubmit them when they next run |
 | a planned stop with no re-key | raise `drain_timeout`, so that the stopping custodian waits for a successor's snapshot and re-keys its tasks, as in [Stop a pool's key custodian](operations-receivers.md#stop-a-pool-s-key-custodian) |
-| no planned stop, crash or lost state directory before the takeover | treat the new custodian as suspect and revoke it with `wherry operator receiver remove` |
-| a `contested` snapshot with no custodian change | find the writer that initialised `p.<pool>.custodian`, which every member of the pool can; revoke a suspect receiver with `wherry operator receiver remove` |
+| no planned stop, crash or lost state directory before the takeover | treat the new custodian as suspect and revoke it with `wherry operator remove --receiver` |
+| a `contested` snapshot with no custodian change | find the writer that initialised `p.<pool>.custodian`, which every member of the pool can; revoke a suspect receiver with `wherry operator remove --receiver` |
 
 ## WherryRunsKeyLost
 
@@ -430,19 +430,19 @@ cancellation and stopping the renewer do not count as claim loss.
 
 ## Rotate a tenant's storage keys
 
-A tenant's S3 key pair is recorded once with `wherry operator tenant storage`
+A tenant's S3 key pair is recorded once with `wherry operator storage`
 and travels in every host bundle of the tenant
-([S3 storage](operations-hosts.md#s3-storage)). `tenant host remove` ends a
+([S3 storage](operations-hosts.md#s3-storage)). `remove --host` ends a
 Kafka principal only: the pair stays valid on every host that holds a bundle
 until the store's administrator disables it. Rotate with an overlap, so no
 host loses its storage:
 
 1. The store's administrator issues a new pair for the tenant's user and
    keeps the old one valid.
-2. Run `wherry operator tenant storage TENANT`, or pipe the new pair in
+2. Run `wherry operator storage --tenant TENANT`, or pipe the new pair in
    with `-`. It checks both keys before it writes and replaces the file
    atomically, so a refused or failed run keeps the old pair; run it again.
-3. Run `wherry operator tenant host refresh TENANT HOST` for each remaining
+3. Run `wherry operator refresh --host HOST --tenant TENANT` for each remaining
    host of the tenant. Each rewrites the host's kept bundle with the new pair
    and the same password; a rerun reports a refreshed bundle as current, so
    a run interrupted part way is run again for every host and converges.
@@ -457,5 +457,5 @@ host loses its storage:
 
 For a compromised host, the administrator disables the pair at once and
 accepts the outage: every host of the tenant loses storage until it holds a
-bundle with the new pair. Then run `wherry operator tenant host remove
+bundle with the new pair. Then run `wherry operator remove --host
 TENANT HOST` for the compromised host and the steps above for the rest.

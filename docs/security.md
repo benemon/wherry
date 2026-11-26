@@ -191,10 +191,10 @@ admission: a malformed first task can win its run and then fail at open with
 
 - **Size.** An envelope is at most 64 KiB, and the signed task with its
   envelope must fit the pool's record limit; `submit` measures the actual
-  record. `pool apply` sizes the pool against a task with a maximum
+  record. `apply --pool` sizes the pool against a task with a maximum
   envelope ([Size a pool against the broker](operations-operator.md#size-a-pool-against-the-broker)).
 - **Time on the broker.** The pool's tasks and events topics keep records for
-  `start_by_limit` plus six hours plus a day, or longer after `pool apply`
+  `start_by_limit` plus six hours plus a day, or longer after `apply --pool`
   shortens `start_by_limit`, since it never lowers their retention, and roll a segment every hour,
   so retention deletes a record within about an hour of that bound; an
   envelope's exposure is that retention plus the broker's deletion lag.
@@ -348,7 +348,7 @@ per-workspace keys.
    ```
 
    ```sh
-   wherry operator pool apply build
+   wherry operator apply --pool build
    ```
 
    The credential is required unless the entry sets `required: false`, so
@@ -489,7 +489,7 @@ start with `https://` or `ssh://` or repeats another, a `credential` with no
 source in `credentials`, and a `host_key` that is not a readable file.
 
 The storage keys are the tenant's pair the bundle carries as `storage`,
-recorded by [`tenant storage`](commands.md#wherry-operator-tenant-storage-tenant),
+recorded by [`storage`](commands.md#wherry-operator-storage),
 for every pool with storage, unless the configuration's `storage` maps the
 pool to credentials of its own, which win. Mapped keys resolve through
 their credentials' sources whenever the host uploads, presigns, downloads or
@@ -555,8 +555,8 @@ rotates with a re-run of `init`.
 ### The operator working directory
 
 The operator's [working directory](configuration-operator.md#operator-working-directory)
-holds `operator.password`, every bundle `tenant host add` and `receiver apply`
-write, and each tenant's S3 key pair that `tenant storage` recorded, in
+holds `operator.password`, every bundle `add --host` and `apply --receiver`
+write, and each tenant's S3 key pair that `storage` recorded, in
 `storage/<tenant>.yaml`. A leaked directory therefore exposes the Kafka
 password of every principal wherry made and the storage keys of every
 tenant. Keep it on the operator's machine, readable by the operator alone:

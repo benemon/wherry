@@ -133,7 +133,7 @@ returns once a run of the mock agent completes. Its steps:
    writes does, `operator.yaml` and the host's included; `up`'s own dials
    trust it the same way. Pool `dev`'s
    terms list each agent by its catalog id with no credential of its own,
-   and `pool apply` expands them as it does for any pool: `claude-code`,
+   and `apply --pool` expands them as it does for any pool: `claude-code`,
    `anthropic` and `codex` each take their one variable, required, and
    `google` its three, each optional; a run of `google` gets the ones whose
    variables are set where the submit runs, and a submit with none set is

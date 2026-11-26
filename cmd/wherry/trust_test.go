@@ -388,13 +388,13 @@ func TestRemoveProbesThroughTheServicePool(t *testing.T) {
 	if err := service.TenantAdd(ctx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := runOperator([]string{"tenant", "host", "add", "tenant-a", "host-a"}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"add", "--host", "host-a", "--tenant", "tenant-a"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	revocationBounds(t, service, "1")
 	hostBundle := filepath.Join("bundles", "hosts", "tenant-a", "host-a.bundle")
 	var stdout bytes.Buffer
-	if err := runOperator([]string{"tenant", "host", "remove", "tenant-a", "host-a", "--wait", "1s"}, &stdout, io.Discard); err != nil {
+	if err := runOperator([]string{"remove", "--host", "host-a", "--tenant", "tenant-a", "--timeout", "1s"}, &stdout, io.Discard); err != nil {
 		t.Fatalf("remove through the service's pool = %v; printed\n%s", err, stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "step=3 complete=true") {
@@ -685,7 +685,7 @@ func TestKeptBundleWithACAIsReissuedWithForce(t *testing.T) {
 	if err := os.WriteFile(filepath.Join("receivers", "receiver-a.yaml"), []byte("pool: pool-a\nplugin_sha256: {nomad: "+fakeSHA256+"}\n"+basePlugin+item("name: claude\nagent: claude\n", "      ")), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"tenant", "add", "tenant-a"}, {"tenant", "host", "add", "tenant-a", "host-a"}, {"receiver", "apply", "receiver-a"}} {
+	for _, args := range [][]string{{"add", "--tenant", "tenant-a"}, {"add", "--host", "host-a", "--tenant", "tenant-a"}, {"apply", "--receiver", "receiver-a"}} {
 		if err := runOperator(args, io.Discard, io.Discard); err != nil {
 			t.Fatal(err)
 		}
@@ -708,8 +708,8 @@ func TestKeptBundleWithACAIsReissuedWithForce(t *testing.T) {
 		refresh    []string
 		force      []string
 	}{
-		{"host", filepath.Join("bundles", "hosts", "tenant-a", "host-a.bundle"), []string{"tenant", "host", "refresh", "tenant-a", "host-a"}, []string{"tenant", "host", "add", "tenant-a", "host-a", "--force"}},
-		{"receiver", filepath.Join("bundles", "receivers", "receiver-a.bundle"), []string{"receiver", "apply", "receiver-a"}, []string{"receiver", "apply", "receiver-a", "--force"}},
+		{"host", filepath.Join("bundles", "hosts", "tenant-a", "host-a.bundle"), []string{"refresh", "--host", "host-a", "--tenant", "tenant-a"}, []string{"add", "--host", "host-a", "--tenant", "tenant-a", "--force"}},
+		{"receiver", filepath.Join("bundles", "receivers", "receiver-a.bundle"), []string{"apply", "--receiver", "receiver-a"}, []string{"apply", "--receiver", "receiver-a", "--force"}},
 	} {
 		before, err := operator.ReadBundle(c.path)
 		if err != nil {

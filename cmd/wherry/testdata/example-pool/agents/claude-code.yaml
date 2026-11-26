@@ -1,4 +1,4 @@
-# claude-code is a credential catalog id: pool apply adds claude-code-oauth-token (CLAUDE_CODE_OAUTH_TOKEN), required.
+# claude-code is a credential catalog id: apply --pool adds claude-code-oauth-token (CLAUDE_CODE_OAUTH_TOKEN), required.
 name: claude-code
 credentials:
   # A credential outside the catalog, beside the derived one; a run gets it when the host resolves it.

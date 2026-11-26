@@ -11,13 +11,13 @@ operator command takes `--dir DIR`, the current directory by default.
 <dir>/
   operator.yaml              written by operator init: how commands connect as wherry.operator
   operator.password          written by operator init, mode 0600
-  pools/<pool>.yaml          pool terms, kept; pool apply reads them
-  receivers/<receiver>.yaml  receiver configurations, kept; receiver apply reads them
+  pools/<pool>.yaml          pool terms, kept; apply --pool reads them
+  receivers/<receiver>.yaml  receiver configurations, kept; apply --receiver reads them
   bundles/                   mode 0700
     hosts/<tenant>/          mode 0700
       <host>.bundle          mode 0600
     receivers/<receiver>.bundle  mode 0600
-  storage/<tenant>.yaml      the tenant's S3 key pair, written by tenant storage, mode 0600 in a directory mode 0700
+  storage/<tenant>.yaml      the tenant's S3 key pair, written by storage, mode 0600 in a directory mode 0700
   .gitignore                 operator init appends operator.password, bundles/ and storage/
 ```
 
@@ -44,7 +44,7 @@ every tenant's S3 key pair, in `storage/` and each host bundle
 
 ### Which file supplies the terms
 
-The YAML file `pool apply` reads: `-f PATH`, or `pools/<pool>.yaml` in the
+The YAML file `apply --pool` reads: `--file PATH`, or `pools/<pool>.yaml` in the
 operator's [working directory](#operator-working-directory). Unknown fields
 are errors.
 When `-f` names a directory, `pool.yaml` holds every field except `agents`, and
@@ -98,7 +98,7 @@ agent: `HOME`, `WHERRY_INPUT_DIR`, `WHERRY_OUTPUT_DIR`,
 `WHERRY_CREDENTIALS_DIR`, `WHERRY_MODEL` and the variables of
 `pluginsdk.AgentEnvironment`. `file` is a [file
 name](a2a-extension-v1.md#submission). An agent's credentials have unique
-names, and no two share a target. `pool apply` refuses terms that break a
+names, and no two share a target. `apply --pool` refuses terms that break a
 rule, naming the agent and credential.
 
 `submit` refuses a task when its host has no source for a required
@@ -155,13 +155,13 @@ A `replicas` value of 0 or an absent field means one replica. From attempt
 `delivery budget exhausted` where it would release it, except in the cases
 the [extension](a2a-extension-v1.md#delivery-budget) lists.
 
-[`pool apply`](commands.md#wherry-operator-pool-apply-pool) changes an existing
+[`apply --pool`](commands.md#wherry-operator-apply) changes an existing
 pool's terms. A lowered `delivery_limit` applies to a task in flight at its
 next release.
 
 **Signatures.** A profile's signature is its agent plus all its labels;
 nothing in the pool terms takes part. Each signature has its own task topic,
-which `receiver apply` creates before the record that names it; `pool apply`
+which `apply --receiver` creates before the record that names it; `apply --pool`
 recreates a recorded profile's topic that was deleted. No terms change creates
 or changes a signature.
 
@@ -194,7 +194,7 @@ under the MIT licence, whose notice is kept with the files.
 An id can name an agent when it follows the [name](commands.md#names)
 grammar (`wafer.ai` does not) and every credential it derives is one these
 terms accept: a variable name no plugin sets, and a derived name of at most
-32 characters. `pool apply` expands each agent whose name is such an id,
+32 characters. `apply --pool` expands each agent whose name is such an id,
 each agent on its own, before it checks the terms:
 
 - An entry reading one variable derives one required credential.
@@ -215,17 +215,17 @@ credential's name or target is refused naming it, and the uniqueness rules
 above hold across both. An agent whose name is not such an id keeps the
 list as written. The recorded terms change only when the operator applies
 them again, so a catalog change in a new wherry release reaches a pool at
-its next `pool apply`.
+its next `apply --pool`.
 
 ### Pool terms example
 
 Terms for pool `build` that set every field except a credential's `file`, as one file for
-`pool apply build -f build.yaml`. `claude-code` and `codex` are catalog
+`apply --pool build --file build.yaml`. `claude-code` and `codex` are catalog
 agents, so they list no model credential:
 
 ```yaml
 agents:
-  # claude-code is a credential catalog id: pool apply adds claude-code-oauth-token (CLAUDE_CODE_OAUTH_TOKEN), required.
+  # claude-code is a credential catalog id: apply --pool adds claude-code-oauth-token (CLAUDE_CODE_OAUTH_TOKEN), required.
   - name: claude-code
     credentials:
       # A credential outside the catalog, beside the derived one; a run gets it when the host resolves it.
@@ -238,7 +238,7 @@ agents:
     credentials:
       - {name: model-api-key, env: MODEL_API_KEY}
   # Without models, a task names no model and the profile's command picks one.
-  # codex is a catalog id: pool apply adds codex-api-key (CODEX_API_KEY), required.
+  # codex is a catalog id: apply --pool adds codex-api-key (CODEX_API_KEY), required.
   - name: codex
 default_agent: claude-code
 start_by_limit: 72h
@@ -259,7 +259,7 @@ storage:
   bucket: wherry
 ```
 
-The same terms as a directory for `pool apply build -f build`:
+The same terms as a directory for `apply --pool build --file build`:
 
 ```
 build/
@@ -295,7 +295,7 @@ storage:
 `agents/claude-code.yaml`:
 
 ```yaml
-# claude-code is a credential catalog id: pool apply adds claude-code-oauth-token (CLAUDE_CODE_OAUTH_TOKEN), required.
+# claude-code is a credential catalog id: apply --pool adds claude-code-oauth-token (CLAUDE_CODE_OAUTH_TOKEN), required.
 name: claude-code
 credentials:
   # A credential outside the catalog, beside the derived one; a run gets it when the host resolves it.
@@ -318,7 +318,7 @@ credentials:
 
 ```yaml
 # Without models, a task names no model and the profile's command picks one.
-# codex is a catalog id: pool apply adds codex-api-key (CODEX_API_KEY), required.
+# codex is a catalog id: apply --pool adds codex-api-key (CODEX_API_KEY), required.
 name: codex
 ```
 
@@ -339,12 +339,12 @@ the tenants entitled to the pool, from a receiver that batches at most
 2 MiB (2097152 bytes), the `max.message.bytes` wherry sets on every tenant
 feed and transcript topic. The Kafka cluster must allow a topic
 `max.message.bytes` of 2 MiB.
-`pool apply` records the lowest record limit of the pool's task topics, or
+`apply --pool` records the lowest record limit of the pool's task topics, or
 with none yet the brokers' and the host's batch limit, in the pool's terms,
 and [`submit`](commands.md#wherry-host-submit) measures each submission against it. A pool file
 does not set it.
 
-`pool apply`, `tenant pool add` and `check` compare five record-batch sizes
+`apply --pool`, `allow` and `check` compare five record-batch sizes
 against the record limits. wherry's tests build and sign each record to pin
 its size. The smallest task a host submits with a maximum envelope and its
 submit wrap, an 89326-byte batch, goes against the task topics' limit. Four
@@ -366,7 +366,7 @@ An input file travels base64-encoded inside the signed record, which is itself
 base64url-encoded, so an inline input takes about 16/9 of its size in the
 submission record.
 
-`pool apply` and `tenant pool add` check against the broker at the time.
+`apply --pool` and `allow` check against the broker at the time.
 Receivers apply the limits from their view of `wherry.operator`, which they
 read every 15 seconds, so a changed limit takes effect within that
 window.
@@ -381,22 +381,22 @@ second and `10` percent.
 
 ## Tenants and entitlements
 
-Create a tenant with `wherry operator tenant add TENANT`.
-Entitle it to a pool with `wherry operator tenant pool add TENANT POOL`.
+Create a tenant with `wherry operator add --tenant TENANT`.
+Entitle it to a pool with `wherry operator allow --tenant TENANT --pool POOL`.
 Host creation and entitlement changes require an existing live tenant.
 The tenant records live on `wherry.operator`.
 There is no tenant configuration file.
 
-Remove an entitlement with `wherry operator tenant pool remove TENANT POOL`.
+Remove an entitlement with `wherry operator deny --tenant TENANT --pool POOL`.
 You can add the entitlement again.
-Remove the tenant with `wherry operator tenant remove TENANT`.
+Remove the tenant with `wherry operator remove --tenant TENANT`.
 An ended tenant name cannot be reused.
 See [Tenant onboarding and offboarding](operations-operator.md#tenant-onboarding-and-offboarding).
 
 ## How pool limits interact
 
 `start_by_limit` sets the minimum retention for pool topics.
-`pool apply` raises retention when needed.
+`apply --pool` raises retention when needed.
 It never lowers retention.
 For a pool with storage, `start_by_limit` plus six hours and ten minutes must fit within seven days.
 Seven days is the maximum lifetime of an S3 SigV4 presigned URL, and the ten minutes are the grace after `task_ended_by` in which a run's S3 outputs may still upload.

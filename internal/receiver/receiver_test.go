@@ -1340,7 +1340,7 @@ func TestConfigureRefusesUnpinnedPluginType(t *testing.T) {
 	config.PluginSHA256 = map[string]string{"other": testPluginSHA256}
 	f.appendConfig(t, config)
 	restarted := &Receiver{id: testReceiver, base: f.receiver.base, reader: operator.NewReader(f.receiver.base), logger: f.receiver.logger, factory: f.receiver.factory, metrics: newMetrics(prometheus.NewRegistry())}
-	if err := restarted.configure(f.ctx); err == nil || !strings.Contains(err.Error(), "plugin type fake has no pinned SHA-256; set plugin_sha256.fake in the receiver's file and run receiver apply") {
+	if err := restarted.configure(f.ctx); err == nil || !strings.Contains(err.Error(), "plugin type fake has no pinned SHA-256; set plugin_sha256.fake in the receiver's file and run apply --receiver") {
 		t.Fatalf("configure: %v, want a refusal naming the type and the flag", err)
 	}
 }
@@ -1427,22 +1427,28 @@ func TestRunJoinsPeriodicWork(t *testing.T) {
 
 func TestNewTakesItsIDFromTheBundle(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.TenantPrincipal("tenant-a", "host-a"), Password: "p"}, nil, filepath.Join(dir, "host"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry()); err == nil {
+	if _, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.TenantPrincipal("tenant-a", "host-a"), Password: "p"}, nil, filepath.Join(dir, "host"), 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry()); err == nil {
 		t.Fatal("New accepted a host principal's bundle")
 	}
-	r, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"}, nil, filepath.Join(dir, "state"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
+	r, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"}, nil, filepath.Join(dir, "state"), 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.base.Close()
 	if r.id != "receiver-a" {
 		t.Fatalf("receiver ID %q", r.id)
 	}
-	again, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"}, nil, filepath.Join(dir, "state"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
+	// The state directory is held from New until Run returns, so a second receiver on it is refused while the first lives.
+	if _, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"}, nil, filepath.Join(dir, "state"), 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry()); err == nil || !strings.Contains(err.Error(), "is held by another receiver process") {
+		t.Fatalf("New beside a live receiver = %v; want it refused", err)
+	}
+	r.base.Close()
+	r.lock.Close()
+	again, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"}, nil, filepath.Join(dir, "state"), 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer again.base.Close()
+	defer again.lock.Close()
 	if !again.signing.Equal(r.signing) {
 		t.Fatal("the signing key was not kept in the state directory")
 	}

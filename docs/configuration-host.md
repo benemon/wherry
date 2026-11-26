@@ -286,7 +286,7 @@ of nothing else is refused. A `storage` block holds both keys or is refused.
 | `broker` | string | required | Kafka bootstrap address, `host:port` |
 | `principal` | string | required | SCRAM-SHA-512 user name |
 | `password` | string | required | SCRAM password |
-| `storage` | mapping | none | the tenant's S3 `access_key` and `secret_key`, plain strings, written when [`tenant storage`](commands.md#wherry-operator-tenant-storage-tenant) recorded them; used for every pool with storage that `storage` in the configuration does not map |
+| `storage` | mapping | none | the tenant's S3 `access_key` and `secret_key`, plain strings, written when [`storage`](commands.md#wherry-operator-storage) recorded them; used for every pool with storage that `storage` in the configuration does not map |
 
 The Kafka platform owns and renews its CA. The host trusts it through the
 machine's trust store plus the configuration's `ca_cert`; a bundle carries

@@ -53,15 +53,19 @@ check-markers: ## Fail on tool-attribution markers in tracked files
 
 .PHONY: check-names
 # The provisioning role is the operator and its record topic wherry.operator;
-# every command is scoped by its role word. The old names went in a clean
-# break. CHANGELOG-style history keeps them. The patterns are assembled from
-# fragments, as in check-markers.
+# every command is scoped by its role word, then a verb, with the operator's
+# resources as flags. The old names went in a clean break. CHANGELOG-style
+# history keeps them, upgrade.md's and commands.md's mapping tables name them,
+# and the operator's span names, a telemetry contract, keep the pre-verb forms.
+# The patterns are assembled from fragments, as in check-markers.
 check-names: ## Fail on the old provisioning-role and command names in tracked files
 	@p="wherry[ .]adm""in|WHERRY_TRUST_ADM""IN[A-Z_]*|wherry (k""ey|clean""up)|dev re""set|receiver (a""dd|up""date|re""voke)|pool (cre""ate|up""date)|host re""voke"; \
 	q="#wherry-adm""in-|internal/adm""in"; \
 	hits=$$(git grep -n -w -E "$$p" -- . ':!*CHANGELOG*'; git grep -n -E "$$q" -- . ':!*CHANGELOG*'); \
 	r='wherry (host )?wa''it\b|host-wa''it-run-id'; \
 	hits="$$hits$$(git grep -n -E "$$r" -- docs/ plugins/ test/ README.md '*.go' ':!*CHANGELOG*' ':!docs/upgrade.md' ':!*_test.go')"; \
+	s="operator (ten""ant|po""ol|recei""ver) (a""dd|li""st|stor""age|rem""ove|po""ol|ho""st|app""ly|sh""ow|susp""end|res""ume|rotate-""key)|ten""ant (a""dd|li""st|stor""age|rem""ove|po""ol (a""dd|rem""ove)|ho""st (a""dd|refr""esh|rem""ove))\b|po""ol (app""ly|susp""end|res""ume|rotate-""key)\b|recei""ver (app""ly|sh""ow|rem""ove)\b|host k""ey rot""ate|k""ey rotate\b|--rotate-""key|-f (PA""TH|FI""LE)|\[-f\b"; \
+	hits="$$hits$$(git grep -n -E "$$s" -- docs/ plugins/ test/ README.md Makefile '*.go' '*.svg' ':!*CHANGELOG*' ':!docs/upgrade.md' ':!*_test.go' | grep -v -E 'SpanCommands|marker\(|^docs/commands\.md:[0-9]+:\| `wherry ')"; \
 	if [ -n "$$hits" ]; then \
 		echo "$$hits"; echo "FAIL: old provisioning-role or command names in tracked files"; exit 1; \
 	fi; \

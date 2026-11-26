@@ -64,7 +64,7 @@ type Terms struct {
 	VCS []string `json:"vcs,omitzero" yaml:"vcs"`
 	// Storage is the pool's S3 lane; nil allows no S3 input or output.
 	Storage *Storage `json:"storage,omitzero" yaml:"storage"`
-	// RecordLimit is the tasks topic's record limit as pool apply reads it from the broker; no pool file sets it.
+	// RecordLimit is the tasks topic's record limit as apply --pool reads it from the broker; no pool file sets it.
 	RecordLimit int64 `json:"record_limit,omitzero" yaml:"-"`
 }
 
@@ -404,7 +404,7 @@ func apply(state *State, record Record) error {
 func (state State) LiveTenant(tenant string) error {
 	ended, exists := state.Tenants[tenant]
 	if !exists {
-		return errors.New("tenant absent; use tenant add first")
+		return errors.New("tenant absent; use add --tenant first")
 	}
 	if ended {
 		return errors.New("tenant has ended")
@@ -498,7 +498,7 @@ func ValidateConfig(config ReceiverConfig, terms Terms) error {
 		}
 		names[profile.Name] = true
 		if _, ok := config.PluginSHA256[profile.Plugin]; !ok {
-			return fmt.Errorf("plugin type %s has no pinned SHA-256; set plugin_sha256.%s in the receiver's file and run receiver apply", profile.Plugin, profile.Plugin)
+			return fmt.Errorf("plugin type %s has no pinned SHA-256; set plugin_sha256.%s in the receiver's file and run apply --receiver", profile.Plugin, profile.Plugin)
 		}
 		if err := wire.ValidateLabels(profile.Labels); err != nil {
 			return err

@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/benemon/wherry/internal/operator"
@@ -74,11 +75,10 @@ type Receiver struct {
 	factory ProfileFactory
 	logger  *log.Logger
 	metrics *metrics
-	// rotateKey, set by New only, has Run replace the signing key in keyFile before it claims anything.
-	keyFile   string
-	rotateKey bool
-	// stateDir holds the signing key and the pool keys.
+	// stateDir holds the signing key and the pool keys; lock is the exclusive lock New takes on it, which Run holds
+	// until it returns, so a second receiver process on the directory, a key rotation included, is refused.
 	stateDir string
+	lock     *os.File
 	custody  custody
 	// drainTimeout bounds how long Run lets held runs end after its context ends.
 	drainTimeout time.Duration
@@ -129,24 +129,10 @@ type Receiver struct {
 }
 
 // New builds the receiver's Kafka client from bundle, verifying the broker, and later each pool's bucket, against roots,
-// operator.RootPool's, loads or creates its signing key in stateDir, settling a rotation an earlier start left, rotates
-// it in Run with rotateKey, and registers its metric families on registry.
-func New(bundle operator.Bundle, roots *x509.CertPool, stateDir string, rotateKey bool, drainTimeout time.Duration, factory ProfileFactory, logger *log.Logger, registry *prometheus.Registry) (*Receiver, error) {
-	id, ok := strings.CutPrefix(bundle.Principal, operator.ReceiverPrincipal(""))
-	if !ok || !wire.ValidName(id) {
-		return nil, errors.New("bundle principal is not a receiver principal")
-	}
-	opts, err := operator.BundleKafkaOpts(bundle, roots)
-	if err != nil {
-		return nil, fmt.Errorf("bundle: %w", err)
-	}
-	if stateDir == "" {
-		return nil, errors.New("receiver requires a state directory")
-	}
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
-		return nil, err
-	}
-	base, err := kgo.NewClient(feedBatches(opts)...)
+// operator.RootPool's, locks stateDir, loads or creates its signing key there, settling a rotation an earlier start
+// left, and registers its metric families on registry.
+func New(bundle operator.Bundle, roots *x509.CertPool, stateDir string, drainTimeout time.Duration, factory ProfileFactory, logger *log.Logger, registry *prometheus.Registry) (*Receiver, error) {
+	id, base, lock, err := openState(bundle, roots, stateDir)
 	if err != nil {
 		return nil, err
 	}
@@ -157,9 +143,74 @@ func New(bundle operator.Bundle, roots *x509.CertPool, stateDir string, rotateKe
 	}
 	if err != nil {
 		base.Close()
+		lock.Close()
 		return nil, fmt.Errorf("signing key: %w", err)
 	}
-	return &Receiver{id: id, base: base, storage: storageClient(roots), reader: operator.NewReader(base), signing: signing, keyFile: keyFile, stateDir: stateDir, rotateKey: rotateKey, drainTimeout: drainTimeout, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
+	return &Receiver{id: id, base: base, storage: storageClient(roots), reader: operator.NewReader(base), signing: signing, stateDir: stateDir, lock: lock, drainTimeout: drainTimeout, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
+}
+
+// openState is the receiver id bundle names, its Kafka client and the exclusive lock on stateDir, which the caller
+// closes.
+func openState(bundle operator.Bundle, roots *x509.CertPool, stateDir string) (string, *kgo.Client, *os.File, error) {
+	id, ok := strings.CutPrefix(bundle.Principal, operator.ReceiverPrincipal(""))
+	if !ok || !wire.ValidName(id) {
+		return "", nil, nil, errors.New("bundle principal is not a receiver principal")
+	}
+	opts, err := operator.BundleKafkaOpts(bundle, roots)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("bundle: %w", err)
+	}
+	if stateDir == "" {
+		return "", nil, nil, errors.New("receiver requires a state directory")
+	}
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return "", nil, nil, err
+	}
+	lock, err := os.Open(stateDir)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		lock.Close()
+		return "", nil, nil, fmt.Errorf("state directory %s is held by another receiver process: %w", stateDir, err)
+	}
+	base, err := kgo.NewClient(feedBatches(opts)...)
+	if err != nil {
+		lock.Close()
+		return "", nil, nil, err
+	}
+	return id, base, lock, nil
+}
+
+// RotateKey replaces the signing key in stateDir of the receiver bundle names, as Run would have, and returns the old
+// and new key ids. It holds the lock a running receiver holds, so it runs only while the receiver is stopped, and it
+// refuses a receiver that has never started, whose key topic is empty: that receiver's first start registers its key.
+func RotateKey(ctx context.Context, bundle operator.Bundle, roots *x509.CertPool, stateDir string) (string, string, error) {
+	id, base, lock, err := openState(bundle, roots, stateDir)
+	if err != nil {
+		return "", "", err
+	}
+	defer lock.Close()
+	defer base.Close()
+	topic, keyFile := operator.ReceiverTopic(id), filepath.Join(stateDir, "signing.key")
+	reader := operator.NewReader(base)
+	defer reader.Close()
+	records, err := reader.ReadFrom(ctx, topic, 0)
+	if err != nil {
+		return "", "", fmt.Errorf("read key topic: %w", err)
+	}
+	if len(records) == 0 {
+		return "", "", errors.New("receiver has never started, so it has no key to rotate: its first start registers one")
+	}
+	key, err := operator.RecoverKey(ctx, base, id, topic, keyFile)
+	if err != nil {
+		return "", "", fmt.Errorf("signing key: %w", err)
+	}
+	next, err := operator.RotateKey(ctx, base, id, topic, keyFile, key)
+	if err != nil {
+		return "", "", err
+	}
+	return signed.KeyID(key.Public().(ed25519.PublicKey)), signed.KeyID(next.Public().(ed25519.PublicKey)), nil
 }
 
 // feedBatches is opts with producer batches up to what a tenant's feed takes, so the largest result fits. Every client
@@ -177,19 +228,14 @@ func (r *Receiver) newClient(extra ...kgo.Opt) (*kgo.Client, error) {
 // until they end, after ctx ends for at most the drain timeout. A Kafka authorisation error or a plugin process exit
 // returns at once, leaving held runs unacknowledged and their jobs running for adoption on redelivery.
 func (r *Receiver) Run(ctx context.Context) error {
+	if r.lock != nil {
+		defer r.lock.Close()
+	}
 	defer r.base.Close()
 	defer r.reader.Close()
 	defer r.shutdownTracing()
 	if err := r.register(ctx); err != nil {
 		return err
-	}
-	if r.rotateKey {
-		next, err := operator.RotateKey(ctx, r.base, r.id, operator.ReceiverTopic(r.id), r.keyFile, r.signing)
-		if err != nil {
-			return r.denyStep(fmt.Errorf("rotate key: %w", err), capWrite, "rotate key")
-		}
-		r.logger.Printf("rotated key: old=%s new=%s", signed.KeyID(r.signing.Public().(ed25519.PublicKey)), signed.KeyID(next.Public().(ed25519.PublicKey)))
-		r.signing = next
 	}
 	if err := r.configure(ctx); err != nil {
 		return err

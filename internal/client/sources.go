@@ -184,7 +184,7 @@ func (h *Host) supplied(agent operator.AgentTerms, requested []string, r *resolv
 }
 
 // modelCredentials are the credentials of agent's terms whose targets are the variables of the entry agent's name names
-// in c, when that entry reads several: the model credentials pool apply derived, found by target. Nil for an agent
+// in c, when that entry reads several: the model credentials apply --pool derived, found by target. Nil for an agent
 // whose name is no such entry, or whose terms share no variable with the entry.
 func modelCredentials(c *catalog.Catalog, agent operator.AgentTerms) []operator.AgentCredential {
 	if c == nil {
