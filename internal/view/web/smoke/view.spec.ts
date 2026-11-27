@@ -58,7 +58,11 @@ test('the page renders every surface under its Content-Security-Policy', async (
   // The policy served is the Go server's, from its own constants through the fixture.
   expect(response!.headers()['content-security-policy']).toMatch(new RegExp('^' + policy.page.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(policy.placeholder, '[A-Za-z0-9+/=]{24}') + '$'));
   await expect(page).toHaveURL(baseURL + '/');
-  await expect(page.getByRole('button', { name: 'Receiver nomad-1' })).toBeVisible();
+  const nomad = page.getByRole('button', { name: 'Receiver nomad-1' });
+  await expect(nomad).toBeVisible();
+  const slots = nomad.locator('progress');
+  await expect(slots).toHaveAttribute('value', '2');
+  await expect(slots).toHaveAttribute('max', '3');
   await expect(page.getByText('Live · model v7')).toBeVisible();
 
   // A push drawer, with the map scaled to the space left: no sideways scroll at 1280 px.
