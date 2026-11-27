@@ -1,4 +1,4 @@
-import { EuiBadge, EuiHealth, EuiIcon } from '@elastic/eui';
+import { EuiBadge, EuiHealth, EuiIcon, EuiProgress } from '@elastic/eui';
 import type { ReactNode } from 'react';
 import { useEffect, useRef, useState } from 'react';
 import type { View } from './App';
@@ -150,6 +150,7 @@ function fullLayout(view: View): Layout {
       recCy[name] = rtop + 24;
       const health = r ? receiverHealth(r, p, view.custodianOf[p.name], view.tally) : { color: 'subdued' as const, label: 'unknown' };
       const inFlight = view.scrubbing ? view.tally.receiverWorking[name] || 0 : r?.in_flight || 0;
+      const capacity = r?.capacity || 0;
       const failed = view.tally.receiverFailed[name] || 0;
       const isEnded = !r || r.ended || r.status === 'ended';
       return (
@@ -158,9 +159,10 @@ function fullLayout(view: View): Layout {
             <span className="w-ring" style={ring(ringColor[health.color], 48)}>
               <EuiIcon type="database" />
             </span>
-            <span className="w-nt">
+            {/* The button's aria-label names the card; hidden, EuiProgress's live region no longer announces each count change. */}
+            <span className="w-nt" style={{ flex: 1 }} aria-hidden="true">
               <b>{name}</b>
-              {inFlight + ' of ' + (r?.capacity || 0) + ((r?.capacity || 0) === 1 ? ' slot' : ' slots')}
+              <EuiProgress size="s" value={inFlight} max={capacity} label="slots" valueText={inFlight + '/' + capacity} />
             </span>
           </button>
           {failed > 0 && (
@@ -370,7 +372,7 @@ function compactLayout(view: View): Layout {
               const isRecSel = (sel?.k === 'recv' && sel.id === n) || selRun?.receiver === n;
               const f = view.scrubbing ? view.tally.receiverWorking[n] || 0 : r?.in_flight || 0;
               return (
-                <button key={n} type="button" className={'w-pill' + (isRecSel ? ' w-selected' : '')} title={n + ' · ' + health.label + ' · ' + f + ' of ' + (r?.capacity || 0) + ' slots' + (isC ? ' · custodian' : '')} aria-label={'Receiver ' + n} onClick={() => view.open({ k: 'recv', id: n })} style={{ width: 24, height: 24, background: f ? 'var(--w-primary-bg)' : undefined, border: '3px solid ' + ringColor[health.color], opacity: isEnded ? 0.4 : 1 }}>
+                <button key={n} type="button" className={'w-pill' + (isRecSel ? ' w-selected' : '')} title={n + ' · ' + health.label + ' · ' + f + ' of ' + (r?.capacity || 0) + ' slots in use' + (isC ? ' · custodian' : '')} aria-label={'Receiver ' + n} onClick={() => view.open({ k: 'recv', id: n })} style={{ width: 24, height: 24, background: f ? 'var(--w-primary-bg)' : undefined, border: '3px solid ' + ringColor[health.color], opacity: isEnded ? 0.4 : 1 }}>
                   {isC && <EuiIcon type="key" size="s" />}
                 </button>
               );
