@@ -156,7 +156,7 @@ func newBusStorage(t *testing.T, storage *s3Store) *bus {
 		t.Fatal(err)
 	}
 	b.hostBundle = filepath.Join(t.TempDir(), "host.yaml")
-	if err := b.service.HostAdd(ctx, "tenant-a", "host-a", b.hostBundle, false); err != nil {
+	if err := b.service.HostAdd(ctx, "tenant-a", "host-a", b.hostBundle); err != nil {
 		t.Fatal(err)
 	}
 	receiverBundle := filepath.Join(t.TempDir(), "receiver.yaml")
@@ -1091,7 +1091,7 @@ func TestUsageErrors(t *testing.T) {
 		}, "unknown host command \"key\""},
 		{"host rotate without --key", func(stderr *bytes.Buffer) error {
 			return run([]string{"host", "rotate"}, stderr, stderr)
-		}, "usage: wherry host rotate --key [--config-file FILE]"},
+		}, "usage: wherry host rotate --key|--scram [--config-file FILE]"},
 		{"receiver rotate without --key", func(stderr *bytes.Buffer) error {
 			return run([]string{"receiver", "rotate"}, stderr, stderr)
 		}, "usage: wherry receiver rotate --key [--config-file FILE]"},
@@ -1138,7 +1138,7 @@ func TestKeyAndInit(t *testing.T) {
 	if again, err := trust.LoadSigningKeyFile(keyPath); err != nil || !again.Equal(key) {
 		t.Fatal("second init replaced the host key")
 	}
-	if err := run([]string{"host", "rotate", "--key", "--config-file", config, "extra"}, &stdout, &stderr); err == nil || err.Error() != "usage: wherry host rotate --key [--config-file FILE]" {
+	if err := run([]string{"host", "rotate", "--key", "--config-file", config, "extra"}, &stdout, &stderr); err == nil || err.Error() != "usage: wherry host rotate --key|--scram [--config-file FILE]" {
 		t.Fatalf("got %v, want host rotate usage error", err)
 	}
 }

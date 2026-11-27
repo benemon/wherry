@@ -33,7 +33,7 @@ profile is ready, so a task reaches only eligible loops.
 
 | Topic | Writers | Readers | Holds |
 | --- | --- | --- | --- |
-| `wherry.operator` | the operator | every principal | pool terms, receiver configurations, tenants, hosts, entitlements, revocations in progress, membership ends, pool suspensions and resumes, rotate-key requests |
+| `wherry.operator` | the operator | every principal | pool terms, receiver configurations, tenants, hosts, entitlements, revocations in progress, membership ends, pool suspensions and resumes, rotate-key requests, host credential resets, enrolments and decisions |
 | `wherry.receiver.<receiver>` | that receiver | its pool's members, entitled tenants' hosts | its keys |
 | `wherry.receiver.<receiver>.progress` | that receiver | its pool's live members | each run's latest committed transcript offset |
 | `wherry.pool.<pool>.tasks.<agent>.<hex>` | entitled tenants' hosts | the pool's receivers with a ready profile of that signature, through the pool's share group | submissions placed on one profile signature; `<hex>` is the SHA-256 of the signature's encoding |
@@ -43,6 +43,7 @@ profile is ready, so a task reaches only eligible loops.
 | `wherry.tenant.<tenant>` | receivers of the tenant's pools | the tenant's hosts | statuses, results, echoes |
 | `wherry.tenant.<tenant>.transcript` | receivers of the tenant's pools | the tenant's hosts | transcript chunks, output chunks |
 | `wherry.host.<tenant>.<host>` | that host | that host, receivers of the tenant's pools | its key |
+| `wherry.requests` | live hosts | the operator | hosts' credential requests |
 
 `wherry.operator` can also read and write every one of these topics
 through its prefixed grant on `wherry.` topics ([ACLs](#acls)).
@@ -292,6 +293,7 @@ naming 256 outputs fits.
 | `wherry.receiver.<receiver>.progress` | `apply --receiver`, `apply --pool` | at least the pool's greatest task topic; never lowered |
 | `wherry.host.<tenant>.<host>` | `add --host` | `-1`, kept after revocation |
 | `wherry.traces` | `operator init` | `604800000` (7 days) |
+| `wherry.requests` | `operator init` | `-1`; `segment.ms=86400000` and `max.message.bytes=65536` |
 | `wherry.traces.<tenant>` | `add --tenant`; `operator init` for a live tenant whose topic is missing | `604800000` (7 days), kept after tenant removal |
 
 The task topics' retention keeps `start_by_limit`, the six-hour maximum run
@@ -342,7 +344,9 @@ creates nothing.
 | `wherry.operator` | cluster | Alter, AlterConfigs |
 | `wherry.operator` | topic prefix `wherry.` | Create, AlterConfigs, Read, Write |
 | `wherry.operator` | group prefix `p-` | AlterConfigs, Describe |
+| `wherry.operator` | topic `wherry.requests` | Delete |
 | host | topic `wherry.operator` | Read, Describe |
+| host | topic `wherry.requests` | Write, Describe |
 | host | topic `wherry.tenant.<own tenant>` | Read, Describe |
 | host | topic `wherry.tenant.<own tenant>.transcript` | Read, Describe |
 | host | topic `wherry.host.<own tenant>.<own host>` | Read, Write, Describe |
@@ -376,8 +380,10 @@ other grant stays.
 
 ## Operator convergence
 
-Operator commands do not lock each other. Each one that writes a record to
-`wherry.operator`, and each of `operator init`, `host add --force` and
+Operator commands do not lock each other, apart from the
+[operator lock](operations-operator.md#concurrent-operator-commands) that
+`approve`, `reject`, `revoke` and host and tenant removal take. Each one that writes a record to
+`wherry.operator`, and each of `operator init` and
 receiver reissue, ends with
 passes that read `wherry.operator` to its end and make Kafka match those
 records. A pass:

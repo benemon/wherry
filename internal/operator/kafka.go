@@ -55,6 +55,7 @@ type Bundle struct {
 	Broker    string      `yaml:"broker"`
 	Principal string      `yaml:"principal"`
 	Password  string      `yaml:"password"`
+	Enrolment string      `yaml:"enrolment,omitempty"`
 	Storage   StorageKeys `yaml:"storage,omitempty"`
 }
 
@@ -68,7 +69,8 @@ type StorageKeys struct {
 // SpanCommands are the commands marker names a root span after, "operator <command>": the fixed set a reader of
 // the trace topics matches span names against.
 var SpanCommands = []string{"check", "pool apply", "receiver provision", "receiver reconfigure", "receiver reissue", "receiver remove",
-	"tenant add", "tenant host add", "tenant host refresh", "tenant host remove", "tenant pool add", "tenant pool remove", "tenant remove"}
+	"request approve", "request reject", "tenant add", "tenant host add", "tenant host refresh", "tenant host remove",
+	"tenant host reset", "tenant host rotate", "tenant pool add", "tenant pool remove", "tenant remove"}
 
 // marker is the root span of an operator command. names are the command's arguments as identity attributes; each is
 // attached only once it passes validateNames, the check every command applies, so an invalid argument the command
@@ -134,8 +136,9 @@ func (service *Service) tenantStorage(tenant string) (StorageKeys, error) {
 
 // hostBundle is the bundle a host of tenant holds now: the operator's broker, the principal and password, and the
 // tenant's storage keys.
-func (service *Service) hostBundle(principal, password string, storage StorageKeys) Bundle {
+func (service *Service) hostBundle(principal, password, enrolment string, storage StorageKeys) Bundle {
 	bundle := service.Bundle(service.Broker, principal, password)
+	bundle.Enrolment = enrolment
 	bundle.Storage = storage
 	return bundle
 }
@@ -228,6 +231,11 @@ func ReplaceStorageKeys(path string, keys StorageKeys) (err error) {
 // BundleKafkaOpts are KafkaOpts for bundle's principal.
 func BundleKafkaOpts(bundle Bundle, roots *x509.CertPool) ([]kgo.Opt, error) {
 	return KafkaOpts(bundle.Broker, bundle.Principal, bundle.Password, roots)
+}
+
+// HostKafkaOpts is BundleKafkaOpts with the SCRAM credential from auth, which franz-go calls at each authentication.
+func HostKafkaOpts(bundle Bundle, roots *x509.CertPool, auth func(context.Context) (scram.Auth, error)) ([]kgo.Opt, error) {
+	return kafkaOpts(bundle.Broker, bundle.Principal, bundle.Password, roots, func(scram.Auth) sasl.Mechanism { return scram.Sha512(auth) })
 }
 
 // ErrNoCertificate is a ca_cert from which Go appends no certificate: the value is set, and is not PEM Go reads.
@@ -800,20 +808,15 @@ func asRecorded(record Record) (ReceiverConfig, error) {
 	return *decoded.Config, nil
 }
 
-// HostAdd provisions host in tenant and writes its bundle to bundlePath, carrying the tenant's storage keys when the
-// operator recorded them. A host that exists is refused unless force, which gives it a new password and replaces the
-// bundle at bundlePath, leaving its record untouched.
-func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath string, force bool) (err error) {
+// HostAdd provisions host in tenant and writes its bundle to bundlePath, carrying the tenant's storage keys when recorded.
+func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath string) (err error) {
 	ctx, span := service.marker(ctx, "tenant host add", telemetry.AttrTenant.String(tenant), telemetry.AttrHost.String(host))
 	defer ended(span, &err)
-	// Without force the bundle's file is reserved before anything changes in Kafka.
-	var bundle *bundleFile
-	if !force {
-		if bundle, err = createBundle(bundlePath, false); err != nil {
-			return err
-		}
-		defer closeBundle(bundle, &err)
+	bundle, err := createBundle(bundlePath, false)
+	if err != nil {
+		return err
 	}
+	defer closeBundle(bundle, &err)
 	if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
 		return err
 	}
@@ -831,30 +834,19 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 		return err
 	}
 	principal := TenantPrincipal(tenant, host)
-	if _, exists := current.Hosts[principal]; exists {
-		if !force {
-			return errors.New("host exists; --force gives it a new password and bundle")
-		}
-		if current.Ended[principal] {
-			return errors.New("host cannot return after its membership end")
-		}
-		if current.Revoking[principal] {
-			return errors.New("host is revoking")
-		}
-		// --force also repairs a host add whose quota failed after its record was appended; the quota comes first so
-		// that a failure leaves no working bundle for an unquoted host.
-		if err := service.applyQuota(ctx, current, tenant, principal); err != nil {
-			return err
-		}
-		return service.reissue(ctx, principal, bundlePath, func(password string) Bundle { return service.hostBundle(principal, password, storage) })
+	switch _, exists := current.Hosts[principal]; {
+	case current.Ended[principal]:
+		return errors.New("host cannot return after its membership end")
+	case current.Revoking[principal]:
+		return errors.New("host is being removed; run remove --host again")
+	case exists:
+		return errors.New("host exists")
 	}
-	if force {
-		if bundle, err = createBundle(bundlePath, true); err != nil {
-			return err
-		}
-		defer closeBundle(bundle, &err)
+	enrolment, err := CredentialID()
+	if err != nil {
+		return err
 	}
-	record := Record{Kind: "host", Tenant: tenant, Host: host}
+	record := Record{Kind: "host", Tenant: tenant, Host: host, Enrolment: enrolment}
 	// A host recorded before its topics and credential exist fails every later check, so they are made first.
 	if _, _, err := service.planRecord(ctx, record); err != nil {
 		return err
@@ -876,7 +868,7 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	if err := service.applyQuota(ctx, state, tenant, principal); err != nil {
 		return err
 	}
-	return writeBundle(bundle, service.hostBundle(principal, password, storage))
+	return writeBundle(bundle, service.hostBundle(principal, password, enrolment, storage))
 }
 
 // HostRefresh rewrites the kept bundle at bundlePath of host in tenant with the operator's broker and the tenant's
@@ -905,9 +897,9 @@ func (service *Service) HostRefresh(ctx context.Context, tenant, host, bundlePat
 	}
 	kept, err := ReadBundle(bundlePath)
 	if errors.Is(err, os.ErrNotExist) {
-		return false, fmt.Errorf("%s does not exist; add --host %s --tenant %s --force gives the host a new password and bundle", bundlePath, host, tenant)
+		return false, fmt.Errorf("%s does not exist; revoke --host %s --tenant %s gives the host a new password and bundle", bundlePath, host, tenant)
 	} else if errors.Is(err, ErrBundleCA) {
-		return false, fmt.Errorf("%w; add --host %s --tenant %s --force gives the host a new password and bundle", err, host, tenant)
+		return false, fmt.Errorf("%w; revoke --host %s --tenant %s gives the host a new password and bundle", err, host, tenant)
 	} else if err != nil {
 		return false, err
 	}
@@ -918,7 +910,7 @@ func (service *Service) HostRefresh(ctx context.Context, tenant, host, bundlePat
 	if err != nil {
 		return false, err
 	}
-	refreshed := service.hostBundle(principal, kept.Password, storage)
+	refreshed := service.hostBundle(principal, kept.Password, kept.Enrolment, storage)
 	if refreshed == kept {
 		return false, nil
 	}
@@ -1044,6 +1036,9 @@ func (service *Service) Check(ctx context.Context) (err error) {
 		return err
 	}
 	if err := service.checkRetention(ctx, state); err != nil {
+		return err
+	}
+	if err := service.checkRequestsTopic(ctx); err != nil {
 		return err
 	}
 	if err := service.checkFeedLimits(ctx, state); err != nil {
@@ -1730,6 +1725,15 @@ func (service *Service) upsertUser(ctx context.Context, user string) (string, er
 // Password is a new random SCRAM password.
 func Password() (string, error) {
 	random := make([]byte, 32)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(random), nil
+}
+
+// CredentialID is a new identifier for a host credential.
+func CredentialID() (string, error) {
+	random := make([]byte, 16)
 	if _, err := rand.Read(random); err != nil {
 		return "", err
 	}

@@ -116,6 +116,10 @@ func newFixtureNoHost(t *testing.T, opts ...kfake.Opt) *fixture {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 	f := &fixture{ctx: ctx, cluster: cluster, service: &operator.Service{Operator: operatorClient, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10, LockCeilingMS: 60000}, receivers: map[string]*testReceiver{}, poolKeys: map[string]*ecdsa.PrivateKey{}, logs: &syncBuffer{}}
+	// wherry.requests, as operator init leaves it.
+	if err := f.service.EnsureRequestsTopic(f.ctx); err != nil {
+		t.Fatal(err)
+	}
 	if err := f.service.TenantAdd(f.ctx, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +173,7 @@ func (f *fixture) connect(t *testing.T, path string, extra ...kgo.Opt) (*kgo.Cli
 func (f *fixture) newHost(t *testing.T, host, stateDir string) *Host {
 	t.Helper()
 	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := f.service.HostAdd(f.ctx, "tenant-a", host, bundle, false); err != nil {
+	if err := f.service.HostAdd(f.ctx, "tenant-a", host, bundle); err != nil {
 		t.Fatal(err)
 	}
 	kafka, principal := f.connect(t, bundle)
@@ -1870,7 +1874,7 @@ func TestEchoOfAMismatchingTaskDoesNotBindTheRun(t *testing.T) {
 func TestRegisterConcurrently(t *testing.T) {
 	f := newFixture(t)
 	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-c", bundle, false); err != nil {
+	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-c", bundle); err != nil {
 		t.Fatal(err)
 	}
 	hosts := make([]*Host, 8)
@@ -2437,7 +2441,7 @@ func TestHostReadsBoundTheirConnectionsAndRequests(t *testing.T) {
 	f := newFixture(t, kfake.NumBrokers(1))
 	_, task := f.admitted(t)
 	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-c", bundle, false); err != nil {
+	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-c", bundle); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []struct {
@@ -2468,7 +2472,7 @@ func TestAwaitOfAFinishedRunBoundsItsConnectionsAndRequests(t *testing.T) {
 	runID := task.submission.Wherry.Run
 	receiver.feed(t, f.ctx, runID, receiver.result(t, task, 1, wire.TaskStateCompleted, nil), receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateCompleted, nil))
 	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-c", bundle, false); err != nil {
+	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-c", bundle); err != nil {
 		t.Fatal(err)
 	}
 	var counted traffic
@@ -2575,7 +2579,7 @@ func TestReceiversOfAHostWithoutEntitlementsIsEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := f.service.HostAdd(f.ctx, "tenant-b", "host-b", bundle, false); err != nil {
+	if err := f.service.HostAdd(f.ctx, "tenant-b", "host-b", bundle); err != nil {
 		t.Fatal(err)
 	}
 	kafka, principal := f.connect(t, bundle)

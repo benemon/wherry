@@ -350,7 +350,7 @@ func provision(t *testing.T) *fixture {
 	}
 	for _, host := range [][2]string{{f.tenantA, f.hostA1}, {f.tenantA, f.hostA2}, {f.tenantB, f.hostB1}} {
 		path := filepath.Join(dir, host[0]+"."+host[1])
-		must(hostFixture(t, service, ctx, host[0], host[1], path, false))
+		must(hostFixture(t, service, ctx, host[0], host[1], path))
 		f.bundles[TenantPrincipal(host[0], host[1])] = readBundle(t, path)
 	}
 	must(kafkatest.Led(ctx, service.Operator, modelTopic(f.poolA), PoolEventsTopic(f.poolA), modelTopic(f.poolB), PoolEventsTopic(f.poolB),

@@ -54,7 +54,7 @@ func newInitHost(t *testing.T, pools map[string]operator.Terms) initHost {
 	for pool, terms := range pools {
 		h.entitle(t, pool, terms)
 	}
-	if err := service.HostAdd(ctx, "tenant-a", "host-a", h.bundle, false); err != nil {
+	if err := service.HostAdd(ctx, "tenant-a", "host-a", h.bundle); err != nil {
 		t.Fatal(err)
 	}
 	// The configuration directory exists, as on a host that has run wherry before; host init hardens it.
@@ -121,7 +121,7 @@ func (h initHost) registeredAt(t *testing.T, host, path, keyID string) {
 func (h initHost) addHost(t *testing.T, host string) string {
 	t.Helper()
 	bundle := filepath.Join(t.TempDir(), host+".bundle")
-	if err := h.service.HostAdd(h.ctx, "tenant-a", host, bundle, false); err != nil {
+	if err := h.service.HostAdd(h.ctx, "tenant-a", host, bundle); err != nil {
 		t.Fatal(err)
 	}
 	return bundle

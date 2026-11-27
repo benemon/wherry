@@ -236,7 +236,7 @@ func traceFixture(t *testing.T, service *Service) (host, receiver string, rows [
 	if err := service.ReceiverAdd(ctx, modelConfig("r", "p"), service.Broker, filepath.Join(t.TempDir(), "r.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	if err := hostFixture(t, service, ctx, "t", "h", filepath.Join(t.TempDir(), "h.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, "t", "h", filepath.Join(t.TempDir(), "h.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	if err := entitleFixture(t, service, ctx, "t", "p"); err != nil {
@@ -414,7 +414,7 @@ func TestTraceTopicGrantsOnKfake(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tenant := range []string{"a", "b"} {
-		if err := hostFixture(t, service, ctx, tenant, "h", filepath.Join(dir, tenant+".yaml"), false); err != nil {
+		if err := hostFixture(t, service, ctx, tenant, "h", filepath.Join(dir, tenant+".yaml")); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -52,7 +52,8 @@ their next release.
 | `wherry operator receiver apply RECEIVER [-f PATH] [--dry-run]` | `wherry operator apply --receiver RECEIVER [--file PATH] [--dry-run]` |
 | `wherry operator receiver apply RECEIVER --force` | `wherry operator apply --receiver RECEIVER --force` |
 | `wherry operator tenant add TENANT` | `wherry operator add --tenant TENANT` |
-| `wherry operator tenant host add TENANT HOST [--force]` | `wherry operator add --host HOST --tenant TENANT [--force]` |
+| `wherry operator tenant host add TENANT HOST` | `wherry operator add --host HOST --tenant TENANT` |
+| `wherry operator tenant host add TENANT HOST --force` | `wherry operator revoke --tenant TENANT --host HOST` |
 | `wherry operator tenant pool add TENANT POOL` | `wherry operator allow --tenant TENANT --pool POOL` |
 | `wherry operator tenant pool remove TENANT POOL` | `wherry operator deny --tenant TENANT --pool POOL` |
 | `wherry operator tenant remove TENANT` | `wherry operator remove --tenant TENANT` |
@@ -75,6 +76,33 @@ the state directory, and refuses a receiver that has never started.
 the procedure. The operator's trace span names keep the old command names:
 readers of the trace topics, the [operator view](operator-view.md) among them,
 match on them.
+
+## Host credential rotation
+
+A host now changes its Kafka password by a request the operator approves
+([Approve a host's credential request](operations-operator.md#approve-a-host-s-credential-request)),
+and `wherry operator revoke --tenant TENANT --host HOST` replaces
+`add --host --force`, which is gone: `add --host` of an existing host fails
+with `host exists`. The operator records the new state at a new record
+version, which an older wherry cannot read: a host or receiver not yet
+upgraded stops at the first such record with `upgrade this wherry`. Upgrade in
+this order:
+
+1. Upgrade every host and every receiver, as in [Upgrade wherry](#upgrade-wherry).
+2. Upgrade the operator's binary.
+3. Run `wherry operator init` again with the Kafka super user. It creates
+   `wherry.requests` and grants `wherry.operator` `Delete` on it; until then
+   `wherry operator check` fails on them.
+4. For each host, run `wherry operator revoke --tenant TENANT --host HOST`,
+   hand over the new bundle, and have the host's user run
+   `wherry host init BUNDLE`, which files a credential request. Approve it.
+
+A host enrolled before this release has no credential ID until step 4:
+`wherry host rotate --scram` refuses it with `no credential ID is recorded for
+this host; ask the operator to revoke and re-enrol it`, and
+`wherry operator list requests` and `wherry operator check` report it as
+`tenant=<tenant> host=<host> has no credential ID; revoke and re-enrol it`. Each host is offline from
+its `revoke` until its user installs the new bundle.
 
 ## Collected outputs and non-git continue
 
@@ -134,8 +162,8 @@ naming the key. Upgrade the operator first: an older operator with a
 
 1. On the operator's machine, install the binary and replace `ca_file` in
    `operator.yaml` with `ca_cert` holding the PEM.
-2. Reissue every bundle with `--force`: `wherry operator add --host
-   HOST --tenant TENANT --force` for each host and `wherry operator apply --receiver
+2. Reissue every bundle: `wherry operator revoke --tenant TENANT --host
+   HOST` for each host and `wherry operator apply --receiver
    RECEIVER --force` for each receiver. Each holder is locked out from its
    reissue until it installs its new bundle.
 3. For each holder: stop it, install the binary and the new bundle, replace

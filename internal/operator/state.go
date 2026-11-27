@@ -3,6 +3,7 @@ package operator
 import (
 	"cmp"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	json "encoding/json/v2"
 	"errors"
@@ -228,19 +229,28 @@ type ProfileSettings struct {
 }
 
 type Record struct {
-	Version  int             `json:"v"`
-	Kind     string          `json:"kind"`
-	Pool     string          `json:"pool,omitzero"`
-	Tenant   string          `json:"tenant,omitzero"`
-	Host     string          `json:"host,omitzero"`
-	Receiver string          `json:"receiver,omitzero"`
-	Terms    *Terms          `json:"terms,omitzero"`
-	Config   *ReceiverConfig `json:"config,omitzero"`
-	AtMS     int64           `json:"at_ms"`
+	Version   int             `json:"v"`
+	Kind      string          `json:"kind"`
+	Pool      string          `json:"pool,omitzero"`
+	Tenant    string          `json:"tenant,omitzero"`
+	Host      string          `json:"host,omitzero"`
+	Receiver  string          `json:"receiver,omitzero"`
+	Terms     *Terms          `json:"terms,omitzero"`
+	Config    *ReceiverConfig `json:"config,omitzero"`
+	Enrolment string          `json:"enrolment,omitzero"`
+	Request   string          `json:"id,omitzero"`
+	Replaces  string          `json:"replaces,omitzero"`
+	Digest    string          `json:"digest,omitzero"`
+	Reason    string          `json:"reason,omitzero"`
+	AtMS      int64           `json:"at_ms"`
 	// At is the record's offset on wherry.operator, which load sets; offsets, never clocks, order operator requests.
 	At int64 `json:"-"`
 }
 type Host struct{ Tenant, Name string }
+type Approval struct {
+	Request string
+	Digest  string
+}
 type State struct {
 	Tenants           map[string]bool // false is live; true is ended.
 	EndedEntitlements map[string]map[string]bool
@@ -250,6 +260,11 @@ type State struct {
 	Entitlements      map[string]map[string]bool
 	Ended             map[string]bool
 	Revoking          map[string]bool
+	Credentials       map[string]string
+	Enrolments        map[string]string
+	Approvals         map[string]Approval
+	Decisions         map[string]map[string]string
+	RotateSCRAM       map[string]bool
 	Suspended         map[string]bool
 	// RotateRequested is the wherry.operator offset of each pool's latest rotate-key record.
 	RotateRequested map[string]int64
@@ -258,11 +273,11 @@ type State struct {
 }
 
 func NewState() State {
-	return State{Tenants: map[string]bool{}, EndedEntitlements: map[string]map[string]bool{}, Pools: map[string]Terms{}, Receivers: map[string]ReceiverConfig{}, Hosts: map[string]Host{}, Entitlements: map[string]map[string]bool{}, Ended: map[string]bool{}, Revoking: map[string]bool{}, Suspended: map[string]bool{}, RotateRequested: map[string]int64{}, SuspendChanged: map[string]int64{}}
+	return State{Tenants: map[string]bool{}, EndedEntitlements: map[string]map[string]bool{}, Pools: map[string]Terms{}, Receivers: map[string]ReceiverConfig{}, Hosts: map[string]Host{}, Entitlements: map[string]map[string]bool{}, Ended: map[string]bool{}, Revoking: map[string]bool{}, Credentials: map[string]string{}, Enrolments: map[string]string{}, Approvals: map[string]Approval{}, Decisions: map[string]map[string]string{}, RotateSCRAM: map[string]bool{}, Suspended: map[string]bool{}, RotateRequested: map[string]int64{}, SuspendChanged: map[string]int64{}}
 }
 
 // RecordVersion is the wherry.operator record version this release writes and the highest it reads.
-const RecordVersion = 1
+const RecordVersion = 2
 
 func EncodeRecord(record Record) ([]byte, error) {
 	if record.Version == 0 {
@@ -301,7 +316,9 @@ func DecodeRecord(encoded []byte) (Record, error) {
 func Fold(records []Record) (State, error) {
 	state := NewState()
 	for _, record := range records {
-		if err := apply(&state, record); err != nil {
+		if err := apply(&state, record); errors.Is(err, errApprovalNotOpen) {
+			return State{}, fmt.Errorf("credential record at offset %d is for an approval that was not open: two operator directories wrote to this deployment at once; reset the deployment", record.At)
+		} else if err != nil {
 			return State{}, err
 		}
 	}
@@ -335,7 +352,12 @@ func apply(state *State, record Record) error {
 		if state.Ended[TenantPrincipal(record.Tenant, record.Host)] {
 			return errors.New("host cannot return after its membership end")
 		}
-		state.Hosts[TenantPrincipal(record.Tenant, record.Host)] = Host{record.Tenant, record.Host}
+		principal := TenantPrincipal(record.Tenant, record.Host)
+		if _, known := state.Hosts[principal]; !known || state.Revoking[principal] {
+			state.Credentials[principal] = record.Enrolment
+			state.Enrolments[principal] = record.Enrolment
+		}
+		state.Hosts[principal] = Host{record.Tenant, record.Host}
 	case "entitlement":
 		if err := state.LiveTenant(record.Tenant); err != nil {
 			return err
@@ -380,10 +402,72 @@ func apply(state *State, record Record) error {
 				state.Tenants[record.Tenant] = true
 			}
 		} else {
-			state.Ended[subject(record)] = true
+			principal := subject(record)
+			state.Ended[principal] = true
+			if record.Host != "" {
+				delete(state.Credentials, principal)
+				delete(state.Enrolments, principal)
+			}
 		}
 	case "revoking":
-		state.Revoking[subject(record)] = true
+		principal := subject(record)
+		state.Revoking[principal] = true
+		if record.Host != "" {
+			state.voidApproval(principal)
+			delete(state.Credentials, principal)
+			delete(state.Enrolments, principal)
+		}
+	case "resetting":
+		principal := TenantPrincipal(record.Tenant, record.Host)
+		state.voidApproval(principal)
+		delete(state.Credentials, principal)
+		delete(state.Enrolments, principal)
+	case "enrolled":
+		principal := TenantPrincipal(record.Tenant, record.Host)
+		if state.Revoking[principal] || state.Ended[principal] {
+			return errors.New("cannot enrol a host being removed or ended")
+		}
+		state.Credentials[principal] = record.Enrolment
+		state.Enrolments[principal] = record.Enrolment
+		delete(state.RotateSCRAM, principal)
+	case "approving":
+		principal := TenantPrincipal(record.Tenant, record.Host)
+		if state.Decision(principal, record.Request) != "" || state.Credentials[principal] == "" || record.Replaces != state.Credentials[principal] {
+			return errors.New("request is decided or does not replace the current credential")
+		}
+		state.Approvals[principal] = Approval{Request: record.Request, Digest: record.Digest}
+	case "credential":
+		principal := TenantPrincipal(record.Tenant, record.Host)
+		if state.Approvals[principal].Request != record.Request {
+			return errApprovalNotOpen
+		}
+		state.decide(principal, record.Request, "approved")
+		state.Credentials[principal] = record.Request
+		delete(state.Approvals, principal)
+		delete(state.RotateSCRAM, principal)
+	case "rejected":
+		principal := TenantPrincipal(record.Tenant, record.Host)
+		if state.Decision(principal, record.Request) != "" {
+			return errors.New("credential request is already decided")
+		}
+		state.decide(principal, record.Request, "rejected")
+		if state.Approvals[principal].Request == record.Request {
+			delete(state.Approvals, principal)
+		}
+		if record.Replaces == state.Credentials[principal] {
+			delete(state.RotateSCRAM, principal)
+		}
+	case "expired":
+		principal := TenantPrincipal(record.Tenant, record.Host)
+		if state.Decision(principal, record.Request) != "" {
+			return errors.New("credential request is already decided")
+		}
+		state.decide(principal, record.Request, "expired")
+		if record.Replaces == state.Credentials[principal] {
+			delete(state.RotateSCRAM, principal)
+		}
+	case "rotate":
+		state.RotateSCRAM[TenantPrincipal(record.Tenant, record.Host)] = true
 	case "suspend", "resume", "rotate-key":
 		if _, ok := state.Pools[record.Pool]; !ok {
 			return errors.New(record.Kind + " names unknown pool")
@@ -399,6 +483,24 @@ func apply(state *State, record Record) error {
 		}
 	}
 	return nil
+}
+
+func (state *State) voidApproval(principal string) {
+	if approval, ok := state.Approvals[principal]; ok {
+		state.decide(principal, approval.Request, "void")
+		delete(state.Approvals, principal)
+	}
+}
+
+func (state *State) decide(principal, request, decision string) {
+	if state.Decisions[principal] == nil {
+		state.Decisions[principal] = map[string]string{}
+	}
+	state.Decisions[principal][request] = decision
+}
+
+func (state State) Decision(principal, request string) string {
+	return state.Decisions[principal][request]
 }
 
 func (state State) LiveTenant(tenant string) error {
@@ -719,7 +821,7 @@ func subject(record Record) string {
 }
 
 func validateRecord(record Record) error {
-	if record.Version != RecordVersion || record.AtMS <= 0 {
+	if (record.Version != 1 && record.Version != RecordVersion) || record.AtMS <= 0 {
 		return errors.New("invalid operator record")
 	}
 	switch record.Kind {
@@ -742,7 +844,7 @@ func validateRecord(record Record) error {
 			return errors.New("invalid receiver record")
 		}
 	case "host":
-		if validateNames(record.Tenant, record.Host) != nil {
+		if validateNames(record.Tenant, record.Host) != nil || record.Version == 1 && record.Enrolment != "" || record.Version == 2 && !ValidCredentialID(record.Enrolment) {
 			return errors.New("invalid host record")
 		}
 	case "entitlement":
@@ -773,6 +875,30 @@ func validateRecord(record Record) error {
 			record.Pool != "" || record.Terms != nil || record.Config != nil {
 			return errors.New("invalid revoking record")
 		}
+	case "resetting":
+		if record.Version != 2 || validateNames(record.Tenant, record.Host) != nil || record.Pool != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
+			return errors.New("invalid resetting record")
+		}
+	case "enrolled":
+		if record.Version != 2 || validateNames(record.Tenant, record.Host) != nil || !ValidCredentialID(record.Enrolment) || record.Pool != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
+			return errors.New("invalid enrolled record")
+		}
+	case "approving":
+		if record.Version != 2 || validateNames(record.Tenant, record.Host) != nil || !ValidCredentialID(record.Request) || !ValidCredentialID(record.Replaces) || !validDigest(record.Digest) || record.Pool != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
+			return errors.New("invalid approving record")
+		}
+	case "credential", "expired":
+		if record.Version != 2 || validateNames(record.Tenant, record.Host) != nil || !ValidCredentialID(record.Request) || !ValidCredentialID(record.Replaces) || record.Pool != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
+			return errors.New("invalid " + record.Kind + " record")
+		}
+	case "rejected":
+		if record.Version != 2 || validateNames(record.Tenant, record.Host) != nil || !ValidCredentialID(record.Request) || !ValidCredentialID(record.Replaces) || record.Reason == "" || record.Pool != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
+			return errors.New("invalid rejected record")
+		}
+	case "rotate":
+		if record.Version != 2 || validateNames(record.Tenant, record.Host) != nil || record.Pool != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
+			return errors.New("invalid rotate record")
+		}
 	case "suspend", "resume", "rotate-key":
 		if validateNames(record.Pool) != nil || record.Tenant != "" || record.Host != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
 			return errors.New("invalid " + record.Kind + " record")
@@ -783,12 +909,26 @@ func validateRecord(record Record) error {
 	return nil
 }
 
+// ValidCredentialID reports whether value is a credential or request ID: 16 bytes, raw URL base64.
+func ValidCredentialID(value string) bool {
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	return err == nil && len(decoded) == 16
+}
+
+func validDigest(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size
+}
+
 type rawRecord struct {
 	Offset int64
 	Value  []byte
 }
 
 // ErrNewerRecord is a wherry.operator record whose version is above RecordVersion, written by a later release.
+// errApprovalNotOpen is F-4's refusal, by which planRecord refuses the write and Fold a record in the log.
+var errApprovalNotOpen = errors.New("credential record is for an approval that is not open")
+
 var ErrNewerRecord = errors.New("wherry.operator holds records a later wherry release wrote")
 
 // load folds wherry.operator, which is append-only and read from offset 0, so an

@@ -12,7 +12,7 @@ Every command but `version` and the shortcuts runs under its role's word:
 
 | Role | Commands |
 | --- | --- |
-| Operator | `wherry operator init`, `check` and `view`; `wherry operator list`, `show`, `apply`, `add`, `remove`, `allow`, `deny`, `suspend`, `resume`, `rotate` and `storage`, each naming its pool, receiver, tenant or host as a flag |
+| Operator | `wherry operator init`, `check` and `view`; `wherry operator list`, `show`, `apply`, `add`, `remove`, `allow`, `deny`, `suspend`, `resume`, `rotate`, `approve`, `reject`, `revoke` and `storage`, each naming its pool, receiver, tenant or host as a flag, and `approve` and `reject` a request by its ID |
 | Receiver | `wherry receiver run` and `rotate` |
 | Host user | `wherry host init`, `rotate`, `receivers`, `mcp`, `submit`, `result`, `status`, `events`, `logs` and `cancel` |
 | Development | [Development commands](commands-dev.md) |
@@ -127,11 +127,11 @@ Every operator command is `wherry operator <verb>`, one level deep, with the
 object it acts on as a resource flag: `--pool POOL`, `--receiver RECEIVER`,
 `--tenant TENANT`, or `--host HOST` beside the `--tenant` the host belongs
 to. The verbs are `init`, `check`, `view`, `list`, `show`, `apply`, `add`,
-`remove`, `allow`, `deny`, `suspend`, `resume`, `rotate` and `storage`.
-Resources are flags because a verb spans kinds: `apply` takes a
+`remove`, `allow`, `deny`, `suspend`, `resume`, `rotate`, `approve`, `reject`,
+`revoke` and `storage`. Resources are flags because a verb spans kinds: `apply` takes a
 pool or a receiver, `remove` a tenant, a host or a receiver. A verb whose
-operand is only ever one kind takes it positionally, as `list tenants`, `host
-init BUNDLE` and `result RUN_ID` do. A missing, extra, mixed, repeated or
+operand is only ever one kind takes it positionally, as `list tenants`,
+`approve ID`, `host init BUNDLE` and `result RUN_ID` do. A missing, extra, mixed, repeated or
 empty resource flag fails with the verb's usage, which lists its accepted
 forms. Each form takes the options its section states and no other; one it
 does not take fails with `unknown option --<name>`. This table maps the
@@ -146,7 +146,8 @@ the break.
 | `wherry operator receiver apply RECEIVER [-f PATH] [--dry-run]` | `wherry operator apply --receiver RECEIVER [--file PATH] [--dry-run]` |
 | `wherry operator receiver apply RECEIVER --force` | `wherry operator apply --receiver RECEIVER --force` |
 | `wherry operator tenant add TENANT` | `wherry operator add --tenant TENANT` |
-| `wherry operator tenant host add TENANT HOST [--force]` | `wherry operator add --host HOST --tenant TENANT [--force]` |
+| `wherry operator tenant host add TENANT HOST` | `wherry operator add --host HOST --tenant TENANT` |
+| `wherry operator tenant host add TENANT HOST --force` | `wherry operator revoke --tenant TENANT --host HOST` |
 | `wherry operator tenant pool add TENANT POOL` | `wherry operator allow --tenant TENANT --pool POOL` |
 | `wherry operator tenant pool remove TENANT POOL` | `wherry operator deny --tenant TENANT --pool POOL` |
 | `wherry operator tenant remove TENANT` | `wherry operator remove --tenant TENANT` |
@@ -166,8 +167,8 @@ the break.
 `apply --dry-run` creates nothing, and reads a missing
 `wherry.operator` as holding no records. Options parse as Go flags,
 in the forms `--name value`, `--name=value` and `-name value`, and the last of
-a repeated option other than a resource flag wins. Options other than `--dry-run` and `--force` take a
-value, and options can appear anywhere after `operator`. An option without a
+a repeated option other than a resource flag wins. Options other than `--dry-run`, `--force`, `--all`,
+`--scram` and `--storage` take a value, and options can appear anywhere after `operator`. An option without a
 value fails with `flag needs an argument: -<name>`, or with the verb's usage when it is a resource flag, one no operator command
 takes with `flag provided but not defined: -<name>`, and one the command does
 not take with `unknown option --<name>`. `--suspect-key` is given once per key;
@@ -208,33 +209,37 @@ creates no bundle directory. The pool and receiver object questions show one
 question per page under headings, with each answer collapsing to one line.
 Ctrl-C during those questions writes nothing.
 
-`add --host` and `apply --receiver` write bundles under the working directory's
+`add --host`, `revoke` and `apply --receiver` write bundles under the working directory's
 `bundles/`: `bundles/hosts/<tenant>/<host>.bundle` and
 `bundles/receivers/<receiver>.bundle`, mode 0600, in directories mode 0700. A
 bundle holds the broker address, the principal and its password; its holder
 trusts the broker's certificate through its machine's trust store
 ([Broker and S3 trust](security.md#broker-and-s3-trust)). A host bundle also
-holds the tenant's S3 key pair as `storage` once
+holds its enrolment ID as `enrolment`, new at each `add --host` and `revoke`,
+and the tenant's S3 key pair as `storage` once
 [`storage`](#wherry-operator-storage) recorded it; a
-receiver bundle never does. Each command that writes or rewrites a bundle
+receiver bundle holds neither. Each command that writes or rewrites a bundle
 prints its path and the next step:
 `wherry host init <file>` for a host, and the platform's bundle step for a receiver.
-`add --host` refuses a host that exists unless given `--force`. `apply --receiver` of a receiver that exists
+`add --host` refuses a host that exists with `host exists`, and a host whose removal
+has not finished with `host is being removed; run remove --host again`;
+[`revoke`](#wherry-operator-revoke) gives an existing host a new password and
+bundle. `apply --receiver` of a receiver that exists
 updates its configuration, and replaces its bundle only when the broker
 address changed, keeping the password; `rotate --storage` does
-the same for a host's bundle, the storage keys included. Without `--force`, `add --host` and
+the same for a host's bundle, the storage keys included. `add --host` and
 `apply --receiver` of a new receiver never replace a bundle: before they change
 anything in Kafka they create the bundle file, failing when a file is there,
 and write the bundle into it at the end. A
 command that fails leaves no bundle and no temporary file of its own, or, when
 it cannot remove one, fails naming it.
 
-`--force` reissues the identity of an existing host or receiver: a new SCRAM
+`apply --receiver RECEIVER --force` reissues the identity of an existing receiver: a new SCRAM
 password and a new bundle, written to a temporary file that is then renamed
 over the bundle. It appends no record. Kafka holds one SCRAM credential per
-user, so the old password stops working at once, and the host or receiver is
-offline until its new bundle is in place. Use it to rotate a password, replace
-a lost bundle or change a host's broker address. When writing, closing or
+user, so the old password stops working at once, and the receiver is
+offline until its new bundle is in place. Use it to rotate a receiver's password, replace
+a lost bundle or change its broker address. When writing, closing or
 renaming the new bundle fails after the password changed, the command removes
 its temporary file, leaves the old bundle, and fails saying that the old
 bundle no longer works and that running it again with `--force` writes a new
@@ -253,6 +258,10 @@ wherry operator init [--dir DIR] [--broker ADDR] \
 It also creates `wherry.traces` and the trace topic of every live tenant where
 missing and sets their configuration, so a re-run on an install that predates
 them gives it every one ([Upgrade](upgrade.md#trace-topics-and-the-operator-s-group-grant)).
+It creates `wherry.requests`, the topic hosts write their
+[credential requests](#wherry-operator-approve) to, where missing, with one
+partition, `cleanup.policy=delete`, `message.timestamp.type=LogAppendTime`,
+`retention.ms=-1`, `segment.ms=86400000` and `max.message.bytes=65536`.
 When standard input and standard error are terminals and `TERM` is not
 `dumb`, you answer each question the flags do not give under a Broker heading.
 You see one question per page.
@@ -308,8 +317,8 @@ Connected as the super user, once, it:
 5. renames the temporary file over `operator.password`.
 
 It then writes `operator.yaml`: `broker`, `password_file: operator.password` and
-`ca_cert` when `--ca-cert` was given, and appends `operator.password` and `bundles/` to `.gitignore`, creating it if
-absent and adding only lines it lacks. It closes the super-user connection;
+`ca_cert` when `--ca-cert` was given, and appends `operator.password`, `operator.lock`, `bundles/` and `storage/` to
+`.gitignore`, creating it if absent and adding only lines it lacks. It closes the super-user connection;
 nothing it writes names the super user, which no later command uses. It ends
 by printing `wherry.operator can provision; its password is in <dir>/operator.password`
 on standard error.
@@ -354,6 +363,9 @@ Loads `wherry.operator` and checks, in order:
   topic at least as long as the greatest of them, `-1` when one is `-1`, and
   each entitled tenant's feed and transcript topic at least `start_by_limit`
   plus six hours;
+- that `wherry.requests` has the configuration
+  [`operator init`](#wherry-operator-init) gives it, naming the setting, its
+  value and the value it wants;
 - that every tenant feed and transcript topic has a `max.message.bytes` of at
   least 2 MiB;
 - that `wherry.traces` and every live tenant's trace topic exist with one
@@ -365,7 +377,18 @@ Loads `wherry.operator` and checks, in order:
   [grants](security.md#the-operator-principal).
 
 It fails naming the first check that does not pass. Once every check passes,
-it lists what removal left on the broker, one line per topic, and exits 0:
+it prints a line for each live host that has no credential ID, which a host
+enrolled before host credential rotation has until it is
+[revoked](#wherry-operator-revoke) and enrolled again, or that still logs in
+with its enrolment password, which `host init` replaces by filing a
+[request](#wherry-operator-approve):
+
+```
+tenant=<tenant> host=<host> has no credential ID; revoke and re-enrol it
+tenant=<tenant> host=<host> is on its enrolment password
+```
+
+It then lists what removal left on the broker, one line per topic, and exits 0:
 
 ```
 leftover <topic> tenant=<tenant> offsets=<n>
@@ -416,6 +439,7 @@ wherry operator list tenants
 wherry operator list pools
 wherry operator list receivers
 wherry operator list hosts [--tenant TENANT]
+wherry operator list requests
 ```
 
 Lists what `wherry.operator` records, as plain text in deterministic name
@@ -437,6 +461,36 @@ pool's name on a line, suspended pools included. `list receivers` prints the
 name of each live receiver. A host or receiver is live until its removal
 starts: revoking and ended ones are omitted from every form, as are ended
 tenants.
+
+`list requests` reads `wherry.requests` as well, and prints one line per
+[credential request](#wherry-operator-approve) it holds, by ID:
+
+```
+request=<id> tenant=<tenant> host=<host> kind=<kind> state=<state>
+bad-signature=<n>
+```
+
+| State | The request |
+| --- | --- |
+| `pending` | waits for `approve` or `reject` |
+| `approving` | has an approval that began and has not finished; the next `approve` finishes it |
+| `approved` | was approved; the host uses its password from its next command |
+| `rejected` | was rejected |
+| `expired` | was not decided within 7 days of the first copy under the host's current key; the next `approve` records it expired |
+| `void` | had an approval that `revoke` or `remove --host` closed |
+| `stale` | names a credential ID that is no longer the host's, so it can never be approved |
+| `conflict` | was sent with two different payloads under one ID, and is not approved |
+| `bad-kind` | asks for a kind of credential this release does not issue; it expires, or `reject` decides it |
+| `host-ended` | belongs to a host that is removed or being removed |
+
+A pass deletes the requests it decided when it ends, so a decided request is
+listed only until then, and again if a copy of it is sent later. The
+`bad-signature` line, printed when there are any, counts the records dropped
+because they do not decode, their signature does not verify against the
+current key of the host they name, or they name another host than the one
+that signed them; such a record has no request to be listed under. The lines for live hosts with no credential ID or on their
+enrolment password follow, as [`operator check`](#wherry-operator-check)
+prints them. `list requests` takes no lock and changes nothing.
 
 ### `wherry operator show`
 
@@ -704,7 +758,7 @@ receiver's configuration record, and takes no `-f` or `--dry-run`.
 
 ```sh
 wherry operator add --tenant TENANT
-wherry operator add --host HOST --tenant TENANT [--force]
+wherry operator add --host HOST --tenant TENANT
 ```
 
 `add` records a new tenant, or a new host of a live tenant. Entitling the
@@ -717,18 +771,17 @@ Records a new tenant and creates its feed and transcript topics at 2 MiB per rec
 
 #### `add --host HOST --tenant TENANT`
 
-Records a host of an existing live tenant, creates its principal and key topic, grants its ACLs, applies its quotas, and writes
-its bundle to `bundles/hosts/<tenant>/<host>.bundle`, naming the broker in
+Records a host of an existing live tenant with a new enrolment ID, creates its principal and key topic, grants its ACLs,
+applies its quotas, and writes its bundle to `bundles/hosts/<tenant>/<host>.bundle`, naming the broker in
 `operator.yaml` and carrying the tenant's S3 key pair as `storage` when
 [`storage`](#wherry-operator-storage) recorded one. It
 prints
 `wrote <bundle>; hand it to the host, where wherry host init <file> installs it`.
-It refuses a host that exists, and an existing bundle file,
-unless given [`--force`](#operator-commands). For a host that exists,
-`--force` reissues its identity: it records nothing and creates no topic. It
-reapplies the host's quotas and [converges](#operator-commands) the ACLs as
-every operator command does, so it also repairs a host add that failed after
-its record was written. A revoking host or a host whose membership ended is refused, including with `--force`. Host names are unique
+It refuses a host that exists with `host exists`, an existing bundle file, a
+host whose removal has not finished with `host is being removed; run remove
+--host again`, and a host whose membership ended. To give an existing host a
+new password and bundle, or to repair a host add that failed after its record
+was written, run [`revoke`](#wherry-operator-revoke). Host names are unique
 within a tenant; hosts of the same name in other tenants have bundles of
 their own. A storage keys file that cannot be read refuses the add before
 anything changes in Kafka.
@@ -743,7 +796,10 @@ wherry operator remove --receiver RECEIVER [--timeout DURATION]
 
 `remove` ends the membership of the object its resource flag names:
 [revocation](concepts.md#revocation) for a host or a receiver, and for a
-tenant every entitlement, every host, then the tenant.
+tenant every entitlement, every host, then the tenant. `remove --host` and
+`remove --tenant` hold the [operator lock](operations-operator.md#concurrent-operator-commands)
+from before their first read to their exit, waits included; `remove --receiver`
+takes no lock.
 
 #### `remove --tenant TENANT`
 
@@ -763,7 +819,9 @@ Tenant command states:
 | `allow` | Refuse; use `add --tenant` | Add or converge and apply quotas when already entitled | Refuse |
 | `deny` | Refuse | End or converge and apply quotas when not entitled | Refuse |
 | `storage` | Refuse | Record the pair in the working directory | Refuse |
-| `add --host` | Refuse | Add; reissue a live host with `--force`; refuse revoking or ended hosts | Refuse |
+| `add --host` | Refuse | Add; refuse live, revoking or ended hosts | Refuse |
+| `revoke` | Refuse | Give a live host a new password and bundle; refuse revoking or ended hosts | Refuse |
+| `rotate --scram` | Refuse | Ask a live host for a credential request; refuse revoking or ended hosts | Refuse |
 | `rotate --storage` | Refuse | Rewrite a live host's kept bundle; refuse revoking or ended hosts | Refuse |
 | `remove --host` | Refuse | Revoke; retry from its record; converge when already ended | Refuse |
 | `remove --tenant` | Refuse | End entitlements, revoke hosts, end tenant, remove bundles | Converge and retry bundle removal |
@@ -773,7 +831,9 @@ Tenant command states:
 Runs the [revocation](concepts.md#revocation) steps for the host, as
 [`remove --receiver`](#wherry-operator-remove) does for a
 receiver, and once they are complete deletes the host's bundle,
-`bundles/hosts/TENANT/HOST.bundle`.
+`bundles/hosts/TENANT/HOST.bundle`. Its first step closes, void, an approval
+of the host's [credential request](#wherry-operator-approve) that an `approve`
+left unfinished; it does not wait for one.
 
 #### `remove --receiver RECEIVER`
 
@@ -896,12 +956,14 @@ acknowledgement as `suspend` does, printing
 
 ```sh
 wherry operator rotate --pool POOL [--suspect-key KID]...
+wherry operator rotate --tenant TENANT --host HOST --scram
 wherry operator rotate --tenant TENANT --host HOST --storage
 ```
 
-`rotate` replaces a secret in use: a suspended pool's key, or with
-`--storage` the S3 key pair in a host's kept bundle. `--storage` is required
-with a host, and an empty `--suspect-key` is refused.
+`rotate` replaces a secret in use: a suspended pool's key, with `--scram` a
+host's Kafka password, or with `--storage` the S3 key pair in a host's kept
+bundle. A host takes `--scram` or `--storage`, and an empty `--suspect-key` is
+refused.
 
 #### `rotate --pool POOL`
 
@@ -959,6 +1021,17 @@ v0.1.2 is covered too. The list can name a credential the envelope did not
 hold; it never omits one it did, so rotating every listed credential covers
 the exposure.
 
+#### `rotate --tenant TENANT --host HOST --scram`
+
+Asks a live host for a new Kafka password: it records a `rotate` record for
+the host on `wherry.operator` and prints nothing. The host's next command of
+any kind, once connected, files a [credential request](#wherry-operator-approve),
+or sends its pending one again, as
+[`host rotate --scram`](#wherry-host-rotate) does; a request decided after the
+record, approved or rejected, answers it. The password changes only when you
+approve that request. It takes no lock. It refuses a tenant or host that does
+not exist, is revoking or has ended.
+
 #### `rotate --tenant TENANT --host HOST --storage`
 
 Rewrites the kept bundle, `bundles/hosts/<tenant>/<host>.bundle`, of a live
@@ -973,8 +1046,130 @@ copy. It appends no record and changes nothing in Kafka. It refuses a
 tenant or host that does not exist, is revoking or has ended; a missing
 bundle, or a kept one carrying the CA earlier operators wrote
 ([Upgrade](upgrade.md#broker-trust)), naming
-`add --host HOST --tenant TENANT --force`, which reissues the host with a new
-password; and a bundle that is another principal's.
+`revoke --host HOST --tenant TENANT`, which reissues the host with a new
+password; and a bundle that is another principal's. It takes no lock: do not
+run it beside a `revoke` of the same host, whose new bundle it can replace with
+the one it read.
+
+### `wherry operator approve`
+
+```sh
+wherry operator approve ID
+wherry operator approve --all
+```
+
+A host asks for a new Kafka password with a credential request, which
+[`host rotate --scram`](#wherry-host-rotate) and
+[`host init`](#wherry-host-init) write to `wherry.requests`. The request holds
+the salt, iterations and salted form of a password the host generated, signed
+with the host key, and names the credential ID it replaces; the password
+itself stays on the host. `approve ID` approves the request with that ID, and
+`approve --all` every pending request.
+[`list requests`](#wherry-operator-list) shows what is there.
+
+`approve` holds the [operator lock](operations-operator.md#concurrent-operator-commands)
+from before its first read to its exit. It:
+
+1. reads `wherry.requests` and checks each record on its own: a record that
+   does not decode, does not verify against the current key of the host it
+   names, or names another host than the one that signed it is dropped and
+   counted as `bad-signature`;
+2. finishes each approval an earlier `approve` began and did not finish;
+3. records `expired` for each request no pass decided within 7 days of its
+   first copy under the host's current key;
+4. for each request it is asked for that is pending, with a salt of 16 to 64
+   bytes, a 64-byte salted password and 4096 to 16384 iterations, records that
+   its approval has begun, sets the salted password as the host's
+   SCRAM-SHA-512 credential, records the decision and prints `approved <id>`;
+5. deletes the decided requests from `wherry.requests`, keeping the undecided
+   ones and the copies of an open approval; undecided requests stay until a
+   pass decides them or records them expired.
+
+A request whose credential ID is no longer the host's is `stale` and is never
+approved; the host files a new one. `approve ID` of a request that is not
+pending prints `request <id> is <state>`, or `no request <id>` for an ID the
+topic does not hold, and exits non-zero; of an ID two hosts' requests share it
+names both hosts and does nothing.
+
+When setting the credential fails, the approval stays open: the pass goes on
+with the other requests, deletes the decided ones and exits non-zero. An error
+the broker returns for the user is printed alone, and changed nothing. A
+timeout, a lost connection or an interrupt prints the error and:
+
+```
+approval of <id> is still open; the upsert may still be applied, at any time and over a later approve or revoke of this host; run approve again, or, if the host is in doubt, revoke it
+```
+
+When the decision record is refused, the pass prints the refusal and
+`run revoke for this host again`, and exits non-zero. That happens only when a
+`revoke` or `remove --host` ran from another copy of the operator directory
+meanwhile, which the lock does not see.
+[Approve a host's credential request](operations-operator.md#approve-a-host-s-credential-request)
+says what to do after each.
+
+### `wherry operator reject`
+
+```sh
+wherry operator reject ID
+```
+
+Records the request with that ID rejected, prints `rejected <id>`, and deletes
+decided requests as `approve` does. It holds the
+[operator lock](operations-operator.md#concurrent-operator-commands). It
+refuses an approval that has begun with `approval of <id> has begun; run
+approve to finish it`, and does nothing for an ID two hosts' requests share.
+
+### `wherry operator revoke`
+
+```sh
+wherry operator revoke --tenant TENANT --host HOST
+```
+
+Gives a live host a new random Kafka password and a new enrolment, and writes
+its kept bundle, `bundles/hosts/<tenant>/<host>.bundle`. Use it when a host's
+password may be known to someone else, to replace a lost bundle, to change the
+broker address a host uses, to repair a host add that failed after its record
+was written, and to give a host enrolled before host credential rotation its
+credential ID. To keep a host out, [remove](#wherry-operator-remove)
+it instead ([Security](security.md#host-credential-rotation)).
+
+`revoke` holds the [operator lock](operations-operator.md#concurrent-operator-commands)
+from before its first read to its exit, its wait included. It:
+
+1. checks that `connections.max.reauth.ms` is bounded on every broker, before
+   it changes anything;
+2. records that the host's credential is reset: from then no request of the
+   host can be approved, and an approval an `approve` left unfinished is
+   closed, void;
+3. applies the host's quotas;
+4. sets a random password on the host's principal;
+5. logs in with it on every broker the metadata lists, retrying a refused
+   login for up to 2 minutes;
+6. waits `connections.max.reauth.ms`, the largest across the brokers, so that
+   no session opened with an earlier password remains;
+7. logs in with it on every listed broker again;
+8. records a new enrolment ID;
+9. writes the kept bundle and prints:
+
+```
+wrote <bundle>; hand it to the host, where wherry host init <file> installs it
+a session opened with an old password during the wait can last up to <duration> more
+```
+
+The host is offline until its user runs `wherry host init` with the new
+bundle, which files a credential request at once. A refused login at step 5
+after 2 minutes, a broker a login cannot reach, and any other failure end the
+command on the error, as `probe incomplete: <error>` for a login. A login
+refused at step 7 ends it with:
+
+```
+the password revoke set is refused after its wait: an upsert from an earlier command was applied after it, and an old password may work; run revoke again
+```
+
+None of these records the enrolment or writes a bundle. Run `revoke` again: a
+run starts from step 1 with a new password, whatever an earlier one left.
+[Revoke a host's password](operations-operator.md#revoke-a-host-s-password)
+says what each outcome means.
 
 ### `wherry operator storage`
 
@@ -987,7 +1182,7 @@ Records the S3 access key and secret key the store's administrator issued
 for a live tenant, once, in `storage/<tenant>.yaml` under the working
 directory, mode 0600 in a directory mode 0700, and adds `storage/` to the
 directory's `.gitignore`. The pair goes into every host bundle of the tenant
-that `add --host`, `--force` or `rotate --storage` writes from then
+that `add --host`, `revoke` or `rotate --storage` writes from then
 on ([S3 storage](operations-hosts.md#s3-storage)), and into no Kafka record.
 It prints the file and, for each live host of the tenant, the `rotate
 --storage` that puts the pair into its kept bundle.
@@ -1331,6 +1526,13 @@ is entitled to:
    the configuration directory's files are not checked. Without `BUNDLE`,
    it uses the bundle the configuration names, and refuses when it names
    none.
+
+   A bundle of a new enrolment, one whose principal or `enrolment` differs
+   from the installed bundle's, or the first, is installed whole, and
+   `scram.next` beside it is removed. A bundle of the installed enrolment,
+   such as one [`rotate --storage`](#rotate-tenant-tenant-host-host-storage)
+   rewrote, gives its broker address and `storage`, and the installed
+   password and any pending request are kept.
 2. It verifies the broker's certificate against the machine's trust store
    plus the configuration's `ca_cert`, which `--ca-cert` writes: the PEM
    text, `@FILE` for a file's contents or `@-` for standard input, as every
@@ -1358,7 +1560,10 @@ is entitled to:
    prints the key ID alone when standard input or standard error is not a
    terminal, with `TERM=dumb`, or when stdout is not the same terminal as
    standard error. Otherwise, Summary shows the registered key ID. It fails when
-   the key topic holds another key.
+   the key topic holds another key. After a new enrolment it then files a
+   credential request, as [`host rotate --scram`](#wherry-host-rotate) does,
+   and prints `request <id> sent`: a bundle's password is for enrolment
+   alone, and works only until the operator approves the request.
 4. It reads every entitled pool's terms. On a terminal it asks by topic:
    Credentials, Git, Storage, then Summary. A credential whose every target
    is a [catalog variable](credential-variables.md) gets no question and no
@@ -1432,10 +1637,14 @@ init again once the operator entitles the tenant to a pool.
 
 ```sh
 wherry host rotate --key [--config-file FILE]
+wherry host rotate --scram [--config-file FILE]
 ```
 
-Replaces the host key with a new one; `--key` names the key, the one
-credential the command rotates:
+Each form rotates the one credential it names.
+
+#### `host rotate --key`
+
+Replaces the host key with a new one:
 
 1. It refuses while a run this host submitted has a latest state that is
    not terminal, as `wherry status` shows it, and names those runs. A
@@ -1457,6 +1666,49 @@ Every host command that finds `<host_key>.next` folds the host's key topic
 before anything else. When the current key is the next key's, it renames
 `<host_key>.next` over `host_key`; when it is still the old key, it removes
 `<host_key>.next`. It fails when the current key is neither.
+
+`host rotate --key` sends no pending credential request again under the new
+key. Run `host rotate --scram`, or the operator's
+[`rotate --scram`](#rotate-tenant-tenant-host-host-scram) has the host do it at
+its next command.
+
+#### `host rotate --scram`
+
+Asks the operator for a new Kafka password. The host generates a random
+password, salts it with PBKDF2-HMAC-SHA-512 at 4096 iterations, writes the
+password and the signed request to `scram.next` beside the bundle, mode 0600,
+and sends the request to `wherry.requests`, printing `request <id> sent`. The
+password never leaves the host: the request carries the salt and the salted
+password, which the operator [approves](#wherry-operator-approve). While the
+request is pending, `host rotate --scram` sends the same request again,
+signed again when the host key has changed, and prints `request <id> is
+pending; sent again`. A host with no credential ID recorded, one enrolled
+before host credential rotation, is refused with `no credential ID is recorded
+for this host; ask the operator to revoke and re-enrol it`.
+
+Every host command, `host mcp` included, once connected:
+
+- uses the requested password once it is approved, rewriting the bundle with
+  it, removes `scram.next`, and prints `credential <id> approved; now in use`;
+- removes `scram.next` once its request can no longer be approved, printing
+  `request <id> rejected`, `expired` or `void`, or `request <id> superseded`
+  when the host's credential ID has changed since it was filed;
+- files a request, or sends the pending one again, when the operator asked for
+  one with [`rotate --scram`](#rotate-tenant-tenant-host-host-scram).
+
+A command connects with the bundle password, and with the requested one when
+the broker refuses the first. One that connects with the requested password
+while the approval is under way prints `approval of <id> is in progress` and
+goes on. When the broker accepts neither, the command fails with `neither the
+bundle password nor the requested one is accepted; ask the operator to revoke
+and re-enrol this host`.
+
+One process at a time changes the bundle and `scram.next`: each takes a lock
+on `scram.lock` beside them, which is never removed, and reads
+`wherry.operator` holding it. When that read does not finish in 30 seconds the
+command fails with `could not read wherry.operator within 30s; nothing was
+changed`. [Rotate the Kafka password](operations-hosts.md#rotate-the-kafka-password)
+says what each message asks of you.
 
 ### `wherry host receivers`
 

@@ -102,7 +102,7 @@ func newFixture(t *testing.T) *fixture {
 
 func (f *fixture) addHost(tenant, host string) ed25519.PrivateKey {
 	f.t.Helper()
-	if err := f.service.HostAdd(f.ctx, tenant, host, filepath.Join(f.t.TempDir(), "host.bundle"), false); err != nil {
+	if err := f.service.HostAdd(f.ctx, tenant, host, filepath.Join(f.t.TempDir(), "host.bundle")); err != nil {
 		f.t.Fatal(err)
 	}
 	owner := signed.HostOwner(tenant, host)

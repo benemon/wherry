@@ -30,7 +30,7 @@ import (
 )
 
 // A pool record written before the limits existed, as EncodeRecord writes modelTerms.
-const poolRecordWithoutLimits = `{"v":1,"kind":"pool","pool":"pool-a","terms":{"agents":[{"name":"agent-a","credentials":[{"name":"model","env":"MODEL_API_KEY"}]}],"default_agent":"agent-a","delivery_limit":3,"lock_duration_ms":15000,"producer_byte_rate":1000000,"request_percentage":50},"at_ms":1}`
+const poolRecordWithoutLimits = `{"v":2,"kind":"pool","pool":"pool-a","terms":{"agents":[{"name":"agent-a","credentials":[{"name":"model","env":"MODEL_API_KEY"}]}],"default_agent":"agent-a","delivery_limit":3,"lock_duration_ms":15000,"producer_byte_rate":1000000,"request_percentage":50},"at_ms":1}`
 
 func TestPoolLimitsDefaultWhereTermsLeaveThemOut(t *testing.T) {
 	terms := modelTerms()
@@ -362,7 +362,7 @@ func TestPoolApplyDryRunCreatesNoTopic(t *testing.T) {
 	defer closeFixture()
 	ctx := context.Background()
 	admin := kadm.NewClient(service.Operator)
-	responses, err := admin.DeleteTopics(ctx, OperatorTopic, telemetry.TraceTopic(""))
+	responses, err := admin.DeleteTopics(ctx, OperatorTopic, telemetry.TraceTopic(""), RequestsTopic)
 	if err == nil {
 		err = responses.Error()
 	}
@@ -893,7 +893,7 @@ func TestTenantFeedsTakeTheFeedRecordLimit(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	atLimit("host add", feeds("tenant-a")...)

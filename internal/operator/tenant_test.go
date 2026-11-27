@@ -173,7 +173,7 @@ func TestAbsentTenantCommands(t *testing.T) {
 	for name, command := range map[string]func() error{
 		"pool add":    func() error { return service.TenantPoolAdd(ctx, "absent", "p") },
 		"pool remove": func() error { return service.TenantPoolRemove(ctx, "absent", "p") },
-		"host add":    func() error { return service.HostAdd(ctx, "absent", "h", filepath.Join(t.TempDir(), "bundle"), false) },
+		"host add":    func() error { return service.HostAdd(ctx, "absent", "h", filepath.Join(t.TempDir(), "bundle")) },
 		"host remove": func() error { return revocationError(service.RevokeHost(ctx, "absent", "h", 0, denied, nil)) },
 		"remove":      func() error { return removeTenantFixture(service, ctx, "absent") },
 	} {
@@ -207,7 +207,7 @@ func TestTenantPoolQuotaRetries(t *testing.T) {
 	if err := service.TenantAdd(ctx, "t"); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, "t", "h", filepath.Join(t.TempDir(), "bundle"), false); err != nil {
+	if err := service.HostAdd(ctx, "t", "h", filepath.Join(t.TempDir(), "bundle")); err != nil {
 		t.Fatal(err)
 	}
 	principal := TenantPrincipal("t", "h")
@@ -272,21 +272,12 @@ func TestTenantPoolQuotaRetries(t *testing.T) {
 	}
 	bundle := filepath.Join(t.TempDir(), "bundle")
 	failQuota()
-	if err := service.HostAdd(ctx, "t", "h2", bundle, false); err == nil {
+	if err := service.HostAdd(ctx, "t", "h2", bundle); err == nil {
 		t.Fatal("expected post-append host quota failure")
 	}
-	failQuota()
-	if err := service.HostAdd(ctx, "t", "h2", bundle, true); err == nil {
-		t.Fatal("expected --force quota failure")
-	}
 	if _, err := os.Stat(bundle); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("a failed --force left a bundle: %v", err)
+		t.Fatalf("a failed host add left a bundle: %v", err)
 	}
-	if err := service.HostAdd(ctx, "t", "h2", bundle, true); err != nil {
-		t.Fatal(err)
-	}
-	principal = TenantPrincipal("t", "h2")
-	quota(200)
 }
 
 func TestTenantFeedsOnlyLiveTenants(t *testing.T) {
@@ -299,20 +290,20 @@ func TestTenantFeedsOnlyLiveTenants(t *testing.T) {
 	}
 }
 
-func TestForceRefusesRevokingHost(t *testing.T) {
+func TestHostAddRefusesRevokingHost(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
 	if err := service.TenantAdd(ctx, "t"); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, "t", "h", filepath.Join(t.TempDir(), "first"), false); err != nil {
+	if err := service.HostAdd(ctx, "t", "h", filepath.Join(t.TempDir(), "first")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.appendChecked(ctx, []byte("revoking"), Record{Kind: "revoking", Tenant: "t", Host: "h"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, "t", "h", filepath.Join(t.TempDir(), "new"), true); err == nil || !strings.Contains(err.Error(), "revoking") {
+	if err := service.HostAdd(ctx, "t", "h", filepath.Join(t.TempDir(), "new")); err == nil || err.Error() != "host is being removed; run remove --host again" {
 		t.Fatal(err)
 	}
 }
@@ -358,7 +349,7 @@ func TestTenantRemoveRetriesAndSerializesRecords(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, host := range []string{"a", "b"} {
-				if err := service.HostAdd(ctx, "t", host, filepath.Join(t.TempDir(), "bundle"), false); err != nil {
+				if err := service.HostAdd(ctx, "t", host, filepath.Join(t.TempDir(), "bundle")); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -439,7 +430,7 @@ func TestTenantRemoveRepairsQuotaAfterEntitlementEnd(t *testing.T) {
 	if err := service.TenantPoolAdd(ctx, "t", "p"); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, "t", "h", filepath.Join(t.TempDir(), "bundle"), false); err != nil {
+	if err := service.HostAdd(ctx, "t", "h", filepath.Join(t.TempDir(), "bundle")); err != nil {
 		t.Fatal(err)
 	}
 	cluster.ControlKey(kmsg.AlterClientQuotas.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
@@ -485,7 +476,7 @@ func TestChecksIgnoreEndedTopicsAndUnrelatedPoolRetention(t *testing.T) {
 	if err := service.TenantPoolAdd(ctx, "t", "p"); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, "t", "h", filepath.Join(t.TempDir(), "bundle"), false); err != nil {
+	if err := service.HostAdd(ctx, "t", "h", filepath.Join(t.TempDir(), "bundle")); err != nil {
 		t.Fatal(err)
 	}
 	revocationBounds(t, service, "1", "1", "1")

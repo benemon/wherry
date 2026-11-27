@@ -332,7 +332,7 @@ func TestCheckNamesSignatureTopicDrift(t *testing.T) {
 			if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err != nil {
 				t.Fatal(err)
 			}
-			if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+			if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml")); err != nil {
 				t.Fatal(err)
 			}
 			if ok, err := granted(ctx, service, host); err != nil || !ok {

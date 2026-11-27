@@ -240,7 +240,7 @@ func (service *Service) deleteACLs(ctx context.Context, builder *kadm.ACLBuilder
 		}
 	}
 	// Brokers apply an ACL deletion in turn, so a describe can briefly still list it; retry within the probe window.
-	deadline := time.Now().Add(probeWindow)
+	deadline := time.Now().Add(ProbeWindow)
 	for {
 		remaining, err := kadm.NewClient(service.Operator).DescribeACLs(ctx, builder)
 		if err != nil {
@@ -303,6 +303,8 @@ func aclBuilder(acl ACL) (*kadm.ACLBuilder, error) {
 			operations[i] = kadm.OpAlter
 		case "ALTER_CONFIGS":
 			operations[i] = kadm.OpAlterConfigs
+		case "DELETE":
+			operations[i] = kadm.OpDelete
 		default:
 			return nil, errors.New("unknown ACL operation")
 		}

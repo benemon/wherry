@@ -6,10 +6,22 @@
 2. Ask for a host bundle from `wherry operator add --host HOST --tenant TENANT`.
    Your machine trusts the broker's certificate through its trust store, or through `ca_cert`, which
    `host init --ca-cert` writes ([Broker and S3 trust](security.md#broker-and-s3-trust)).
-3. Run `wherry host init HOST.bundle`.
-4. Set the catalog variables its agent lines name where submits run, and
+3. Run `wherry host init HOST.bundle`. It files a request for a Kafka
+   password of the host's own and prints `request <id> sent`.
+4. Ask your operator to approve the request. Until then the host logs in with
+   the bundle's password; the first command after the approval prints
+   `credential <id> approved; now in use`.
+5. Set the catalog variables its agent lines name where submits run, and
    configure a source for each credential it asks about.
-5. Run `wherry host receivers` to check your access.
+6. Run `wherry host receivers` to check your access.
+
+A bundle the operator rewrote with `rotate --storage` is of the same
+enrolment: `wherry host init` takes its broker address and storage keys, keeps
+the host's own password and any pending request, and files nothing. A bundle
+from `wherry operator revoke` is a new enrolment: `host init` installs it
+whole, drops any pending request and files a new one. When `host init` stops
+after installing a new bundle and before filing, run `wherry host rotate
+--scram`.
 
 [Set up a host](install-host.md) gives a complete example.
 
@@ -20,8 +32,9 @@ A pool's key custodian rotates the pool key itself, daily
 ([Rotation](concepts.md#rotation)); a suspected pool key calls for
 [Respond to a compromised receiver or pool key](operations-operator.md#respond-to-a-compromised-receiver-or-pool-key).
 Readers keep verifying the feed and transcript records the old key signed
-before the rotation. For a key that may be compromised, revoke the host or
-receiver instead.
+before the rotation. For a key that may be compromised, remove the host or
+receiver instead
+([Revoke a host or receiver](operations-operator.md#revoke-a-host-or-receiver)).
 
 For a host:
 
@@ -47,6 +60,50 @@ it current and removes the `.next` file when the topic still names the old
 key. Leave the `.next` file in place; removing it by hand after the
 rotation was published loses the key.
 
+## Rotate the Kafka password
+
+A host's Kafka password is one it generates and keeps; the operator approves
+each new one, and no password passes between you.
+
+1. Run the rotation:
+
+   ```sh
+   wherry host rotate --scram
+   ```
+
+   It writes the new password and the signed request to `scram.next` beside
+   the bundle and sends the request, printing `request <id> sent`. Run it
+   again while the request is pending and it sends the same request, printing
+   `request <id> is pending; sent again`.
+
+2. Ask your operator to approve the request. The operator can also ask the
+   host for one with `wherry operator rotate --scram`; your next command of
+   any kind then files it.
+
+3. Your next command after the approval writes the password into the bundle,
+   removes `scram.next` and prints `credential <id> approved; now in use`. A
+   rejected or expired request is removed the same way, printing `rejected` or
+   `expired`; run the rotation again for a new one. A running
+   `wherry host mcp` follows the change without a restart.
+
+After `wherry host rotate --key`, the pending request is signed with the old
+key and the operator cannot approve it: run `wherry host rotate --scram` to
+send it again under the new key.
+
+Leave `scram.next` and `scram.lock` in place. `scram.next` holds the requested
+password until the bundle does, and `scram.lock` keeps two wherry processes of
+the host from changing the files at once. A command that stops at any point
+leaves the files for the next one to go on from: a request that was written
+and not sent is sent by the next `wherry host rotate --scram`, or by the
+host's next command once the operator has run `rotate --scram`.
+
+| Message | Meaning | Next step |
+| --- | --- | --- |
+| `no credential ID is recorded for this host; ask the operator to revoke and re-enrol it` | The host was enrolled before host credential rotation. | Ask the operator to run `wherry operator revoke` for the host, then run `wherry host init` with the new bundle. |
+| `approval of <id> is in progress` | The command connected with the requested password while the operator's approval is under way. | Nothing: the command goes on, and a later one uses the password once the approval is recorded. |
+| `neither the bundle password nor the requested one is accepted; ask the operator to revoke and re-enrol this host` | The broker holds a password the host does not have. | Ask the operator to revoke the host's password, then run `wherry host init` with the new bundle. |
+| `could not read wherry.operator within 30s; nothing was changed` | The broker did not answer in time. | Run the command again. |
+
 ## Replace a lost key
 
 A host or receiver key cannot be recovered or re-registered.
@@ -56,7 +113,8 @@ A host or receiver key cannot be recovered or re-registered.
 - A receiver whose state directory is lost fails at start with
   `receiver key topic holds another key than the state directory`.
 
-Revoke it, then add a host or receiver under a new name.
+Remove it with `wherry operator remove`, then add a host or receiver under a
+new name.
 
 ## Inputs and outputs
 

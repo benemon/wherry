@@ -80,7 +80,7 @@ func TestAFailedTaskWriteLeavesNoRecord(t *testing.T) {
 func TestSweepLeavesAHeldLock(t *testing.T) {
 	f := newFixture(t)
 	lock := filepath.Join(f.stateDir, "resubmit", "run-a.json.lock")
-	unlock, err := f.host.lockFile(f.ctx, lock)
+	unlock, err := LockFile(f.ctx, lock, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestSweepLeavesAHeldLock(t *testing.T) {
 func TestALockWaitEndsWithItsContext(t *testing.T) {
 	f := newFixture(t)
 	lock := filepath.Join(f.stateDir, "resubmit", "run-a.json.lock")
-	unlock, err := f.host.lockFile(f.ctx, lock)
+	unlock, err := LockFile(f.ctx, lock, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestALockWaitEndsWithItsContext(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		release, err := f.host.lockFile(ctx, lock)
+		release, err := LockFile(ctx, lock, nil)
 		if err == nil {
 			release()
 		}

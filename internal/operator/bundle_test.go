@@ -40,7 +40,7 @@ var bundleAdds = []struct {
 	add  func(*Service, string) error
 }{
 	{"host", func(service *Service, path string) error {
-		return service.HostAdd(context.Background(), "tenant-a", "host-b", path, false)
+		return service.HostAdd(context.Background(), "tenant-a", "host-b", path)
 	}},
 	{"receiver", func(service *Service, path string) error {
 		return service.ReceiverAdd(context.Background(), modelConfig("receiver-b", "pool-a"), service.Broker, path)
@@ -75,7 +75,7 @@ func TestHostAddRefusesAnExistingFileBeforeCreatingTheRecordTopic(t *testing.T) 
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	responses, err := kadm.NewClient(service.Operator).DeleteTopics(ctx, OperatorTopic, telemetry.TraceTopic(""))
+	responses, err := kadm.NewClient(service.Operator).DeleteTopics(ctx, OperatorTopic, telemetry.TraceTopic(""), RequestsTopic)
 	if err == nil {
 		err = responses.Error()
 	}
@@ -86,7 +86,7 @@ func TestHostAddRefusesAnExistingFileBeforeCreatingTheRecordTopic(t *testing.T) 
 	if err := os.WriteFile(path, []byte("other"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, "tenant-a", "host-b", path, false); !errors.Is(err, os.ErrExist) {
+	if err := service.HostAdd(ctx, "tenant-a", "host-b", path); !errors.Is(err, os.ErrExist) {
 		t.Fatalf("host add = %v; want the existing file refused", err)
 	}
 	// kadm's ListTopics answers from cached metadata; a direct request lists what exists.
@@ -118,7 +118,7 @@ func TestHostAddRecordsNothingWhenItsTopicIsRefused(t *testing.T) {
 		}
 		return response, nil, true
 	})
-	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.bundle"), false); err == nil {
+	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.bundle")); err == nil {
 		t.Fatal("host add succeeded; want its topic's creation refused")
 	}
 	if state, err := service.LoadState(ctx); err != nil || len(state.Hosts) != 0 {
@@ -208,9 +208,6 @@ func TestReissueFailingAfterThePasswordChanges(t *testing.T) {
 			name    string
 			reissue func(*Service, string) error
 		}{
-			{"host", func(service *Service, path string) error {
-				return hostFixture(t, service, t.Context(), "tenant-a", "host-a", path, true)
-			}},
 			{"receiver", func(service *Service, path string) error {
 				return service.ReceiverReissue(t.Context(), "receiver-a", service.Broker, path)
 			}},
@@ -239,15 +236,15 @@ func TestReissueFailingAfterThePasswordChanges(t *testing.T) {
 	}
 }
 
-// host add --force refuses a host whose membership ended, writing no bundle.
-func TestHostAddForceRefusesAnEndedHost(t *testing.T) {
+// host add refuses a host whose membership ended, writing no bundle.
+func TestHostAddRefusesAnEndedHost(t *testing.T) {
 	_, service, ctx := compromiseFixture(t)
 	if _, err := service.appendChecked(ctx, []byte("tenant-a.host-a"), Record{Kind: "end", Tenant: "tenant-a", Host: "host-a"}); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "host.bundle")
-	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", path, true); err == nil || err.Error() != "host cannot return after its membership end" {
-		t.Fatalf("host add --force of an ended host = %v; want it refused", err)
+	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", path); err == nil || err.Error() != "host cannot return after its membership end" {
+		t.Fatalf("host add of an ended host = %v; want it refused", err)
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a refused host add wrote %s (%v)", path, err)

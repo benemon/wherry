@@ -83,8 +83,8 @@ func TestOperatorCommandUsage(t *testing.T) {
 		{[]string{"remove", "--receiver", "receiver-a", "receiver-b"}, operatorUsage["remove"]},
 		{[]string{"pool", "entitle", "build"}, "unknown operator command"},
 		{[]string{"add", "--tenant", "tenant-a", "extra"}, operatorUsage["add"]},
-		{[]string{"revoke", "host", "tenant-a", "host-a"}, "unknown operator command"},
-		{[]string{"revoke", "receiver", "receiver-a"}, "unknown operator command"},
+		{[]string{"revoke", "host", "tenant-a", "host-a"}, operatorUsage["revoke"]},
+		{[]string{"revoke", "receiver", "receiver-a"}, operatorUsage["revoke"]},
 		{[]string{"receiver", "configure", "receiver-a"}, "unknown operator command"},
 		{[]string{"skip", "42", "--sha256", strings.Repeat("0", 64)}, "unknown operator command"},
 		{[]string{"skip", "42"}, "unknown operator command"},
@@ -856,10 +856,9 @@ func TestReceiverApplyForceReissuesTheIdentity(t *testing.T) {
 	}
 }
 
-// host add writes the host's bundle under bundles/hosts/<tenant>, refuses an existing host without --force, and with
-// --force replaces its bundle with one holding a new password; the old bundle stops working. A host of the same name in
-// another tenant has a bundle of its own, which neither its add nor its --force touches the first's.
-func TestHostAddForceReissuesTheIdentity(t *testing.T) {
+// Host add writes the host's bundle under bundles/hosts/<tenant>, refuses an existing host, and keeps equal host names
+// in different tenants separate.
+func TestHostAddWritesOneIdentity(t *testing.T) {
 	service := operatorEnv(t)
 	for _, tenant := range []string{"tenant-a", "tenant-b"} {
 		if err := service.TenantAdd(t.Context(), tenant); err != nil {
@@ -889,8 +888,8 @@ func TestHostAddForceReissuesTheIdentity(t *testing.T) {
 	if err := os.Rename(bundle, aside); err != nil {
 		t.Fatal(err)
 	}
-	if err := add("tenant-a"); err == nil || err.Error() != "host exists; --force gives it a new password and bundle" {
-		t.Fatalf("host add of an existing host = %v; want it refused without --force", err)
+	if err := add("tenant-a"); err == nil || err.Error() != "host exists" {
+		t.Fatalf("host add of an existing host = %v; want it refused", err)
 	}
 	if _, err := os.Stat(bundle); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a refused host add left %s: %v", bundle, err)
@@ -901,58 +900,19 @@ func TestHostAddForceReissuesTheIdentity(t *testing.T) {
 	if !bundleWorks(t, service, bundle) {
 		t.Fatal("a refused host add changed the password")
 	}
-	old, err := os.ReadFile(bundle)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hosts := func() int {
-		t.Helper()
-		reader := operator.NewReader(service.Operator)
-		defer reader.Close()
-		records, err := reader.ReadFrom(context.Background(), operator.OperatorTopic, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		count := 0
-		for _, record := range records {
-			if decoded, err := operator.DecodeRecord(record.Value); err == nil && decoded.Kind == "host" {
-				count++
-			}
-		}
-		return count
-	}
-	before := hosts()
-	if err := add("tenant-a", "--force"); err != nil {
-		t.Fatal(err)
-	}
-	if after := hosts(); before != 1 || after != before {
-		t.Fatalf("host add --force left %d host records, %d before; want the one record untouched", after, before)
-	}
-	oldBundle := filepath.Join(t.TempDir(), "old.bundle")
-	if err := os.WriteFile(oldBundle, old, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if bundleWorks(t, service, oldBundle) {
-		t.Fatal("the broker took the old bundle after host add --force")
-	}
-	if !bundleWorks(t, service, bundle) {
-		t.Fatal("the broker refused the bundle host add --force wrote")
-	}
 	first, err := os.ReadFile(bundle)
 	if err != nil {
 		t.Fatal(err)
 	}
 	other := filepath.Join("bundles", "hosts", "tenant-b", "host-a.bundle")
-	for _, options := range [][]string{nil, {"--force"}} {
-		if err := add("tenant-b", options...); err != nil {
-			t.Fatalf("host add of host-a in another tenant %v = %v", options, err)
-		}
-		if !bundleWorks(t, service, other) {
-			t.Fatalf("the broker refused the other tenant's bundle host add %v wrote", options)
-		}
-		if after, err := os.ReadFile(bundle); err != nil || !bytes.Equal(after, first) {
-			t.Fatalf("host add of host-a in another tenant %v changed %s: %v", options, bundle, err)
-		}
+	if err := add("tenant-b"); err != nil {
+		t.Fatalf("host add of host-a in another tenant = %v", err)
+	}
+	if !bundleWorks(t, service, other) {
+		t.Fatal("the broker refused the other tenant's bundle")
+	}
+	if after, err := os.ReadFile(bundle); err != nil || !bytes.Equal(after, first) {
+		t.Fatalf("host add of host-a in another tenant changed %s: %v", bundle, err)
 	}
 	if !bundleWorks(t, service, bundle) {
 		t.Fatal("the broker refused the first tenant's bundle after the other tenant's host add")

@@ -20,8 +20,8 @@ principals and group configurations; the cluster itself is prepared once.
   [Authorization and ACLs](https://kafka.apache.org/documentation/#security_authz).
 - **`auto.create.topics.enable=false`**, so a mistyped topic name fails.
 - **`connections.max.reauth.ms`** is set broker-wide on every broker.
-  Revocation reads that key from each broker, waits at least the longest
-  value, and fails while it is unbounded. A listener-prefixed override does
+  Revocation and `revoke` read that key from each broker, wait at least the
+  longest value, and fail while it is unbounded. A listener-prefixed override does
   not count.
 - **`transaction.max.timeout.ms`** is short enough to wait out:
   revocation waits at least the longest of it,
@@ -74,7 +74,7 @@ wherry operator init --broker kafka.example.com:9093 \
 The listener's certificate chains to a CA in this machine's trust store, or
 to one given as `--ca-cert` ([Broker and S3 trust](security.md#broker-and-s3-trust)). `init` creates `wherry.operator` with a new password, grants it the
 [ACLs provisioning needs](security.md#the-operator-principal), creates the
-`wherry.operator` topic, and writes `operator.yaml` and
+`wherry.operator` and `wherry.requests` topics, and writes `operator.yaml` and
 `operator.password`. The broker address is what host bundles name, so use
 the address hosts reach; a receiver's file can name another. Every other
 `wherry operator` command runs in the working directory, or with `--dir`,
@@ -91,9 +91,33 @@ broker's: run `init` again with the Kafka super user.
 
 ### Concurrent operator commands
 
-Do not run two operator commands at once. Concurrent operator commands are not supported.
+`approve`, `reject`, `revoke`, `remove --host` and `remove --tenant` take an
+exclusive lock on `operator.lock` in the working directory before their first
+read, and hold it until they exit, their waits included. The file is never
+removed, and `operator init` adds it to `.gitignore`. A command that finds the
+lock held waits for it with no timeout, and prints once the command that
+holds it, followed by what you may do about it:
 
-Operator commands do not lock each other. Each one that changes Kafka ends
+```
+waiting for <command> (pid <n> on <host>, since <time>); to go first, interrupt that command and run it again afterwards
+waiting for <command> (pid <n> on <host>, since <time>); do not interrupt it: an approve that is interrupted, or that ends on a timeout, can leave an upsert the broker makes later
+```
+
+The first line is for a `revoke` or `remove` holder, the second for any
+other. Interrupt only a `revoke` or a `remove`, which you run again
+afterwards, and never an `approve`, which you leave to finish: an
+interrupted `approve` can leave its upsert on its way to the broker
+([An upsert the broker makes later](security.md#an-upsert-the-broker-makes-later)).
+A removal's wait can hold the lock for as long as the broker's
+`transaction.max.timeout.ms`, 15 minutes by default. `add --host`, `rotate`,
+`list requests`, `check` and `remove --receiver` take no lock. The lock
+reaches one directory on one machine
+([The operator lock](security.md#the-operator-lock)).
+
+Run the other operator commands one at a time: they do not wait for each
+other, and running them concurrently is not supported.
+
+Each operator command that changes Kafka ends
 by converging Kafka on the records of `wherry.operator` as read to its end,
 not on the ones it read when it started
 ([Operator convergence](design.md#operator-convergence)). When
@@ -105,8 +129,8 @@ on `wherry.operator` when its last pass ended. A command still running can
 change Kafka after that, but its own passes then follow. A command that
 fails before it writes a record writes nothing to `wherry.operator`. Topics,
 a new host's or receiver's credential, or a new receiver's grants it made
-first stay, the grants until the next command's pass. A `add --host --force`
-or receiver reissue that a revocation overtakes refuses with `cannot return
+first stay, the grants until the next command's pass. A receiver reissue
+that a revocation overtakes refuses with `cannot return
 after its membership end` and writes no bundle. A command's pass deletes the
 grants a concurrent command adding a receiver makes before its record. That
 command's own pass restores them, and a peer denied meanwhile exits and is
@@ -412,15 +436,19 @@ The host's user then runs `wherry host init <bundle>`, which places the
 bundle, registers the host key and writes the
 [client configuration](configuration-host.md#client-configuration) with a source
 for each credential the tenant's pools take, as in
-[Set up a host](install-host.md#_2-initialise-the-host).
+[Set up a host](install-host.md#_2-initialise-the-host). It also files a
+credential request for a password of the host's own: approve it, as in
+[Approve a host's credential request](#approve-a-host-s-credential-request).
+Until you do, the host logs in with the bundle's password.
 
 A tenant can be entitled to several pools; run `allow` once per pool.
 
-To rotate a host's Kafka password, replace a lost bundle or change the
-broker address a host uses, run `add --host` again with `--force`. It writes a
-new bundle over the old one, and the old password stops working at once, so
-the host is offline until its user puts the new bundle in place.
-`apply --receiver RECEIVER --force` does the same for a receiver.
+To rotate a host's Kafka password, approve a request the host files
+([Approve a host's credential request](#approve-a-host-s-credential-request)).
+To replace a lost bundle, change the broker address a host uses, or end a
+password that may be known, revoke the host's password
+([Revoke a host's password](#revoke-a-host-s-password)).
+`apply --receiver RECEIVER --force` gives a receiver a new password and bundle.
 
 ## Add a receiver
 
@@ -644,13 +672,137 @@ task adopts its job. When the new configuration renames a run's profile or
 changes its agent, the adopting receiver stops and purges the run's job and
 dispatches the run again.
 
+## Approve a host's credential request
+
+A host changes its Kafka password by request: it generates the password,
+keeps it, and sends a signed request holding its salted form to
+`wherry.requests`, which you approve. `wherry host init` files one when it
+installs a new bundle, and `wherry host rotate --scram` files one when the
+host's user runs it.
+
+Prerequisites: the operator's working directory.
+
+1. To ask a host for a new password, record the request for it:
+
+   ```sh
+   wherry operator rotate --tenant acme --host laptop --scram
+   ```
+
+   The host files its request at its next command of any kind.
+
+2. List the requests:
+
+   ```sh
+   wherry operator list requests
+   ```
+
+   Each line names the request ID, its tenant and host, and its state
+   ([`list requests`](commands.md#wherry-operator-list)).
+
+3. Approve a request, or every pending one, or reject one:
+
+   ```sh
+   wherry operator approve <id>
+   wherry operator approve --all
+   wherry operator reject <id>
+   ```
+
+   `approve` prints `approved <id>` for each request it approves.
+
+4. The host uses the new password from its next command, which prints
+   `credential <id> approved; now in use`. Nothing needs to be handed over.
+
+Run `approve` or `reject` often enough that undecided requests do not pile
+up: a request stays in `wherry.requests` until a pass decides it, and a
+request no pass decided within 7 days is recorded `expired` by the next one.
+After `wherry host rotate --key` the host's pending request is not pending
+until the host sends it again under the new key: its user runs
+`wherry host rotate --scram`, or you run `rotate --scram` for it.
+
+When a pass does not finish an approval, it exits non-zero after the other
+requests. What to do depends on what it printed:
+
+| Output | Meaning | Next step |
+| --- | --- | --- |
+| an error, then `approval of <id> is still open; the upsert may still be applied, at any time and over a later approve or revoke of this host; run approve again, or, if the host is in doubt, revoke it` | The credential update timed out, lost its connection or was interrupted. The broker may still apply it, at any time ([An upsert the broker makes later](security.md#an-upsert-the-broker-makes-later)). | Run `approve` again before anything else for that host: the next pass sets the same password and records the decision. If the host is in doubt, revoke its password. |
+| an error alone | The broker refused the update for the host, and nothing changed. The approval stays open. | Fix the cause and run `approve` again. An approval no pass can finish is closed by [`revoke`](#revoke-a-host-s-password). |
+| an error, then `run revoke for this host again` | The decision record was refused: a `revoke` or `remove --host` of the host ran from another copy of the operator directory meanwhile ([The operator lock](security.md#the-operator-lock)). | Run `revoke` for the host again, or `remove --host` again for a host being removed. |
+
+`reject` of a request whose approval has begun fails with `approval of <id>
+has begun; run approve to finish it`: run `approve`, or close the approval with
+`revoke`. A host that connects with its requested password while an approval
+is under way prints `approval of <id> is in progress`; run `approve` to finish
+it. Never interrupt an `approve` ([Concurrent operator commands](#concurrent-operator-commands)).
+A pass that stops for any reason, the machine's included, leaves its approval
+open; the next `approve` finishes it, so run that before anything else for
+the host.
+
+## Revoke a host's password
+
+`revoke` gives a live host a new random password and a new enrolment, and
+writes its bundle. Use it to replace a lost bundle, to change the broker
+address in a host's bundle, to end a password that may be known, to close an
+approval no pass can finish, and to enrol a host that has no credential ID.
+To keep a host out for good, [remove it](#revoke-a-host-or-receiver).
+
+Prerequisites: the broker settings in [Prepare Kafka](#prepare-kafka), with
+`connections.max.reauth.ms` bounded, and the operator's working directory.
+
+1. Revoke the host's password:
+
+   ```sh
+   wherry operator revoke --tenant acme --host laptop
+   ```
+
+   It records the reset, sets a random password, checks that every broker the
+   cluster metadata lists accepts it, waits `connections.max.reauth.ms` for the
+   sessions opened with the old password to end, checks again, and writes the
+   bundle ([`revoke`](commands.md#wherry-operator-revoke)). On success it
+   prints:
+
+   ```
+   wrote bundles/hosts/acme/laptop.bundle; hand it to the host, where wherry host init laptop.bundle installs it
+   a session opened with an old password during the wait can last up to <duration> more
+   ```
+
+   The second line bounds a session that opened during the wait.
+
+2. Hand the bundle to the host's user over a channel you trust. The host is
+   offline until its user runs `wherry host init laptop.bundle`, which files a
+   credential request at once.
+
+3. Approve that request, as in
+   [Approve a host's credential request](#approve-a-host-s-credential-request).
+
+When `revoke` fails, it records no enrolment and writes no bundle:
+
+| Output | Meaning | Next step |
+| --- | --- | --- |
+| `the password revoke set is refused after its wait: an upsert from an earlier command was applied after it, and an old password may work; run revoke again` | An upsert an earlier `approve` or `revoke` of the host sent was applied over this one's, and the password it carries may log in. | Run `revoke` again. |
+| `probe incomplete: <error>` | A broker still refused the new password after 2 minutes, or could not be reached. | Check the broker connection, then run `revoke` again. |
+| `connections.max.reauth.ms is unbounded, so revoke cannot complete` | A broker sets no bound on sessions; nothing was changed. | Set `connections.max.reauth.ms` on the brokers ([Prepare Kafka](#prepare-kafka)), then run `revoke` again. |
+
+A `revoke` that stops at any step, interrupted or on an error, leaves the host
+with no credential ID and perhaps a password that no longer works: run it
+again, which starts over with a new password. When the stopped run's upsert
+reaches the broker after the re-run's, the re-run fails with the first line
+above, or its bundle does not log in; run `revoke` once more. A host whose
+commands fail with `neither the bundle password nor the requested one is
+accepted; ask the operator to revoke and re-enrol this host` needs the same:
+revoke its password and hand over the new bundle.
+
+`revoke` does not change the host key. For a host key that may be
+compromised, remove the host instead.
+
 ## Revoke a host or receiver
 
 Prerequisites: the broker settings in [Prepare Kafka](#prepare-kafka), and
-the operator's working directory. Other operator commands can run
+the operator's working directory. `remove --host` holds the
+[operator lock](#concurrent-operator-commands), so an `approve`, `reject`,
+`revoke` or other removal waits for it. Commands that take no lock can run
 meanwhile: the revocation deletes again, after its membership end record,
-any credential or ACL a [concurrent command](#concurrent-operator-commands)
-restored.
+any credential or ACL one of them restored. A host's removal closes, void, an
+approval an `approve` left unfinished, and does not wait for one.
 
 1. Run the revocation:
 
@@ -677,8 +829,12 @@ restored.
    stale command can restore wherry-managed grants, which the next pass
    deletes again. A run that failed before step 2 may have left the
    principal's grants, and the run again deletes them. Step 3 already retries for up to 2 minutes while a
-   broker still authorises the principal. The bundle stays until a run
+   broker still authorises the principal. When the random password of an
+   interrupted run reaches the broker after the next run's, that run's step 3
+   fails; run the command once more. The bundle stays until a run
    completes; a run that finds the principal already ended deletes it.
+   Until a host's removal completes, `add --host` of it fails with `host is
+   being removed; run remove --host again`.
 
 3. For a receiver, rotate at its source each credential of the runs it
    opened and, when it held its pool's key as key custodian, of every run
@@ -834,6 +990,16 @@ than this release knows, a later release wrote it and the error says to
 `wherry.operator`, and the deployment needs a reset: `wherry.operator` is
 append-only and read from offset 0, so no record on it can be passed over.
 
+A record that decodes but that no reader can apply stops every reader the
+same way and needs the same reset. An `approve` and a `revoke` or removal of
+the same host run from two copies of the operator directory at once, which
+the [operator lock](security.md#the-operator-lock) does not see, can leave
+one:
+
+```
+credential record at offset <n> is for an approval that was not open: two operator directories wrote to this deployment at once; reset the deployment
+```
+
 No `wherry` command reads state while this holds, so the reset works on the
 platform and on Kafka directly.
 
@@ -867,6 +1033,8 @@ To onboard a tenant:
 4. Run `wherry operator add --host laptop --tenant acme`.
 5. Deliver the bundle over a channel you trust.
 6. Run `wherry host init laptop.bundle` on the host.
+7. Approve the request `host init` filed: find its ID with
+   `wherry operator list requests`, then run `wherry operator approve <id>`.
 
 Collect results before removing an entitlement.
 `wherry operator deny --tenant acme --pool build` withdraws the hosts' pool access.

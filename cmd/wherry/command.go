@@ -28,6 +28,7 @@ const usage = `usage: wherry <command>
 operator:
   wherry operator init|check|view
   wherry operator list|show|apply|add|remove|allow|deny|suspend|resume|rotate|storage
+  wherry operator approve|reject|revoke
 receiver:
   wherry receiver run|rotate
 host:
@@ -129,20 +130,29 @@ func runHost(args []string, stdout, stderr io.Writer) error {
 		}
 		return hostInit(context.Background(), path, strings.Join(positional, ""), ca, stdout, stderr)
 	case "rotate":
-		const rotateUsage = "usage: wherry host rotate --key [--config-file FILE]"
+		const rotateUsage = "usage: wherry host rotate --key|--scram [--config-file FILE]"
 		flags := flag.NewFlagSet("host rotate", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		configFile := flags.String("config-file", "", "host configuration file")
 		key := flags.Bool("key", false, "replace the host's signing key")
+		scram := flags.Bool("scram", false, "request a new SCRAM credential")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		if flags.NArg() != 0 || !*key {
+		if flags.NArg() != 0 || *key == *scram {
 			return errors.New(rotateUsage)
 		}
 		config, err := loadConfig(*configFile)
 		if err != nil {
 			return err
+		}
+		if *scram {
+			host, err := busclient.Connect(config, log.New(stderr, "", 0))
+			if err != nil {
+				return err
+			}
+			defer host.Close()
+			return host.RotateSCRAM(context.Background(), stdout)
 		}
 		old, next, err := busclient.RotateKey(context.Background(), config)
 		if err != nil {

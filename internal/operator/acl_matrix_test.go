@@ -44,6 +44,7 @@ func TestACLMatrix(t *testing.T) {
 		"wherry.operator cluster kafka-cluster ALTER,ALTER_CONFIGS",
 		"wherry.operator group p-* ALTER_CONFIGS,DESCRIBE",
 		"wherry.operator topic wherry.* CREATE,ALTER_CONFIGS,READ,WRITE",
+		"wherry.operator topic wherry.requests DELETE",
 		"wherry.rcv.receiver-a group p-pool-a READ,DESCRIBE,DESCRIBE_CONFIGS",
 		"wherry.rcv.receiver-a group p-pool-a.custodian READ,DESCRIBE",
 		"wherry.rcv.receiver-a topic wherry.host.tenant-a.host-a READ,DESCRIBE",
@@ -106,6 +107,7 @@ func TestACLMatrix(t *testing.T) {
 		"wherry.rcv.receiver-c transactional p.pool-b.* WRITE,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.host.tenant-a.host-a READ,WRITE,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.operator READ,DESCRIBE",
+		"wherry.tnt.tenant-a.host-a topic wherry.requests WRITE,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.pool.pool-a.custodian READ,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.pool.pool-a.events WRITE,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.pool.pool-a.receivers READ,DESCRIBE",
@@ -122,6 +124,7 @@ func TestACLMatrix(t *testing.T) {
 		"wherry.tnt.tenant-a.host-a topic wherry.traces.tenant-a READ,WRITE,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.host.tenant-b.host-b READ,WRITE,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.operator READ,DESCRIBE",
+		"wherry.tnt.tenant-b.host-b topic wherry.requests WRITE,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.pool.pool-a.custodian READ,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.pool.pool-a.events WRITE,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.pool.pool-a.receivers READ,DESCRIBE",
@@ -133,6 +136,7 @@ func TestACLMatrix(t *testing.T) {
 		"wherry.tnt.tenant-b.host-b topic wherry.traces.tenant-b READ,WRITE,DESCRIBE",
 	}
 	slices.Sort(got)
+	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		for _, line := range got {
 			if !slices.Contains(want, line) {

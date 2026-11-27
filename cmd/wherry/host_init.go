@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"maps"
 	"os"
 	"path/filepath"
@@ -85,6 +86,7 @@ func hostInit(ctx context.Context, path, bundle string, caCert *string, stdout, 
 			return err
 		}
 	}
+	newEnrolment := false
 	if bundle != "" {
 		contents, err := operator.ReadBundle(bundle)
 		if err != nil {
@@ -102,8 +104,14 @@ func hostInit(ctx context.Context, path, bundle string, caCert *string, stdout, 
 		} else if err := makePrivateDir(filepath.Dir(destination)); err != nil {
 			return err
 		}
-		// Bundles hold a password: ReplaceBundle writes mode 0600 and renames over the old file.
-		if err := operator.ReplaceBundle(destination, contents); err != nil {
+		// T-H5 and T-H6 under the host lock, so a promotion by another process is not undone by the password read here.
+		release, err := busclient.LockFile(ctx, busclient.ScramLockPath(destination), nil)
+		if err != nil {
+			return err
+		}
+		newEnrolment, err = installBundle(destination, contents)
+		release()
+		if err != nil {
 			return err
 		}
 		if !explicit {
@@ -159,6 +167,18 @@ func hostInit(ctx context.Context, path, bundle string, caCert *string, stdout, 
 	keyID, pools, err := busclient.Init(ctx, config)
 	if err != nil {
 		return err
+	}
+	if newEnrolment {
+		// The bundle's password is for enrolment only.
+		host, err := busclient.Connect(config, log.New(prompts, "", 0))
+		if err != nil {
+			return err
+		}
+		err = host.RotateSCRAM(ctx, prompts)
+		host.Close()
+		if err != nil {
+			return err
+		}
 	}
 	// Bundled storage keys serve every entitled pool with storage, so those pools get no storage question; a pool the
 	// configuration maps to credentials of its own keeps them.
@@ -671,4 +691,22 @@ func writeHostConfig(path string, file busclient.Config) error {
 		return err
 	}
 	return nil
+}
+
+// installBundle installs contents at destination and reports whether it is a new enrolment: one whose principal or
+// enrolment differs from the installed bundle's, or with none installed, which replaces the bundle whole and removes
+// scram.next. The same enrolment keeps the installed password and scram.next.
+func installBundle(destination string, contents operator.Bundle) (bool, error) {
+	installed, err := operator.ReadBundle(destination)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if err == nil && installed.Principal == contents.Principal && installed.Enrolment == contents.Enrolment {
+		contents.Password = installed.Password
+		return false, operator.ReplaceBundle(destination, contents)
+	}
+	if err := operator.ReplaceBundle(destination, contents); err != nil {
+		return true, err
+	}
+	return true, busclient.RemoveSCRAMNext(destination)
 }

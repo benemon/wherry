@@ -24,20 +24,23 @@ import (
 
 // operatorUsage is each operator verb's usage, under "" the operator's. A verb with several forms lists them with |.
 var operatorUsage = map[string]string{
-	"":        "usage: wherry operator <init|check|view|list|show|apply|add|remove|allow|deny|suspend|resume|rotate|storage> [--dir DIR]",
+	"":        "usage: wherry operator <init|check|view|list|show|apply|add|remove|allow|deny|suspend|resume|rotate|approve|reject|revoke|storage> [--dir DIR]",
 	"init":    "usage: wherry operator init [--dir DIR] [--broker ADDR] [--super-user NAME --super-user-password @FILE|@-] [--super-user-mechanism SCRAM-SHA-512|SCRAM-SHA-256] [--ca-cert PEM|@FILE|@-]",
 	"check":   "usage: wherry operator check",
 	"view":    "usage: wherry operator view [--dir DIR] [--window 24h] [--port N] [--external-url URL]",
-	"list":    "usage: wherry operator list tenants|pools|receivers | list hosts [--tenant TENANT]",
+	"list":    "usage: wherry operator list tenants|pools|receivers|requests | list hosts [--tenant TENANT]",
 	"show":    "usage: wherry operator show --receiver RECEIVER",
 	"apply":   "usage: wherry operator apply --pool POOL [--file PATH] [--dry-run] | apply --receiver RECEIVER [--file PATH] [--dry-run] | apply --receiver RECEIVER --force",
-	"add":     "usage: wherry operator add --tenant TENANT | add --host HOST --tenant TENANT [--force]",
+	"add":     "usage: wherry operator add --tenant TENANT | add --host HOST --tenant TENANT",
 	"remove":  "usage: wherry operator remove --tenant TENANT | remove --host HOST --tenant TENANT [--timeout DURATION] | remove --receiver RECEIVER [--timeout DURATION]",
 	"allow":   "usage: wherry operator allow --tenant TENANT --pool POOL",
 	"deny":    "usage: wherry operator deny --tenant TENANT --pool POOL",
 	"suspend": "usage: wherry operator suspend --pool POOL",
 	"resume":  "usage: wherry operator resume --pool POOL",
-	"rotate":  "usage: wherry operator rotate --pool POOL [--suspect-key KID]... | rotate --tenant TENANT --host HOST --storage",
+	"rotate":  "usage: wherry operator rotate --pool POOL [--suspect-key KID]... | rotate --tenant TENANT --host HOST --scram|--storage",
+	"approve": "usage: wherry operator approve ID|--all",
+	"reject":  "usage: wherry operator reject ID",
+	"revoke":  "usage: wherry operator revoke --tenant TENANT --host HOST",
 	"storage": "usage: wherry operator storage --tenant TENANT [-]",
 }
 
@@ -59,13 +62,16 @@ var operatorForms = map[string][]operatorForm{
 	"list":    {{}, {resources: []string{"tenant"}}},
 	"show":    {{resources: []string{"receiver"}}},
 	"apply":   {{resources: []string{"pool"}, options: []string{"file", "dry-run"}}, {resources: []string{"receiver"}, options: []string{"file", "dry-run", "force"}}},
-	"add":     {{resources: []string{"tenant"}}, {resources: []string{"host", "tenant"}, options: []string{"force"}}},
+	"add":     {{resources: []string{"tenant"}}, {resources: []string{"host", "tenant"}}},
 	"remove":  {{resources: []string{"tenant"}}, {resources: []string{"host", "tenant"}, options: []string{"timeout"}}, {resources: []string{"receiver"}, options: []string{"timeout"}}},
 	"allow":   {{resources: []string{"pool", "tenant"}}},
 	"deny":    {{resources: []string{"pool", "tenant"}}},
 	"suspend": {{resources: []string{"pool"}}},
 	"resume":  {{resources: []string{"pool"}}},
-	"rotate":  {{resources: []string{"pool"}, options: []string{"suspect-key"}}, {resources: []string{"host", "tenant"}, options: []string{"storage"}, required: "storage"}},
+	"rotate":  {{resources: []string{"pool"}, options: []string{"suspect-key"}}, {resources: []string{"host", "tenant"}, options: []string{"scram", "storage"}}},
+	"approve": {{options: []string{"all"}}},
+	"reject":  {{}},
+	"revoke":  {{resources: []string{"host", "tenant"}}},
 	"storage": {{resources: []string{"tenant"}}},
 }
 
@@ -73,7 +79,7 @@ var operatorForms = map[string][]operatorForm{
 var operatorResources = []string{"host", "pool", "receiver", "tenant"}
 
 // listKinds are what list takes positionally.
-var listKinds = []string{"tenants", "pools", "receivers", "hosts"}
+var listKinds = []string{"tenants", "pools", "receivers", "hosts", "requests"}
 
 func runOperator(args []string, stdout, stderr io.Writer) (err error) {
 	// Each command's first dial is inside it, so a broker certificate the connection does not trust is explained here,
@@ -101,6 +107,9 @@ func runOperator(args []string, stdout, stderr io.Writer) (err error) {
 	command := pos[0]
 	switch {
 	case command == "list" && len(pos) == 2 && slices.Contains(listKinds, pos[1]):
+	case command == "approve" && len(pos) == 2 && options["all"] == "":
+	case command == "reject" && len(pos) == 2:
+	case command == "approve" && len(pos) == 1 && options["all"] != "":
 	case command == "storage" && (len(pos) == 1 || (len(pos) == 2 && pos[1] == "-")):
 	case command != "list" && command != "storage" && len(pos) == 1:
 	default:
@@ -124,6 +133,14 @@ func runOperator(args []string, stdout, stderr io.Writer) (err error) {
 		}
 	}()
 	pool, receiver, tenant, host := options["pool"], options["receiver"], options["tenant"], options["host"]
+	// One operator pass, revoke or removal at a time; a receiver's removal orders against none of them.
+	if command == "approve" || command == "reject" || command == "revoke" || command == "remove" && receiver == "" {
+		release, err := lockOperator(filepath.Join(dir, "operator.lock"), command, args, stderr)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	switch command {
 	case "apply":
 		_, dryRun := options["dry-run"]
@@ -262,8 +279,7 @@ func runOperator(args []string, stdout, stderr io.Writer) (err error) {
 		if err != nil {
 			return err
 		}
-		_, force := options["force"]
-		if err := service.HostAdd(ctx, tenant, host, bundle, force); err != nil {
+		if err := service.HostAdd(ctx, tenant, host, bundle); err != nil {
 			return err
 		}
 		return hostBundleNext(stdout, "wrote", bundle)
@@ -271,6 +287,9 @@ func runOperator(args []string, stdout, stderr io.Writer) (err error) {
 		// A trailing - takes the pair from standard input.
 		return tenantStorage(ctx, service, dir, tenant, len(pos) == 2, stdout, stderr)
 	case "list":
+		if pos[1] == "requests" {
+			return service.ListRequests(ctx, time.Now(), stdout)
+		}
 		state, err := service.LoadState(ctx)
 		if err != nil {
 			return err
@@ -303,6 +322,12 @@ func runOperator(args []string, stdout, stderr io.Writer) (err error) {
 		return nil
 	case "rotate":
 		if host != "" {
+			if (options["scram"] == "") == (options["storage"] == "") {
+				return errors.New(operatorUsage["rotate"])
+			}
+			if options["scram"] != "" {
+				return service.RotateHostSCRAM(ctx, tenant, host)
+			}
 			// The bundle must already be kept, so no directory is made.
 			bundle, err := bundlePath(dir, "hosts", false, tenant, host)
 			if err != nil {
@@ -327,6 +352,29 @@ func runOperator(args []string, stdout, stderr io.Writer) (err error) {
 			return err
 		}
 		writeRotateReport(stdout, pool, report, time.Now())
+		return nil
+	case "approve":
+		_, all := options["all"]
+		id := ""
+		if !all {
+			id = pos[1]
+		}
+		return service.ApproveRequests(ctx, id, all, time.Now(), stdout)
+	case "reject":
+		return service.RejectRequest(ctx, pos[1], stdout)
+	case "revoke":
+		bundle, err := bundlePath(dir, "hosts", false, tenant, host)
+		if err != nil {
+			return err
+		}
+		wait, err := service.RevokeHostSCRAM(ctx, tenant, host, bundle)
+		if err != nil {
+			return err
+		}
+		if err := hostBundleNext(stdout, "wrote", bundle); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "a session opened with an old password during the wait can last up to %s more\n", wait)
 		return nil
 	case "remove":
 		if host == "" && receiver == "" {
@@ -390,6 +438,13 @@ func runOperator(args []string, stdout, stderr io.Writer) (err error) {
 	case "check":
 		if err := service.Check(ctx); err != nil {
 			return err
+		}
+		state, err := service.LoadState(ctx)
+		if err != nil {
+			return err
+		}
+		for _, line := range operator.CredentialReport(state) {
+			fmt.Fprintln(stdout, line)
 		}
 		// What removal left is reported only once every check passes; leftovers are no failure.
 		leftovers, err := service.Leftovers(ctx)
@@ -615,6 +670,8 @@ func operatorArgs(args []string) ([]string, map[string]string, error) {
 	flags.Bool("dry-run", false, "")
 	flags.Bool("force", false, "")
 	flags.Bool("storage", false, "")
+	flags.Bool("scram", false, "")
+	flags.Bool("all", false, "")
 	// A resource flag names one object, so one given twice or empty fits no form.
 	resources := map[string]string{}
 	malformed := false
@@ -627,7 +684,30 @@ func operatorArgs(args []string) ([]string, map[string]string, error) {
 			return nil
 		})
 	}
+	// A request ID is raw URL base64 and can begin with "-", which the flag package would take for an option. An
+	// argument that is a request ID and no option's name, and is not the value of the option before it, is the
+	// operand of approve or reject wherever it sits.
+	var operand string
+	if slices.Contains(args, "approve") || slices.Contains(args, "reject") {
+		for i, arg := range args {
+			if !strings.HasPrefix(arg, "-") || !operator.ValidCredentialID(arg) || flags.Lookup(strings.TrimLeft(arg, "-")) != nil {
+				continue
+			}
+			if i > 0 && strings.HasPrefix(args[i-1], "-") && !strings.Contains(args[i-1], "=") {
+				if option := flags.Lookup(strings.TrimLeft(args[i-1], "-")); option != nil {
+					if boolean, ok := option.Value.(interface{ IsBoolFlag() bool }); !ok || !boolean.IsBoolFlag() {
+						continue
+					}
+				}
+			}
+			operand, args = arg, slices.Delete(slices.Clone(args), i, i+1)
+			break
+		}
+	}
 	positional, err := parseAnywhere(flags, args)
+	if operand != "" && len(positional) > 0 {
+		positional = slices.Insert(positional, 1, operand)
+	}
 	if err != nil {
 		// A resource flag given last with no value is empty like one given as --name=, not the flag package's error.
 		if name, missing := strings.CutPrefix(err.Error(), "flag needs an argument: -"); missing && slices.Contains(operatorResources, name) && len(positional) > 0 && operatorUsage[positional[0]] != "" {

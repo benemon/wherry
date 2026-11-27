@@ -1172,11 +1172,11 @@ func TestToolFailureCodes(t *testing.T) {
 
 // newerRecord is DecodeRecord's error for a record one version above this release's.
 func newerRecord(t *testing.T) error {
-	encoded, err := operator.EncodeRecord(operator.Record{Kind: "host", Tenant: "tenant-a", Host: "host-a"})
+	encoded, err := operator.EncodeRecord(operator.Record{Kind: "rotate", Tenant: "tenant-a", Host: "host-a"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = operator.DecodeRecord(bytes.Replace(encoded, []byte(`"v":1`), []byte(fmt.Sprintf(`"v":%d`, operator.RecordVersion+1)), 1))
+	_, err = operator.DecodeRecord(bytes.Replace(encoded, []byte(`"v":2`), []byte(fmt.Sprintf(`"v":%d`, operator.RecordVersion+1)), 1))
 	return fmt.Errorf("load: %w", err)
 }
 

@@ -274,28 +274,30 @@ func Init(ctx context.Context, config Config) (string, map[string]operator.Terms
 }
 
 // pingTimeout bounds Connect's first exchange with the broker; franz-go bounds each dial and request at 10 s.
-const pingTimeout = 30 * time.Second
+var pingTimeout = 30 * time.Second
 
 // Connect opens the bundle's TLS and SCRAM-SHA-512 Kafka connection as its host principal, verifying the broker, and
 // later each pool's bucket, against the machine's trust store plus config's ca_cert; the host logs to logger.
 func Connect(config Config, logger *log.Logger) (*Host, error) {
-	bundle, err := operator.ReadBundle(config.Bundle)
-	if err != nil {
-		return nil, err
-	}
 	// LoadConfig built the pool; a Config built in code gets it here.
 	roots := config.Roots
 	if roots == nil {
+		var err error
 		if roots, err = operator.ConfigRootPool(config.Path, config.CACert); err != nil {
 			return nil, err
 		}
 	}
-	opts, err := operator.BundleKafkaOpts(bundle, roots)
+	bundle, flag, err := connectPassword(config.Bundle, roots)
+	if err != nil {
+		return nil, operator.ExplainUnknownAuthority(err, config.ca())
+	}
+	auth := &scramAuth{bundle: config.Bundle, roots: roots, flag: flag}
+	opts, err := operator.HostKafkaOpts(bundle, roots, auth.auth)
 	if err != nil {
 		return nil, fmt.Errorf("bundle: %w", err)
 	}
 	// Aborted transactions are a fenced holder's writes and must never be read.
-	kafka, err := kgo.NewClient(append(opts, kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
+	kafka, err := kgo.NewClient(append(opts, kgo.FetchIsolationLevel(kgo.ReadCommitted()), kgo.WithHooks(auth))...)
 	if err != nil {
 		return nil, err
 	}
@@ -322,6 +324,12 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 			kafka.Close()
 			return nil, fmt.Errorf("tracing: %w", err)
 		}
+	}
+	host.bundlePath, host.scram = config.Bundle, auth
+	auth.host.Store(host)
+	if err := host.syncSCRAM(context.Background(), false, logger.Writer()); err != nil {
+		host.Close()
+		return nil, err
 	}
 	return host, nil
 }

@@ -7,6 +7,7 @@ import (
 	"io"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/benemon/wherry/internal/operator"
@@ -32,7 +33,14 @@ func TestCheckReportsLeftovers(t *testing.T) {
 		t.Helper()
 		var stdout bytes.Buffer
 		err := runOperator([]string{"check", "--dir", dir}, &stdout, io.Discard)
-		return stdout.String(), err
+		// A host on its enrolment password is reported by check, and is no leftover.
+		var lines []string
+		for _, line := range strings.SplitAfter(stdout.String(), "\n") {
+			if !strings.HasSuffix(line, " is on its enrolment password\n") {
+				lines = append(lines, line)
+			}
+		}
+		return strings.Join(lines, ""), err
 	}
 	if out, err := check(); err != nil || out != "" {
 		t.Fatalf("check on a clean install printed %q, %v; want nothing", out, err)

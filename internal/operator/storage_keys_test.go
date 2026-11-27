@@ -9,7 +9,7 @@ import (
 )
 
 // A tenant's storage keys, as the service's Storage gives them, reach every host bundle of the tenant as plain YAML
-// strings: host add writes them, --force keeps them under the new password, and refresh rewrites a kept bundle with a
+// strings: host add writes them, and refresh rewrites a kept bundle with a
 // changed pair and the same password. A receiver bundle never carries them, a tenant without a pair gets none, and a
 // lookup that fails refuses host add before anything changes in Kafka and refresh before it rewrites.
 func TestHostBundlesCarryTheTenantsStorageKeys(t *testing.T) {
@@ -19,7 +19,7 @@ func TestHostBundlesCarryTheTenantsStorageKeys(t *testing.T) {
 	service.Storage = func(tenant string) (StorageKeys, error) { return recorded[tenant], nil }
 	dir := t.TempDir()
 	path := filepath.Join(dir, "host-b.bundle")
-	if err := service.HostAdd(ctx, "tenant-a", "host-b", path, false); err != nil {
+	if err := service.HostAdd(ctx, "tenant-a", "host-b", path); err != nil {
 		t.Fatal(err)
 	}
 	added, err := ReadBundle(path)
@@ -30,13 +30,7 @@ func TestHostBundlesCarryTheTenantsStorageKeys(t *testing.T) {
 	if err != nil || !strings.Contains(string(encoded), "access_key: "+keys.AccessKey+"\n") || !strings.Contains(string(encoded), "secret_key: "+keys.SecretKey+"\n") || strings.Contains(string(encoded), "!!binary") {
 		t.Fatalf("bundle holds\n%s\n%v; want the keys as plain strings", encoded, err)
 	}
-	if err := service.HostAdd(ctx, "tenant-a", "host-b", path, true); err != nil {
-		t.Fatal(err)
-	}
-	reissued, err := ReadBundle(path)
-	if err != nil || reissued.Storage != keys || reissued.Password == added.Password {
-		t.Fatalf("bundle after --force %+v, %v; want the keys under a new password", reissued, err)
-	}
+	reissued := added
 	receiverPath := filepath.Join(dir, "receiver-b.bundle")
 	if err := service.ReceiverAdd(ctx, modelConfig("receiver-b", "pool-a"), service.Broker, receiverPath); err != nil {
 		t.Fatal(err)
@@ -56,7 +50,7 @@ func TestHostBundlesCarryTheTenantsStorageKeys(t *testing.T) {
 	if changed, err := service.HostRefresh(ctx, "tenant-a", "host-b", path); err != nil || !changed {
 		t.Fatalf("refresh after the pair changed: %t, %v; want the bundle rewritten", changed, err)
 	}
-	if refreshed, err := ReadBundle(path); err != nil || refreshed != (Bundle{Broker: reissued.Broker, Principal: reissued.Principal, Password: reissued.Password, Storage: next}) {
+	if refreshed, err := ReadBundle(path); err != nil || refreshed != (Bundle{Broker: reissued.Broker, Principal: reissued.Principal, Password: reissued.Password, Enrolment: reissued.Enrolment, Storage: next}) {
 		t.Fatalf("refreshed bundle %+v, %v; want the new pair with the password of %+v", refreshed, err, reissued)
 	}
 	if changed, err := service.HostRefresh(ctx, "tenant-a", "host-b", path); err != nil || changed {
@@ -64,7 +58,7 @@ func TestHostBundlesCarryTheTenantsStorageKeys(t *testing.T) {
 	}
 	// A tenant the operator recorded no pair for gets a bundle without one.
 	other := filepath.Join(dir, "tenant-b.bundle")
-	if err := hostFixture(t, service, ctx, "tenant-b", "host-a", other, false); err != nil {
+	if err := hostFixture(t, service, ctx, "tenant-b", "host-a", other); err != nil {
 		t.Fatal(err)
 	}
 	if encoded, err := os.ReadFile(other); err != nil || strings.Contains(string(encoded), "storage") {
@@ -74,7 +68,7 @@ func TestHostBundlesCarryTheTenantsStorageKeys(t *testing.T) {
 	service.Storage = func(string) (StorageKeys, error) { return StorageKeys{}, injected }
 	before := kafkaChanges(t, service)
 	unwritten := filepath.Join(dir, "host-c.bundle")
-	if err := service.HostAdd(ctx, "tenant-a", "host-c", unwritten, false); !errors.Is(err, injected) {
+	if err := service.HostAdd(ctx, "tenant-a", "host-c", unwritten); !errors.Is(err, injected) {
 		t.Fatalf("host add with a keys lookup that fails = %v; want the failure", err)
 	}
 	if after := kafkaChanges(t, service); after != before {

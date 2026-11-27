@@ -41,7 +41,7 @@ func TestTracedCommandFailuresCarryAClass(t *testing.T) {
 		func() error { return service.PoolApply(ctx, "p", modelTerms(), false) },
 		func() error { return service.TenantAdd(ctx, "t") },
 		func() error { return service.TenantPoolAdd(ctx, "t", "p") },
-		func() error { return service.HostAdd(ctx, "t", "h", bundlePath, false) },
+		func() error { return service.HostAdd(ctx, "t", "h", bundlePath) },
 	} {
 		if err := command(); err != nil {
 			t.Fatal(err)
@@ -62,7 +62,7 @@ func TestTracedCommandFailuresCarryAClass(t *testing.T) {
 	// unknown host's revocation, and a revocation whose probe fails at step 3 with a reason quoting a sentinel.
 	failures := map[string]func() error{
 		"pool apply":      func() error { return service.PoolApply(ctx, "Not A Pool", modelTerms(), false) },
-		"tenant host add": func() error { return service.HostAdd(ctx, "t", "h", bundlePath, false) },
+		"tenant host add": func() error { return service.HostAdd(ctx, "t", "h", bundlePath) },
 		"tenant host refresh": func() error {
 			return revocationErrorOf(service.HostRefresh(ctx, "t", "absent", filepath.Join(dir, "absent.yaml")))
 		},
@@ -162,7 +162,7 @@ func TestTracedCommandsValidateArgumentsBeforeAttributing(t *testing.T) {
 			"tenant add":         func() error { return service.TenantAdd(ctx, bad) },
 			"tenant pool add":    func() error { return service.TenantPoolAdd(ctx, "t", bad) },
 			"tenant pool remove": func() error { return service.TenantPoolRemove(ctx, bad, "p") },
-			"tenant host add":    func() error { return service.HostAdd(ctx, "t", bad, filepath.Join(dir, "host.yaml"), false) },
+			"tenant host add":    func() error { return service.HostAdd(ctx, "t", bad, filepath.Join(dir, "host.yaml")) },
 			"tenant host refresh": func() error {
 				return revocationErrorOf(service.HostRefresh(ctx, bad, "h", filepath.Join(dir, "absent.yaml")))
 			},

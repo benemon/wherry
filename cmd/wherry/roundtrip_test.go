@@ -82,7 +82,12 @@ func (b *syncBuffer) String() string {
 // tlsCluster is tlsBroker with admin and wherry.operator its super users.
 func tlsCluster(t *testing.T, opts ...kfake.Opt) (*kfake.Cluster, string) {
 	t.Helper()
-	return tlsBroker(t, append([]kfake.Opt{kfake.Superuser("SCRAM-SHA-512", "admin", "password"), kfake.Superuser("SCRAM-SHA-512", "wherry.operator", "operator-password")}, opts...)...)
+	cluster, ca := tlsBroker(t, append([]kfake.Opt{kfake.Superuser("SCRAM-SHA-512", "admin", "password"), kfake.Superuser("SCRAM-SHA-512", "wherry.operator", "operator-password")}, opts...)...)
+	// wherry.requests, as operator init leaves it.
+	if err := (&operator.Service{Operator: connectTLS(t, cluster.ListenAddrs()[0], ca, "admin", "password")}).EnsureRequestsTopic(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return cluster, ca
 }
 
 // testCA is the CA every tlsBroker's certificate chains to, one per test process, which no system root trusts: each test
@@ -317,12 +322,12 @@ func TestRoundTrip(t *testing.T) {
 		func() error { return service.PoolApply(ctx, "pool-a", terms, false) },
 		func() error { return service.TenantAdd(ctx, "tenant-a") },
 		func() error { return service.TenantPoolAdd(ctx, "tenant-a", "pool-a") },
-		func() error { return service.HostAdd(ctx, "tenant-a", "host-a", hostBundle, false) },
-		func() error { return service.HostAdd(ctx, "tenant-a", "host-b", otherBundle, false) },
+		func() error { return service.HostAdd(ctx, "tenant-a", "host-a", hostBundle) },
+		func() error { return service.HostAdd(ctx, "tenant-a", "host-b", otherBundle) },
 		func() error { return service.ReceiverAdd(ctx, config, service.Broker, receiverBundle) },
 		func() error {
 			service.Storage = nil
-			return service.HostAdd(ctx, "tenant-a", "host-c", plainBundle, false)
+			return service.HostAdd(ctx, "tenant-a", "host-c", plainBundle)
 		},
 	} {
 		if err := step(); err != nil {

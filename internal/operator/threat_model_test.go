@@ -704,6 +704,10 @@ func kfakeService(t *testing.T) (*kfake.Cluster, *Service, func()) {
 	if err := cluster.CreateTopic(OperatorTopic, 1, map[string]string{"retention.ms": "-1"}); err != nil {
 		t.Fatal(err)
 	}
+	// wherry.requests, as operator init leaves it.
+	if err := cluster.CreateTopic(RequestsTopic, 1, requestTopicConfigs); err != nil {
+		t.Fatal(err)
+	}
 	// wherry.traces, as operator init leaves it.
 	if err := cluster.CreateTopic(telemetry.TraceTopic(""), 1, traceConfigs); err != nil {
 		t.Fatal(err)
@@ -850,7 +854,7 @@ func TestLoadNamesALaterReleasesRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	later := bytes.Replace(raw[0].Value, []byte(`"v":1`), []byte(`"v":2`), 1)
+	later := bytes.Replace(raw[0].Value, []byte(`"v":2`), []byte(`"v":3`), 1)
 	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: OperatorTopic, Value: later}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
@@ -867,7 +871,7 @@ func TestLoadNamesALaterReleasesRecord(t *testing.T) {
 
 // A later release's record beside a corrupt one, in either order, takes the reset advice and lists both.
 func TestLoadListsEveryUndecodableRecord(t *testing.T) {
-	newer := []byte(`{"v":2,"kind":"host"}`)
+	newer := []byte(`{"v":3,"kind":"host"}`)
 	corrupt := []byte("not a record")
 	for _, raw := range [][]rawRecord{{{0, newer}, {1, corrupt}}, {{0, corrupt}, {1, newer}}} {
 		_, err := load(raw)
@@ -880,7 +884,7 @@ func TestLoadListsEveryUndecodableRecord(t *testing.T) {
 
 // An unknown member at this release's version folds; a higher version is a later release's; a duplicate name is refused.
 func TestDecodeRecordToleratesUnknownMembers(t *testing.T) {
-	encoded, err := EncodeRecord(Record{Kind: "host", Tenant: "tenant-a", Host: "host-a"})
+	encoded, err := EncodeRecord(Record{Kind: "host", Tenant: "tenant-a", Host: "host-a", Enrolment: "AAAAAAAAAAAAAAAAAAAAAA"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -891,10 +895,10 @@ func TestDecodeRecordToleratesUnknownMembers(t *testing.T) {
 	}
 	state, err := load([]rawRecord{{Offset: 0, Value: tenant}, {Offset: 1, Value: extra}})
 	if err != nil || state.Hosts[TenantPrincipal("tenant-a", "host-a")].Name != "host-a" {
-		t.Fatalf("unknown member at v1: %v, %v; want it folded", state.Hosts, err)
+		t.Fatalf("unknown member at v2: %v, %v; want it folded", state.Hosts, err)
 	}
-	if _, err := DecodeRecord(bytes.Replace(encoded, []byte(`"v":1`), []byte(`"v":2`), 1)); !errors.Is(err, ErrNewerRecord) {
-		t.Fatalf("v2 record: %v; want ErrNewerRecord", err)
+	if _, err := DecodeRecord(bytes.Replace(encoded, []byte(`"v":2`), []byte(`"v":3`), 1)); !errors.Is(err, ErrNewerRecord) {
+		t.Fatalf("v3 record: %v; want ErrNewerRecord", err)
 	}
 	if _, err := DecodeRecord(append([]byte(`{"host":"host-b",`), encoded[1:]...)); err == nil || errors.Is(err, ErrNewerRecord) {
 		t.Fatalf("duplicate name: %v; want refused as undecodable", err)
@@ -1016,8 +1020,8 @@ func TestRevocationProbeRetriesWhileBrokersSettle(t *testing.T) {
 		t.Fatal(err)
 	}
 	revocationBounds(t, service, "1", "1", "1")
-	window, interval := probeWindow, probeInterval
-	defer func() { probeWindow, probeInterval = window, interval }()
+	window, interval := ProbeWindow, probeInterval
+	defer func() { ProbeWindow, probeInterval = window, interval }()
 	probeInterval = time.Millisecond
 	probe := func(answers ...error) (func(context.Context, string, string) error, *int, *string) {
 		calls, password := 0, ""
@@ -1054,7 +1058,7 @@ func TestRevocationProbeRetriesWhileBrokersSettle(t *testing.T) {
 	if step := stepThree(service.RevokeReceiver(ctx, "receiver-c", time.Millisecond, failed, nil)); step.Complete || *calls != 1 {
 		t.Fatalf("failed probe: step %+v after %d probes; want one failed probe", step, *calls)
 	}
-	probeWindow = 5 * time.Millisecond
+	ProbeWindow = 5 * time.Millisecond
 	refused, _, password := probe(errLoginRefused)
 	step := stepThree(service.RevokeReceiver(ctx, "receiver-c", time.Millisecond, refused, nil))
 	if step.Complete || !errors.Is(step.Err, errLoginRefused) {

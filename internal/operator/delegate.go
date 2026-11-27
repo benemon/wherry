@@ -14,6 +14,7 @@ import (
 var OperatorACLs = []ACL{
 	{OperatorPrincipal, "cluster", "kafka-cluster", false, []string{"ALTER", "ALTER_CONFIGS"}},
 	{OperatorPrincipal, "topic", "wherry.", true, []string{"CREATE", "ALTER_CONFIGS", "READ", "WRITE"}},
+	{OperatorPrincipal, "topic", RequestsTopic, false, []string{"DELETE"}},
 	{OperatorPrincipal, "group", PoolGroup(""), true, []string{"ALTER_CONFIGS", "DESCRIBE"}},
 }
 
@@ -39,6 +40,9 @@ func Delegate(ctx context.Context, superUser *kgo.Client, password string) error
 	}
 	service := &Service{Operator: superUser}
 	if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
+		return err
+	}
+	if err := service.EnsureRequestsTopic(ctx); err != nil {
 		return err
 	}
 	return setSCRAM(ctx, superUser, OperatorPrincipal, password)
