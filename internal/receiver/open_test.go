@@ -533,21 +533,31 @@ func TestOpenWaitListsAgainOnlyOnARetriablePartitionError(t *testing.T) {
 	}{
 		{"retriable then listed", 3, kerr.OffsetNotAvailable.Code, kgo.AckAccept, "", false, func(n int32) bool { return n == 4 }},
 		{"non-retriable", -1, kerr.UnknownServerError.Code, kgo.AckRelease, "read pool events: " + kerr.UnknownServerError.Error(), false, func(n int32) bool { return n == 1 }},
-		{"retriable past the deadline", -1, kerr.OffsetNotAvailable.Code, kgo.AckRelease, "read pool events: " + context.Canceled.Error(), true, func(n int32) bool { return n > 2 }},
+		{"retriable past the deadline", -1, kerr.OffsetNotAvailable.Code, kgo.AckRelease, "read pool events: request ListOffsets has 1 separate shard errors, first: " + context.Canceled.Error(), true, func(n int32) bool { return n == 3 }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			record := f.submit(t, f.host, nil)
 			topic := operator.PoolEventsTopic(testPool)
 			seen := &atomic.Int32{}
+			ctx, cancel := context.WithCancel(f.ctx)
+			defer cancel()
+			ended := make(chan struct{})
 			f.cluster.ControlKey(int16(kmsg.ListOffsets), func(request kmsg.Request) (kmsg.Response, error, bool) {
 				f.cluster.KeepControl()
 				listed := request.(*kmsg.ListOffsetsRequest)
 				if listed.IsolationLevel != 0 || len(listed.Topics) != 1 || listed.Topics[0].Topic != topic || listed.Topics[0].Partitions[0].Timestamp != -1 {
 					return nil, nil, false
 				}
-				if n := seen.Add(1); test.failures >= 0 && n > test.failures {
+				n := seen.Add(1)
+				if test.failures >= 0 && n > test.failures {
 					return nil, nil, false
+				}
+				// Holding the third response until the run ends puts the cancel inside that listing, which then fails
+				// with the context's error.
+				if test.cancels && n == 3 {
+					cancel()
+					f.cluster.SleepControl(func() { <-ended })
 				}
 				response := listed.ResponseKind().(*kmsg.ListOffsetsResponse)
 				failed := kmsg.ListOffsetsResponseTopic{Topic: topic}
@@ -557,16 +567,10 @@ func TestOpenWaitListsAgainOnlyOnARetriablePartitionError(t *testing.T) {
 				response.Topics = append(response.Topics, failed)
 				return response, nil, true
 			})
-			ctx, cancel := context.WithCancel(f.ctx)
-			defer cancel()
 			done := f.executing(t, ctx, record, 1)
-			if test.cancels {
-				for seen.Load() <= 2 && f.ctx.Err() == nil {
-					time.Sleep(10 * time.Millisecond)
-				}
-				cancel()
-			}
-			if status := <-done; status != test.want || !strings.Contains(f.logs.String(), test.logged) || !test.listings(seen.Load()) {
+			status := <-done
+			close(ended)
+			if status != test.want || !strings.Contains(f.logs.String(), test.logged) || !test.listings(seen.Load()) {
 				t.Fatalf("status %v after %d listings, want %v; logs:\n%s", status, seen.Load(), test.want, f.logs.String())
 			}
 		})
