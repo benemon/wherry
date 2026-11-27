@@ -26,7 +26,7 @@ names only its line numbers, and no `~` is expanded:
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `broker` | string | required | Kafka bootstrap address, `host:port`; host bundles name it, and receiver bundles unless the receiver's file names another |
+| `broker` | string | required | Kafka bootstrap address, `host:port`; host bundles name it, and receiver bundles unless the receiver's file names another. On a cluster of several brokers, use a DNS name that resolves to every broker: a host connects through this one address, and the connection tries each resolved address in turn when one is unreachable |
 | `password_file` | string | required | `wherry.operator`'s password file, `operator.password`; a relative path is in the working directory |
 | `ca_cert` | string | none | PEM of a CA, or several concatenated, the operator's Kafka connection trusts beside the machine's trust store; `operator init --ca-cert` writes it ([Broker and S3 trust](security.md#broker-and-s3-trust)) |
 | `tracing` | bool | `false` | write a span per operator command to the trace topics through the operator's Kafka connection ([Tracing](tracing.md)) |
