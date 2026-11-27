@@ -428,21 +428,17 @@ holds another key than the state directory`.
 Each platform runs that command in the receiver's place. The steps below use
 the names of the install guides' examples.
 
-::: warning Not yet run on a platform
-The steps for systemd, Kubernetes and Nomad below have not yet been run against
-a live receiver. Check each step against your platform before you rely on it.
-:::
-
 ### On systemd
 
 The unit's bundle is a credential, at a path that exists only while the unit
 runs, so the rotation reads a copy of the configuration that names the
-bundle's file. As root, as the unit runs:
+bundle's file. As root, as the unit runs, with the unit's path to `wherry`,
+which sudo's default `secure_path` leaves out:
 
 ```sh
 systemctl stop wherry-receiver
 sed 's|^bundle:.*|bundle: /etc/wherry/receiver.bundle|' /etc/wherry/config.yaml > /run/wherry-rotate.yaml
-wherry receiver rotate --key --config-file /run/wherry-rotate.yaml
+/usr/local/bin/wherry receiver rotate --key --config-file /run/wherry-rotate.yaml
 rm /run/wherry-rotate.yaml
 systemctl start wherry-receiver
 ```
@@ -462,8 +458,14 @@ kubectl delete job wherry-receiver-rotate-key
 kubectl scale deployment wherry-receiver --replicas=1
 ```
 
-`rotate-key.yaml`, with the Deployment's image and, where the Deployment's
-pod has an `fsGroup`, the same one:
+`rotate-key.yaml`, with the Deployment's image, its ConfigMap and Secret and,
+where the Deployment's pod has an `fsGroup`, the same one. The example's
+kustomization adds a hash of their content to the ConfigMap's and Secret's
+names, so take them from the Deployment:
+
+```sh
+kubectl get deployment wherry-receiver -o jsonpath='{range .spec.template.spec.volumes[*]}{.name}={.configMap.name}{.secret.secretName}{"\n"}{end}'
+```
 
 ```yaml
 apiVersion: batch/v1
@@ -488,8 +490,8 @@ spec:
             - {name: bundle, mountPath: /etc/wherry/bundle, readOnly: true}
             - {name: state, mountPath: /var/lib/wherry}
       volumes:
-        - {name: config, configMap: {name: wherry-receiver-config}}
-        - {name: bundle, secret: {secretName: wherry-receiver-bundle, defaultMode: 0440}}
+        - {name: config, configMap: {name: wherry-receiver-config-HASH}}
+        - {name: bundle, secret: {secretName: wherry-receiver-bundle-HASH, defaultMode: 0440}}
         - {name: state, persistentVolumeClaim: {claimName: wherry-receiver-state}}
 ```
 
