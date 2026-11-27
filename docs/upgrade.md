@@ -79,30 +79,12 @@ match on them.
 
 ## Host credential rotation
 
-A host now changes its Kafka password by a request the operator approves
-([Approve a host's credential request](operations-operator.md#approve-a-host-s-credential-request)),
-and `wherry operator revoke --tenant TENANT --host HOST` replaces
-`add --host --force`, which is gone: `add --host` of an existing host fails
-with `host exists`. The operator records the new state at a new record
-version, which an older wherry cannot read: a host or receiver not yet
-upgraded stops at the first such record with `upgrade this wherry`. Upgrade in
-this order:
-
-1. Upgrade every host and every receiver, as in [Upgrade wherry](#upgrade-wherry).
-2. Upgrade the operator's binary.
-3. Run `wherry operator init` again with the Kafka super user. It creates
-   `wherry.requests` and grants `wherry.operator` `Delete` on it; until then
-   `wherry operator check` fails on them.
-4. For each host, run `wherry operator revoke --tenant TENANT --host HOST`,
-   hand over the new bundle, and have the host's user run
-   `wherry host init BUNDLE`, which files a credential request. Approve it.
-
-A host enrolled before this release has no credential ID until step 4:
-`wherry host rotate --scram` refuses it with `no credential ID is recorded for
-this host; ask the operator to revoke and re-enrol it`, and
-`wherry operator list requests` and `wherry operator check` report it as
-`tenant=<tenant> host=<host> has no credential ID; revoke and re-enrol it`. Each host is offline from
-its `revoke` until its user installs the new bundle.
+A clean break, as every pre-1.0 change ([ADR-0032](design.md)); no
+compatibility path remains. This release reads only the `wherry.operator`
+records it writes, so an existing deployment is reset
+([Reset a deployment](operations-operator.md#reset-a-deployment)) and its
+hosts enrolled again. `wherry operator revoke --tenant TENANT --host HOST`
+replaces `add --host --force`, which is gone.
 
 ## Collected outputs and non-git continue
 

@@ -167,8 +167,8 @@ the break.
 `apply --dry-run` creates nothing, and reads a missing
 `wherry.operator` as holding no records. Options parse as Go flags,
 in the forms `--name value`, `--name=value` and `-name value`, and the last of
-a repeated option other than a resource flag wins. Options other than `--dry-run`, `--force`, `--all`,
-`--scram` and `--storage` take a value, and options can appear anywhere after `operator`. An option without a
+a repeated option other than a resource flag wins. Options other than `--dry-run`, `--force`, `--all`
+and `--storage` take a value, and options can appear anywhere after `operator`. An option without a
 value fails with `flag needs an argument: -<name>`, or with the verb's usage when it is a resource flag, one no operator command
 takes with `flag provided but not defined: -<name>`, and one the command does
 not take with `unknown option --<name>`. `--suspect-key` is given once per key;
@@ -821,7 +821,6 @@ Tenant command states:
 | `storage` | Refuse | Record the pair in the working directory | Refuse |
 | `add --host` | Refuse | Add; refuse live, revoking or ended hosts | Refuse |
 | `revoke` | Refuse | Give a live host a new password and bundle; refuse revoking or ended hosts | Refuse |
-| `rotate --scram` | Refuse | Ask a live host for a credential request; refuse revoking or ended hosts | Refuse |
 | `rotate --storage` | Refuse | Rewrite a live host's kept bundle; refuse revoking or ended hosts | Refuse |
 | `remove --host` | Refuse | Revoke; retry from its record; converge when already ended | Refuse |
 | `remove --tenant` | Refuse | End entitlements, revoke hosts, end tenant, remove bundles | Converge and retry bundle removal |
@@ -956,14 +955,14 @@ acknowledgement as `suspend` does, printing
 
 ```sh
 wherry operator rotate --pool POOL [--suspect-key KID]...
-wherry operator rotate --tenant TENANT --host HOST --scram
 wherry operator rotate --tenant TENANT --host HOST --storage
 ```
 
-`rotate` replaces a secret in use: a suspended pool's key, with `--scram` a
-host's Kafka password, or with `--storage` the S3 key pair in a host's kept
-bundle. A host takes `--scram` or `--storage`, and an empty `--suspect-key` is
-refused.
+`rotate` replaces a secret in use: a suspended pool's key, or with `--storage`
+the S3 key pair in a host's kept bundle. An empty `--suspect-key` is refused.
+A host's Kafka password is rotated from the host, with
+[`host rotate --scram`](#wherry-host-rotate), and approved here with
+[`approve`](#wherry-operator-approve).
 
 #### `rotate --pool POOL`
 
@@ -1021,17 +1020,6 @@ v0.1.2 is covered too. The list can name a credential the envelope did not
 hold; it never omits one it did, so rotating every listed credential covers
 the exposure.
 
-#### `rotate --tenant TENANT --host HOST --scram`
-
-Asks a live host for a new Kafka password: it records a `rotate` record for
-the host on `wherry.operator` and prints nothing. The host's next command of
-any kind, once connected, files a [credential request](#wherry-operator-approve),
-or sends its pending one again, as
-[`host rotate --scram`](#wherry-host-rotate) does; a request decided after the
-record, approved or rejected, answers it. The password changes only when you
-approve that request. It takes no lock. It refuses a tenant or host that does
-not exist, is revoking or has ended.
-
 #### `rotate --tenant TENANT --host HOST --storage`
 
 Rewrites the kept bundle, `bundles/hosts/<tenant>/<host>.bundle`, of a live
@@ -1063,8 +1051,10 @@ A host asks for a new Kafka password with a credential request, which
 [`host init`](#wherry-host-init) write to `wherry.requests`. The request holds
 the salt, iterations and salted form of a password the host generated, signed
 with the host key, and names the credential ID it replaces; the password
-itself stays on the host. `approve ID` approves the request with that ID, and
-`approve --all` every pending request.
+itself stays on the host. A request ID, like a credential ID, is 16 random
+bytes in lowercase hex: 32 characters, such as
+`3f9c0a1e7b5d4c2a9e8f6b1d0c7a5e3f`. `approve ID` approves the request with
+that ID, and `approve --all` every pending request.
 [`list requests`](#wherry-operator-list) shows what is there.
 
 `approve` holds the [operator lock](operations-operator.md#concurrent-operator-commands)
@@ -1081,9 +1071,11 @@ from before its first read to its exit. It:
    bytes, a 64-byte salted password and 4096 to 16384 iterations, records that
    its approval has begun, sets the salted password as the host's
    SCRAM-SHA-512 credential, records the decision and prints `approved <id>`;
-5. deletes the decided requests from `wherry.requests`, keeping the undecided
-   ones and the copies of an open approval; undecided requests stay until a
-   pass decides them or records them expired.
+5. moves the log start of `wherry.requests` past the decided requests, so no
+   client can fetch them, keeping the undecided ones and the copies of an open
+   approval; undecided requests stay until a pass decides them or records them
+   expired. The bytes stay on the brokers' disks
+   ([The requests topic](security.md#the-requests-topic)).
 
 A request whose credential ID is no longer the host's is `stale` and is never
 approved; the host files a new one. `approve ID` of a request that is not
@@ -1092,7 +1084,8 @@ topic does not hold, and exits non-zero; of an ID two hosts' requests share it
 names both hosts and does nothing.
 
 When setting the credential fails, the approval stays open: the pass goes on
-with the other requests, deletes the decided ones and exits non-zero. An error
+with the other requests, moves the log start past the decided ones and exits
+non-zero. An error
 the broker returns for the user is printed alone, and changed nothing. A
 timeout, a lost connection or an interrupt prints the error and:
 
@@ -1668,9 +1661,7 @@ before anything else. When the current key is the next key's, it renames
 `<host_key>.next`. It fails when the current key is neither.
 
 `host rotate --key` sends no pending credential request again under the new
-key. Run `host rotate --scram`, or the operator's
-[`rotate --scram`](#rotate-tenant-tenant-host-host-scram) has the host do it at
-its next command.
+key. Run `host rotate --scram` to send it again, signed with the new key.
 
 #### `host rotate --scram`
 
@@ -1686,22 +1677,33 @@ pending; sent again`. A host with no credential ID recorded, one enrolled
 before host credential rotation, is refused with `no credential ID is recorded
 for this host; ask the operator to revoke and re-enrol it`.
 
-Every host command, `host mcp` included, once connected:
+Every host command, once connected:
 
 - uses the requested password once it is approved, rewriting the bundle with
   it, removes `scram.next`, and prints `credential <id> approved; now in use`;
 - removes `scram.next` once its request can no longer be approved, printing
   `request <id> rejected`, `expired` or `void`, or `request <id> superseded`
-  when the host's credential ID has changed since it was filed;
-- files a request, or sends the pending one again, when the operator asked for
-  one with [`rotate --scram`](#rotate-tenant-tenant-host-host-scram).
+  when the host's credential ID has changed since it was filed.
 
-A command connects with the bundle password, and with the requested one when
-the broker refuses the first. One that connects with the requested password
-while the approval is under way prints `approval of <id> is in progress` and
-goes on. When the broker accepts neither, the command fails with `neither the
-bundle password nor the requested one is accepted; ask the operator to revoke
-and re-enrol this host`.
+A command logs in on the bundle's broker alone, with the bundle password, and
+with the requested one when that broker refuses the first. While the broker
+refuses both and a request is pending, the broker may not have applied an
+approval yet, and the command tries again for up to 2 minutes. One that
+connects with the requested password while the approval is under way prints
+`approval of <id> is in progress` and goes on. When the broker accepts neither,
+the command fails with `neither the bundle password nor the requested one is
+accepted; ask the operator to revoke and re-enrol this host`.
+
+Brokers apply an approved password in turn. Right after an approval, a broker
+other than the bundle's can still refuse the password the host now uses, and
+the client does not retry that refusal: the command fails, printing `broker <id>
+at <host:port> refused this host's password; a broker refuses a credential an
+operator has just approved until it has applied it: run the command again`, and
+running it again succeeds once that broker has applied the password.
+
+`wherry host mcp` logs in with the password its bundle holds when it starts and
+keeps it. After an approval it fails at its next re-authentication, with a tool
+error saying to restart it; restart it to use the new password.
 
 One process at a time changes the bundle and `scram.next`: each takes a lock
 on `scram.lock` beside them, which is never removed, and reads

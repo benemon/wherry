@@ -76,15 +76,16 @@ each new one, and no password passes between you.
    again while the request is pending and it sends the same request, printing
    `request <id> is pending; sent again`.
 
-2. Ask your operator to approve the request. The operator can also ask the
-   host for one with `wherry operator rotate --scram`; your next command of
-   any kind then files it.
+2. Ask your operator to approve the request.
 
 3. Your next command after the approval writes the password into the bundle,
    removes `scram.next` and prints `credential <id> approved; now in use`. A
    rejected or expired request is removed the same way, printing `rejected` or
-   `expired`; run the rotation again for a new one. A running
-   `wherry host mcp` follows the change without a restart.
+   `expired`; run the rotation again for a new one.
+
+4. Restart any running `wherry host mcp`. It logs in with the password its
+   bundle held when it started, so after the approval it fails at its next
+   re-authentication, with a tool error saying to restart it.
 
 After `wherry host rotate --key`, the pending request is signed with the old
 key and the operator cannot approve it: run `wherry host rotate --scram` to
@@ -94,15 +95,22 @@ Leave `scram.next` and `scram.lock` in place. `scram.next` holds the requested
 password until the bundle does, and `scram.lock` keeps two wherry processes of
 the host from changing the files at once. A command that stops at any point
 leaves the files for the next one to go on from: a request that was written
-and not sent is sent by the next `wherry host rotate --scram`, or by the
-host's next command once the operator has run `rotate --scram`.
+and not sent is sent by the next `wherry host rotate --scram`.
+
+A command logs in on the bundle's broker alone. Brokers apply an approved
+password in turn, so right after an approval another broker can still refuse
+the password the host now uses, and the command fails on that broker: the
+client does not retry it. Run the command again once that broker has applied
+the password.
 
 | Message | Meaning | Next step |
 | --- | --- | --- |
 | `no credential ID is recorded for this host; ask the operator to revoke and re-enrol it` | The host was enrolled before host credential rotation. | Ask the operator to run `wherry operator revoke` for the host, then run `wherry host init` with the new bundle. |
 | `approval of <id> is in progress` | The command connected with the requested password while the operator's approval is under way. | Nothing: the command goes on, and a later one uses the password once the approval is recorded. |
+| an MCP tool error, `the broker refused this host's password; if an operator approved a new credential for this host, restart this MCP server, which reads the bundle when it starts` | `wherry host mcp` still has the password from before the approval. | Restart `wherry host mcp`. |
 | `neither the bundle password nor the requested one is accepted; ask the operator to revoke and re-enrol this host` | The broker holds a password the host does not have. | Ask the operator to revoke the host's password, then run `wherry host init` with the new bundle. |
 | `could not read wherry.operator within 30s; nothing was changed` | The broker did not answer in time. | Run the command again. |
+| `broker <id> at <host:port> refused this host's password; a broker refuses a credential an operator has just approved until it has applied it: run the command again` | That broker has not yet applied the password the operator just approved. | Run the command again. |
 
 ## Replace a lost key
 

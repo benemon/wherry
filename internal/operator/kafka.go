@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
@@ -70,7 +71,7 @@ type StorageKeys struct {
 // the trace topics matches span names against.
 var SpanCommands = []string{"check", "pool apply", "receiver provision", "receiver reconfigure", "receiver reissue", "receiver remove",
 	"request approve", "request reject", "tenant add", "tenant host add", "tenant host refresh", "tenant host remove",
-	"tenant host reset", "tenant host rotate", "tenant pool add", "tenant pool remove", "tenant remove"}
+	"tenant host reset", "tenant pool add", "tenant pool remove", "tenant remove"}
 
 // marker is the root span of an operator command. names are the command's arguments as identity attributes; each is
 // attached only once it passes validateNames, the check every command applies, so an invalid argument the command
@@ -231,11 +232,6 @@ func ReplaceStorageKeys(path string, keys StorageKeys) (err error) {
 // BundleKafkaOpts are KafkaOpts for bundle's principal.
 func BundleKafkaOpts(bundle Bundle, roots *x509.CertPool) ([]kgo.Opt, error) {
 	return KafkaOpts(bundle.Broker, bundle.Principal, bundle.Password, roots)
-}
-
-// HostKafkaOpts is BundleKafkaOpts with the SCRAM credential from auth, which franz-go calls at each authentication.
-func HostKafkaOpts(bundle Bundle, roots *x509.CertPool, auth func(context.Context) (scram.Auth, error)) ([]kgo.Opt, error) {
-	return kafkaOpts(bundle.Broker, bundle.Principal, bundle.Password, roots, func(scram.Auth) sasl.Mechanism { return scram.Sha512(auth) })
 }
 
 // ErrNoCertificate is a ca_cert from which Go appends no certificate: the value is set, and is not PEM Go reads.
@@ -1731,13 +1727,14 @@ func Password() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(random), nil
 }
 
-// CredentialID is a new identifier for a host credential.
+// CredentialID is a new identifier for a host credential or request: 16 random bytes in lowercase hex, which never
+// begins with "-", so a command line takes it as an operand.
 func CredentialID() (string, error) {
 	random := make([]byte, 16)
 	if _, err := rand.Read(random); err != nil {
 		return "", err
 	}
-	return base64.RawURLEncoding.EncodeToString(random), nil
+	return hex.EncodeToString(random), nil
 }
 
 // setSCRAM creates user's SCRAM credential, or replaces it, with password.

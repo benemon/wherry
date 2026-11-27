@@ -136,7 +136,7 @@ func (f *fixture) rotate(owner, topic string, at time.Time) ed25519.PrivateKey {
 // operator appends record to wherry.operator stamped at.
 func (f *fixture) operator(at time.Time, record operator.Record) {
 	f.t.Helper()
-	record.Version, record.AtMS = 1, at.UnixMilli()
+	record.Version, record.AtMS = operator.RecordVersion, at.UnixMilli()
 	f.produce(operator.OperatorTopic, "", must(f.t)(operator.EncodeRecord(record)), at)
 }
 

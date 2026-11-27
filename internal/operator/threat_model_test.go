@@ -142,7 +142,7 @@ func TestTranscriptTopicACLsAreExactlyItsWritersAndReaders(t *testing.T) {
 func TestProgressTopicACLsAreExactlyItsWriterAndPoolPeers(t *testing.T) {
 	state := modelState(t)
 	config := modelConfig("receiver-c", "pool-a")
-	if err := apply(&state, Record{Version: 1, Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &config, AtMS: 1}); err != nil {
+	if err := apply(&state, Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &config, AtMS: 1}); err != nil {
 		t.Fatal(err)
 	}
 	own, read, operator := []string{"READ", "WRITE", "DESCRIBE"}, []string{"READ", "DESCRIBE"}, []string{"CREATE", "ALTER_CONFIGS", "READ", "WRITE"}
@@ -402,7 +402,7 @@ func TestRevocationRefusesAWaitBelowTheBrokersLongestTimeout(t *testing.T) {
 
 func TestRevokingPrincipalIsGrantedNothing(t *testing.T) {
 	state := modelState(t)
-	for _, record := range []Record{{Version: 1, Kind: "revoking", Receiver: "receiver-a", AtMS: 1}, {Version: 1, Kind: "revoking", Tenant: "tenant-a", Host: "host-a", AtMS: 1}} {
+	for _, record := range []Record{{Kind: "revoking", Receiver: "receiver-a", AtMS: 1}, {Kind: "revoking", Tenant: "tenant-a", Host: "host-a", AtMS: 1}} {
 		encoded, err := EncodeRecord(record)
 		if err != nil {
 			t.Fatal(err)
@@ -622,7 +622,7 @@ func TestShareGroupStartsAtEarliest(t *testing.T) {
 func TestReceiverAcceptsOnlyItsRecordedConfiguration(t *testing.T) {
 	terms := modelTerms()
 	config := modelConfig("receiver-b", "pool-a")
-	record := Record{Version: 1, Kind: "receiver", Pool: "pool-a", Receiver: "receiver-b", Config: &config, AtMS: 1}
+	record := Record{Kind: "receiver", Pool: "pool-a", Receiver: "receiver-b", Config: &config, AtMS: 1}
 	if err := ValidateReceiverRecord(record, "receiver-a", terms); err == nil {
 		t.Fatal("accepted another receiver's configuration")
 	}
@@ -674,10 +674,10 @@ func modelTopic(pool string) string { return SignatureTopic(pool, "agent-a", nil
 
 func modelState(t *testing.T) State {
 	terms := modelTerms()
-	records := []Record{{Version: 1, Kind: "tenant", Tenant: "tenant-a", AtMS: 1}, {Version: 1, Kind: "tenant", Tenant: "tenant-b", AtMS: 1}, {Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}, {Version: 1, Kind: "pool", Pool: "pool-b", Terms: &terms, AtMS: 1}, {Version: 1, Kind: "host", Tenant: "tenant-a", Host: "host-a", AtMS: 1}, {Version: 1, Kind: "host", Tenant: "tenant-b", Host: "host-b", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-a", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-b", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-a", AtMS: 1}}
+	records := []Record{{Kind: "tenant", Tenant: "tenant-a", AtMS: 1}, {Kind: "tenant", Tenant: "tenant-b", AtMS: 1}, {Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}, {Kind: "pool", Pool: "pool-b", Terms: &terms, AtMS: 1}, {Kind: "host", Enrolment: "00000000000000000000000000000000", Tenant: "tenant-a", Host: "host-a", AtMS: 1}, {Kind: "host", Enrolment: "00000000000000000000000000000000", Tenant: "tenant-b", Host: "host-b", AtMS: 1}, {Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-a", AtMS: 1}, {Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-b", AtMS: 1}, {Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-a", AtMS: 1}}
 	for _, config := range []ReceiverConfig{modelConfig("receiver-a", "pool-a"), modelConfig("receiver-b", "pool-b")} {
 		copy := config
-		records = append(records, Record{Version: 1, Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &copy, AtMS: 1})
+		records = append(records, Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &copy, AtMS: 1})
 	}
 	state, err := Fold(records)
 	if err != nil {
@@ -884,7 +884,7 @@ func TestLoadListsEveryUndecodableRecord(t *testing.T) {
 
 // An unknown member at this release's version folds; a higher version is a later release's; a duplicate name is refused.
 func TestDecodeRecordToleratesUnknownMembers(t *testing.T) {
-	encoded, err := EncodeRecord(Record{Kind: "host", Tenant: "tenant-a", Host: "host-a", Enrolment: "AAAAAAAAAAAAAAAAAAAAAA"})
+	encoded, err := EncodeRecord(Record{Kind: "host", Tenant: "tenant-a", Host: "host-a", Enrolment: strings.Repeat("0", 32)})
 	if err != nil {
 		t.Fatal(err)
 	}

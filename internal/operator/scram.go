@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/signed"
-	"github.com/benemon/wherry/internal/telemetry"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/twmb/franz-go/pkg/kadm"
 )
@@ -104,7 +103,7 @@ func DecodeCredentialRequest(encoded []byte) (CredentialRequest, []byte, error) 
 }
 
 func validRequest(request CredentialRequest) bool {
-	return request.Version == 1 && ValidCredentialID(request.ID) && validateNames(request.Tenant, request.Host) == nil && ValidCredentialID(request.Replaces)
+	return request.Version == 1 && validCredentialID(request.ID) && validateNames(request.Tenant, request.Host) == nil && validCredentialID(request.Replaces)
 }
 
 func payloadDigest(payload []byte) string {
@@ -446,20 +445,4 @@ func CredentialReport(state State) []string {
 	}
 	slices.Sort(lines)
 	return lines
-}
-
-// RotateHostSCRAM records that a live host is to file a SCRAM rotation request at its next command.
-func (service *Service) RotateHostSCRAM(ctx context.Context, tenant, host string) (err error) {
-	ctx, span := service.marker(ctx, "tenant host rotate", telemetry.AttrTenant.String(tenant), telemetry.AttrHost.String(host))
-	defer ended(span, &err)
-	state, err := service.LoadState(ctx)
-	if err != nil {
-		return err
-	}
-	principal := TenantPrincipal(tenant, host)
-	if _, ok := state.Hosts[principal]; !ok || state.Ended[principal] || state.Revoking[principal] {
-		return errors.New("no live host by that name")
-	}
-	_, err = service.appendChecked(ctx, []byte("rotate."+principal), Record{Kind: "rotate", Tenant: tenant, Host: host})
-	return err
 }

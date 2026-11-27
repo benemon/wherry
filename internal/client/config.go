@@ -287,17 +287,17 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 			return nil, err
 		}
 	}
-	bundle, flag, err := connectPassword(config.Bundle, roots)
+	bundle, flag, err := connectBundle(config.Bundle, roots)
 	if err != nil {
 		return nil, operator.ExplainUnknownAuthority(err, config.ca())
 	}
-	auth := &scramAuth{bundle: config.Bundle, roots: roots, flag: flag}
-	opts, err := operator.HostKafkaOpts(bundle, roots, auth.auth)
+	// The password is the one T-H0 found every broker accepts, for the life of the process.
+	opts, err := operator.BundleKafkaOpts(bundle, roots)
 	if err != nil {
 		return nil, fmt.Errorf("bundle: %w", err)
 	}
 	// Aborted transactions are a fenced holder's writes and must never be read.
-	kafka, err := kgo.NewClient(append(opts, kgo.FetchIsolationLevel(kgo.ReadCommitted()), kgo.WithHooks(auth))...)
+	kafka, err := kgo.NewClient(append(opts, kgo.FetchIsolationLevel(kgo.ReadCommitted()), kgo.WithHooks(refusedLogin{logger}))...)
 	if err != nil {
 		return nil, err
 	}
@@ -325,8 +325,7 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 			return nil, fmt.Errorf("tracing: %w", err)
 		}
 	}
-	host.bundlePath, host.scram = config.Bundle, auth
-	auth.host.Store(host)
+	host.bundlePath, host.connectedWith = config.Bundle, flag
 	if err := host.syncSCRAM(context.Background(), false, logger.Writer()); err != nil {
 		host.Close()
 		return nil, err

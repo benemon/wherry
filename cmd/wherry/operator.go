@@ -37,7 +37,7 @@ var operatorUsage = map[string]string{
 	"deny":    "usage: wherry operator deny --tenant TENANT --pool POOL",
 	"suspend": "usage: wherry operator suspend --pool POOL",
 	"resume":  "usage: wherry operator resume --pool POOL",
-	"rotate":  "usage: wherry operator rotate --pool POOL [--suspect-key KID]... | rotate --tenant TENANT --host HOST --scram|--storage",
+	"rotate":  "usage: wherry operator rotate --pool POOL [--suspect-key KID]... | rotate --tenant TENANT --host HOST --storage",
 	"approve": "usage: wherry operator approve ID|--all",
 	"reject":  "usage: wherry operator reject ID",
 	"revoke":  "usage: wherry operator revoke --tenant TENANT --host HOST",
@@ -68,7 +68,7 @@ var operatorForms = map[string][]operatorForm{
 	"deny":    {{resources: []string{"pool", "tenant"}}},
 	"suspend": {{resources: []string{"pool"}}},
 	"resume":  {{resources: []string{"pool"}}},
-	"rotate":  {{resources: []string{"pool"}, options: []string{"suspect-key"}}, {resources: []string{"host", "tenant"}, options: []string{"scram", "storage"}}},
+	"rotate":  {{resources: []string{"pool"}, options: []string{"suspect-key"}}, {resources: []string{"host", "tenant"}, options: []string{"storage"}, required: "storage"}},
 	"approve": {{options: []string{"all"}}},
 	"reject":  {{}},
 	"revoke":  {{resources: []string{"host", "tenant"}}},
@@ -322,12 +322,6 @@ func runOperator(args []string, stdout, stderr io.Writer) (err error) {
 		return nil
 	case "rotate":
 		if host != "" {
-			if (options["scram"] == "") == (options["storage"] == "") {
-				return errors.New(operatorUsage["rotate"])
-			}
-			if options["scram"] != "" {
-				return service.RotateHostSCRAM(ctx, tenant, host)
-			}
 			// The bundle must already be kept, so no directory is made.
 			bundle, err := bundlePath(dir, "hosts", false, tenant, host)
 			if err != nil {
@@ -670,7 +664,6 @@ func operatorArgs(args []string) ([]string, map[string]string, error) {
 	flags.Bool("dry-run", false, "")
 	flags.Bool("force", false, "")
 	flags.Bool("storage", false, "")
-	flags.Bool("scram", false, "")
 	flags.Bool("all", false, "")
 	// A resource flag names one object, so one given twice or empty fits no form.
 	resources := map[string]string{}
@@ -684,30 +677,7 @@ func operatorArgs(args []string) ([]string, map[string]string, error) {
 			return nil
 		})
 	}
-	// A request ID is raw URL base64 and can begin with "-", which the flag package would take for an option. An
-	// argument that is a request ID and no option's name, and is not the value of the option before it, is the
-	// operand of approve or reject wherever it sits.
-	var operand string
-	if slices.Contains(args, "approve") || slices.Contains(args, "reject") {
-		for i, arg := range args {
-			if !strings.HasPrefix(arg, "-") || !operator.ValidCredentialID(arg) || flags.Lookup(strings.TrimLeft(arg, "-")) != nil {
-				continue
-			}
-			if i > 0 && strings.HasPrefix(args[i-1], "-") && !strings.Contains(args[i-1], "=") {
-				if option := flags.Lookup(strings.TrimLeft(args[i-1], "-")); option != nil {
-					if boolean, ok := option.Value.(interface{ IsBoolFlag() bool }); !ok || !boolean.IsBoolFlag() {
-						continue
-					}
-				}
-			}
-			operand, args = arg, slices.Delete(slices.Clone(args), i, i+1)
-			break
-		}
-	}
 	positional, err := parseAnywhere(flags, args)
-	if operand != "" && len(positional) > 0 {
-		positional = slices.Insert(positional, 1, operand)
-	}
 	if err != nil {
 		// A resource flag given last with no value is empty like one given as --name=, not the flag package's error.
 		if name, missing := strings.CutPrefix(err.Error(), "flag needs an argument: -"); missing && slices.Contains(operatorResources, name) && len(positional) > 0 && operatorUsage[positional[0]] != "" {

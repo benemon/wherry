@@ -22,7 +22,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/benemon/wherry/internal/catalog"
@@ -182,17 +181,11 @@ type Credential struct {
 type Host struct {
 	kafka *kgo.Client
 	// reader reads every topic the host reads other than through its follower.
-	reader   *operator.Reader
-	key      ed25519.PrivateKey
-	tenant   string
-	host     string
-	stateDir string
-	// bundlePath is the bundle Connect read, and scram its auth function; a Host built by NewHost alone has neither.
-	bundlePath string
-	scram      *scramAuth
-	// rotating is host rotate --scram; resent is whether this process has sent a request since it started (T-H7).
-	rotating    bool
-	resent      atomic.Bool
+	reader      *operator.Reader
+	key         ed25519.PrivateKey
+	tenant      string
+	host        string
+	stateDir    string
 	credentials map[string]credential.Source
 	// catalog is the credential catalog this host reads variables through: a terms credential whose target is one of
 	// its variables resolves from that variable when the configuration names no source.
@@ -207,6 +200,9 @@ type Host struct {
 	// roots is the pool each bucket's certificate is verified against, Connect's; nil is the system roots alone.
 	roots  *x509.CertPool
 	logger *log.Logger
+	// bundlePath is the bundle Connect read, and connectedWith the request whose password it connected with, if any; a
+	// Host built by NewHost alone has neither.
+	bundlePath, connectedWith string
 	// follower is the host's reader of the tenant feed, kept while its context lasts.
 	followMu sync.Mutex
 	follower *follower
@@ -305,11 +301,6 @@ func (h *Host) load(ctx context.Context) (view, error) {
 	state, err := h.reader.Load(ctx)
 	if err != nil {
 		return view{}, err
-	}
-	if h.bundlePath != "" && h.scramDue(state) {
-		if err := h.syncSCRAM(ctx, false, h.logger.Writer()); err != nil {
-			h.logger.Printf("SCRAM credential: %v", err)
-		}
 	}
 	topics := map[string]string{}
 	for pool := range state.Entitlements[h.tenant] {

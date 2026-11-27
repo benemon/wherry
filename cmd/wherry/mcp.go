@@ -25,6 +25,7 @@ import (
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/twmb/franz-go/pkg/kerr"
 )
 
 // waitBound is the waiting budget, less submission time for submit.
@@ -151,6 +152,9 @@ func toolFailure(err error) error {
 		return invalidArgument(err.Error())
 	case errors.Is(err, context.Canceled):
 		return &toolError{Code: "CANCELLED", Message: "the request was cancelled"}
+	case errors.Is(err, kerr.SaslAuthenticationFailed):
+		// The server logs in with the password its bundle held when it started, and a promotion does not reach it.
+		return &toolError{Code: "UNAVAILABLE", Message: "the broker refused this host's password; if an operator approved a new credential for this host, restart this MCP server, which reads the bundle when it starts"}
 	case errors.Is(err, operator.ErrNewerRecord):
 		return &toolError{Code: "VERSION_SKEW", Message: "this wherry is older than the release that wrote the pool's records; upgrade wherry and restart this MCP server"}
 	}

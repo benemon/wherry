@@ -208,7 +208,6 @@ func TestHostLockKeepsARequestFiledAfterAVoidRead(t *testing.T) {
 	}
 	reached, resume := pauseAt(t, "read")
 	done := make(chan error, 2)
-	first.rotating = false
 	go func() { done <- first.syncSCRAM(context.Background(), false, io.Discard) }()
 	<-reached
 	go func() { done <- second.RotateSCRAM(context.Background(), io.Discard) }()
@@ -224,21 +223,31 @@ func TestHostLockKeepsARequestFiledAfterAVoidRead(t *testing.T) {
 	}
 }
 
-// Test 34: a revoke and a request by another process that land before a row takes the lock are what the row reads,
-// so it does not remove that request.
+// Test 34: an approval, a promotion and a new request by another process that land before a row takes the lock are what
+// the row reads, so it does not remove that request.
 func TestHostRowReadsUnderTheLock(t *testing.T) {
 	h := newHostFiles(t)
-	first := h.process(t)
+	// Sessions outlive the test, so every process stays logged in across the approval.
+	reauth := "60000"
+	if responses, err := kadm.NewClient(h.service.Operator).AlterBrokerConfigs(context.Background(), []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "connections.max.reauth.ms", Value: &reauth}}); err != nil || responses[0].Err != nil {
+		t.Fatalf("broker settings: %v %v", err, responses)
+	}
+	first, other := h.process(t), h.process(t)
 	reached, resume := pauseAt(t, "lock")
 	done := make(chan error, 1)
 	go func() { done <- first.syncSCRAM(context.Background(), false, io.Discard) }()
 	<-reached
 	scramStep = func(string) {}
-	if _, err := h.service.RevokeHostSCRAM(context.Background(), "tenant-a", "host-a", h.kept); err != nil {
+	if err := other.RotateSCRAM(context.Background(), io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	h.install(t)
-	if err := h.process(t).RotateSCRAM(context.Background(), io.Discard); err != nil {
+	if err := h.service.ApproveRequests(context.Background(), h.next(t), false, time.Now(), io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.syncSCRAM(context.Background(), false, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.RotateSCRAM(context.Background(), io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	filed := h.next(t)

@@ -53,7 +53,7 @@ func TestPoolLimitsDefaultWhereTermsLeaveThemOut(t *testing.T) {
 		t.Fatalf("defaults %#v, want 8 MiB and a 72h start_by_limit", got)
 	}
 	terms.OutputLimit = 2000
-	state, err = Fold([]Record{{Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}})
+	state, err = Fold([]Record{{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}})
 	if got := state.Pools["pool-a"]; err != nil || got.OutputLimit != 2000 {
 		t.Fatalf("limit %d, %v; want the terms' own", got.OutputLimit, err)
 	}
@@ -83,7 +83,7 @@ func TestReplyLimit(t *testing.T) {
 		t.Fatalf("YAML reply_limit %d, %v", parsed.ReplyLimit, err)
 	}
 	terms.OutputLimit = 1000
-	state, err = Fold([]Record{{Version: 1, Kind: "pool", Pool: "pool-a", Terms: &Terms{Agents: terms.Agents, DefaultAgent: terms.DefaultAgent,
+	state, err = Fold([]Record{{Kind: "pool", Pool: "pool-a", Terms: &Terms{Agents: terms.Agents, DefaultAgent: terms.DefaultAgent,
 		DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1, RequestPercentage: 1, OutputLimit: 1000}, AtMS: 1}})
 	if got := state.Pools["pool-a"].ReplyLimit; err != nil || got != 1000 {
 		t.Fatalf("reply limit %d, %v; want an output limit under the default", got, err)

@@ -3,7 +3,6 @@ package operator
 import (
 	"cmp"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	json "encoding/json/v2"
 	"errors"
@@ -264,7 +263,6 @@ type State struct {
 	Enrolments        map[string]string
 	Approvals         map[string]Approval
 	Decisions         map[string]map[string]string
-	RotateSCRAM       map[string]bool
 	Suspended         map[string]bool
 	// RotateRequested is the wherry.operator offset of each pool's latest rotate-key record.
 	RotateRequested map[string]int64
@@ -273,10 +271,10 @@ type State struct {
 }
 
 func NewState() State {
-	return State{Tenants: map[string]bool{}, EndedEntitlements: map[string]map[string]bool{}, Pools: map[string]Terms{}, Receivers: map[string]ReceiverConfig{}, Hosts: map[string]Host{}, Entitlements: map[string]map[string]bool{}, Ended: map[string]bool{}, Revoking: map[string]bool{}, Credentials: map[string]string{}, Enrolments: map[string]string{}, Approvals: map[string]Approval{}, Decisions: map[string]map[string]string{}, RotateSCRAM: map[string]bool{}, Suspended: map[string]bool{}, RotateRequested: map[string]int64{}, SuspendChanged: map[string]int64{}}
+	return State{Tenants: map[string]bool{}, EndedEntitlements: map[string]map[string]bool{}, Pools: map[string]Terms{}, Receivers: map[string]ReceiverConfig{}, Hosts: map[string]Host{}, Entitlements: map[string]map[string]bool{}, Ended: map[string]bool{}, Revoking: map[string]bool{}, Credentials: map[string]string{}, Enrolments: map[string]string{}, Approvals: map[string]Approval{}, Decisions: map[string]map[string]string{}, Suspended: map[string]bool{}, RotateRequested: map[string]int64{}, SuspendChanged: map[string]int64{}}
 }
 
-// RecordVersion is the wherry.operator record version this release writes and the highest it reads.
+// RecordVersion is the wherry.operator record version this release writes and the only one it reads.
 const RecordVersion = 2
 
 func EncodeRecord(record Record) ([]byte, error) {
@@ -429,7 +427,6 @@ func apply(state *State, record Record) error {
 		}
 		state.Credentials[principal] = record.Enrolment
 		state.Enrolments[principal] = record.Enrolment
-		delete(state.RotateSCRAM, principal)
 	case "approving":
 		principal := TenantPrincipal(record.Tenant, record.Host)
 		if state.Decision(principal, record.Request) != "" || state.Credentials[principal] == "" || record.Replaces != state.Credentials[principal] {
@@ -444,7 +441,6 @@ func apply(state *State, record Record) error {
 		state.decide(principal, record.Request, "approved")
 		state.Credentials[principal] = record.Request
 		delete(state.Approvals, principal)
-		delete(state.RotateSCRAM, principal)
 	case "rejected":
 		principal := TenantPrincipal(record.Tenant, record.Host)
 		if state.Decision(principal, record.Request) != "" {
@@ -454,20 +450,12 @@ func apply(state *State, record Record) error {
 		if state.Approvals[principal].Request == record.Request {
 			delete(state.Approvals, principal)
 		}
-		if record.Replaces == state.Credentials[principal] {
-			delete(state.RotateSCRAM, principal)
-		}
 	case "expired":
 		principal := TenantPrincipal(record.Tenant, record.Host)
 		if state.Decision(principal, record.Request) != "" {
 			return errors.New("credential request is already decided")
 		}
 		state.decide(principal, record.Request, "expired")
-		if record.Replaces == state.Credentials[principal] {
-			delete(state.RotateSCRAM, principal)
-		}
-	case "rotate":
-		state.RotateSCRAM[TenantPrincipal(record.Tenant, record.Host)] = true
 	case "suspend", "resume", "rotate-key":
 		if _, ok := state.Pools[record.Pool]; !ok {
 			return errors.New(record.Kind + " names unknown pool")
@@ -821,7 +809,7 @@ func subject(record Record) string {
 }
 
 func validateRecord(record Record) error {
-	if (record.Version != 1 && record.Version != RecordVersion) || record.AtMS <= 0 {
+	if record.Version != RecordVersion || record.AtMS <= 0 {
 		return errors.New("invalid operator record")
 	}
 	switch record.Kind {
@@ -844,7 +832,7 @@ func validateRecord(record Record) error {
 			return errors.New("invalid receiver record")
 		}
 	case "host":
-		if validateNames(record.Tenant, record.Host) != nil || record.Version == 1 && record.Enrolment != "" || record.Version == 2 && !ValidCredentialID(record.Enrolment) {
+		if validateNames(record.Tenant, record.Host) != nil || !validCredentialID(record.Enrolment) {
 			return errors.New("invalid host record")
 		}
 	case "entitlement":
@@ -876,28 +864,24 @@ func validateRecord(record Record) error {
 			return errors.New("invalid revoking record")
 		}
 	case "resetting":
-		if record.Version != 2 || validateNames(record.Tenant, record.Host) != nil || record.Pool != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
+		if validateNames(record.Tenant, record.Host) != nil || record.Pool != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
 			return errors.New("invalid resetting record")
 		}
 	case "enrolled":
-		if record.Version != 2 || validateNames(record.Tenant, record.Host) != nil || !ValidCredentialID(record.Enrolment) || record.Pool != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
+		if validateNames(record.Tenant, record.Host) != nil || !validCredentialID(record.Enrolment) || record.Pool != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
 			return errors.New("invalid enrolled record")
 		}
 	case "approving":
-		if record.Version != 2 || validateNames(record.Tenant, record.Host) != nil || !ValidCredentialID(record.Request) || !ValidCredentialID(record.Replaces) || !validDigest(record.Digest) || record.Pool != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
+		if validateNames(record.Tenant, record.Host) != nil || !validCredentialID(record.Request) || !validCredentialID(record.Replaces) || !validDigest(record.Digest) || record.Pool != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
 			return errors.New("invalid approving record")
 		}
 	case "credential", "expired":
-		if record.Version != 2 || validateNames(record.Tenant, record.Host) != nil || !ValidCredentialID(record.Request) || !ValidCredentialID(record.Replaces) || record.Pool != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
+		if validateNames(record.Tenant, record.Host) != nil || !validCredentialID(record.Request) || !validCredentialID(record.Replaces) || record.Pool != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
 			return errors.New("invalid " + record.Kind + " record")
 		}
 	case "rejected":
-		if record.Version != 2 || validateNames(record.Tenant, record.Host) != nil || !ValidCredentialID(record.Request) || !ValidCredentialID(record.Replaces) || record.Reason == "" || record.Pool != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
+		if validateNames(record.Tenant, record.Host) != nil || !validCredentialID(record.Request) || !validCredentialID(record.Replaces) || record.Reason == "" || record.Pool != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
 			return errors.New("invalid rejected record")
-		}
-	case "rotate":
-		if record.Version != 2 || validateNames(record.Tenant, record.Host) != nil || record.Pool != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
-			return errors.New("invalid rotate record")
 		}
 	case "suspend", "resume", "rotate-key":
 		if validateNames(record.Pool) != nil || record.Tenant != "" || record.Host != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
@@ -909,10 +893,10 @@ func validateRecord(record Record) error {
 	return nil
 }
 
-// ValidCredentialID reports whether value is a credential or request ID: 16 bytes, raw URL base64.
-func ValidCredentialID(value string) bool {
-	decoded, err := base64.RawURLEncoding.DecodeString(value)
-	return err == nil && len(decoded) == 16
+// validCredentialID reports whether value is a credential or request ID: 16 bytes in lowercase hex.
+func validCredentialID(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == 16 && hex.EncodeToString(decoded) == value
 }
 
 func validDigest(value string) bool {

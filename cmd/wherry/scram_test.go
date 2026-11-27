@@ -908,107 +908,6 @@ func TestPromotionNeverLosesTheApprovedPassword(t *testing.T) {
 	}
 }
 
-// Test 15: an operator rotate record makes the host file once; a rejection satisfies it; with a scram.next whose request
-// never reached the topic, the host's next command of any kind after rotate --scram sends the same ID.
-func TestOperatorRotateRecordIsActedOnOnce(t *testing.T) {
-	e := newSCRAMEnv(t, "1")
-	e.op("approve", sentID(t, e.init(e.kept)))
-	e.host("receivers")
-	e.op("rotate", "--tenant", "tenant-a", "--host", "host-a", "--scram")
-	if _, err := e.host("receivers"); err != nil || e.next() == "" {
-		t.Fatalf("a host command after rotate --scram filed nothing: %v", err)
-	}
-	first := e.nextID()
-	e.host("receivers")
-	if e.nextID() != first {
-		t.Fatal("a second host command filed another request for one rotate record")
-	}
-	e.op("reject", first)
-	e.host("receivers")
-	if e.next() != "" {
-		t.Fatal("a rejection did not satisfy the rotate record, or its scram.next stayed")
-	}
-	fault := e.cluster.Fault(kfake.Fault{Keys: []kmsg.Key{kmsg.Produce}, Topic: operator.RequestsTopic, Err: kerr.TopicAuthorizationFailed, Count: -1})
-	e.host("rotate", "--scram")
-	fault.Remove()
-	lost := e.nextID()
-	if out := e.op("list", "requests"); strings.Contains(out, lost) {
-		t.Fatal("the test needs a request that never reached the topic")
-	}
-	e.op("rotate", "--tenant", "tenant-a", "--host", "host-a", "--scram")
-	if _, err := e.host("receivers"); err != nil || !strings.Contains(e.op("list", "requests"), "request="+lost) {
-		t.Fatalf("after rotate --scram the host's next command did not send the pending request: %v", err)
-	}
-}
-
-// Test 18 (host half): a broker applying the upsert late is retried within the probe window and the host promotes; a
-// revoked host fails at once.
-func TestHostRetriesABrokerApplyingLate(t *testing.T) {
-	e := newSCRAMEnv(t, "1")
-	id := sentID(t, e.init(e.kept))
-	e.op("approve", id)
-	if stderr, retried, err := e.whileLagging(1, "receivers"); err != nil || !retried || !strings.Contains(stderr, "credential "+id+" approved; now in use") {
-		t.Fatalf("host command while a broker applies late: %v\n%s", err, stderr)
-	}
-	e.op("revoke", "--tenant", "tenant-a", "--host", "host-a")
-	start := time.Now()
-	if _, err := e.host("receivers"); err == nil || !strings.Contains(err.Error(), "neither the bundle password nor the requested one is accepted; ask the operator to revoke and re-enrol this host") || time.Since(start) > operator.ProbeWindow {
-		t.Fatalf("a revoked host's command = %v after %s", err, time.Since(start))
-	}
-}
-
-// Test 14: host mcp's client goes on after an approval, recovers when it re-authenticates between the upsert and the
-// decision, and keeps the bundle password once another process has promoted and filed again.
-func TestLongLivedHostFollowsItsCredential(t *testing.T) {
-	e := newSCRAMEnv(t, "600")
-	sentID(t, e.init(e.kept))
-	config, err := busclient.LoadConfig(filepath.Join(filepath.Dir(e.bundle), "config.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	host, err := busclient.Connect(config, log.New(io.Discard, "", 0))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer host.Close()
-	ctx := context.Background()
-	var request struct{ Request, Password string }
-	readYAML(filepath.Join(filepath.Dir(e.bundle), "scram.next"), &request)
-	decoded, _, _ := operator.DecodeCredentialRequest([]byte(request.Request))
-	results, err := kadm.NewClient(e.service.Operator).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{{User: operator.TenantPrincipal("tenant-a", "host-a"), Mechanism: kadm.ScramSha512,
-		Iterations: decoded.SCRAM.Iterations, Salt: decoded.SCRAM.Salt, SaltedPassword: decoded.SCRAM.SaltedPassword}})
-	if err != nil || results.Error() != nil {
-		t.Fatalf("upsert as a stopped pass makes it: %v %v", err, results.Error())
-	}
-	// T-L3 runs on a request refused at re-authentication; the requests after it authenticate.
-	recovered := func(when string) {
-		t.Helper()
-		var err error
-		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
-			if _, err = host.Receivers(ctx); err == nil {
-				return
-			}
-		}
-		t.Fatalf("host mcp %s: %v", when, err)
-	}
-	time.Sleep(time.Second)
-	recovered("after an upsert with no decision")
-	e.op("approve", "--all")
-	time.Sleep(time.Second)
-	recovered("after the decision")
-	if e.next() != "" || !e.works(e.bundle) {
-		t.Fatal("host mcp did not promote the approved request")
-	}
-	e.op("rotate", "--tenant", "tenant-a", "--host", "host-a", "--scram")
-	if _, err := e.host("receivers"); err != nil || e.next() == "" {
-		t.Fatalf("the one-shot command filed nothing: %v", err)
-	}
-	time.Sleep(time.Second)
-	if _, err := host.Receivers(ctx); err != nil {
-		t.Fatalf("host mcp after another process filed again: %v", err)
-	}
-}
-
 // Test 18 (revoke half): revoke waits for a broker applying late; one still refusing when the probe window ends ends
 // the command on the probe's error, with no second upsert, no enrolled record and no bundle; a re-run completes.
 func TestRevokeProbesEveryBrokerBeforeItsWait(t *testing.T) {
@@ -1042,46 +941,41 @@ func TestRevokeProbesEveryBrokerBeforeItsWait(t *testing.T) {
 	}
 }
 
-// A request ID can begin with "-" (raw URL base64); approve and reject take it as their operand, wherever the flags
-// are.
-func TestRequestIDBeginningWithAHyphenIsAnOperand(t *testing.T) {
-	id := "-" + strings.Repeat("A", 21)
-	if !operator.ValidCredentialID(id) {
-		t.Fatalf("%s is not a request ID", id)
-	}
-	for _, args := range [][]string{{"approve", id}, {"reject", id}, {"--dir", "d", "approve", id}, {"reject", id, "--dir", "d"},
-		{"approve", "--dir", "d", id}, {"reject", "--dir=d", id}, {"approve", "--all", id}} {
-		positional, _, err := operatorArgs(args)
-		if err != nil || len(positional) != 2 || positional[1] != id {
-			t.Fatalf("%q parsed to %q, %v", args, positional, err)
-		}
-	}
+// Test 18 (host half): the bundle's broker has yet to apply the approved password and refuses both; with scram.next
+// there the host tries again within the probe window and promotes once the broker accepts it. A revoked host, with no
+// scram.next, fails at once.
+func TestHostRetriesWhileItsBrokerRefusesBothPasswords(t *testing.T) {
 	e := newSCRAMEnv(t, "1")
-	for _, verb := range []string{"approve", "reject"} {
-		stdout, _, err := e.run("operator", verb, id)
-		if err == nil || !strings.Contains(stdout+err.Error(), "no request "+id) {
-			t.Fatalf("operator %s %s = %v\n%s", verb, id, err, stdout)
-		}
-	}
-}
-
-// Test 18, T-H0's predicate: the bundle names the second broker; the first listed broker has not applied the
-// approved password and refuses both, and the second accepts the approved one. The host retries until every listed
-// broker accepts it, and does not fail on the first broker's refusal.
-func TestHostRetriesWhileOnlyAnotherBrokerAcceptsTheApprovedPassword(t *testing.T) {
-	e := newSCRAMEnv(t, "1")
-	kept, err := operator.ReadBundle(e.kept)
-	if err != nil {
-		t.Fatal(err)
-	}
-	kept.Broker = e.cluster.ListenAddrs()[1]
-	if err := operator.ReplaceBundle(e.kept, kept); err != nil {
-		t.Fatal(err)
-	}
 	id := sentID(t, e.init(e.kept))
 	e.op("approve", id)
 	stderr, retried, err := e.whileLagging(0, "receivers")
 	if err != nil || !retried || !strings.Contains(stderr, "credential "+id+" approved; now in use") {
-		t.Fatalf("host command while only another broker accepts the approved password: %v\n%s", err, stderr)
+		t.Fatalf("host command while its broker applies the approval late: retried %t, %v\n%s", retried, err, stderr)
+	}
+	e.op("revoke", "--tenant", "tenant-a", "--host", "host-a")
+	start := time.Now()
+	if _, err := e.host("receivers"); err == nil || !strings.Contains(err.Error(), "neither the bundle password nor the requested one is accepted; ask the operator to revoke and re-enrol this host") || time.Since(start) > operator.ProbeWindow {
+		t.Fatalf("a revoked host's command = %v after %s", err, time.Since(start))
+	}
+}
+
+// Right after an approval a broker other than the bundle's can still refuse the approved password; kgo does not retry
+// that refusal, so the command fails naming the broker and saying to run it again, which then succeeds.
+func TestAnotherBrokerYetToApplyTheApprovalIsNamed(t *testing.T) {
+	e := newSCRAMEnv(t, "1")
+	id := sentID(t, e.init(e.kept))
+	e.op("approve", id)
+	if err := e.cluster.MoveTopicPartition(operator.OperatorTopic, 0, 2); err != nil {
+		t.Fatal(err)
+	}
+	e.lagNode = 2
+	e.lagging.Store(true)
+	stderr, err := e.host("receivers")
+	e.lagging.Store(false)
+	if err == nil || !strings.Contains(stderr, "broker 2 at ") || !strings.Contains(stderr, "refused this host's password; a broker refuses a credential an operator has just approved until it has applied it: run the command again") {
+		t.Fatalf("host command while another broker has yet to apply the approval: %v\n%s", err, stderr)
+	}
+	if stderr, err := e.host("receivers"); err != nil || !strings.Contains(stderr, "credential "+id+" approved; now in use") {
+		t.Fatalf("the command run again: %v\n%s", err, stderr)
 	}
 }

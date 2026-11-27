@@ -630,13 +630,19 @@ password changes.
 
 ## Host credential rotation
 
-A host chooses its own Kafka password and the operator approves it, so no
-password passes through anyone. [`host rotate --scram`](commands.md#wherry-host-rotate)
+A host chooses its own Kafka password and the operator approves it, so after
+enrolment no Kafka password passes through anyone. The enrolment bundle, from
+`add --host` or `revoke`, does carry one.
+[`host rotate --scram`](commands.md#wherry-host-rotate)
 generates the password on the host and writes a request, signed with the host
 key, to `wherry.requests`; the request carries the salt and the salted
 password, which is what Kafka stores for a SCRAM credential.
 [`operator approve`](commands.md#wherry-operator-approve) sets it as the
 host's credential. Receivers keep `apply --receiver --force`.
+
+Request and approval exist for scale: hosts start their own rotations, the
+operator approves them in bulk with `approve --all`, and no bundle is written
+or handed over for a rotation.
 
 ### The requests topic
 
@@ -649,11 +655,12 @@ topic as holding passwords:
   the topic has `retention.ms=-1`, so nothing ages out on its own. Run a pass
   often enough that undecided requests do not pile up
   ([Approve a host's credential request](operations-operator.md#approve-a-host-s-credential-request)).
-- After the pass that decides a request, no client can read it: the pass
-  deletes it below the topic's log start. Its bytes stay on the brokers' disks
-  until the first request produced more than a day after the segment began
-  rolls the segment, and the next retention check deletes it. On a quiet topic
-  nothing bounds that time. Whoever reads a broker's disk reads them.
+- After the pass that decides a request, no client can fetch it: the pass
+  moves the topic's log start past it (`DeleteRecords`). That does not remove
+  it. Its bytes stay on the brokers' disks until the first request produced
+  more than a day after the segment began rolls the segment, and the next
+  retention check deletes the segment. On a quiet topic nothing bounds that
+  time. Whoever reads a broker's disk reads them.
 - A live host can write any record there, with any ID and any Kafka key, as
   often as its quota allows. A pass approves only a request signed with the
   current key of the host it names, and drops every other record, so a copy
@@ -714,6 +721,13 @@ is no sign that none is left. These are accepted limits:
   the removed principal, which can be one the host holds the password of: its
   login succeeds, it has no ACLs, and the next operator command that converges
   deletes the credential.
+
+A host command logs in on its bundle's broker alone. Brokers apply an approved
+password in turn, so right after an approval another broker can refuse the
+password the host now uses until it has applied it. The client does not retry
+that refusal: the command fails naming the broker, and running it again
+succeeds. A running `wherry host mcp` keeps the password it started with and is
+restarted after an approval.
 
 "Every broker" in `revoke`'s and removal's login checks is every broker the
 cluster metadata lists. A fenced broker is not listed, so it is not asked, and

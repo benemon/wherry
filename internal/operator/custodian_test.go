@@ -71,14 +71,14 @@ func TestSnapshotTopicIsCompactedSinglePartitionAndKeptForever(t *testing.T) {
 // entitled to the pool read it; no one else but wherry.operator holds either.
 func TestSnapshotTopicACLs(t *testing.T) {
 	terms := modelTerms()
-	records := []Record{{Version: 1, Kind: "tenant", Tenant: "tenant-a", AtMS: 1}, {Version: 1, Kind: "tenant", Tenant: "tenant-b", AtMS: 1},
-		{Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}, {Version: 1, Kind: "pool", Pool: "pool-b", Terms: &terms, AtMS: 1},
-		{Version: 1, Kind: "host", Tenant: "tenant-a", Host: "host-a", AtMS: 1}, {Version: 1, Kind: "host", Tenant: "tenant-b", Host: "host-b", AtMS: 1},
-		{Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-a", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-b", AtMS: 1},
+	records := []Record{{Kind: "tenant", Tenant: "tenant-a", AtMS: 1}, {Kind: "tenant", Tenant: "tenant-b", AtMS: 1},
+		{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}, {Kind: "pool", Pool: "pool-b", Terms: &terms, AtMS: 1},
+		{Kind: "host", Enrolment: "00000000000000000000000000000000", Tenant: "tenant-a", Host: "host-a", AtMS: 1}, {Kind: "host", Enrolment: "00000000000000000000000000000000", Tenant: "tenant-b", Host: "host-b", AtMS: 1},
+		{Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-a", AtMS: 1}, {Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-b", AtMS: 1},
 	}
 	for _, config := range []ReceiverConfig{modelConfig("receiver-a", "pool-a"), modelConfig("receiver-b", "pool-b")} {
 		copy := config
-		records = append(records, Record{Version: 1, Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &copy, AtMS: 1})
+		records = append(records, Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &copy, AtMS: 1})
 	}
 	state, err := Fold(records)
 	if err != nil {
@@ -107,17 +107,17 @@ func TestSnapshotTopicACLs(t *testing.T) {
 // it, and no one but wherry.operator holds a grant on another receivers topic.
 func TestPoolReceiversTopicACLs(t *testing.T) {
 	terms := modelTerms()
-	records := []Record{{Version: 1, Kind: "tenant", Tenant: "tenant-a", AtMS: 1}, {Version: 1, Kind: "tenant", Tenant: "tenant-b", AtMS: 1},
-		{Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}, {Version: 1, Kind: "pool", Pool: "pool-b", Terms: &terms, AtMS: 1},
-		{Version: 1, Kind: "host", Tenant: "tenant-a", Host: "host-a", AtMS: 1}, {Version: 1, Kind: "host", Tenant: "tenant-b", Host: "host-b", AtMS: 1},
-		{Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-a", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-b", AtMS: 1},
-		{Version: 1, Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-a", AtMS: 1},
+	records := []Record{{Kind: "tenant", Tenant: "tenant-a", AtMS: 1}, {Kind: "tenant", Tenant: "tenant-b", AtMS: 1},
+		{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}, {Kind: "pool", Pool: "pool-b", Terms: &terms, AtMS: 1},
+		{Kind: "host", Enrolment: "00000000000000000000000000000000", Tenant: "tenant-a", Host: "host-a", AtMS: 1}, {Kind: "host", Enrolment: "00000000000000000000000000000000", Tenant: "tenant-b", Host: "host-b", AtMS: 1},
+		{Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-a", AtMS: 1}, {Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-b", AtMS: 1},
+		{Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-a", AtMS: 1},
 	}
 	for _, config := range []ReceiverConfig{modelConfig("receiver-a", "pool-a"), modelConfig("receiver-b", "pool-b"), modelConfig("receiver-c", "pool-a")} {
 		copy := config
-		records = append(records, Record{Version: 1, Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &copy, AtMS: 1})
+		records = append(records, Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &copy, AtMS: 1})
 	}
-	records = append(records, Record{Version: 1, Kind: "end", Receiver: "receiver-c", AtMS: 1}, Record{Version: 1, Kind: "end", Tenant: "tenant-b", Pool: "pool-a", AtMS: 1})
+	records = append(records, Record{Kind: "end", Receiver: "receiver-c", AtMS: 1}, Record{Kind: "end", Tenant: "tenant-b", Pool: "pool-a", AtMS: 1})
 	state, err := Fold(records)
 	if err != nil {
 		t.Fatal(err)
@@ -149,12 +149,12 @@ func TestPoolReceiversTopicACLs(t *testing.T) {
 // A pool peer keeps READ on an ended member's key topic, never on its progress topic.
 func TestEndedMembersKeyTopicStaysReadable(t *testing.T) {
 	terms := modelTerms()
-	records := []Record{{Version: 1, Kind: "tenant", Tenant: "tenant-a", AtMS: 1}, {Version: 1, Kind: "tenant", Tenant: "tenant-b", AtMS: 1}, {Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}}
+	records := []Record{{Kind: "tenant", Tenant: "tenant-a", AtMS: 1}, {Kind: "tenant", Tenant: "tenant-b", AtMS: 1}, {Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}}
 	for _, config := range []ReceiverConfig{modelConfig("receiver-a", "pool-a"), modelConfig("receiver-b", "pool-a")} {
 		copy := config
-		records = append(records, Record{Version: 1, Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &copy, AtMS: 1})
+		records = append(records, Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &copy, AtMS: 1})
 	}
-	records = append(records, Record{Version: 1, Kind: "end", Receiver: "receiver-b", AtMS: 1})
+	records = append(records, Record{Kind: "end", Receiver: "receiver-b", AtMS: 1})
 	var raw []rawRecord
 	for i, record := range records {
 		encoded, err := EncodeRecord(record)

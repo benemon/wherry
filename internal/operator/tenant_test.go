@@ -20,7 +20,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
-func tenantRecord(kind string) Record { return Record{Version: 1, Kind: kind, Tenant: "t", AtMS: 1} }
+func tenantRecord(kind string) Record { return Record{Kind: kind, Tenant: "t", AtMS: 1} }
 
 func TestTenantLoadRules(t *testing.T) {
 	tenant, end := tenantRecord("tenant"), tenantRecord("end")
@@ -31,11 +31,12 @@ func TestTenantLoadRules(t *testing.T) {
 	host := tenantRecord("host")
 	host.Host = "h"
 	revoking := host
+	host.Enrolment = strings.Repeat("0", 32)
 	revoking.Kind = "revoking"
 	endHost := host
 	endHost.Kind = "end"
 	terms := modelTerms()
-	pool := Record{Version: 1, Kind: "pool", Pool: "p", Terms: &terms, AtMS: 1}
+	pool := Record{Kind: "pool", Pool: "p", Terms: &terms, AtMS: 1}
 	for _, test := range []struct {
 		name    string
 		records []Record

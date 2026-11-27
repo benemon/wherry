@@ -11,6 +11,7 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -781,43 +782,26 @@ func (f *requestFixture) records() [][]byte {
 	return values
 }
 
-// Test 33: the new kinds are written at version 2, a version 1 log followed by version 2 records folds, and a record
-// above this release's version is "upgrade this wherry".
-func TestNewKindsAreRecordVersionTwo(t *testing.T) {
+// Test 33: every record is written at version 2, the only version this release reads; a version 1 record is refused,
+// and one above it is "upgrade this wherry".
+func TestRecordsAreVersionTwoOnly(t *testing.T) {
 	id, _ := CredentialID()
-	digest := payloadDigest([]byte("x"))
-	var records []Record
 	for _, record := range []Record{
-		{Version: 1, Kind: "tenant", Tenant: "tenant-a"},
-		{Version: 1, Kind: "host", Tenant: "tenant-a", Host: "host-a"},
+		{Kind: "tenant", Tenant: "tenant-a"},
+		{Kind: "host", Tenant: "tenant-a", Host: "host-a", Enrolment: id},
 		{Kind: "resetting", Tenant: "tenant-a", Host: "host-a"},
 		{Kind: "enrolled", Tenant: "tenant-a", Host: "host-a", Enrolment: id},
-		{Kind: "rotate", Tenant: "tenant-a", Host: "host-a"},
-		{Kind: "approving", Tenant: "tenant-a", Host: "host-a", Request: digest[:22], Replaces: id, Digest: digest},
 	} {
-		if record.Kind == "approving" {
-			record.Request, _ = CredentialID()
-		}
 		encoded, err := EncodeRecord(record)
 		if err != nil {
 			t.Fatalf("%s: %v", record.Kind, err)
 		}
-		decoded, err := DecodeRecord(encoded)
-		if err != nil {
-			t.Fatalf("%s: %v", record.Kind, err)
+		if decoded, err := DecodeRecord(encoded); err != nil || decoded.Version != 2 {
+			t.Fatalf("%s written at version %d, %v", record.Kind, decoded.Version, err)
 		}
-		if record.Version == 0 && decoded.Version != 2 {
-			t.Fatalf("%s written at version %d", record.Kind, decoded.Version)
-		}
-		records = append(records, decoded)
 	}
-	if state, err := Fold(records); err != nil || state.Credentials[principal("host-a")] != id {
-		t.Fatalf("fold of version 1 then 2 = %v", err)
-	}
-	for _, kind := range []string{"resetting", "rotate"} {
-		if _, err := EncodeRecord(Record{Version: 1, Kind: kind, Tenant: "tenant-a", Host: "host-a"}); err == nil {
-			t.Fatalf("a %s record is valid at version 1", kind)
-		}
+	if _, err := DecodeRecord([]byte(`{"v":1,"kind":"tenant","tenant":"tenant-a","at_ms":1}`)); err == nil {
+		t.Fatal("a version 1 record decoded")
 	}
 	if _, err := DecodeRecord([]byte(`{"v":3,"kind":"resetting","tenant":"tenant-a","host":"host-a","at_ms":1}`)); !errors.Is(err, ErrNewerRecord) {
 		t.Fatalf("a version 3 record = %v", err)
@@ -864,5 +848,22 @@ func TestRequestsTopicKeepsEveryRecordUntilAPass(t *testing.T) {
 	}
 	if err := f.service.checkRequestsTopic(f.ctx); err == nil || !strings.Contains(err.Error(), "retention.ms is 1209600000, want -1") {
 		t.Fatalf("check of a finite retention = %v", err)
+	}
+}
+
+// A generated credential or request ID is 16 random bytes in lowercase hex, so it never begins with "-" and a command
+// line takes it as an operand.
+func TestCredentialIDIsLowercaseHex(t *testing.T) {
+	format := regexp.MustCompile(`^[0-9a-f]{32}$`)
+	for range 1000 {
+		id, err := CredentialID()
+		if err != nil || !format.MatchString(id) || strings.HasPrefix(id, "-") || !validCredentialID(id) {
+			t.Fatalf("generated ID %q, %v; want 32 lowercase hex digits", id, err)
+		}
+	}
+	for _, id := range []string{strings.Repeat("A", 32), "-" + strings.Repeat("a", 31), strings.Repeat("0", 31)} {
+		if validCredentialID(id) {
+			t.Fatalf("%q is valid; want only 32 lowercase hex digits", id)
+		}
 	}
 }

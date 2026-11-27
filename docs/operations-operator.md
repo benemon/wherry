@@ -682,15 +682,7 @@ host's user runs it.
 
 Prerequisites: the operator's working directory.
 
-1. To ask a host for a new password, record the request for it:
-
-   ```sh
-   wherry operator rotate --tenant acme --host laptop --scram
-   ```
-
-   The host files its request at its next command of any kind.
-
-2. List the requests:
+1. List the requests:
 
    ```sh
    wherry operator list requests
@@ -699,7 +691,7 @@ Prerequisites: the operator's working directory.
    Each line names the request ID, its tenant and host, and its state
    ([`list requests`](commands.md#wherry-operator-list)).
 
-3. Approve a request, or every pending one, or reject one:
+2. Approve a request, or every pending one, or reject one:
 
    ```sh
    wherry operator approve <id>
@@ -709,15 +701,17 @@ Prerequisites: the operator's working directory.
 
    `approve` prints `approved <id>` for each request it approves.
 
-4. The host uses the new password from its next command, which prints
+3. The host uses the new password from its next command, which prints
    `credential <id> approved; now in use`. Nothing needs to be handed over.
+   A running `wherry host mcp` keeps its old password and is restarted by
+   the host's user after the approval.
 
 Run `approve` or `reject` often enough that undecided requests do not pile
 up: a request stays in `wherry.requests` until a pass decides it, and a
 request no pass decided within 7 days is recorded `expired` by the next one.
 After `wherry host rotate --key` the host's pending request is not pending
-until the host sends it again under the new key: its user runs
-`wherry host rotate --scram`, or you run `rotate --scram` for it.
+until the host's user sends it again under the new key with
+`wherry host rotate --scram`.
 
 When a pass does not finish an approval, it exits non-zero after the other
 requests. What to do depends on what it printed:
