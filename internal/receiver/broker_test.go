@@ -61,7 +61,7 @@ func newBrokerPool(t *testing.T, ctx context.Context, address string) brokerPool
 	if err := b.service.TenantPoolAdd(ctx, b.tenant, b.pool); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.service.HostAdd(ctx, b.tenant, b.host, filepath.Join(t.TempDir(), "host.bundle"), false); err != nil {
+	if err := b.service.HostAdd(ctx, b.tenant, b.host, filepath.Join(t.TempDir(), "host.bundle")); err != nil {
 		t.Fatal(err)
 	}
 	b.member(t, ctx, b.receiver)

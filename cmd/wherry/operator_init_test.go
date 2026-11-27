@@ -216,6 +216,7 @@ func operatorCommands(t *testing.T, root *kgo.Client, dir, suffix string, check,
 		{"apply", "--receiver", receiver, "--file", filepath.Join(files, "receiver.yaml")},
 		{"show", "--receiver", receiver},
 		{"suspend", "--pool", pool},
+		{"approve", "--all"},
 	} {
 		if err := wherry(args...); err != nil {
 			return err
@@ -281,8 +282,8 @@ func testOperatorInitDelegates(t *testing.T, b initBroker, removes bool) {
 	if info, err := os.Stat(filepath.Join(dir, "operator.password")); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("operator.password %v, %v; want mode 0600", info, err)
 	}
-	if ignored, err := os.ReadFile(filepath.Join(dir, ".gitignore")); err != nil || string(ignored) != "node_modules\n*.log\noperator.password\nbundles/\nstorage/\n" {
-		t.Fatalf(".gitignore %q, %v; want its lines kept and operator.password, bundles/ and storage/ added", ignored, err)
+	if ignored, err := os.ReadFile(filepath.Join(dir, ".gitignore")); err != nil || string(ignored) != "node_modules\n*.log\noperator.password\noperator.lock\nbundles/\nstorage/\n" {
+		t.Fatalf(".gitignore %q, %v; want its lines kept and operator.password, operator.lock, bundles/ and storage/ added", ignored, err)
 	}
 	superPassword, err := os.ReadFile(b.superPasswordFile)
 	if err != nil {
@@ -293,7 +294,7 @@ func testOperatorInitDelegates(t *testing.T, b initBroker, removes bool) {
 	if err := b.init(t, dir); err != nil {
 		t.Fatal(err)
 	}
-	if ignored, err := os.ReadFile(filepath.Join(dir, ".gitignore")); err != nil || string(ignored) != "node_modules\n*.log\noperator.password\nbundles/\nstorage/\n" {
+	if ignored, err := os.ReadFile(filepath.Join(dir, ".gitignore")); err != nil || string(ignored) != "node_modules\n*.log\noperator.password\noperator.lock\nbundles/\nstorage/\n" {
 		t.Fatalf("after a second init, .gitignore %q, %v; want each line once", ignored, err)
 	}
 	// The password from standard input and from the masked prompt leaves the directory as clean as the file's: each
@@ -371,13 +372,13 @@ func testOperatorACLs(t *testing.T, broker func(*testing.T) initBroker) {
 					t.Fatal(err)
 				}
 				builder := kadm.NewACLs().Allow("User:" + operator.OperatorPrincipal).AllowHosts("*").Operations(map[string]kadm.ACLOperation{
-					"ALTER": kadm.OpAlter, "ALTER_CONFIGS": kadm.OpAlterConfigs, "CREATE": kadm.OpCreate, "READ": kadm.OpRead, "WRITE": kadm.OpWrite, "DESCRIBE": kadm.OpDescribe,
+					"ALTER": kadm.OpAlter, "ALTER_CONFIGS": kadm.OpAlterConfigs, "CREATE": kadm.OpCreate, "READ": kadm.OpRead, "WRITE": kadm.OpWrite, "DESCRIBE": kadm.OpDescribe, "DELETE": kadm.OpDelete,
 				}[dropped])
 				switch acl.ResourceType {
 				case "cluster":
 					builder.Clusters().ResourcePatternType(kadm.ACLPatternLiteral)
 				case "topic":
-					builder.Topics(acl.Resource).ResourcePatternType(kadm.ACLPatternPrefixed)
+					builder.Topics(acl.Resource).ResourcePatternType(map[bool]kadm.ACLPattern{true: kadm.ACLPatternPrefixed, false: kadm.ACLPatternLiteral}[acl.Prefix])
 				case "group":
 					builder.Groups(acl.Resource).ResourcePatternType(kadm.ACLPatternPrefixed)
 				}

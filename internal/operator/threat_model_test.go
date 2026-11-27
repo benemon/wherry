@@ -142,7 +142,7 @@ func TestTranscriptTopicACLsAreExactlyItsWritersAndReaders(t *testing.T) {
 func TestProgressTopicACLsAreExactlyItsWriterAndPoolPeers(t *testing.T) {
 	state := modelState(t)
 	config := modelConfig("receiver-c", "pool-a")
-	if err := apply(&state, Record{Version: 1, Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &config, AtMS: 1}); err != nil {
+	if err := apply(&state, Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &config, AtMS: 1}); err != nil {
 		t.Fatal(err)
 	}
 	own, read, operator := []string{"READ", "WRITE", "DESCRIBE"}, []string{"READ", "DESCRIBE"}, []string{"CREATE", "ALTER_CONFIGS", "READ", "WRITE"}
@@ -402,7 +402,7 @@ func TestRevocationRefusesAWaitBelowTheBrokersLongestTimeout(t *testing.T) {
 
 func TestRevokingPrincipalIsGrantedNothing(t *testing.T) {
 	state := modelState(t)
-	for _, record := range []Record{{Version: 1, Kind: "revoking", Receiver: "receiver-a", AtMS: 1}, {Version: 1, Kind: "revoking", Tenant: "tenant-a", Host: "host-a", AtMS: 1}} {
+	for _, record := range []Record{{Kind: "revoking", Receiver: "receiver-a", AtMS: 1}, {Kind: "revoking", Tenant: "tenant-a", Host: "host-a", AtMS: 1}} {
 		encoded, err := EncodeRecord(record)
 		if err != nil {
 			t.Fatal(err)
@@ -622,7 +622,7 @@ func TestShareGroupStartsAtEarliest(t *testing.T) {
 func TestReceiverAcceptsOnlyItsRecordedConfiguration(t *testing.T) {
 	terms := modelTerms()
 	config := modelConfig("receiver-b", "pool-a")
-	record := Record{Version: 1, Kind: "receiver", Pool: "pool-a", Receiver: "receiver-b", Config: &config, AtMS: 1}
+	record := Record{Kind: "receiver", Pool: "pool-a", Receiver: "receiver-b", Config: &config, AtMS: 1}
 	if err := ValidateReceiverRecord(record, "receiver-a", terms); err == nil {
 		t.Fatal("accepted another receiver's configuration")
 	}
@@ -674,10 +674,10 @@ func modelTopic(pool string) string { return SignatureTopic(pool, "agent-a", nil
 
 func modelState(t *testing.T) State {
 	terms := modelTerms()
-	records := []Record{{Version: 1, Kind: "tenant", Tenant: "tenant-a", AtMS: 1}, {Version: 1, Kind: "tenant", Tenant: "tenant-b", AtMS: 1}, {Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}, {Version: 1, Kind: "pool", Pool: "pool-b", Terms: &terms, AtMS: 1}, {Version: 1, Kind: "host", Tenant: "tenant-a", Host: "host-a", AtMS: 1}, {Version: 1, Kind: "host", Tenant: "tenant-b", Host: "host-b", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-a", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-b", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-a", AtMS: 1}}
+	records := []Record{{Kind: "tenant", Tenant: "tenant-a", AtMS: 1}, {Kind: "tenant", Tenant: "tenant-b", AtMS: 1}, {Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}, {Kind: "pool", Pool: "pool-b", Terms: &terms, AtMS: 1}, {Kind: "host", Enrolment: "00000000000000000000000000000000", Tenant: "tenant-a", Host: "host-a", AtMS: 1}, {Kind: "host", Enrolment: "00000000000000000000000000000000", Tenant: "tenant-b", Host: "host-b", AtMS: 1}, {Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-a", AtMS: 1}, {Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-b", AtMS: 1}, {Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-a", AtMS: 1}}
 	for _, config := range []ReceiverConfig{modelConfig("receiver-a", "pool-a"), modelConfig("receiver-b", "pool-b")} {
 		copy := config
-		records = append(records, Record{Version: 1, Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &copy, AtMS: 1})
+		records = append(records, Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &copy, AtMS: 1})
 	}
 	state, err := Fold(records)
 	if err != nil {
@@ -702,6 +702,10 @@ func hasACL(acls []ACL, principal, resource, operation string) bool {
 func kfakeService(t *testing.T) (*kfake.Cluster, *Service, func()) {
 	cluster := kfake.MustCluster(kfake.EnableSASL(), kfake.EnableACLs(), kfake.Superuser("SCRAM-SHA-512", "admin", "password"), kfake.Superuser("PLAIN", "wherry.operator", "operator-password"))
 	if err := cluster.CreateTopic(OperatorTopic, 1, map[string]string{"retention.ms": "-1"}); err != nil {
+		t.Fatal(err)
+	}
+	// wherry.requests, as operator init leaves it.
+	if err := cluster.CreateTopic(RequestsTopic, 1, requestTopicConfigs); err != nil {
 		t.Fatal(err)
 	}
 	// wherry.traces, as operator init leaves it.
@@ -850,7 +854,7 @@ func TestLoadNamesALaterReleasesRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	later := bytes.Replace(raw[0].Value, []byte(`"v":1`), []byte(`"v":2`), 1)
+	later := bytes.Replace(raw[0].Value, []byte(`"v":2`), []byte(`"v":3`), 1)
 	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: OperatorTopic, Value: later}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
@@ -867,7 +871,7 @@ func TestLoadNamesALaterReleasesRecord(t *testing.T) {
 
 // A later release's record beside a corrupt one, in either order, takes the reset advice and lists both.
 func TestLoadListsEveryUndecodableRecord(t *testing.T) {
-	newer := []byte(`{"v":2,"kind":"host"}`)
+	newer := []byte(`{"v":3,"kind":"host"}`)
 	corrupt := []byte("not a record")
 	for _, raw := range [][]rawRecord{{{0, newer}, {1, corrupt}}, {{0, corrupt}, {1, newer}}} {
 		_, err := load(raw)
@@ -880,7 +884,7 @@ func TestLoadListsEveryUndecodableRecord(t *testing.T) {
 
 // An unknown member at this release's version folds; a higher version is a later release's; a duplicate name is refused.
 func TestDecodeRecordToleratesUnknownMembers(t *testing.T) {
-	encoded, err := EncodeRecord(Record{Kind: "host", Tenant: "tenant-a", Host: "host-a"})
+	encoded, err := EncodeRecord(Record{Kind: "host", Tenant: "tenant-a", Host: "host-a", Enrolment: strings.Repeat("0", 32)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -891,10 +895,10 @@ func TestDecodeRecordToleratesUnknownMembers(t *testing.T) {
 	}
 	state, err := load([]rawRecord{{Offset: 0, Value: tenant}, {Offset: 1, Value: extra}})
 	if err != nil || state.Hosts[TenantPrincipal("tenant-a", "host-a")].Name != "host-a" {
-		t.Fatalf("unknown member at v1: %v, %v; want it folded", state.Hosts, err)
+		t.Fatalf("unknown member at v2: %v, %v; want it folded", state.Hosts, err)
 	}
-	if _, err := DecodeRecord(bytes.Replace(encoded, []byte(`"v":1`), []byte(`"v":2`), 1)); !errors.Is(err, ErrNewerRecord) {
-		t.Fatalf("v2 record: %v; want ErrNewerRecord", err)
+	if _, err := DecodeRecord(bytes.Replace(encoded, []byte(`"v":2`), []byte(`"v":3`), 1)); !errors.Is(err, ErrNewerRecord) {
+		t.Fatalf("v3 record: %v; want ErrNewerRecord", err)
 	}
 	if _, err := DecodeRecord(append([]byte(`{"host":"host-b",`), encoded[1:]...)); err == nil || errors.Is(err, ErrNewerRecord) {
 		t.Fatalf("duplicate name: %v; want refused as undecodable", err)
@@ -1016,8 +1020,8 @@ func TestRevocationProbeRetriesWhileBrokersSettle(t *testing.T) {
 		t.Fatal(err)
 	}
 	revocationBounds(t, service, "1", "1", "1")
-	window, interval := probeWindow, probeInterval
-	defer func() { probeWindow, probeInterval = window, interval }()
+	window, interval := ProbeWindow, probeInterval
+	defer func() { ProbeWindow, probeInterval = window, interval }()
 	probeInterval = time.Millisecond
 	probe := func(answers ...error) (func(context.Context, string, string) error, *int, *string) {
 		calls, password := 0, ""
@@ -1054,7 +1058,7 @@ func TestRevocationProbeRetriesWhileBrokersSettle(t *testing.T) {
 	if step := stepThree(service.RevokeReceiver(ctx, "receiver-c", time.Millisecond, failed, nil)); step.Complete || *calls != 1 {
 		t.Fatalf("failed probe: step %+v after %d probes; want one failed probe", step, *calls)
 	}
-	probeWindow = 5 * time.Millisecond
+	ProbeWindow = 5 * time.Millisecond
 	refused, _, password := probe(errLoginRefused)
 	step := stepThree(service.RevokeReceiver(ctx, "receiver-c", time.Millisecond, refused, nil))
 	if step.Complete || !errors.Is(step.Err, errLoginRefused) {

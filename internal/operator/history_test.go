@@ -37,15 +37,15 @@ func historyFixture(t *testing.T, client *kgo.Client, base, ended, retermed time
 	changed.Storage = &Storage{Endpoint: "https://s3.example.com", Bucket: "bucket-b"}
 	configA, configB := modelConfig("receiver-a", "pool-a"), modelConfig("receiver-b", "pool-a")
 	at := func(record Record, when time.Time) timedRecord {
-		record.Version, record.AtMS = 1, when.UnixMilli()
+		record.Version, record.AtMS = RecordVersion, when.UnixMilli()
 		return timedRecord{record, when}
 	}
 	operatorRecords(t, client,
 		at(Record{Kind: "tenant", Tenant: "tenant-a"}, base),
 		at(Record{Kind: "tenant", Tenant: "tenant-b"}, base),
 		at(Record{Kind: "pool", Pool: "pool-a", Terms: &terms}, base),
-		at(Record{Kind: "host", Tenant: "tenant-a", Host: "host-a"}, base),
-		at(Record{Kind: "host", Tenant: "tenant-b", Host: "host-b"}, base),
+		at(Record{Kind: "host", Enrolment: "00000000000000000000000000000000", Tenant: "tenant-a", Host: "host-a"}, base),
+		at(Record{Kind: "host", Enrolment: "00000000000000000000000000000000", Tenant: "tenant-b", Host: "host-b"}, base),
 		at(Record{Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-a"}, base),
 		at(Record{Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-a"}, base),
 		at(Record{Kind: "receiver", Pool: "pool-a", Receiver: "receiver-a", Config: &configA}, base),

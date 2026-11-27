@@ -47,44 +47,51 @@ func encode(payload any) ([]byte, error) {
 // only then decodes the payload into dst. It returns the owner, which
 // the caller must match against the payload's own claims.
 func Verify(encoded []byte, typ string, keys Keys, dst any) (string, error) {
-	return verify(encoded, typ, keys.current, dst)
+	owner, _, err := verify(encoded, typ, keys.current, dst, Tolerant)
+	return owner, err
+}
+
+// VerifyStrict is Verify with strict payload decoding and returns the verified payload bytes.
+func VerifyStrict(encoded []byte, typ string, keys Keys, dst any) (string, []byte, error) {
+	return verify(encoded, typ, keys.current, dst, Strict)
 }
 
 // VerifyHistory is Verify for an owner's feed records, which also verify
 // against a key the owner retired after the broker appended them.
 func VerifyHistory(encoded []byte, typ string, keys Keys, appended time.Time, dst any) (string, error) {
-	return verify(encoded, typ, func(owner, keyID string) (ed25519.PublicKey, error) {
+	owner, _, err := verify(encoded, typ, func(owner, keyID string) (ed25519.PublicKey, error) {
 		for _, retired := range keys[owner].Retired {
 			if KeyID(retired.Key) == keyID && appended.Before(retired.At) {
 				return retired.Key, nil
 			}
 		}
 		return keys.current(owner, keyID)
-	}, dst)
+	}, dst, Tolerant)
+	return owner, err
 }
 
-func verify(encoded []byte, typ string, key func(owner, keyID string) (ed25519.PublicKey, error), dst any) (string, error) {
+func verify(encoded []byte, typ string, key func(owner, keyID string) (ed25519.PublicKey, error), dst any, options json.Options) (string, []byte, error) {
 	jws, err := jose.ParseSignedCompact(string(encoded), []jose.SignatureAlgorithm{jose.EdDSA})
 	if err != nil {
-		return "", fmt.Errorf("parse JWS: %w", err)
+		return "", nil, fmt.Errorf("parse JWS: %w", err)
 	}
 	if len(jws.Signatures) != 1 || jws.Signatures[0].Protected.Algorithm != string(jose.EdDSA) || jws.Signatures[0].Protected.ExtraHeaders[jose.HeaderType] != typ {
-		return "", errors.New("invalid JWS protected header")
+		return "", nil, errors.New("invalid JWS protected header")
 	}
 	owner, keyID, ok := strings.Cut(jws.Signatures[0].Protected.KeyID, "/")
 	if !ok {
-		return "", errors.New("JWS kid does not name an owner and key")
+		return "", nil, errors.New("JWS kid does not name an owner and key")
 	}
 	public, err := key(owner, keyID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	payload, err := jws.Verify(public)
 	if err != nil {
-		return "", errors.New("invalid JWS signature")
+		return "", nil, errors.New("invalid JWS signature")
 	}
-	if err := json.Unmarshal(payload, dst, Tolerant); err != nil {
-		return "", fmt.Errorf("decode payload: %w", err)
+	if err := json.Unmarshal(payload, dst, options); err != nil {
+		return "", nil, fmt.Errorf("decode payload: %w", err)
 	}
-	return owner, nil
+	return owner, payload, nil
 }

@@ -88,7 +88,7 @@ func removeUndoesAStaleHostAddForce(t *testing.T, service *Service, pool, tenant
 	if err := service.PoolApply(ctx, pool, modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := hostFixture(t, service, ctx, tenant, host, filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, tenant, host, filepath.Join(t.TempDir(), "host.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	if err := entitleFixture(t, service, ctx, tenant, pool); err != nil {
@@ -142,7 +142,7 @@ func TestNextCommandWithdrawsARemovedReceiversRestoredGrants(t *testing.T) {
 		}
 		return service.reconcileACLs(ctx, loaded)
 	})
-	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	if count, err := principalACLs(ctx, service, ReceiverPrincipal("receiver-a")); err != nil || count != 0 {
@@ -211,7 +211,7 @@ func TestConvergeTouchesOnlyWhatWherryManages(t *testing.T) {
 	commands := []func() error{
 		func() error { return service.PoolApply(ctx, "pool-a", modelTerms(), false) },
 		func() error {
-			return hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false)
+			return hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"))
 		},
 		func() error { return entitleFixture(t, service, ctx, "tenant-a", "pool-a") },
 		func() error {
@@ -257,7 +257,7 @@ func TestSuspensionReassertsItsDeletionAfterItsRecord(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err != nil {
@@ -317,7 +317,7 @@ func entitledHost(t *testing.T, service *Service) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	if err := entitleFixture(t, service, ctx, "tenant-a", "pool-a"); err != nil {
@@ -343,7 +343,7 @@ func TestAPassDuringWhichTheLogMovedRepeats(t *testing.T) {
 	ctx := context.Background()
 	entitledHost(t, service)
 	duringPass(t, func() error { return service.PoolSuspend(ctx, "pool-a", true) })
-	if err := hostFixture(t, service, ctx, "tenant-b", "host-b", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, "tenant-b", "host-b", filepath.Join(t.TempDir(), "host.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	withdrawn(t, service, ACL{TenantPrincipal("tenant-a", "host-a"), "topic", PoolTasksPrefix("pool-a"), true, []string{"WRITE"}})
@@ -370,33 +370,6 @@ func TestConvergeStopsAtItsBound(t *testing.T) {
 	}
 	if converged == nil || !strings.Contains(converged.Error(), "moved during each of 5 convergence passes") || moved != convergePasses {
 		t.Fatalf("converge = %v after %d moves, want the bound's error after %d", converged, moved, convergePasses)
-	}
-}
-
-// A host add --force that checked the host was live, while a removal ends it before its pass: it refuses and writes no
-// bundle.
-func TestStaleReissueRefusesAndWritesNoBundle(t *testing.T) {
-	_, service, closeFixture := kfakeService(t)
-	defer closeFixture()
-	ctx := context.Background()
-	entitledHost(t, service)
-	revocationBounds(t, service, "1", "1", "1")
-	duringPass(t, func() error {
-		if result := service.RevokeHost(ctx, "tenant-a", "host-a", 0, denied, nil); !result.Complete {
-			return errors.New("incomplete revocation")
-		}
-		return nil
-	})
-	dir := t.TempDir()
-	err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(dir, "host.yaml"), true)
-	if err == nil || !strings.Contains(err.Error(), "cannot return after its membership end") {
-		t.Fatalf("stale reissue = %v, want a refusal", err)
-	}
-	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
-		t.Fatalf("stale reissue left %v: %v", entries, err)
-	}
-	if ok, err := hasCredential(ctx, service, TenantPrincipal("tenant-a", "host-a")); err != nil || ok {
-		t.Fatalf("removed host keeps a credential: %t, %v", ok, err)
 	}
 }
 

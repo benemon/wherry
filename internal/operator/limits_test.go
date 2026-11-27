@@ -30,7 +30,7 @@ import (
 )
 
 // A pool record written before the limits existed, as EncodeRecord writes modelTerms.
-const poolRecordWithoutLimits = `{"v":1,"kind":"pool","pool":"pool-a","terms":{"agents":[{"name":"agent-a","credentials":[{"name":"model","env":"MODEL_API_KEY"}]}],"default_agent":"agent-a","delivery_limit":3,"lock_duration_ms":15000,"producer_byte_rate":1000000,"request_percentage":50},"at_ms":1}`
+const poolRecordWithoutLimits = `{"v":2,"kind":"pool","pool":"pool-a","terms":{"agents":[{"name":"agent-a","credentials":[{"name":"model","env":"MODEL_API_KEY"}]}],"default_agent":"agent-a","delivery_limit":3,"lock_duration_ms":15000,"producer_byte_rate":1000000,"request_percentage":50},"at_ms":1}`
 
 func TestPoolLimitsDefaultWhereTermsLeaveThemOut(t *testing.T) {
 	terms := modelTerms()
@@ -53,7 +53,7 @@ func TestPoolLimitsDefaultWhereTermsLeaveThemOut(t *testing.T) {
 		t.Fatalf("defaults %#v, want 8 MiB and a 72h start_by_limit", got)
 	}
 	terms.OutputLimit = 2000
-	state, err = Fold([]Record{{Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}})
+	state, err = Fold([]Record{{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}})
 	if got := state.Pools["pool-a"]; err != nil || got.OutputLimit != 2000 {
 		t.Fatalf("limit %d, %v; want the terms' own", got.OutputLimit, err)
 	}
@@ -83,7 +83,7 @@ func TestReplyLimit(t *testing.T) {
 		t.Fatalf("YAML reply_limit %d, %v", parsed.ReplyLimit, err)
 	}
 	terms.OutputLimit = 1000
-	state, err = Fold([]Record{{Version: 1, Kind: "pool", Pool: "pool-a", Terms: &Terms{Agents: terms.Agents, DefaultAgent: terms.DefaultAgent,
+	state, err = Fold([]Record{{Kind: "pool", Pool: "pool-a", Terms: &Terms{Agents: terms.Agents, DefaultAgent: terms.DefaultAgent,
 		DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1, RequestPercentage: 1, OutputLimit: 1000}, AtMS: 1}})
 	if got := state.Pools["pool-a"].ReplyLimit; err != nil || got != 1000 {
 		t.Fatalf("reply limit %d, %v; want an output limit under the default", got, err)
@@ -362,7 +362,7 @@ func TestPoolApplyDryRunCreatesNoTopic(t *testing.T) {
 	defer closeFixture()
 	ctx := context.Background()
 	admin := kadm.NewClient(service.Operator)
-	responses, err := admin.DeleteTopics(ctx, OperatorTopic, telemetry.TraceTopic(""))
+	responses, err := admin.DeleteTopics(ctx, OperatorTopic, telemetry.TraceTopic(""), RequestsTopic)
 	if err == nil {
 		err = responses.Error()
 	}
@@ -893,7 +893,7 @@ func TestTenantFeedsTakeTheFeedRecordLimit(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := hostFixture(t, service, ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	atLimit("host add", feeds("tenant-a")...)

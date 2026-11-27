@@ -975,7 +975,7 @@ func devBootstrap(ctx context.Context, env devEnv, agents []string, sources map[
 	if err != nil {
 		return err
 	}
-	if err := service.HostAdd(ctx, devTenant, devHost, hostBundle, false); err != nil {
+	if err := service.HostAdd(ctx, devTenant, devHost, hostBundle); err != nil {
 		return fmt.Errorf("add --host: %w", err)
 	}
 	receiverBundle, err := bundlePath(dir, "receivers", true, devReceiver)

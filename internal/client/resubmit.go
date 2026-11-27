@@ -313,7 +313,7 @@ func (h *Host) lockRun(ctx context.Context, runID string) (func(), error) {
 		return nil, ErrRunNotFound
 	}
 	lock := filepath.Join(h.stateDir, "resubmit", filepath.Base(path)+".lock")
-	unlock, err := h.lockFile(ctx, lock)
+	unlock, err := LockFile(ctx, lock, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -323,12 +323,13 @@ func (h *Host) lockRun(ctx context.Context, runID string) (func(), error) {
 	}, nil
 }
 
-// lockFile takes an exclusive lock on the file at path, shared by every process using the state directory, and returns
-// its release. It gives up when ctx ends.
-func (h *Host) lockFile(ctx context.Context, path string) (func(), error) {
+// LockFile takes an exclusive lock on the file at path, shared by every process that locks that path, and returns its
+// release. It gives up when ctx ends. While it waits it calls waiting, when set, once with the file's contents.
+func LockFile(ctx context.Context, path string, waiting func([]byte)) (func(), error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
+	waited := false
 	for {
 		lock, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 		if err != nil {
@@ -340,6 +341,13 @@ func (h *Host) lockFile(ctx context.Context, path string) (func(), error) {
 			held, statErr := lock.Stat()
 			current, pathErr := os.Stat(path)
 			if statErr == nil && pathErr == nil && os.SameFile(held, current) {
+				// The open's mode applies only to a file it creates; one that was already there is made 0600 too.
+				if held.Mode().Perm() != 0o600 {
+					if err := lock.Chmod(0o600); err != nil {
+						lock.Close()
+						return nil, err
+					}
+				}
 				return func() { lock.Close() }, nil
 			}
 			lock.Close()
@@ -348,6 +356,11 @@ func (h *Host) lockFile(ctx context.Context, path string) (func(), error) {
 		lock.Close()
 		if !errors.Is(err, syscall.EWOULDBLOCK) {
 			return nil, err
+		}
+		if !waited && waiting != nil {
+			contents, _ := os.ReadFile(path)
+			waiting(contents)
+			waited = true
 		}
 		select {
 		case <-ctx.Done():

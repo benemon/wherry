@@ -150,14 +150,14 @@ func TestTenantStorageCommand(t *testing.T) {
 		t.Fatalf("refresh printed %q; want %q", stdout.String(), want)
 	}
 	after, err := operator.ReadBundle(hostA)
-	if err != nil || after != (operator.Bundle{Broker: before.Broker, Principal: before.Principal, Password: before.Password, Storage: keys}) {
+	if err != nil || after != (operator.Bundle{Broker: before.Broker, Principal: before.Principal, Password: before.Password, Enrolment: before.Enrolment, Storage: keys}) {
 		t.Fatalf("refreshed bundle %+v, %v; want the pair with the password of %+v", after, err, before)
 	}
 	stdout.Reset()
 	if err := runOperator([]string{"rotate", "--tenant", "tenant-a", "--host", "host-a", "--storage"}, &stdout, io.Discard); err != nil || stdout.String() != hostA+" is current\n" {
 		t.Fatalf("refresh again: %v, %q", err, stdout.String())
 	}
-	// A host added now carries the pair, and the add names the next step; a reissue keeps the pair under its new password.
+	// A host added now carries the pair, and the add names the next step.
 	stdout.Reset()
 	if err := runOperator([]string{"add", "--host", "host-b", "--tenant", "tenant-a"}, &stdout, io.Discard); err != nil {
 		t.Fatal(err)
@@ -167,16 +167,6 @@ func TestTenantStorageCommand(t *testing.T) {
 	}
 	if added, err := operator.ReadBundle(hostB); err != nil || added.Storage != keys {
 		t.Fatalf("bundle %+v, %v; want the pair in a host added after it was recorded", added, err)
-	}
-	stdout.Reset()
-	if err := runOperator([]string{"add", "--host", "host-a", "--tenant", "tenant-a", "--force"}, &stdout, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	if want := "wrote " + hostA + "; hand it to the host, where wherry host init host-a.bundle installs it\n"; stdout.String() != want {
-		t.Fatalf("host add --force printed %q; want %q", stdout.String(), want)
-	}
-	if reissued, err := operator.ReadBundle(hostA); err != nil || reissued.Storage != keys || reissued.Password == after.Password {
-		t.Fatalf("bundle after --force %+v, %v; want the pair under a new password", reissued, err)
 	}
 	// Receiver bundles never carry it, reissued or not.
 	if err := runOperator([]string{"apply", "--receiver", "receiver-a", "--force"}, io.Discard, io.Discard); err != nil {

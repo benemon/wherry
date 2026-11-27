@@ -20,7 +20,7 @@ func TestTenantRemoveRetriesRevocationSteps(t *testing.T) {
 			if err := service.TenantAdd(ctx, "t"); err != nil {
 				t.Fatal(err)
 			}
-			if err := service.HostAdd(ctx, "t", "h", filepath.Join(t.TempDir(), "bundle"), false); err != nil {
+			if err := service.HostAdd(ctx, "t", "h", filepath.Join(t.TempDir(), "bundle")); err != nil {
 				t.Fatal(err)
 			}
 			revocationBounds(t, service, "1", "1", "1")

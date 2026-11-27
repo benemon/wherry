@@ -529,6 +529,7 @@ On Strimzi, the User Operator must ignore the principals wherry creates, as
 | Cluster | `Alter` | creating and deleting SCRAM credentials; creating, describing and deleting ACLs |
 | Cluster | `AlterConfigs` | client quotas; reading broker settings |
 | Topic, prefix `wherry.` | `Create`, `AlterConfigs`, `Read`, `Write` | the operator, receiver, pool, tenant and host topics |
+| Topic `wherry.requests` | `Delete` | deleting decided [credential requests](#host-credential-rotation) |
 | Group, prefix `p-` | `AlterConfigs`, `Describe` | share-group settings; share-group state for the [operator view](operator-view.md) |
 
 Kafka implies `Describe` by `Read`, `Write` and `Alter`, and
@@ -537,7 +538,10 @@ Kafka implies `Describe` by `Read`, `Write` and `Alter`, and
 so on the cluster and the topics `init` grants neither. On the pool groups
 `AlterConfigs` implies `DescribeConfigs` alone, and describing a share
 group's state needs `Describe`, so `init` grants it there. `operator check`
-reports any of these grants that is missing. On an install set up before the
+reports any of these grants that is missing. On an install set up before
+host credential rotation, a re-run of `init` grants `Delete` on
+`wherry.requests` and creates the topic
+([Upgrade](upgrade.md#host-credential-rotation)). On an install set up before the
 group `Describe` it reports `missing DESCRIBE ACL on p- for wherry.operator`;
 a re-run of `init` grants it, and creates the trace topics, as
 [Upgrade](upgrade.md#trace-topics-and-the-operator-s-group-grant) describes.
@@ -555,17 +559,20 @@ rotates with a re-run of `init`.
 ### The operator working directory
 
 The operator's [working directory](configuration-operator.md#operator-working-directory)
-holds `operator.password`, every bundle `add --host` and `apply --receiver`
+holds `operator.password`, every bundle `add --host`, `revoke` and `apply --receiver`
 write, and each tenant's S3 key pair that `storage` recorded, in
 `storage/<tenant>.yaml`. A leaked directory therefore exposes the Kafka
 password of every principal wherry made and the storage keys of every
 tenant. Keep it on the operator's machine, readable by the operator alone:
 `bundles/` and `storage/` are mode 0700 and each password, bundle and keys
-file mode 0600. `init` adds `operator.password`, `bundles/` and `storage/`
+file mode 0600. `init` adds `operator.password`, `operator.lock`, `bundles/` and `storage/`
 to the directory's `.gitignore`, so the pool and receiver files can be kept
 in git without them. Hand each bundle to its host or receiver over a channel
 you trust. A host bundle holds the host's Kafka password and its tenant's
-storage pair.
+storage pair. That password logs in until the operator approves the host's
+first [credential request](#host-credential-rotation), which `host init` files
+at once, and the bundle stays in `bundles/hosts/` after that, holding a password
+that no longer works.
 
 ### Broker and S3 trust
 
@@ -620,6 +627,112 @@ password changes.
   --ca-cert @broker-ca.pem` on the operator's machine write it; a receiver's
   local configuration holds it as a block scalar. On OpenShift, the CA goes
   in the receiver's local configuration as `ca_cert`.
+
+## Host credential rotation
+
+A host chooses its own Kafka password and the operator approves it, so after
+enrolment no Kafka password passes through anyone. The enrolment bundle, from
+`add --host` or `revoke`, does carry one.
+[`host rotate --scram`](commands.md#wherry-host-rotate)
+generates the password on the host and writes a request, signed with the host
+key, to `wherry.requests`; the request carries the salt and the salted
+password, which is what Kafka stores for a SCRAM credential.
+[`operator approve`](commands.md#wherry-operator-approve) sets it as the
+host's credential. Receivers keep `apply --receiver --force`.
+
+Request and approval exist for scale: hosts start their own rotations, the
+operator approves them in bulk with `approve --all`, and no bundle is written
+or handed over for a rotation.
+
+### The requests topic
+
+Every live host can write to `wherry.requests`; only `wherry.operator` reads
+it, and `operator init` grants it `Delete` there. A request's salted password
+is enough to log in as the host once the request is approved, so treat the
+topic as holding passwords:
+
+- A request stays in `wherry.requests` until an `approve` or `reject` runs:
+  the topic has `retention.ms=-1`, so nothing ages out on its own. Run a pass
+  often enough that undecided requests do not pile up
+  ([Approve a host's credential request](operations-operator.md#approve-a-host-s-credential-request)).
+- After the pass that decides a request, no client can fetch it: the pass
+  moves the topic's log start past it (`DeleteRecords`). That does not remove
+  it. Its bytes stay on the brokers' disks until the first request produced
+  more than a day after the segment began rolls the segment, and the next
+  retention check deletes the segment. On a quiet topic nothing bounds that
+  time. Whoever reads a broker's disk reads them.
+- A live host can write any record there, with any ID and any Kafka key, as
+  often as its quota allows. A pass approves only a request signed with the
+  current key of the host it names, and drops every other record, so a copy
+  under another host's ID does not stop the real one; it approves a request
+  only within 7 days of its first copy under that key, and only while the
+  request names the host's current credential ID, so a copy replayed after its
+  decision or after a `revoke` is never approved.
+- A bundle's password, from `add --host` or `revoke`, works until the
+  operator approves the host's first request, which `host init` files at once.
+  The kept bundle stays in `bundles/hosts/`
+  ([The operator working directory](#the-operator-working-directory)).
+
+A host key that may be compromised lets its holder sign requests as the host,
+and `revoke` does not change the host key:
+[remove the host](operations-operator.md#revoke-a-host-or-receiver) with
+`remove --host` and enrol it again under a new name.
+
+### The operator lock
+
+`approve`, `reject`, `revoke`, `remove --host` and `remove --tenant` take an
+exclusive lock on `operator.lock` in the operator directory, held until they
+exit ([Concurrent operator commands](operations-operator.md#concurrent-operator-commands)).
+It is the only thing that keeps an approval apart from a `revoke` or removal
+of the same host: Kafka has no conditional update of a SCRAM credential. The
+lock reaches the processes of one machine that open the same directory. It
+does not reach a clone of the operator directory, a synced copy of it, or
+another machine, and on a network mount only where the file system carries
+`flock` between clients, as Linux NFS does. Run these commands from one
+directory on one machine.
+
+### An upsert the broker makes later
+
+Kafka's update of a SCRAM credential, an upsert, has no compare-and-set and no
+timeout. An upsert that any `approve` or `revoke` of a host sent can be made
+by the broker later, over whatever a later command set, whether the command
+stopped, timed out or returned without an error; Kafka documents no bound on
+how late, and nothing in wherry waits for one. An `approve` that reports an
+upsert error says the upsert may still be applied. A command that exits zero
+is no sign that none is left. These are accepted limits:
+
+- `revoke` waits `connections.max.reauth.ms` between its upsert and its last
+  login check. A late upsert applied in that time makes the last check fail,
+  and `revoke` stops saying an old password may work. One applied later is not
+  seen.
+- Applied after `revoke` has finished, a late upsert restores the password it
+  carries, the host's requested one or an earlier `revoke`'s, and the bundle
+  `revoke` wrote does not log in, until `revoke` is run again. A host in use
+  shows this at its next connection, which fails; a host not enrolled again
+  shows nothing. To keep a host out, remove it with `remove --host`, do not
+  only revoke it: after a removal a restored login has no ACLs.
+- A session opened with an old password during `revoke`'s wait can outlast
+  `revoke` by at most `connections.max.reauth.ms`, which `revoke` prints beside
+  its bundle line.
+- A late upsert applied over a later approval, or a stopped `revoke`'s own over
+  its re-run's, leaves the host holding a password the broker does not have.
+  The host is locked out until `revoke` and re-enrolment.
+- A late upsert applied after `remove --host` can leave a SCRAM credential for
+  the removed principal, which can be one the host holds the password of: its
+  login succeeds, it has no ACLs, and the next operator command that converges
+  deletes the credential.
+
+A host command logs in on its bundle's broker alone. Brokers apply an approved
+password in turn, so right after an approval another broker can refuse the
+password the host now uses until it has applied it. The client does not retry
+that refusal: the command fails naming the broker, and running it again
+succeeds. A running `wherry host mcp` keeps the password it started with and is
+restarted after an approval.
+
+"Every broker" in `revoke`'s and removal's login checks is every broker the
+cluster metadata lists. A fenced broker is not listed, so it is not asked, and
+keeps the credentials it had: a password it still accepts works there after
+`revoke`, as after a removal.
 
 ## Trace topics
 

@@ -16,18 +16,18 @@ import (
 // its operations.
 func TestACLMatrix(t *testing.T) {
 	terms := modelTerms()
-	records := []Record{{Version: 1, Kind: "tenant", Tenant: "tenant-a", AtMS: 1}, {Version: 1, Kind: "tenant", Tenant: "tenant-b", AtMS: 1},
-		{Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}, {Version: 1, Kind: "pool", Pool: "pool-b", Terms: &terms, AtMS: 1},
-		{Version: 1, Kind: "host", Tenant: "tenant-a", Host: "host-a", AtMS: 1}, {Version: 1, Kind: "host", Tenant: "tenant-b", Host: "host-b", AtMS: 1},
-		{Version: 1, Kind: "host", Tenant: "tenant-a", Host: "host-c", AtMS: 1},
-		{Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-a", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-b", AtMS: 1},
-		{Version: 1, Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-a", AtMS: 1},
+	records := []Record{{Kind: "tenant", Tenant: "tenant-a", AtMS: 1}, {Kind: "tenant", Tenant: "tenant-b", AtMS: 1},
+		{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}, {Kind: "pool", Pool: "pool-b", Terms: &terms, AtMS: 1},
+		{Kind: "host", Enrolment: "00000000000000000000000000000000", Tenant: "tenant-a", Host: "host-a", AtMS: 1}, {Kind: "host", Enrolment: "00000000000000000000000000000000", Tenant: "tenant-b", Host: "host-b", AtMS: 1},
+		{Kind: "host", Enrolment: "00000000000000000000000000000000", Tenant: "tenant-a", Host: "host-c", AtMS: 1},
+		{Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-a", AtMS: 1}, {Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-b", AtMS: 1},
+		{Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-a", AtMS: 1},
 	}
 	for _, config := range []ReceiverConfig{modelConfig("receiver-a", "pool-a"), modelConfig("receiver-b", "pool-a"), modelConfig("receiver-c", "pool-b")} {
 		copy := config
-		records = append(records, Record{Version: 1, Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &copy, AtMS: 1})
+		records = append(records, Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &copy, AtMS: 1})
 	}
-	records = append(records, Record{Version: 1, Kind: "end", Tenant: "tenant-a", Host: "host-c", AtMS: 1}, Record{Version: 1, Kind: "suspend", Pool: "pool-b", AtMS: 1})
+	records = append(records, Record{Kind: "end", Tenant: "tenant-a", Host: "host-c", AtMS: 1}, Record{Kind: "suspend", Pool: "pool-b", AtMS: 1})
 	state, err := Fold(records)
 	if err != nil {
 		t.Fatal(err)
@@ -44,6 +44,7 @@ func TestACLMatrix(t *testing.T) {
 		"wherry.operator cluster kafka-cluster ALTER,ALTER_CONFIGS",
 		"wherry.operator group p-* ALTER_CONFIGS,DESCRIBE",
 		"wherry.operator topic wherry.* CREATE,ALTER_CONFIGS,READ,WRITE",
+		"wherry.operator topic wherry.requests DELETE",
 		"wherry.rcv.receiver-a group p-pool-a READ,DESCRIBE,DESCRIBE_CONFIGS",
 		"wherry.rcv.receiver-a group p-pool-a.custodian READ,DESCRIBE",
 		"wherry.rcv.receiver-a topic wherry.host.tenant-a.host-a READ,DESCRIBE",
@@ -106,6 +107,7 @@ func TestACLMatrix(t *testing.T) {
 		"wherry.rcv.receiver-c transactional p.pool-b.* WRITE,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.host.tenant-a.host-a READ,WRITE,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.operator READ,DESCRIBE",
+		"wherry.tnt.tenant-a.host-a topic wherry.requests WRITE,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.pool.pool-a.custodian READ,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.pool.pool-a.events WRITE,DESCRIBE",
 		"wherry.tnt.tenant-a.host-a topic wherry.pool.pool-a.receivers READ,DESCRIBE",
@@ -122,6 +124,7 @@ func TestACLMatrix(t *testing.T) {
 		"wherry.tnt.tenant-a.host-a topic wherry.traces.tenant-a READ,WRITE,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.host.tenant-b.host-b READ,WRITE,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.operator READ,DESCRIBE",
+		"wherry.tnt.tenant-b.host-b topic wherry.requests WRITE,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.pool.pool-a.custodian READ,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.pool.pool-a.events WRITE,DESCRIBE",
 		"wherry.tnt.tenant-b.host-b topic wherry.pool.pool-a.receivers READ,DESCRIBE",
@@ -133,6 +136,7 @@ func TestACLMatrix(t *testing.T) {
 		"wherry.tnt.tenant-b.host-b topic wherry.traces.tenant-b READ,WRITE,DESCRIBE",
 	}
 	slices.Sort(got)
+	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		for _, line := range got {
 			if !slices.Contains(want, line) {

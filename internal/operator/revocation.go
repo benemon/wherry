@@ -20,8 +20,8 @@ import (
 var ErrAuthorizationDenied = errors.New("authorisation denied")
 var ErrStillAuthorised = errors.New("broker still authorises the principal")
 
-// ACL deletion reaches each broker on its own schedule, so step 3 retries a broker that still authorises.
-var probeWindow, probeInterval = 2 * time.Minute, time.Second
+// ACL deletion and a SCRAM credential reach each broker on its own schedule, so a probe retries within ProbeWindow.
+var ProbeWindow, probeInterval = 2 * time.Minute, time.Second
 
 // errLoginRefused is a probe whose login a broker refused.
 var errLoginRefused = errors.New("authentication failure")
@@ -177,7 +177,7 @@ func (r *revocation) steps(ctx context.Context, first, last int) RevocationResul
 		if probe == nil {
 			return errors.New("probe is not configured")
 		}
-		deadline := time.Now().Add(probeWindow)
+		deadline := time.Now().Add(ProbeWindow)
 		for {
 			err := probe(ctx, principal, r.password)
 			if errors.Is(err, ErrAuthorizationDenied) {
@@ -272,10 +272,15 @@ func (service *Service) Probe(topic string) func(context.Context, string, string
 	}
 }
 
-// WaitOperatorCredential waits, within topicWait, until every broker service.Operator lists accepts wherry.operator's
-// login with password. Brokers apply a SCRAM credential in turn, and a login refused before then succeeds after.
+// WaitOperatorCredential waits, within topicWait, until every listed broker accepts wherry.operator's login with password.
 func (service *Service) WaitOperatorCredential(ctx context.Context, password string) error {
-	waitCtx, cancel := context.WithTimeout(ctx, topicWait)
+	return service.WaitCredential(ctx, OperatorPrincipal, password, topicWait)
+}
+
+// WaitCredential waits, within window, until every broker service.Operator lists accepts principal's login with
+// password. Brokers apply a SCRAM credential in turn, and a login refused before then succeeds after.
+func (service *Service) WaitCredential(ctx context.Context, principal, password string, window time.Duration) error {
+	waitCtx, cancel := context.WithTimeout(ctx, window)
 	defer cancel()
 	// A dial past the deadline fails with an i/o timeout before waitCtx's timer fires and sets waitCtx.Err(), so the
 	// allowance is spent once the clock reaches the deadline, not once waitCtx.Err() says so.
@@ -291,7 +296,7 @@ func (service *Service) WaitOperatorCredential(ctx context.Context, password str
 	if len(ids) == 0 {
 		return errors.New("list brokers: none listed")
 	}
-	opts, err := KafkaOpts(service.Broker, OperatorPrincipal, password, service.Roots)
+	opts, err := KafkaOpts(service.Broker, principal, password, service.Roots)
 	if err != nil {
 		return err
 	}
@@ -315,14 +320,14 @@ func (service *Service) WaitOperatorCredential(ctx context.Context, password str
 			if errors.Is(err, kerr.SaslAuthenticationFailed) {
 				refused = err
 			} else if refused == nil || time.Now().Before(deadline) {
-				return fmt.Errorf("broker %d as %s: %w", id, OperatorPrincipal, err)
+				return fmt.Errorf("broker %d as %s: %w", id, principal, err)
 			}
 			select {
 			case <-waitCtx.Done():
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				return fmt.Errorf("broker %d as %s: %w", id, OperatorPrincipal, refused)
+				return fmt.Errorf("broker %d as %s: %w", id, principal, refused)
 			case <-time.After(listBackoff):
 			}
 		}

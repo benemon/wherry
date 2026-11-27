@@ -702,7 +702,7 @@ func newService(t *testing.T, ctx context.Context, terms operator.Terms) (*kfake
 	if err := service.TenantPoolAdd(ctx, testTenant, testPool); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HostAdd(ctx, testTenant, testHost, filepath.Join(t.TempDir(), "host.yaml"), false); err != nil {
+	if err := service.HostAdd(ctx, testTenant, testHost, filepath.Join(t.TempDir(), "host.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	return cluster, service

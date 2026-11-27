@@ -27,10 +27,10 @@ func entitleFixture(t *testing.T, service *Service, ctx context.Context, tenant,
 	return service.TenantPoolAdd(ctx, tenant, pool)
 }
 
-func hostFixture(t *testing.T, service *Service, ctx context.Context, tenant, host, path string, force bool) error {
+func hostFixture(t *testing.T, service *Service, ctx context.Context, tenant, host, path string) error {
 	t.Helper()
 	if err := tenantFixture(t, service, ctx, tenant); err != nil {
 		return err
 	}
-	return service.HostAdd(ctx, tenant, host, path, force)
+	return service.HostAdd(ctx, tenant, host, path)
 }

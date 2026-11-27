@@ -28,7 +28,7 @@ func ACLs(state State) []ACL {
 	var acls []ACL
 	for principal, host := range state.Hosts {
 		if !state.Ended[principal] && !state.Revoking[principal] {
-			acls = append(acls, ACL{principal, "topic", OperatorTopic, false, readDescribe}, ACL{principal, "topic", TenantTopic(host.Tenant), false, readDescribe}, ACL{principal, "topic", TenantTranscriptTopic(host.Tenant), false, readDescribe}, ACL{principal, "topic", HostTopic(host.Tenant, host.Name), false, []string{"READ", "WRITE", "DESCRIBE"}})
+			acls = append(acls, ACL{principal, "topic", OperatorTopic, false, readDescribe}, ACL{principal, "topic", RequestsTopic, false, writeDescribe}, ACL{principal, "topic", TenantTopic(host.Tenant), false, readDescribe}, ACL{principal, "topic", TenantTranscriptTopic(host.Tenant), false, readDescribe}, ACL{principal, "topic", HostTopic(host.Tenant, host.Name), false, []string{"READ", "WRITE", "DESCRIBE"}})
 			// A host's one tenant is on every span it writes, so its trace rows are its tenant's topic alone, entitled or not:
 			// it reads the spans of runs finishing after an entitlement ends.
 			acls = append(acls, ACL{principal, "topic", telemetry.TraceTopic(host.Tenant), false, []string{"READ", "WRITE", "DESCRIBE"}})

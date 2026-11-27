@@ -456,7 +456,7 @@ func TestTracedResubmissionFailureFailsTheSpan(t *testing.T) {
 func (f *fixture) tracedHost(t *testing.T, name string) (*Host, *syncBuffer, operator.Bundle) {
 	t.Helper()
 	bundlePath := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := f.service.HostAdd(f.ctx, "tenant-a", name, bundlePath, false); err != nil {
+	if err := f.service.HostAdd(f.ctx, "tenant-a", name, bundlePath); err != nil {
 		t.Fatal(err)
 	}
 	encoded, err := os.ReadFile(bundlePath)

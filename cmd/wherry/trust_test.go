@@ -669,8 +669,8 @@ func TestOperatorInitWithoutCACertKeepsTheExistingOne(t *testing.T) {
 	}
 }
 
-// A kept bundle that carries the ca earlier operators wrote is refused by tenant host refresh and receiver apply
-// naming --force, and --force reissues it without ca; the bundle a refusal leaves is untouched.
+// A kept bundle that carries the ca earlier operators wrote is refused by rotate --storage naming revoke and by receiver
+// apply naming --force, and each reissues it without ca; the bundle a refusal leaves is untouched.
 func TestKeptBundleWithACAIsReissuedWithForce(t *testing.T) {
 	service := operatorEnv(t)
 	ctx := context.Background()
@@ -690,6 +690,7 @@ func TestKeptBundleWithACAIsReissuedWithForce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	revocationBounds(t, service, "1")
 	// withCA rewrites the bundle at path as an earlier operator wrote it, the ca after the password.
 	withCA := func(path string) []byte {
 		t.Helper()
@@ -705,11 +706,12 @@ func TestKeptBundleWithACAIsReissuedWithForce(t *testing.T) {
 	}
 	for _, c := range []struct {
 		name, path string
+		hint       string
 		refresh    []string
 		force      []string
 	}{
-		{"host", filepath.Join("bundles", "hosts", "tenant-a", "host-a.bundle"), []string{"rotate", "--tenant", "tenant-a", "--host", "host-a", "--storage"}, []string{"add", "--host", "host-a", "--tenant", "tenant-a", "--force"}},
-		{"receiver", filepath.Join("bundles", "receivers", "receiver-a.bundle"), []string{"apply", "--receiver", "receiver-a"}, []string{"apply", "--receiver", "receiver-a", "--force"}},
+		{"host", filepath.Join("bundles", "hosts", "tenant-a", "host-a.bundle"), "revoke", []string{"rotate", "--tenant", "tenant-a", "--host", "host-a", "--storage"}, []string{"revoke", "--host", "host-a", "--tenant", "tenant-a"}},
+		{"receiver", filepath.Join("bundles", "receivers", "receiver-a.bundle"), "--force", []string{"apply", "--receiver", "receiver-a"}, []string{"apply", "--receiver", "receiver-a", "--force"}},
 	} {
 		before, err := operator.ReadBundle(c.path)
 		if err != nil {
@@ -717,8 +719,8 @@ func TestKeptBundleWithACAIsReissuedWithForce(t *testing.T) {
 		}
 		kept := withCA(c.path)
 		err = runOperator(c.refresh, io.Discard, io.Discard)
-		if err == nil || !errors.Is(err, operator.ErrBundleCA) || !strings.Contains(err.Error(), c.path+": ca is no longer read; reissue this bundle") || !strings.Contains(err.Error(), "--force") {
-			t.Fatalf("%s refresh with a kept bundle carrying a ca = %v; want the key and --force named", c.name, err)
+		if err == nil || !errors.Is(err, operator.ErrBundleCA) || !strings.Contains(err.Error(), c.path+": ca is no longer read; reissue this bundle") || !strings.Contains(err.Error(), c.hint) {
+			t.Fatalf("%s refresh with a kept bundle carrying a ca = %v; want the key and remedy named", c.name, err)
 		}
 		if after, err := os.ReadFile(c.path); err != nil || !bytes.Equal(after, kept) {
 			t.Fatalf("%s: a refused refresh rewrote %s", c.name, c.path)

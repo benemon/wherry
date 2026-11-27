@@ -52,7 +52,8 @@ their next release.
 | `wherry operator receiver apply RECEIVER [-f PATH] [--dry-run]` | `wherry operator apply --receiver RECEIVER [--file PATH] [--dry-run]` |
 | `wherry operator receiver apply RECEIVER --force` | `wherry operator apply --receiver RECEIVER --force` |
 | `wherry operator tenant add TENANT` | `wherry operator add --tenant TENANT` |
-| `wherry operator tenant host add TENANT HOST [--force]` | `wherry operator add --host HOST --tenant TENANT [--force]` |
+| `wherry operator tenant host add TENANT HOST` | `wherry operator add --host HOST --tenant TENANT` |
+| `wherry operator tenant host add TENANT HOST --force` | `wherry operator revoke --tenant TENANT --host HOST` |
 | `wherry operator tenant pool add TENANT POOL` | `wherry operator allow --tenant TENANT --pool POOL` |
 | `wherry operator tenant pool remove TENANT POOL` | `wherry operator deny --tenant TENANT --pool POOL` |
 | `wherry operator tenant remove TENANT` | `wherry operator remove --tenant TENANT` |
@@ -75,6 +76,15 @@ the state directory, and refuses a receiver that has never started.
 the procedure. The operator's trace span names keep the old command names:
 readers of the trace topics, the [operator view](operator-view.md) among them,
 match on them.
+
+## Host credential rotation
+
+A clean break, as every pre-1.0 change ([ADR-0032](design.md)); no
+compatibility path remains. This release reads only the `wherry.operator`
+records it writes, so an existing deployment is reset
+([Reset a deployment](operations-operator.md#reset-a-deployment)) and its
+hosts enrolled again. `wherry operator revoke --tenant TENANT --host HOST`
+replaces `add --host --force`, which is gone.
 
 ## Collected outputs and non-git continue
 
@@ -134,8 +144,8 @@ naming the key. Upgrade the operator first: an older operator with a
 
 1. On the operator's machine, install the binary and replace `ca_file` in
    `operator.yaml` with `ca_cert` holding the PEM.
-2. Reissue every bundle with `--force`: `wherry operator add --host
-   HOST --tenant TENANT --force` for each host and `wherry operator apply --receiver
+2. Reissue every bundle: `wherry operator revoke --tenant TENANT --host
+   HOST` for each host and `wherry operator apply --receiver
    RECEIVER --force` for each receiver. Each holder is locked out from its
    reissue until it installs its new bundle.
 3. For each holder: stop it, install the binary and the new bundle, replace

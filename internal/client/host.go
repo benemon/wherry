@@ -200,6 +200,9 @@ type Host struct {
 	// roots is the pool each bucket's certificate is verified against, Connect's; nil is the system roots alone.
 	roots  *x509.CertPool
 	logger *log.Logger
+	// bundlePath is the bundle Connect read, and connectedWith the request whose password it connected with, if any; a
+	// Host built by NewHost alone has neither.
+	bundlePath, connectedWith string
 	// follower is the host's reader of the tenant feed, kept while its context lasts.
 	followMu sync.Mutex
 	follower *follower

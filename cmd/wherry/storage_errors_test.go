@@ -70,8 +70,8 @@ func TestSubmitStorageErrorAndLogShowMarkersForTheStorageKeys(t *testing.T) {
 		func() error { return service.PoolApply(ctx, "pool-a", terms, false) },
 		func() error { return service.TenantAdd(ctx, "tenant-a") },
 		func() error { return service.TenantPoolAdd(ctx, "tenant-a", "pool-a") },
-		func() error { return service.HostAdd(ctx, "tenant-a", "host-a", hostA, false) },
-		func() error { return service.HostAdd(ctx, "tenant-a", "host-b", hostB, false) },
+		func() error { return service.HostAdd(ctx, "tenant-a", "host-a", hostA) },
+		func() error { return service.HostAdd(ctx, "tenant-a", "host-b", hostB) },
 		func() error { return service.ReceiverAdd(ctx, config, service.Broker, receiverBundle) },
 	} {
 		if err := step(); err != nil {

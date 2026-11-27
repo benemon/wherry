@@ -230,7 +230,7 @@ func operatorInit(ctx context.Context, dir string, options map[string]string, pr
 	if _, _, err := loadOperatorConfig(dir); err != nil {
 		return err
 	}
-	if err := ignore(filepath.Join(dir, ".gitignore"), "operator.password", "bundles/", "storage/"); err != nil {
+	if err := ignore(filepath.Join(dir, ".gitignore"), "operator.password", "operator.lock", "bundles/", "storage/"); err != nil {
 		return err
 	}
 	fmt.Fprintf(prompts, "%s can provision; its password is in %s\n", operator.OperatorPrincipal, filepath.Join(dir, "operator.password"))
