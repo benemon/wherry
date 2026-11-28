@@ -1,15 +1,15 @@
 ---
-# internal/client/config.go: the default configuration is $XDG_CONFIG_HOME/wherry/config.yaml, whose state directory
-# is $XDG_STATE_HOME/wherry, each with its XDG default; the host's own environment decides them.
-- name: Read the host's XDG configuration and state directories
-  ansible.builtin.command:
-    argv: [sh, -c, 'printf "%s\n%s\n" "${XDG_CONFIG_HOME:-$HOME/.config}" "${XDG_STATE_HOME:-$HOME/.local/state}"']
-  register: _wherry_host_xdg
-  check_mode: false
-  changed_when: false
+- name: Gather the host's environment
+  ansible.builtin.setup:
+    gather_subset: ['!all', '!min', env]
+  when: ansible_facts.env is not defined
 
+# internal/client/config.go: the default configuration is $XDG_CONFIG_HOME/wherry/config.yaml, whose state directory
+# is $XDG_STATE_HOME/wherry, each with its XDG default.
 - name: Set the host configuration path
   ansible.builtin.set_fact:
-    _wherry_host_config: "{{ wherry_host_config_dir | default(_wherry_host_xdg.stdout_lines[0] ~ '/wherry') }}/config.yaml"
-    _wherry_host_default_config: "{{ _wherry_host_xdg.stdout_lines[0] }}/wherry/config.yaml"
-    _wherry_host_default_state: "{{ _wherry_host_xdg.stdout_lines[1] }}/wherry"
+    __wherry_host_config: "{{ wherry_host_config_dir | default(__wherry_host_xdg_config ~ '/wherry', true) }}/config.yaml"
+    __wherry_host_default_config: "{{ __wherry_host_xdg_config }}/wherry/config.yaml"
+    __wherry_host_default_state: "{{ ansible_facts.env.XDG_STATE_HOME | default(ansible_facts.env.HOME ~ '/.local/state', true) }}/wherry"
+  vars:
+    __wherry_host_xdg_config: "{{ ansible_facts.env.XDG_CONFIG_HOME | default(ansible_facts.env.HOME ~ '/.config', true) }}"

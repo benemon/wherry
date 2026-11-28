@@ -146,6 +146,9 @@ jobs:
       - name: Build, check and retire the collection's example
         if: matrix.package == './cmd/wherry/'
         run: ansible/tests/ci.sh run
+      - name: Collect the role run's systemd and receiver state
+        if: failure() && matrix.package == './cmd/wherry/'
+        run: ansible/tests/ci.sh collect
 
   s3:
     runs-on: ubuntu-latest

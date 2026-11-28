@@ -1,9 +1,9 @@
 ---
-- name: Refuse state=absent without wherry_confirm_absent
+- name: Refuse wherry_operator_state=absent without wherry_operator_confirm_absent
   ansible.builtin.assert:
-    that: state == 'present' or wherry_confirm_absent | bool
-    fail_msg: state=absent moves the operator directory aside; set wherry_confirm_absent to true to proceed.
+    that: wherry_operator_state == 'present' or wherry_operator_confirm_absent | bool
+    fail_msg: wherry_operator_state=absent moves the operator directory aside; set wherry_operator_confirm_absent to true to proceed.
     quiet: true
 
 - name: Apply the operator's state
-  ansible.builtin.include_tasks: "{{ state }}.yml"
+  ansible.builtin.include_tasks: "{{ wherry_operator_state }}.yml"

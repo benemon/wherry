@@ -1,18 +1,16 @@
 argument_specs:
   main:
-    short_description: Create the Nomad namespaces wherry uses, or delete them and the receiver policies.
-    description:
-      - With state=absent, deletes the ACL policies whose names start with wherry_nomad_policy_prefix, then each namespace.
+    short_description: Create or delete the Nomad namespaces wherry uses.
     options:
-      state:
+      wherry_nomad_state:
         type: str
         choices: [present, absent]
         default: present
         description: Whether the namespaces should exist.
-      wherry_confirm_absent:
+      wherry_nomad_confirm_absent:
         type: bool
         default: false
-        description: Must be true for state=absent.
+        description: Must be true for wherry_nomad_state=absent.
       wherry_nomad_address:
         type: str
         required: true
@@ -29,7 +27,7 @@ argument_specs:
         type: list
         elements: dict
         required: true
-        description: Nomad namespaces and their capabilities; state=absent reads the names alone.
+        description: Nomad namespaces and their capabilities; state absent deletes each by name. nomad_receiver reads the same variable.
         options:
           name:
             type: str
@@ -44,6 +42,3 @@ argument_specs:
           node_pool_configuration:
             type: dict
             description: Namespace node pool configuration, a Nomad Enterprise feature.
-      wherry_nomad_policy_prefix:
-        type: str
-        description: Prefix, starting with wherry, of the receiver ACL policies state=absent deletes.

@@ -1,28 +1,68 @@
 ---
-- name: Check the arguments state=absent needs
+- name: Check the arguments wherry_nomad_receiver_state=absent needs
   ansible.builtin.assert:
     that:
-      - wherry_nomad_namespaces is defined
-      - wherry_nomad_receiver_prefix is defined and wherry_nomad_receiver_prefix is match('wherry')
-      - wherry_nomad_agent_prefix is defined and wherry_nomad_agent_prefix | length > 0
+      - wherry_nomad_receiver_name is not none or wherry_nomad_receiver_purge_prefix | bool
+      - wherry_nomad_receiver_name is none or wherry_nomad_receiver_namespace is not none
+      - >-
+        not wherry_nomad_receiver_purge_prefix | bool or
+        (wherry_nomad_receiver_job_prefix is not none and wherry_nomad_receiver_job_prefix is match('wherry') and
+         wherry_nomad_receiver_agent_prefix is not none and wherry_nomad_receiver_agent_prefix | length > 0)
     fail_msg: >-
-      state=absent needs wherry_nomad_namespaces, a wherry_nomad_receiver_prefix that starts with wherry, and a
-      non-empty wherry_nomad_agent_prefix.
+      wherry_nomad_receiver_state=absent needs wherry_nomad_receiver_name and _namespace, or
+      wherry_nomad_receiver_purge_prefix; the purge needs a wherry_nomad_receiver_job_prefix that starts with wherry and
+      a non-empty wherry_nomad_receiver_agent_prefix.
     quiet: true
 
-- name: Remove wherry receivers and runs from Nomad
-  module_defaults:
-    group/benemon.nomad.nomad:
-      address: "{{ wherry_nomad_address }}"
-      ca_cert: "{{ wherry_nomad_ca_cert | default(omit) }}"
-      token: "{{ wherry_nomad_token }}"
+- name: Delete the receiver
+  when: wherry_nomad_receiver_name is not none
+  block:
+    - name: Purge the receiver job
+      benemon.nomad.nomad_job:
+        name: "{{ wherry_nomad_receiver_name }}"
+        namespace: "{{ wherry_nomad_receiver_namespace }}"
+        state: absent
+        purge: true
+
+    - name: Delete the receiver variable
+      benemon.nomad.nomad_variable:
+        path: "nomad/jobs/{{ wherry_nomad_receiver_name }}"
+        namespace: "{{ wherry_nomad_receiver_namespace }}"
+        state: absent
+
+    - name: Delete the receiver state volume
+      benemon.nomad.nomad_volume:
+        name: "{{ wherry_nomad_receiver_name }}"
+        namespace: "{{ wherry_nomad_receiver_namespace }}"
+        node_pool: "{{ wherry_nomad_receiver_node_pool | default(omit, true) }}"
+        state: absent
+
+    - name: Delete the receiver workload policy
+      benemon.nomad.nomad_acl_policy:
+        name: "{{ wherry_nomad_receiver_name }}"
+        state: absent
+
+- name: Purge every wherry receiver and agent run by prefix
+  when: wherry_nomad_receiver_purge_prefix | bool
   block:
     - name: List Nomad namespaces
       benemon.nomad.nomad_namespace_info:
-      register: _wherry_nomad_namespace_list
+      register: __wherry_nomad_receiver_namespace_list
 
-    - name: Clear wherry objects from each Nomad namespace
-      ansible.builtin.include_tasks: absent-namespace.yml
-      loop: "{{ wherry_nomad_namespaces | map(attribute='name') | intersect(_wherry_nomad_namespace_list.namespaces | map(attribute='Name')) }}"
+    - name: Purge each namespace
+      ansible.builtin.include_tasks: purge.yml
+      loop: "{{ wherry_nomad_receiver_purge_namespaces | intersect(__wherry_nomad_receiver_namespace_list.namespaces | map(attribute='Name')) }}"
       loop_control:
-        loop_var: _wherry_nomad_namespace
+        loop_var: __wherry_nomad_receiver_purge_namespace
+
+    - name: List Nomad ACL policies
+      benemon.nomad.nomad_acl_policy_info:
+      register: __wherry_nomad_receiver_policies
+
+    - name: Delete the receiver workload policies
+      benemon.nomad.nomad_acl_policy:
+        name: "{{ item.Name }}"
+        state: absent
+      loop: "{{ __wherry_nomad_receiver_policies.policies | selectattr('Name', 'match', wherry_nomad_receiver_job_prefix | regex_escape) }}"
+      loop_control:
+        label: "{{ item.Name }}"

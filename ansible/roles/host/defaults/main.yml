@@ -1,3 +1,9 @@
 ---
-state: present
-wherry_confirm_absent: false
+wherry_host_state: present
+wherry_host_confirm_absent: false
+wherry_host_name: null
+wherry_host_tenant: "{{ wherry_tenant | default(none) }}"
+wherry_host_operator_dir: "{{ wherry_operator_dir | default(none) }}"
+wherry_host_ca_cert: "{{ wherry_ca_cert | default(none) }}"
+wherry_host_config_dir: null
+wherry_host_backup_dir: "{{ wherry_backup_dir | default(none) }}"

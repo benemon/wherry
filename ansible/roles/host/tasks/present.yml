@@ -1,34 +1,27 @@
 ---
-- name: Check the arguments state=present needs
+- name: Check the arguments wherry_host_state=present needs
   ansible.builtin.assert:
     that:
-      - wherry_host is defined
-      - wherry_host_tenant is defined
-      - wherry_operator_dir is defined
-      - wherry_host_ca_cert is defined
-    fail_msg: state=present needs wherry_host, wherry_host_tenant, wherry_operator_dir and wherry_host_ca_cert.
+      - wherry_host_name is not none
+      - wherry_host_tenant is not none
+      - wherry_host_operator_dir is not none
+      - wherry_host_ca_cert is not none
+    fail_msg: >-
+      wherry_host_state=present needs wherry_host_name, _tenant, _operator_dir and _ca_cert (the last three default to
+      wherry_tenant, wherry_operator_dir and wherry_ca_cert).
     quiet: true
 
 - name: Inspect the host bundle
   ansible.builtin.stat:
-    path: "{{ wherry_operator_dir }}/bundles/hosts/{{ wherry_host_tenant }}/{{ wherry_host }}.bundle"
-  register: _wherry_host_bundle
+    path: "{{ wherry_host_operator_dir }}/bundles/hosts/{{ wherry_host_tenant }}/{{ wherry_host_name }}.bundle"
+  register: __wherry_host_bundle
 
 - name: Enrol a new host credential
-  when: not _wherry_host_bundle.stat.exists
+  when: not __wherry_host_bundle.stat.exists
   block:
     - name: Add the host
       ansible.builtin.command:
-        argv:
-          - wherry
-          - operator
-          - add
-          - --host
-          - "{{ wherry_host }}"
-          - --tenant
-          - "{{ wherry_host_tenant }}"
-          - --dir
-          - "{{ wherry_operator_dir }}"
+        argv: [wherry, operator, add, --host, "{{ wherry_host_name }}", --tenant, "{{ wherry_host_tenant }}", --dir, "{{ wherry_host_operator_dir }}"]
       changed_when: true
 
     - name: Initialise the host
@@ -38,29 +31,33 @@
           - host
           - init
           - --config-file
-          - "{{ _wherry_host_config }}"
+          - "{{ __wherry_host_config }}"
           - --ca-cert
           - "@{{ wherry_host_ca_cert }}"
-          - "{{ wherry_operator_dir }}/bundles/hosts/{{ wherry_host_tenant }}/{{ wherry_host }}.bundle"
-      register: _wherry_host_initialisation
+          - "{{ wherry_host_operator_dir }}/bundles/hosts/{{ wherry_host_tenant }}/{{ wherry_host_name }}.bundle"
+      register: __wherry_host_initialisation
       changed_when: true
       no_log: true
 
-    - name: Check the enrolment request
-      ansible.builtin.assert:
-        that: _wherry_host_initialisation.stderr is regex('request [0-9a-f]{32} sent')
-        fail_msg: Host initialisation did not report an enrolment request ID.
-        quiet: true
-
-    - name: Keep the enrolment request ID
-      ansible.builtin.set_fact:
-        _wherry_host_request_id: "{{ _wherry_host_initialisation.stderr | regex_search('request ([0-9a-f]{32}) sent', '\\1') | first }}"
-
+    # Check mode runs neither command above, so there is no request to approve.
     - name: Approve the enrolment request
-      ansible.builtin.command:
-        argv: [wherry, operator, approve, "{{ _wherry_host_request_id }}", --dir, "{{ wherry_operator_dir }}"]
-      register: _wherry_host_approval
-      until: ('approved ' ~ _wherry_host_request_id) in _wherry_host_approval.stdout
-      retries: 3
-      delay: 10
-      changed_when: true
+      when: not ansible_check_mode
+      block:
+        - name: Check the enrolment request
+          ansible.builtin.assert:
+            that: __wherry_host_initialisation.stderr is regex('request [0-9a-f]{32} sent')
+            fail_msg: Host initialisation did not report an enrolment request ID.
+            quiet: true
+
+        - name: Keep the enrolment request ID
+          ansible.builtin.set_fact:
+            __wherry_host_request_id: "{{ __wherry_host_initialisation.stderr | regex_search('request ([0-9a-f]{32}) sent', '\\1') | first }}"
+
+        - name: Approve the enrolment request
+          ansible.builtin.command:
+            argv: [wherry, operator, approve, "{{ __wherry_host_request_id }}", --dir, "{{ wherry_host_operator_dir }}"]
+          register: __wherry_host_approval
+          until: ('approved ' ~ __wherry_host_request_id) in __wherry_host_approval.stdout
+          retries: 3
+          delay: 10
+          changed_when: true

@@ -1,40 +1,43 @@
 ---
-- name: Check the arguments state=present needs
+- name: Check the arguments wherry_operator_state=present needs
   ansible.builtin.assert:
     that:
-      - wherry_version is defined
-      - wherry_operator_broker is defined
-      - wherry_operator_ca_cert is defined
-      - wherry_operator_super_user is defined
-      - wherry_operator_super_user_password is defined
-      - wherry_tenant is defined
-      - wherry_pools is defined
-      - wherry_receivers is defined
+      - wherry_operator_version is not none
+      - wherry_operator_broker is not none
+      - wherry_operator_ca_cert is not none
+      - wherry_operator_super_user is not none
+      - wherry_operator_super_user_password is not none
+      - wherry_operator_tenant is not none
     fail_msg: >-
-      state=present needs wherry_version, wherry_operator_broker, wherry_operator_ca_cert, wherry_operator_super_user,
-      wherry_operator_super_user_password, wherry_tenant, wherry_pools and wherry_receivers.
+      wherry_operator_state=present needs wherry_operator_version, _broker, _ca_cert, _super_user, _super_user_password
+      and _tenant (version, broker, CA and tenant default to wherry_version, wherry_broker, wherry_ca_cert and wherry_tenant).
     quiet: true
 
 - name: Read the installed wherry version
   ansible.builtin.command:
     argv: [wherry, version]
-  register: _wherry_version_result
+  register: __wherry_operator_version_result
   check_mode: false
   changed_when: false
 
 - name: Check the installed wherry version
   ansible.builtin.assert:
-    that: ('version=' ~ wherry_version) in _wherry_version_result.stdout_lines
-    fail_msg: "Installed wherry is not {{ wherry_version }}."
+    that: ('version=' ~ wherry_operator_version) in __wherry_operator_version_result.stdout_lines
+    fail_msg: "Installed wherry is not {{ wherry_operator_version }}."
     quiet: true
 
 - name: Inspect the operator configuration
   ansible.builtin.stat:
     path: "{{ wherry_operator_dir }}/operator.yaml"
-  register: _wherry_operator_configuration
+  register: __wherry_operator_configuration
+
+# A first run in check mode initialises nothing, so nothing can query the operator.
+- name: Note whether the operator can be queried
+  ansible.builtin.set_fact:
+    __wherry_operator_queryable: "{{ __wherry_operator_configuration.stat.exists or not ansible_check_mode }}"
 
 - name: Initialise the operator
-  when: not _wherry_operator_configuration.stat.exists
+  when: not __wherry_operator_configuration.stat.exists
   block:
     - name: Create the operator directory
       ansible.builtin.file:
@@ -66,39 +69,48 @@
 - name: Wait for operator authentication
   ansible.builtin.command:
     argv: [wherry, operator, list, tenants, --dir, "{{ wherry_operator_dir }}"]
-  register: _wherry_operator_ready
-  until: _wherry_operator_ready.rc == 0
+  register: __wherry_operator_ready
+  until: __wherry_operator_ready.rc == 0
   retries: 30
   delay: 2
   check_mode: false
   changed_when: false
+  when: __wherry_operator_queryable
 
 - name: Create the tenant
   ansible.builtin.command:
-    argv: [wherry, operator, add, --tenant, "{{ wherry_tenant }}", --dir, "{{ wherry_operator_dir }}"]
-  register: _wherry_tenant_add
-  changed_when: _wherry_tenant_add.rc == 0
+    argv: [wherry, operator, add, --tenant, "{{ wherry_operator_tenant }}", --dir, "{{ wherry_operator_dir }}"]
+  register: __wherry_operator_tenant_add
+  changed_when: __wherry_operator_tenant_add.rc == 0
   failed_when: >-
-    _wherry_tenant_add.rc != 0 and
-    'tenant exists; a tenant name cannot return' not in (_wherry_tenant_add.stdout ~ _wherry_tenant_add.stderr)
+    __wherry_operator_tenant_add.rc != 0 and
+    'tenant exists; a tenant name cannot return' not in (__wherry_operator_tenant_add.stdout ~ __wherry_operator_tenant_add.stderr)
+
+- name: Create the pool record directory
+  ansible.builtin.file:
+    path: "{{ wherry_operator_dir }}/pools"
+    state: directory
+    mode: "0700"
+
+# wherry operator apply reports nothing about change, so a pool's change is its record changing: the copy in the
+# operator directory's pools/, where the CLI reads a pool's file by default.
+- name: Record each pool definition
+  ansible.builtin.copy:
+    src: "{{ item.file }}"
+    dest: "{{ wherry_operator_dir }}/pools/{{ item.name }}.yaml"
+    mode: "0600"
+  loop: "{{ wherry_operator_pools }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: __wherry_operator_pool_records
 
 - name: Validate pool definitions
   ansible.builtin.command:
-    argv:
-      - wherry
-      - operator
-      - apply
-      - --pool
-      - "{{ item.name }}"
-      - --dry-run
-      - --file
-      - "{{ item.file }}"
-      - --dir
-      - "{{ wherry_operator_dir }}"
-  loop: "{{ wherry_pools }}"
+    argv: [wherry, operator, apply, --pool, "{{ item.name }}", --dry-run, --file, "{{ item.file }}", --dir, "{{ wherry_operator_dir }}"]
+  loop: "{{ wherry_operator_pools }}"
   loop_control:
     label: "{{ item.name }}"
-  when: ansible_check_mode
+  when: ansible_check_mode and __wherry_operator_queryable
   check_mode: false
   changed_when: false
 
@@ -109,82 +121,93 @@
       - operator
       - apply
       - --pool
-      - "{{ item.name }}"
+      - "{{ item.item.name }}"
       - --file
-      - "{{ item.file }}"
+      - "{{ wherry_operator_dir }}/pools/{{ item.item.name }}.yaml"
       - --dir
       - "{{ wherry_operator_dir }}"
-  loop: "{{ wherry_pools }}"
+  loop: "{{ __wherry_operator_pool_records.results }}"
   loop_control:
-    label: "{{ item.name }}"
+    label: "{{ item.item.name }}"
   when: not ansible_check_mode
-  changed_when: false
+  changed_when: item.changed
 
 - name: Entitle the tenant to each pool
   ansible.builtin.command:
-    argv: [wherry, operator, allow, --tenant, "{{ wherry_tenant }}", --pool, "{{ item.name }}", --dir, "{{ wherry_operator_dir }}"]
-  loop: "{{ wherry_pools }}"
+    argv: [wherry, operator, allow, --tenant, "{{ wherry_operator_tenant }}", --pool, "{{ item.name }}", --dir, "{{ wherry_operator_dir }}"]
+  loop: "{{ wherry_operator_pools }}"
   loop_control:
     label: "{{ item.name }}"
   when: not ansible_check_mode
-  register: _wherry_pool_entitlement
-  changed_when: "'already entitled' not in _wherry_pool_entitlement.stdout"
+  register: __wherry_operator_entitlement
+  changed_when: "'already entitled' not in __wherry_operator_entitlement.stdout"
 
-# The receiver records carry each receiver's config, which the argument spec marks no_log; the loops run over names so
-# -vvv prints no record.
-- name: Create receiver record directories
-  ansible.builtin.file:
-    path: "{{ wherry_operator_dir }}/receivers/{{ item }}/plugins"
-    state: directory
-    mode: "0700"
-  loop: "{{ _wherry_receiver_names }}"
+- name: Start the changed receiver list
+  ansible.builtin.set_fact:
+    __wherry_operator_changed_receivers: []
 
-- name: Write receiver local configurations
-  ansible.builtin.copy:
-    content: "{{ (wherry_receivers | selectattr('name', 'equalto', item) | first).config | to_nice_yaml(indent=2, sort_keys=false) }}"
-    dest: "{{ wherry_operator_dir }}/receivers/{{ item }}/config.yaml"
-    mode: "0600"
-  loop: "{{ _wherry_receiver_names }}"
-  no_log: true
-
-- name: Write receiver records
-  ansible.builtin.copy:
-    content: >-
-      {{ {'pool': _wherry_record.pool, 'broker': _wherry_record.broker, 'plugin_sha256': _wherry_record.plugin_sha256} |
-      to_nice_yaml(indent=2, sort_keys=false) }}
-    dest: "{{ wherry_operator_dir }}/receivers/{{ item }}/receiver.yaml"
-    mode: "0600"
-  loop: "{{ _wherry_receiver_names }}"
-  vars:
-    _wherry_record: "{{ wherry_receivers | selectattr('name', 'equalto', item) | first }}"
-
-- name: Synchronise receiver plugin configurations
-  ansible.builtin.include_tasks: receiver.yml
-  loop: "{{ _wherry_receiver_names }}"
+- name: Write each receiver record
+  ansible.builtin.include_tasks: record.yml
+  loop: "{{ __wherry_operator_receiver_names }}"
   loop_control:
-    loop_var: _wherry_receiver_name
+    loop_var: __wherry_operator_receiver_name
   vars:
-    _wherry_receiver: "{{ wherry_receivers | selectattr('name', 'equalto', _wherry_receiver_name) | first }}"
+    __wherry_operator_record_root: "{{ wherry_operator_dir }}/receivers"
+    __wherry_operator_record_tracked: true
 
-- name: Validate receiver records
-  ansible.builtin.command:
-    argv:
-      - wherry
-      - operator
-      - apply
-      - --receiver
-      - "{{ item }}"
-      - --dry-run
-      - --file
-      - "{{ wherry_operator_dir }}/receivers/{{ item }}"
-      - --dir
-      - "{{ wherry_operator_dir }}"
-  loop: "{{ _wherry_receiver_names }}"
-  when: ansible_check_mode
-  check_mode: false
-  changed_when: false
-  no_log: true
+# In check mode the records above are not written, so the proposed records are written to a scratch directory and
+# validated there.
+- name: Validate the proposed receiver records
+  when: ansible_check_mode and __wherry_operator_queryable
+  block:
+    - name: Create the scratch record directory
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: wherry-operator.
+      register: __wherry_operator_scratch
+      check_mode: false
+      changed_when: false
 
+    - name: Write each proposed receiver record
+      ansible.builtin.include_tasks:
+        file: record.yml
+        apply:
+          check_mode: false
+      loop: "{{ __wherry_operator_receiver_names }}"
+      loop_control:
+        loop_var: __wherry_operator_receiver_name
+      vars:
+        __wherry_operator_record_root: "{{ __wherry_operator_scratch.path }}"
+        __wherry_operator_record_tracked: false
+
+    - name: Validate receiver records
+      ansible.builtin.command:
+        argv:
+          - wherry
+          - operator
+          - apply
+          - --receiver
+          - "{{ item }}"
+          - --dry-run
+          - --file
+          - "{{ __wherry_operator_scratch.path }}/{{ item }}"
+          - --dir
+          - "{{ wherry_operator_dir }}"
+      loop: "{{ __wherry_operator_receiver_names }}"
+      check_mode: false
+      changed_when: false
+      no_log: true
+
+  always:
+    - name: Remove the scratch record directory
+      ansible.builtin.file:
+        path: "{{ __wherry_operator_scratch.path }}"
+        state: absent
+      check_mode: false
+      changed_when: false
+      when: __wherry_operator_scratch.path is defined
+
+# wherry operator apply reports nothing about change, so a receiver's change is its record changing.
 - name: Apply receiver records
   ansible.builtin.command:
     argv:
@@ -197,7 +220,7 @@
       - "{{ wherry_operator_dir }}/receivers/{{ item }}"
       - --dir
       - "{{ wherry_operator_dir }}"
-  loop: "{{ _wherry_receiver_names }}"
+  loop: "{{ __wherry_operator_receiver_names }}"
   when: not ansible_check_mode
-  changed_when: false
+  changed_when: item in __wherry_operator_changed_receivers
   no_log: true

@@ -1,28 +1,36 @@
 ---
-- name: Find the host configuration
-  ansible.builtin.include_tasks: paths.yml
+# Check mode creates no operator and starts no receiver, so there is nothing to wait for.
+- name: Wait for the named receivers
+  when: not ansible_check_mode
+  block:
+    - name: Check the operator directory is named
+      ansible.builtin.assert:
+        that: wherry_host_operator_dir is not none
+        fail_msg: The live entry point needs wherry_host_operator_dir, by default wherry_operator_dir.
+        quiet: true
 
-- name: Check operator state
-  ansible.builtin.command:
-    argv: [wherry, operator, check, --dir, "{{ wherry_operator_dir }}"]
-  register: _wherry_operator_check
-  check_mode: false
-  changed_when: false
-  failed_when: >-
-    _wherry_operator_check.rc != 0 or
-    _wherry_operator_check.stdout is search('is on its enrolment password|has no credential ID')
+    - name: Find the host configuration
+      ansible.builtin.include_tasks: paths.yml
 
-- name: Wait for receivers to become live
-  ansible.builtin.command:
-    argv: [wherry, host, receivers, --json, --config-file, "{{ _wherry_host_config }}"]
-  register: _wherry_receiver_status
-  until: >-
-    _wherry_receiver_status.rc == 0 and
-    wherry_live_receivers | difference(
-      _wherry_receiver_status.stdout | from_json |
-      selectattr('status', 'equalto', 'live') | map(attribute='receiver_id') | list
-    ) | length == 0
-  retries: 30
-  delay: 10
-  check_mode: false
-  changed_when: false
+    - name: Check operator state
+      ansible.builtin.command:
+        argv: [wherry, operator, check, --dir, "{{ wherry_host_operator_dir }}"]
+      register: __wherry_host_operator_check
+      changed_when: false
+      failed_when: >-
+        __wherry_host_operator_check.rc != 0 or
+        __wherry_host_operator_check.stdout is search('is on its enrolment password|has no credential ID')
+
+    - name: Wait for receivers to become live
+      ansible.builtin.command:
+        argv: [wherry, host, receivers, --json, --config-file, "{{ __wherry_host_config }}"]
+      register: __wherry_host_receiver_status
+      until: >-
+        __wherry_host_receiver_status.rc == 0 and
+        wherry_host_live_receivers | difference(
+          __wherry_host_receiver_status.stdout | from_json |
+          selectattr('status', 'equalto', 'live') | map(attribute='receiver_id') | list
+        ) | length == 0
+      retries: 30
+      delay: 10
+      changed_when: false

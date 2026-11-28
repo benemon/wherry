@@ -1,0 +1,5 @@
+---
+__wherry_systemd_receiver_plugin_commits:
+  "0.3.0": bed01cdc83b0cfa766ca63aa15bfc6ced63ac45c
+# The release archives' architecture names for the host's.
+__wherry_systemd_receiver_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts.architecture] }}"

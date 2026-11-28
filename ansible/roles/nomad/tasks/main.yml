@@ -1,9 +1,22 @@
 ---
-- name: Refuse state=absent without wherry_confirm_absent
+- name: Refuse wherry_nomad_state=absent without wherry_nomad_confirm_absent
   ansible.builtin.assert:
-    that: state == 'present' or wherry_confirm_absent | bool
-    fail_msg: state=absent deletes the Nomad namespaces and receiver policies; set wherry_confirm_absent to true to proceed.
+    that: wherry_nomad_state == 'present' or wherry_nomad_confirm_absent | bool
+    fail_msg: wherry_nomad_state=absent deletes the Nomad namespaces; set wherry_nomad_confirm_absent to true to proceed.
     quiet: true
 
-- name: Apply the Nomad platform's state
-  ansible.builtin.include_tasks: "{{ state }}.yml"
+- name: Set the wherry Nomad namespaces' state
+  module_defaults:
+    group/benemon.nomad.nomad:
+      address: "{{ wherry_nomad_address }}"
+      ca_cert: "{{ wherry_nomad_ca_cert | default(omit) }}"
+      token: "{{ wherry_nomad_token }}"
+  benemon.nomad.nomad_namespace:
+    name: "{{ item.name }}"
+    description: "{{ item.description | default(omit) if wherry_nomad_state == 'present' else omit }}"
+    capabilities: "{{ item.capabilities | default(omit) if wherry_nomad_state == 'present' else omit }}"
+    node_pool_configuration: "{{ item.node_pool_configuration | default(omit) if wherry_nomad_state == 'present' else omit }}"
+    state: "{{ wherry_nomad_state }}"
+  loop: "{{ wherry_nomad_namespaces }}"
+  loop_control:
+    label: "{{ item.name }}"

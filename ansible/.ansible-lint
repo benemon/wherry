@@ -1,4 +1,7 @@
 ---
-# The roles' public variables share the collection's wherry_ prefix, so one inventory serves every role.
+profile: production
+# var-naming[no-role-prefix] accepts only the bare role name as a prefix (host_, nomad_), which is ambiguous for roles
+# named host or nomad and collides with other collections. Every role argument is wherry_<role>_* instead, and shared
+# values are collection-level wherry_* variables the role defaults reference (Red Hat CoP 5.2).
 skip_list:
   - var-naming[no-role-prefix]

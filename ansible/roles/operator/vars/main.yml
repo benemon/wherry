@@ -1,2 +1,2 @@
 ---
-_wherry_receiver_names: "{{ wherry_receivers | map(attribute='name') }}"
+__wherry_operator_receiver_names: "{{ wherry_operator_receivers | map(attribute='name') }}"

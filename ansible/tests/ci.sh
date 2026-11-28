@@ -60,15 +60,15 @@ prepare() {
 	go build -trimpath -o "$work/bin/wherry" ./cmd/wherry
 	version=$(wherry version | sed -n 's/^version=//p')
 	wherry_version=$(inventory_var wherry_version)
-	[[ $WHERRY_PLUGIN_VERSION == "nomad/v$(inventory_var wherry_plugin_versions.nomad)" ]] ||
+	[[ $WHERRY_PLUGIN_VERSION == "nomad/v$(inventory_var wherry_nomad_plugin_version)" ]] ||
 		fail "WHERRY_PLUGIN_VERSION $WHERRY_PLUGIN_VERSION is not the inventory's Nomad plugin version"
 	address=$(ip -4 -o route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
 	[[ -n $address ]] || fail "the runner has no address on a default route"
 	echo "ADVERTISED_IP=$address" >>"$GITHUB_ENV"
 
-	docker build -q -f "$plugins/examples/nomad/Containerfile" --build-arg VERSION="$(inventory_var wherry_plugin_versions.nomad)" \
+	docker build -q -f "$plugins/examples/nomad/Containerfile" --build-arg VERSION="$(inventory_var wherry_nomad_plugin_version)" \
 		--build-arg WHERRY_VERSION="$wherry_version" -t wherry-receiver-nomad:ci "$plugins"
-	docker build -q -f "$plugins/examples/kubernetes/Containerfile" --build-arg VERSION="$(inventory_var wherry_plugin_versions.kubernetes)" \
+	docker build -q -f "$plugins/examples/kubernetes/Containerfile" --build-arg VERSION="$(inventory_var wherry_kubernetes_plugin_version)" \
 		--build-arg WHERRY_VERSION="$wherry_version" -t wherry-receiver-kubernetes:ci "$plugins"
 	WHERRY_REF=$(git -C "$plugins/wherry-src" rev-parse HEAD) \
 		"$plugins/.github/wherry-ref.sh" "$work/ref-bin" wherry-receiver-nomad:ci wherry-receiver-kubernetes:ci
@@ -114,15 +114,11 @@ prepare() {
 		all:
 		  vars:
 		    wherry_broker: $address:9093
-		    wherry_receiver_images:
+		    wherry_operator_version: "$version"
+		    example_receiver_images:
 		      nomad: wherry-receiver-nomad:ci
 		      kubernetes: wherry-receiver-kubernetes:ci
-		    wherry_kubernetes_overlay_patches: [base/fsgroup.yaml, $src/ansible/tests/kind-storage.yaml]
-		  children:
-		    controllers:
-		      hosts:
-		        controller:
-		          wherry_version: "$version"
+		    wherry_kubernetes_receiver_overlay_patches: [base/fsgroup.yaml, $src/ansible/tests/kind-storage.yaml]
 	EOF
 
 	{
@@ -151,7 +147,7 @@ nomad_client_ready() {
 # against the release workflow at that release's tag.
 systemd_pin() {
 	local dir=$work/systemd-release plugin
-	plugin=$(inventory_var wherry_plugin_versions.systemd)
+	plugin=$(inventory_var wherry_systemd_plugin_version)
 	mkdir -p "$dir"
 	gh release download "systemd/v$plugin" -R benemon/wherry-plugins -D "$dir" --clobber \
 		-p checksums.txt -p checksums.txt.sigstore.json
@@ -244,6 +240,8 @@ kafka_cleared() {
 run_roles() {
 	local platform retire
 	cd "$examples"
+	ansible-playbook --check "${inventories[@]}" site.yml | tee "$work/first-check.log"
+	[[ ! -e ~/.local/state/wherry-example/operator ]] || fail "the first --check wrote the operator directory"
 	ansible-playbook -vvv "${inventories[@]}" site.yml >"$work/site.log" || {
 		tail -n 200 "$work/site.log"
 		fail "site.yml"
@@ -262,8 +260,8 @@ run_roles() {
 	unchanged "$work/check.log"
 
 	seed_foreign wherry.rcv.nomad-1 wherry.tenant.acme
-	retire=(retire.yml -e wherry_confirm_absent=true -e wherry_operator_clear_kafka=true
-		-e "wherry_kafka_bin_dir=$KAFKA_HOME/bin" -e "wherry_kafka_admin_config=$WHERRY_KAFKA_ADMIN_CONFIG")
+	retire=(retire.yml -e @confirm-absent.yml -e wherry_operator_clear_kafka=true
+		-e "wherry_operator_kafka_bin_dir=$KAFKA_HOME/bin" -e "wherry_operator_kafka_admin_config=$WHERRY_KAFKA_ADMIN_CONFIG")
 	ansible-playbook -vvv "${inventories[@]}" "${retire[@]}" >"$work/retire.log" || {
 		tail -n 200 "$work/retire.log"
 		fail "retire.yml"
@@ -283,12 +281,29 @@ run_roles() {
 	kafka_cleared
 }
 
+# collect prints what a failed role run leaves for diagnosis: the systemd agent units' journal and settings, the
+# directories the systemd plugin works in, and the receivers' journals.
+collect() {
+	set +e
+	sudo journalctl --no-pager -n 200 -u 'wherry-agent-*' -u wherry-receiver
+	sudo systemctl show 'wherry-agent-*' -p Id,WorkingDirectory,BindPaths,StateDirectory,DynamicUser,ExecMainStatus,Result
+	sudo ls -la / /wherry /var/lib/private /var/lib/private/wherry-agents /var/lib/wherry-agents /var/lib/wherry/systemd/runs
+	sudo find /var/lib/private/wherry-agents /var/lib/wherry-agents -maxdepth 2 -printf '%M %u:%g %p -> %l\n'
+	sudo sh -c 'cat /var/lib/wherry/systemd/runs/*/job.json'
+	findmnt -o TARGET,PROPAGATION,FSTYPE / /var /var/lib
+	systemctl --version
+	sudo aa-status 2>/dev/null | head -20
+	kubectl get pods -A
+	nomad job status -namespace '*'
+}
+
 case ${1:-} in
 install) install_tools ;;
 prepare) prepare ;;
 probe) probe ;;
 run) run_roles ;;
 seed) seed_foreign "$2" "$3" ;;
+collect) collect ;;
 cleared) kafka_cleared ;;
-*) fail "usage: ci.sh install|prepare|probe|run, or seed PRINCIPAL TOPIC and cleared against a running wherry-kafka" ;;
+*) fail "usage: ci.sh install|prepare|probe|run|collect, or seed PRINCIPAL TOPIC and cleared against a running wherry-kafka" ;;
 esac

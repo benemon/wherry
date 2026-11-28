@@ -1,6 +1,9 @@
 ---
-_wherry_systemd_receiver_plugin_commits:
-  "0.3.0": bed01cdc83b0cfa766ca63aa15bfc6ced63ac45c
+wherry_systemd_receiver_state: present
+wherry_systemd_receiver_confirm_absent: false
+wherry_systemd_receiver_version: "{{ wherry_version | default(none) }}"
+wherry_systemd_receiver_plugin_version: "{{ wherry_systemd_plugin_version | default(none) }}"
+wherry_systemd_receiver_plugin_sha256: null
+wherry_systemd_receiver_config: null
+wherry_systemd_receiver_bundle: null
 wherry_systemd_receiver_cache_dir: "{{ lookup('ansible.builtin.env', 'HOME') }}/.cache/wherry"
-state: present
-wherry_confirm_absent: false

@@ -2,14 +2,14 @@
 - name: Inspect the receiver service unit
   ansible.builtin.stat:
     path: /etc/systemd/system/wherry-receiver.service
-  register: _wherry_systemd_receiver_unit
+  register: __wherry_systemd_unit
 
 - name: Stop and disable the receiver service
   ansible.builtin.systemd_service:
     name: wherry-receiver
     state: stopped
     enabled: false
-  when: _wherry_systemd_receiver_unit.stat.exists
+  when: __wherry_systemd_unit.stat.exists
 
 - name: Remove the receiver platform files
   ansible.builtin.file:
@@ -32,4 +32,4 @@
 - name: Reload systemd after retirement
   ansible.builtin.systemd_service:
     daemon_reload: true
-  when: _wherry_systemd_receiver_unit.stat.exists
+  when: __wherry_systemd_unit.stat.exists

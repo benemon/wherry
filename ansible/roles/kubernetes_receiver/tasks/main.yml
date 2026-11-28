@@ -1,9 +1,21 @@
 ---
-- name: Refuse state=absent without wherry_confirm_absent
+- name: Refuse wherry_kubernetes_receiver_state=absent without wherry_kubernetes_receiver_confirm_absent
   ansible.builtin.assert:
-    that: state == 'present' or wherry_confirm_absent | bool
-    fail_msg: state=absent deletes the receiver and its state claim; set wherry_confirm_absent to true to proceed.
+    that: wherry_kubernetes_receiver_state == 'present' or wherry_kubernetes_receiver_confirm_absent | bool
+    fail_msg: >-
+      wherry_kubernetes_receiver_state=absent deletes the receiver and its state claim; set
+      wherry_kubernetes_receiver_confirm_absent to true to proceed.
+    quiet: true
+
+- name: Check the Kubernetes connection
+  ansible.builtin.assert:
+    that:
+      - wherry_kubernetes_receiver_kubeconfig is not none
+      - wherry_kubernetes_receiver_namespace is not none
+    fail_msg: >-
+      The role needs wherry_kubernetes_receiver_kubeconfig and _namespace, by default wherry_kubernetes_kubeconfig and
+      wherry_kubernetes_namespace.
     quiet: true
 
 - name: Apply the Kubernetes receiver's state
-  ansible.builtin.include_tasks: "{{ state }}.yml"
+  ansible.builtin.include_tasks: "{{ wherry_kubernetes_receiver_state }}.yml"

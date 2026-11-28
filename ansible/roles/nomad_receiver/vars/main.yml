@@ -1,6 +1,8 @@
 ---
+__wherry_nomad_receiver_plugin_commits:
+  "0.3.1": 11a1095a7e3786b2c80f47b1cedf92543fddc36f
 # The options of the pinned examples/nomad/wherry-receiver.volume.hcl, which nomad_volume takes as options, not as the file.
-_wherry_nomad_volume:
+__wherry_nomad_receiver_volume:
   plugin_id: mkdir
   access_mode: single-node-single-writer
   attachment_mode: file-system
@@ -8,5 +10,9 @@ _wherry_nomad_volume:
   uid: "1001"
   gid: "0"
 # Every key of the pinned volume file: the options above, and the name, type and node pool the role sets itself.
-_wherry_nomad_volume_keys: [access_mode, attachment_mode, gid, mode, name, node_pool, plugin_id, type, uid]
-_wherry_nomad_prefixes: "({{ wherry_nomad_receiver_prefix | regex_escape }}|{{ wherry_nomad_agent_prefix | regex_escape }})"
+__wherry_nomad_receiver_volume_keys: [access_mode, attachment_mode, gid, mode, name, node_pool, plugin_id, type, uid]
+__wherry_nomad_receiver_prefixes: >-
+  ({{ wherry_nomad_receiver_job_prefix | regex_escape }}|{{ wherry_nomad_receiver_agent_prefix | regex_escape }})
+__wherry_nomad_receiver_examples: >-
+  {{ 'https://raw.githubusercontent.com/benemon/wherry-plugins/' ~
+  __wherry_nomad_receiver_plugin_commits[wherry_nomad_receiver_plugin_version] ~ '/examples/nomad' }}

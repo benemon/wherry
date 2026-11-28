@@ -1,7 +1,9 @@
-# Decommissions the deployment site.yml built: every role with state=absent. The operator directory goes into
+# Decommissions the deployment site.yml built: every role with its state absent, which each role refuses without its
+# own wherry_<role>_confirm_absent; confirm-absent.yml sets all eight. The operator directory goes into
 # wherry_backup_dir and Kafka keeps wherry's objects; to clear them too, pass wherry_operator_clear_kafka=true with
-# wherry_kafka_bin_dir and wherry_kafka_admin_config, which run Kafka's scripts and need Java 17 or later.
-# ansible-playbook -i inventory.yml retire.yml -e wherry_confirm_absent=true
+# wherry_operator_kafka_bin_dir and wherry_operator_kafka_admin_config, which run Kafka's scripts and need Java 17 or
+# later.
+# ansible-playbook -i inventory.yml retire.yml -e @confirm-absent.yml
 ---
 - name: Remove the Nomad and Kubernetes receivers
   hosts: controllers
@@ -9,13 +11,17 @@
   roles:
     - role: benemon.wherry.nomad_receiver
       vars:
-        state: absent
-        wherry_nomad_receiver_prefix: wherry-receiver
-        wherry_nomad_agent_prefix: agent-
+        wherry_nomad_receiver_state: absent
+        wherry_nomad_receiver_name: wherry-receiver-nomad-1
+        wherry_nomad_receiver_namespace: wherry
+        wherry_nomad_receiver_node_pool: default
+        # The receiver's agent runs are jobs of their own, which only the prefix purge removes.
+        wherry_nomad_receiver_purge_prefix: true
+        wherry_nomad_receiver_job_prefix: wherry-receiver
+        wherry_nomad_receiver_agent_prefix: agent-
     - role: benemon.wherry.kubernetes_receiver
       vars:
-        state: absent
-        wherry_plugin_version: "{{ wherry_plugin_versions.kubernetes }}"
+        wherry_kubernetes_receiver_state: absent
 
 - name: Remove the systemd receiver
   hosts: systemd_receivers
@@ -24,7 +30,7 @@
   roles:
     - role: benemon.wherry.systemd_receiver
       vars:
-        state: absent
+        wherry_systemd_receiver_state: absent
 
 - name: Retire the host and the operator
   hosts: controllers
@@ -32,10 +38,10 @@
   roles:
     - role: benemon.wherry.host
       vars:
-        state: absent
+        wherry_host_state: absent
     - role: benemon.wherry.operator
       vars:
-        state: absent
+        wherry_operator_state: absent
 
 - name: Retire the Nomad and Kubernetes platforms
   hosts: controllers
@@ -43,11 +49,10 @@
   roles:
     - role: benemon.wherry.nomad
       vars:
-        state: absent
-        wherry_nomad_policy_prefix: wherry-receiver
+        wherry_nomad_state: absent
     - role: benemon.wherry.kubernetes
       vars:
-        state: absent
+        wherry_kubernetes_state: absent
 
 - name: Retire the systemd platform
   hosts: systemd_receivers
@@ -56,4 +61,4 @@
   roles:
     - role: benemon.wherry.systemd
       vars:
-        state: absent
+        wherry_systemd_state: absent

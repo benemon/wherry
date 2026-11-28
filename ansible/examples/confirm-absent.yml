@@ -1,0 +1,9 @@
+# Each role's confirmation for retire.yml: ansible-playbook -i inventory.yml retire.yml -e @confirm-absent.yml
+wherry_nomad_receiver_confirm_absent: true
+wherry_kubernetes_receiver_confirm_absent: true
+wherry_systemd_receiver_confirm_absent: true
+wherry_host_confirm_absent: true
+wherry_operator_confirm_absent: true
+wherry_nomad_confirm_absent: true
+wherry_kubernetes_confirm_absent: true
+wherry_systemd_confirm_absent: true

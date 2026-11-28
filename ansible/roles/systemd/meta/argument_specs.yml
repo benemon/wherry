@@ -2,18 +2,20 @@ argument_specs:
   main:
     short_description: Install the wherry receiver's systemd platform files, or remove the platform.
     description:
-      - With state=present, installs the pinned unit, slice and tmpfiles files, creates the state roots and enables the service.
-      - With state=absent, stops and disables the service and removes the platform's files, /etc/wherry, the state roots and any installed releases.
+      - With wherry_systemd_state=present, installs the pinned unit, slice and tmpfiles files, creates the state roots and enables the service.
+      - >-
+        With wherry_systemd_state=absent, stops and disables the service and removes the platform's files,
+        /etc/wherry, the state roots and any installed releases.
     options:
-      state:
+      wherry_systemd_state:
         type: str
         choices: [present, absent]
         default: present
         description: Whether the platform should be installed.
-      wherry_confirm_absent:
+      wherry_systemd_confirm_absent:
         type: bool
         default: false
-        description: Must be true for state=absent.
-      wherry_plugin_version:
+        description: Must be true for wherry_systemd_state=absent.
+      wherry_systemd_plugin_version:
         type: str
-        description: Systemd plugin version, which names the pinned example commit; needed with state=present.
+        description: Systemd plugin version, which names the pinned example commit; needed with state present. systemd_receiver reads the same variable.
