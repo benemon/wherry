@@ -1,0 +1,122 @@
+---
+- name: Check the arguments state=present needs
+  ansible.builtin.assert:
+    that:
+      - wherry_plugin_version is defined
+      - wherry_nomad_receiver_name is defined
+      - wherry_nomad_receiver_namespace is defined
+      - wherry_nomad_receiver_node_pool is defined
+      - wherry_nomad_receiver_image is defined
+      - wherry_nomad_receiver_driver is defined
+      - wherry_nomad_receiver_metrics_port is defined
+      - wherry_nomad_receiver_policy_rules is defined
+      - wherry_nomad_receiver_bundle is defined
+      - wherry_nomad_receiver_config is defined
+    fail_msg: >-
+      state=present needs wherry_plugin_version and wherry_nomad_receiver_name, _namespace, _node_pool, _image, _driver,
+      _metrics_port, _policy_rules, _bundle and _config.
+    quiet: true
+
+- name: Check the Nomad plugin version is pinned
+  ansible.builtin.assert:
+    that: wherry_plugin_version in _wherry_nomad_plugin_commits
+    fail_msg: "Unsupported Nomad plugin version {{ wherry_plugin_version }}."
+    quiet: true
+
+- name: Create the Nomad example directory
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: wherry-nomad.
+  register: _wherry_nomad_example_dir
+  delegate_to: localhost
+  check_mode: false
+  changed_when: false
+
+- name: Fetch and deploy the Nomad receiver
+  module_defaults:
+    group/benemon.nomad.nomad:
+      address: "{{ wherry_nomad_address }}"
+      ca_cert: "{{ wherry_nomad_ca_cert | default(omit) }}"
+      token: "{{ wherry_nomad_token }}"
+  block:
+    - name: Fetch the pinned Nomad examples
+      ansible.builtin.get_url:
+        url: "https://raw.githubusercontent.com/benemon/wherry-plugins/{{ _wherry_nomad_plugin_commits[wherry_plugin_version] }}/examples/nomad/{{ item }}"
+        dest: "{{ _wherry_nomad_example_dir.path }}/{{ item }}"
+        mode: "0600"
+      loop:
+        - wherry-receiver.nomad.hcl
+        - wherry-receiver.volume.hcl
+      delegate_to: localhost
+      check_mode: false
+      changed_when: false
+
+    - name: Check the volume options match the pinned example
+      ansible.builtin.assert:
+        that:
+          - _wherry_volume_hcl is regex('(?m)^plugin_id\\s*=\\s*"' ~ _wherry_nomad_volume.plugin_id ~ '"$')
+          - _wherry_volume_hcl is regex('(?m)^\\s*access_mode\\s*=\\s*"' ~ _wherry_nomad_volume.access_mode ~ '"$')
+          - _wherry_volume_hcl is regex('(?m)^\\s*attachment_mode\\s*=\\s*"' ~ _wherry_nomad_volume.attachment_mode ~ '"$')
+          - _wherry_volume_hcl is regex('(?m)^\\s*mode\\s*=\\s*"' ~ _wherry_nomad_volume.mode ~ '"$')
+          - _wherry_volume_hcl is regex('(?m)^\\s*uid\\s*=\\s*' ~ _wherry_nomad_volume.uid ~ '$')
+          - _wherry_volume_hcl is regex('(?m)^\\s*gid\\s*=\\s*' ~ _wherry_nomad_volume.gid ~ '$')
+          - _wherry_volume_hcl | regex_findall('(?m)^\\s*(\\w+)\\s*=') | sort == _wherry_nomad_volume_keys
+        fail_msg: The pinned wherry-receiver.volume.hcl differs from this role's nomad_volume options.
+      vars:
+        _wherry_volume_hcl: "{{ lookup('ansible.builtin.file', _wherry_nomad_example_dir.path ~ '/wherry-receiver.volume.hcl') }}"
+
+    - name: Apply the receiver workload policy
+      benemon.nomad.nomad_acl_policy:
+        name: "{{ wherry_nomad_receiver_name }}"
+        description: "wherry receiver {{ wherry_nomad_receiver_name }} workload identity"
+        rules: "{{ wherry_nomad_receiver_policy_rules }}"
+        job_acl:
+          namespace: "{{ wherry_nomad_receiver_namespace }}"
+          job_id: "{{ wherry_nomad_receiver_name }}"
+
+    - name: Create the receiver state volume  # noqa: args[module] lint cannot check a templated choice
+      benemon.nomad.nomad_volume:
+        name: "{{ wherry_nomad_receiver_name }}"
+        namespace: "{{ wherry_nomad_receiver_namespace }}"
+        node_pool: "{{ wherry_nomad_receiver_node_pool }}"
+        plugin_id: "{{ _wherry_nomad_volume.plugin_id }}"
+        capabilities:
+          - access_mode: "{{ _wherry_nomad_volume.access_mode }}"
+            attachment_mode: "{{ _wherry_nomad_volume.attachment_mode }}"
+        parameters:
+          mode: "{{ _wherry_nomad_volume.mode }}"
+          uid: "{{ _wherry_nomad_volume.uid }}"
+          gid: "{{ _wherry_nomad_volume.gid }}"
+        wait: true
+
+    - name: Store the receiver bundle and configuration
+      benemon.nomad.nomad_variable:
+        path: "nomad/jobs/{{ wherry_nomad_receiver_name }}"
+        namespace: "{{ wherry_nomad_receiver_namespace }}"
+        items: >-
+          {{ {'bundle': wherry_nomad_receiver_bundle,
+              'config': wherry_nomad_receiver_config | to_nice_yaml(indent=2, sort_keys=false)} |
+          combine({'nomad_ca': lookup('ansible.builtin.file', wherry_nomad_ca_cert, rstrip=false)}
+                  if wherry_nomad_ca_cert is defined else {}) }}
+      no_log: true
+
+    - name: Run the receiver job
+      benemon.nomad.nomad_job:
+        namespace: "{{ wherry_nomad_receiver_namespace }}"
+        jobspec: "{{ lookup('ansible.builtin.file', _wherry_nomad_example_dir.path ~ '/wherry-receiver.nomad.hcl', rstrip=false) }}"
+        hcl_variables:
+          job_id: "{{ wherry_nomad_receiver_name }}"
+          image: "{{ wherry_nomad_receiver_image }}"
+          driver: "{{ wherry_nomad_receiver_driver }}"
+          node_pool: "{{ wherry_nomad_receiver_node_pool }}"
+          metrics_port: "{{ wherry_nomad_receiver_metrics_port }}"
+          volume_source: "{{ wherry_nomad_receiver_name }}"
+
+  always:
+    - name: Remove the Nomad example directory
+      ansible.builtin.file:
+        path: "{{ _wherry_nomad_example_dir.path }}"
+        state: absent
+      delegate_to: localhost
+      check_mode: false
+      changed_when: false

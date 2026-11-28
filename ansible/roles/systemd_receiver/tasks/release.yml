@@ -1,0 +1,54 @@
+---
+- name: Create the release directory for {{ _wherry_release.binary }}
+  ansible.builtin.file:
+    path: "{{ _wherry_release.dir }}/bin"
+    state: directory
+    mode: "0700"
+  check_mode: false
+
+- name: Fetch the checksums and signature for {{ _wherry_release.binary }}
+  ansible.builtin.get_url:
+    url: "{{ _wherry_release.url }}/{{ item }}"
+    dest: "{{ _wherry_release.dir }}/{{ item }}"
+    mode: "0600"
+  loop: [checksums.txt, checksums.txt.sigstore.json]
+  check_mode: false
+
+- name: Verify the checksums for {{ _wherry_release.binary }}
+  ansible.builtin.command:
+    argv:
+      - cosign
+      - verify-blob
+      - "{{ _wherry_release.dir }}/checksums.txt"
+      - --bundle
+      - "{{ _wherry_release.dir }}/checksums.txt.sigstore.json"
+      - --certificate-identity-regexp
+      - "{{ _wherry_release.identity }}"
+      - --certificate-oidc-issuer
+      - https://token.actions.githubusercontent.com
+  check_mode: false
+  changed_when: false
+
+- name: Fetch the checked archive for {{ _wherry_release.binary }}
+  ansible.builtin.get_url:
+    url: "{{ _wherry_release.url }}/{{ _wherry_release.archive }}.tar.gz"
+    dest: "{{ _wherry_release.dir }}/{{ _wherry_release.archive }}.tar.gz"
+    checksum: >-
+      sha256:{{ (lookup('ansible.builtin.file', _wherry_release.dir ~ '/checksums.txt').splitlines() |
+      select('search', '  ' ~ (_wherry_release.archive | regex_escape) ~ '[.]tar[.]gz$') | first).split()[0] }}
+    mode: "0600"
+  check_mode: false
+
+# Each run extracts from the archive get_url has just checked, not from an earlier extraction.
+- name: Extract the binary {{ _wherry_release.binary }}
+  ansible.builtin.command:
+    argv:
+      - tar
+      - -xzf
+      - "{{ _wherry_release.dir }}/{{ _wherry_release.archive }}.tar.gz"
+      - --strip-components=1
+      - -C
+      - "{{ _wherry_release.dir }}/bin"
+      - "{{ _wherry_release.archive }}/{{ _wherry_release.binary }}"
+  check_mode: false
+  changed_when: false

@@ -1,0 +1,12 @@
+---
+# The options of the pinned examples/nomad/wherry-receiver.volume.hcl, which nomad_volume takes as options, not as the file.
+_wherry_nomad_volume:
+  plugin_id: mkdir
+  access_mode: single-node-single-writer
+  attachment_mode: file-system
+  mode: "0700"
+  uid: "1001"
+  gid: "0"
+# Every key of the pinned volume file: the options above, and the name, type and node pool the role sets itself.
+_wherry_nomad_volume_keys: [access_mode, attachment_mode, gid, mode, name, node_pool, plugin_id, type, uid]
+_wherry_nomad_prefixes: "({{ wherry_nomad_receiver_prefix | regex_escape }}|{{ wherry_nomad_agent_prefix | regex_escape }})"

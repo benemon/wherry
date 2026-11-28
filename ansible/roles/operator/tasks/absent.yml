@@ -1,0 +1,156 @@
+---
+- name: Check the arguments state=absent needs
+  ansible.builtin.assert:
+    that:
+      - wherry_backup_dir is defined
+      - not wherry_operator_clear_kafka | bool or (wherry_kafka_bin_dir is defined and wherry_kafka_admin_config is defined)
+    fail_msg: state=absent needs wherry_backup_dir, and wherry_operator_clear_kafka needs wherry_kafka_bin_dir and wherry_kafka_admin_config.
+    quiet: true
+
+- name: Inspect the operator configuration
+  ansible.builtin.stat:
+    path: "{{ wherry_operator_dir }}/operator.yaml"
+  register: _wherry_operator_configuration
+
+- name: Clear wherry from Kafka
+  when: wherry_operator_clear_kafka | bool and _wherry_operator_configuration.stat.exists
+  vars:
+    _wherry_kafka: >-
+      {{ ['--bootstrap-server', (lookup('ansible.builtin.file', wherry_operator_dir ~ '/operator.yaml') | from_yaml).broker,
+          '--command-config', wherry_kafka_admin_config] }}
+    # internal/operator/reconcile.go managed(): wherry's groups are those named under PoolGroup(""), the p- prefix
+    # (internal/operator/names.go), on which a wherry.rcv. or wherry.tnt. principal holds a grant.
+    _wherry_kafka_pool_groups: >-
+      {{ _wherry_kafka_acl_entries | default([]) | selectattr('type', 'equalto', 'GROUP') | map(attribute='name') |
+      select('match', 'p-') | unique }}
+    _wherry_kafka_acl_flags:
+      TOPIC: --topic=
+      GROUP: --group=
+      TRANSACTIONAL_ID: --transactional-id=
+      DELEGATION_TOKEN: --delegation-token=
+      USER: --user-principal=
+  block:
+    - name: List Kafka ACLs
+      ansible.builtin.command:
+        argv: "{{ [wherry_kafka_bin_dir ~ '/kafka-acls.sh'] + _wherry_kafka + ['--list'] }}"
+      register: _wherry_kafka_acls
+      check_mode: false
+      changed_when: false
+
+    - name: List Kafka consumer groups
+      ansible.builtin.command:
+        argv: "{{ [wherry_kafka_bin_dir ~ '/kafka-consumer-groups.sh'] + _wherry_kafka + ['--list'] }}"
+      register: _wherry_kafka_consumer_groups
+      check_mode: false
+      changed_when: false
+
+    - name: List Kafka share groups
+      ansible.builtin.command:
+        argv: "{{ [wherry_kafka_bin_dir ~ '/kafka-share-groups.sh'] + _wherry_kafka + ['--list'] }}"
+      register: _wherry_kafka_share_groups
+      check_mode: false
+      changed_when: false
+
+    - name: List Kafka users
+      ansible.builtin.command:
+        argv: "{{ [wherry_kafka_bin_dir ~ '/kafka-configs.sh'] + _wherry_kafka + ['--describe', '--entity-type', 'users'] }}"
+      register: _wherry_kafka_users
+      check_mode: false
+      changed_when: false
+
+    - name: List Kafka topics
+      ansible.builtin.command:
+        argv: "{{ [wherry_kafka_bin_dir ~ '/kafka-topics.sh'] + _wherry_kafka + ['--list'] }}"
+      register: _wherry_kafka_topics
+      check_mode: false
+      changed_when: false
+
+    # kafka-acls.sh --list prints a block per resource pattern; each ALLOW entry of a wherry.rcv. or wherry.tnt.
+    # principal becomes one item, keyed by the resource and pattern types that one --remove call can take together.
+    - name: Collect the wherry host and receiver ACLs
+      ansible.builtin.set_fact:
+        _wherry_kafka_acl_entries: >-
+          {%- set acls = namespace(entries=[]) -%}
+          {%- for block in _wherry_kafka_acls.stdout.split('Current ACLs for resource')[1:] -%}
+          {%- set resource = block | regex_findall(_wherry_resource_pattern) | first -%}
+          {%- for principal, operation in block | regex_findall(_wherry_entry_pattern) -%}
+          {%- set acls.entries = acls.entries + [{'key': resource[0] ~ ' ' ~ resource[2], 'type': resource[0], 'name': resource[1],
+                'pattern': resource[2] | lower, 'principal': principal, 'operation': operation | replace('_', '')}] -%}
+          {%- endfor -%}
+          {%- endfor -%}
+          {{ acls.entries }}
+      vars:
+        _wherry_resource_pattern: 'resourceType=(\w+), name=([^,]+), patternType=(\w+)'
+        _wherry_entry_pattern: 'principal=User:(wherry\.(?:rcv|tnt)\.[^,]+), host=[^,]+, operation=(\w+), permissionType=ALLOW'
+
+    - name: Delete wherry's consumer groups
+      ansible.builtin.command:
+        argv: "{{ [wherry_kafka_bin_dir ~ '/kafka-consumer-groups.sh'] + _wherry_kafka + ['--delete', '--group', item] }}"
+      loop: "{{ _wherry_kafka_pool_groups | intersect(_wherry_kafka_consumer_groups.stdout_lines) }}"
+      changed_when: true
+
+    - name: Delete wherry's share groups
+      ansible.builtin.command:
+        argv: "{{ [wherry_kafka_bin_dir ~ '/kafka-share-groups.sh'] + _wherry_kafka + ['--delete', '--group', item] }}"
+      loop: "{{ _wherry_kafka_pool_groups | intersect(_wherry_kafka_share_groups.stdout_lines) }}"
+      changed_when: true
+
+    # kafka-acls.sh takes --cluster with no name; every other resource type takes its flag and a name.
+    - name: Remove the ACLs of wherry hosts and receivers
+      ansible.builtin.command:
+        argv: >-
+          {{ [wherry_kafka_bin_dir ~ '/kafka-acls.sh'] + _wherry_kafka + ['--remove', '--force', '--resource-pattern-type=' ~ item.1[0].pattern]
+          + (item.1 | map(attribute='principal') | unique | map('regex_replace', '^', '--allow-principal=User:'))
+          + (item.1 | map(attribute='operation') | unique | map('regex_replace', '^', '--operation='))
+          + (['--cluster'] if item.1[0].type == 'CLUSTER' else
+             item.1 | map(attribute='name') | unique | map('regex_replace', '^', _wherry_kafka_acl_flags[item.1[0].type])) }}
+      loop: "{{ _wherry_kafka_acl_entries | groupby('key') | map('list') }}"
+      loop_control:
+        label: "{{ item.0 }}"
+      changed_when: true
+
+    - name: Delete the SCRAM credentials of wherry hosts and receivers
+      ansible.builtin.command:
+        argv: >-
+          {{ [wherry_kafka_bin_dir ~ '/kafka-configs.sh'] + _wherry_kafka + ['--alter', '--entity-type', 'users',
+              '--entity-name', item.0, '--delete-config', item.1 | regex_findall(_wherry_mechanism_pattern) | join(',')] }}
+      loop: "{{ _wherry_kafka_users.stdout | regex_findall(_wherry_scram_pattern) }}"
+      loop_control:
+        label: "{{ item.0 }}"
+      vars:
+        _wherry_scram_pattern: "SCRAM credential configs for user-principal '(wherry\\.(?:rcv|tnt)\\.[^']+)' are (.*)"
+        _wherry_mechanism_pattern: '(SCRAM-SHA-\d+)='
+      changed_when: true
+
+    - name: Delete the client quotas of wherry hosts
+      ansible.builtin.command:
+        argv: >-
+          {{ [wherry_kafka_bin_dir ~ '/kafka-configs.sh'] + _wherry_kafka + ['--alter', '--entity-type', 'users',
+              '--entity-name', item.0, '--delete-config', item.1 | regex_findall(_wherry_quota_key_pattern) | join(',')] }}
+      loop: "{{ _wherry_kafka_users.stdout | regex_findall(_wherry_quota_pattern) }}"
+      loop_control:
+        label: "{{ item.0 }}"
+      vars:
+        _wherry_quota_pattern: "Quota configs for user-principal '(wherry\\.tnt\\.[^']+)' are (.*)"
+        _wherry_quota_key_pattern: '(\w+)='
+      changed_when: true
+
+    - name: Delete the wherry topics
+      ansible.builtin.command:
+        argv: "{{ [wherry_kafka_bin_dir ~ '/kafka-topics.sh'] + _wherry_kafka + ['--delete', '--topic', item] }}"
+      loop: "{{ _wherry_kafka_topics.stdout_lines | select('match', 'wherry[.]') }}"
+      changed_when: true
+
+- name: Move the operator directory into a dated backup
+  when: _wherry_operator_configuration.stat.exists
+  block:
+    - name: Create the backup directory
+      ansible.builtin.file:
+        path: "{{ wherry_backup_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Move the operator directory
+      ansible.builtin.command:
+        argv: [mv, "{{ wherry_operator_dir }}", "{{ wherry_backup_dir }}/operator-{{ now(utc=true, fmt='%Y%m%d-%H%M%S') }}"]
+        removes: "{{ wherry_operator_dir }}/operator.yaml"

@@ -1,0 +1,25 @@
+argument_specs:
+  main:
+    short_description: Create or delete the Kubernetes namespace or OpenShift project wherry's receiver runs in.
+    options:
+      state:
+        type: str
+        choices: [present, absent]
+        default: present
+        description: Whether the namespace should exist; absent waits until it is gone.
+      wherry_confirm_absent:
+        type: bool
+        default: false
+        description: Must be true for state=absent.
+      wherry_kubernetes_kubeconfig:
+        type: path
+        required: true
+        description: Kubernetes kubeconfig file.
+      wherry_kubernetes_namespace:
+        type: str
+        required: true
+        description: Namespace or project name.
+      wherry_kubernetes_openshift:
+        type: bool
+        default: false
+        description: Manage an OpenShift Project instead of a Namespace.

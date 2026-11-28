@@ -1,0 +1,203 @@
+---
+- name: Check the arguments state=present needs
+  ansible.builtin.assert:
+    that:
+      - wherry_version is defined
+      - wherry_operator_broker is defined
+      - wherry_operator_ca_cert is defined
+      - wherry_operator_super_user is defined
+      - wherry_operator_super_user_password is defined
+      - wherry_tenant is defined
+      - wherry_pools is defined
+      - wherry_receivers is defined
+    fail_msg: >-
+      state=present needs wherry_version, wherry_operator_broker, wherry_operator_ca_cert, wherry_operator_super_user,
+      wherry_operator_super_user_password, wherry_tenant, wherry_pools and wherry_receivers.
+    quiet: true
+
+- name: Read the installed wherry version
+  ansible.builtin.command:
+    argv: [wherry, version]
+  register: _wherry_version_result
+  check_mode: false
+  changed_when: false
+
+- name: Check the installed wherry version
+  ansible.builtin.assert:
+    that: ('version=' ~ wherry_version) in _wherry_version_result.stdout_lines
+    fail_msg: "Installed wherry is not {{ wherry_version }}."
+    quiet: true
+
+- name: Inspect the operator configuration
+  ansible.builtin.stat:
+    path: "{{ wherry_operator_dir }}/operator.yaml"
+  register: _wherry_operator_configuration
+
+- name: Initialise the operator
+  when: not _wherry_operator_configuration.stat.exists
+  block:
+    - name: Create the operator directory
+      ansible.builtin.file:
+        path: "{{ wherry_operator_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Initialise the operator credential
+      ansible.builtin.command:
+        argv:
+          - wherry
+          - operator
+          - init
+          - --dir
+          - "{{ wherry_operator_dir }}"
+          - --broker
+          - "{{ wherry_operator_broker }}"
+          - --ca-cert
+          - "@{{ wherry_operator_ca_cert }}"
+          - --super-user
+          - "{{ wherry_operator_super_user }}"
+          - --super-user-password
+          - '@-'
+        stdin: "{{ wherry_operator_super_user_password }}"
+        stdin_add_newline: false
+      no_log: true
+      changed_when: true
+
+- name: Wait for operator authentication
+  ansible.builtin.command:
+    argv: [wherry, operator, list, tenants, --dir, "{{ wherry_operator_dir }}"]
+  register: _wherry_operator_ready
+  until: _wherry_operator_ready.rc == 0
+  retries: 30
+  delay: 2
+  check_mode: false
+  changed_when: false
+
+- name: Create the tenant
+  ansible.builtin.command:
+    argv: [wherry, operator, add, --tenant, "{{ wherry_tenant }}", --dir, "{{ wherry_operator_dir }}"]
+  register: _wherry_tenant_add
+  changed_when: _wherry_tenant_add.rc == 0
+  failed_when: >-
+    _wherry_tenant_add.rc != 0 and
+    'tenant exists; a tenant name cannot return' not in (_wherry_tenant_add.stdout ~ _wherry_tenant_add.stderr)
+
+- name: Validate pool definitions
+  ansible.builtin.command:
+    argv:
+      - wherry
+      - operator
+      - apply
+      - --pool
+      - "{{ item.name }}"
+      - --dry-run
+      - --file
+      - "{{ item.file }}"
+      - --dir
+      - "{{ wherry_operator_dir }}"
+  loop: "{{ wherry_pools }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: ansible_check_mode
+  check_mode: false
+  changed_when: false
+
+- name: Apply pool definitions
+  ansible.builtin.command:
+    argv:
+      - wherry
+      - operator
+      - apply
+      - --pool
+      - "{{ item.name }}"
+      - --file
+      - "{{ item.file }}"
+      - --dir
+      - "{{ wherry_operator_dir }}"
+  loop: "{{ wherry_pools }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: not ansible_check_mode
+  changed_when: false
+
+- name: Entitle the tenant to each pool
+  ansible.builtin.command:
+    argv: [wherry, operator, allow, --tenant, "{{ wherry_tenant }}", --pool, "{{ item.name }}", --dir, "{{ wherry_operator_dir }}"]
+  loop: "{{ wherry_pools }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: not ansible_check_mode
+  register: _wherry_pool_entitlement
+  changed_when: "'already entitled' not in _wherry_pool_entitlement.stdout"
+
+# The receiver records carry each receiver's config, which the argument spec marks no_log; the loops run over names so
+# -vvv prints no record.
+- name: Create receiver record directories
+  ansible.builtin.file:
+    path: "{{ wherry_operator_dir }}/receivers/{{ item }}/plugins"
+    state: directory
+    mode: "0700"
+  loop: "{{ _wherry_receiver_names }}"
+
+- name: Write receiver local configurations
+  ansible.builtin.copy:
+    content: "{{ (wherry_receivers | selectattr('name', 'equalto', item) | first).config | to_nice_yaml(indent=2, sort_keys=false) }}"
+    dest: "{{ wherry_operator_dir }}/receivers/{{ item }}/config.yaml"
+    mode: "0600"
+  loop: "{{ _wherry_receiver_names }}"
+  no_log: true
+
+- name: Write receiver records
+  ansible.builtin.copy:
+    content: >-
+      {{ {'pool': _wherry_record.pool, 'broker': _wherry_record.broker, 'plugin_sha256': _wherry_record.plugin_sha256} |
+      to_nice_yaml(indent=2, sort_keys=false) }}
+    dest: "{{ wherry_operator_dir }}/receivers/{{ item }}/receiver.yaml"
+    mode: "0600"
+  loop: "{{ _wherry_receiver_names }}"
+  vars:
+    _wherry_record: "{{ wherry_receivers | selectattr('name', 'equalto', item) | first }}"
+
+- name: Synchronise receiver plugin configurations
+  ansible.builtin.include_tasks: receiver.yml
+  loop: "{{ _wherry_receiver_names }}"
+  loop_control:
+    loop_var: _wherry_receiver_name
+  vars:
+    _wherry_receiver: "{{ wherry_receivers | selectattr('name', 'equalto', _wherry_receiver_name) | first }}"
+
+- name: Validate receiver records
+  ansible.builtin.command:
+    argv:
+      - wherry
+      - operator
+      - apply
+      - --receiver
+      - "{{ item }}"
+      - --dry-run
+      - --file
+      - "{{ wherry_operator_dir }}/receivers/{{ item }}"
+      - --dir
+      - "{{ wherry_operator_dir }}"
+  loop: "{{ _wherry_receiver_names }}"
+  when: ansible_check_mode
+  check_mode: false
+  changed_when: false
+  no_log: true
+
+- name: Apply receiver records
+  ansible.builtin.command:
+    argv:
+      - wherry
+      - operator
+      - apply
+      - --receiver
+      - "{{ item }}"
+      - --file
+      - "{{ wherry_operator_dir }}/receivers/{{ item }}"
+      - --dir
+      - "{{ wherry_operator_dir }}"
+  loop: "{{ _wherry_receiver_names }}"
+  when: not ansible_check_mode
+  changed_when: false
+  no_log: true

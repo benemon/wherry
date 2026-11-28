@@ -1,0 +1,28 @@
+---
+- name: Find the host configuration
+  ansible.builtin.include_tasks: paths.yml
+
+- name: Check operator state
+  ansible.builtin.command:
+    argv: [wherry, operator, check, --dir, "{{ wherry_operator_dir }}"]
+  register: _wherry_operator_check
+  check_mode: false
+  changed_when: false
+  failed_when: >-
+    _wherry_operator_check.rc != 0 or
+    _wherry_operator_check.stdout is search('is on its enrolment password|has no credential ID')
+
+- name: Wait for receivers to become live
+  ansible.builtin.command:
+    argv: [wherry, host, receivers, --json, --config-file, "{{ _wherry_host_config }}"]
+  register: _wherry_receiver_status
+  until: >-
+    _wherry_receiver_status.rc == 0 and
+    wherry_live_receivers | difference(
+      _wherry_receiver_status.stdout | from_json |
+      selectattr('status', 'equalto', 'live') | map(attribute='receiver_id') | list
+    ) | length == 0
+  retries: 30
+  delay: 10
+  check_mode: false
+  changed_when: false

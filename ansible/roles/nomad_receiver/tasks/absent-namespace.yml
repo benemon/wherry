@@ -1,0 +1,45 @@
+---
+- name: List jobs in {{ _wherry_nomad_namespace }}
+  benemon.nomad.nomad_job_info:
+    namespace: "{{ _wherry_nomad_namespace }}"
+  register: _wherry_nomad_jobs
+
+- name: Purge wherry jobs from {{ _wherry_nomad_namespace }}
+  benemon.nomad.nomad_job:
+    name: "{{ item.ID }}"
+    namespace: "{{ _wherry_nomad_namespace }}"
+    state: absent
+    purge: true
+  loop: "{{ _wherry_nomad_jobs.jobs | selectattr('ID', 'match', _wherry_nomad_prefixes) }}"
+  loop_control:
+    label: "{{ item.ID }}"
+
+- name: List variables in {{ _wherry_nomad_namespace }}
+  benemon.nomad.nomad_variable_info:
+    namespace: "{{ _wherry_nomad_namespace }}"
+    prefix: nomad/jobs/
+  register: _wherry_nomad_variables
+
+- name: Delete wherry variables from {{ _wherry_nomad_namespace }}
+  benemon.nomad.nomad_variable:
+    path: "{{ item.Path }}"
+    namespace: "{{ _wherry_nomad_namespace }}"
+    state: absent
+  loop: "{{ _wherry_nomad_variables.variables | selectattr('Path', 'match', 'nomad/jobs/' ~ _wherry_nomad_prefixes) }}"
+  loop_control:
+    label: "{{ item.Path }}"
+
+- name: List volumes in {{ _wherry_nomad_namespace }}
+  benemon.nomad.nomad_volume_info:
+    namespace: "{{ _wherry_nomad_namespace }}"
+  register: _wherry_nomad_volumes
+
+- name: Delete receiver volumes from {{ _wherry_nomad_namespace }}
+  benemon.nomad.nomad_volume:
+    name: "{{ item.Name }}"
+    node_pool: "{{ item.NodePool }}"
+    namespace: "{{ _wherry_nomad_namespace }}"
+    state: absent
+  loop: "{{ _wherry_nomad_volumes.volumes | selectattr('Name', 'match', wherry_nomad_receiver_prefix | regex_escape) }}"
+  loop_control:
+    label: "{{ item.Name }}"

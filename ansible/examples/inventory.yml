@@ -1,0 +1,44 @@
+# One Linux machine is the operator, the wherry host, the Ansible controller and all three receiver platforms;
+# systemd_receiver names the same machine for the plays that run as root.
+# The environment supplies the secrets and local paths: WHERRY_KAFKA_ADMIN_PASSWORD, WHERRY_KAFKA_CA_CERT, NOMAD_ADDR,
+# WHERRY_NOMAD_TOKEN, KUBECONFIG and the three WHERRY_*_PLUGIN_SHA256 pins.
+all:
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    wherry_version: v0.1.8-rc.11
+    wherry_plugin_versions:
+      nomad: "0.3.1"
+      kubernetes: "0.3.0"
+      systemd: "0.3.0"
+    wherry_plugin_sha256:
+      nomad: "{{ lookup('ansible.builtin.env', 'WHERRY_NOMAD_PLUGIN_SHA256') }}"
+      kubernetes: "{{ lookup('ansible.builtin.env', 'WHERRY_KUBERNETES_PLUGIN_SHA256') }}"
+      systemd: "{{ lookup('ansible.builtin.env', 'WHERRY_SYSTEMD_PLUGIN_SHA256') }}"
+    wherry_state_dir: "{{ lookup('ansible.builtin.env', 'HOME') }}/.local/state/wherry-example"
+    wherry_operator_dir: "{{ wherry_state_dir }}/operator"
+    wherry_backup_dir: "{{ wherry_state_dir }}/backup"
+    wherry_ca_cert: "{{ lookup('ansible.builtin.env', 'WHERRY_KAFKA_CA_CERT') }}"
+    wherry_broker: kafka.example.com:9093
+    wherry_tenant: acme
+    wherry_host: laptop
+    wherry_receiver_images:
+      nomad: registry.example.com/wherry-receiver-nomad:0.3.1
+      kubernetes: registry.example.com/wherry-receiver-kubernetes:0.3.0
+    wherry_nomad_address: "{{ lookup('ansible.builtin.env', 'NOMAD_ADDR') }}"
+    wherry_nomad_token: "{{ lookup('ansible.builtin.env', 'WHERRY_NOMAD_TOKEN') }}"
+    wherry_nomad_namespaces:
+      - name: wherry
+        description: wherry receivers and agent runs
+        capabilities:
+          enabled_task_drivers: [docker]
+    wherry_kubernetes_kubeconfig: "{{ lookup('ansible.builtin.env', 'KUBECONFIG') }}"
+    wherry_kubernetes_namespace: wherry
+    wherry_kubernetes_overlay_patches: [base/fsgroup.yaml]
+  children:
+    controllers:
+      hosts:
+        controller:
+    systemd_receivers:
+      hosts:
+        systemd_receiver:

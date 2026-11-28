@@ -1,0 +1,21 @@
+---
+- name: Inspect the receiver service unit
+  ansible.builtin.stat:
+    path: /etc/systemd/system/wherry-receiver.service
+  register: _wherry_systemd_receiver_unit
+
+- name: Stop the receiver service
+  ansible.builtin.systemd_service:
+    name: wherry-receiver
+    state: stopped
+  when: _wherry_systemd_receiver_unit.stat.exists
+
+- name: Remove the receiver's releases, configuration and bundle
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /usr/local/bin/wherry
+    - /usr/local/libexec/wherry
+    - /etc/wherry/config.yaml
+    - /etc/wherry/receiver.bundle

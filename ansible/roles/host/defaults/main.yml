@@ -1,0 +1,3 @@
+---
+state: present
+wherry_confirm_absent: false

@@ -1,0 +1,17 @@
+---
+- name: Configure wherry Nomad namespaces
+  module_defaults:
+    group/benemon.nomad.nomad:
+      address: "{{ wherry_nomad_address }}"
+      ca_cert: "{{ wherry_nomad_ca_cert | default(omit) }}"
+      token: "{{ wherry_nomad_token }}"
+  block:
+    - name: Create each wherry Nomad namespace
+      benemon.nomad.nomad_namespace:
+        name: "{{ item.name }}"
+        description: "{{ item.description | default(omit) }}"
+        capabilities: "{{ item.capabilities | default(omit) }}"
+        node_pool_configuration: "{{ item.node_pool_configuration | default(omit) }}"
+      loop: "{{ wherry_nomad_namespaces }}"
+      loop_control:
+        label: "{{ item.name }}"

@@ -1,0 +1,12 @@
+---
+- name: Refuse state=absent without wherry_confirm_absent
+  ansible.builtin.assert:
+    that: state == 'present' or wherry_confirm_absent | bool
+    fail_msg: state=absent archives and clears the host's identity; set wherry_confirm_absent to true to proceed.
+    quiet: true
+
+- name: Find the host configuration
+  ansible.builtin.include_tasks: paths.yml
+
+- name: Apply the host's state
+  ansible.builtin.include_tasks: "{{ state }}.yml"

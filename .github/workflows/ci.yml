@@ -29,6 +29,18 @@ jobs:
             pluginsdk/go.sum
       - name: Run every gate
         run: make check
+      - name: Lint the Ansible collection
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ansible"
+          "$RUNNER_TEMP/ansible/bin/pip" install -q ansible-core==2.22.0 ansible-lint==26.11.1
+          "$RUNNER_TEMP/ansible/bin/ansible-galaxy" collection install ./ansible -p "$RUNNER_TEMP/collections"
+          cd ansible
+          ANSIBLE_COLLECTIONS_PATH="$RUNNER_TEMP/collections" "$RUNNER_TEMP/ansible/bin/ansible-lint" --offline
+      # C6 and C7 of the collection's tests: no lab name or address, and no Nomad call outside benemon.nomad.
+      - name: Check the collection names no environment and calls Nomad only through benemon.nomad
+        run: |
+          if grep -rniE 'orbital|172\.16\.|nas\.|ocpv|mbp|boundary|vault' ansible/; then exit 1; fi
+          if grep -rnE '^\s*(- )?(ansible\.builtin\.)?uri:|(lookup|query)\(.(ansible\.builtin\.)?url.' ansible/; then exit 1; fi
 
   proto:
     runs-on: ubuntu-latest
@@ -84,6 +96,10 @@ jobs:
       matrix:
         package: [./internal/operator/, ./internal/receiver/, ./internal/client/, ./cmd/wherry/]
     name: broker (${{ matrix.package }})
+    env:
+      # The wherry-plugins tag whose plugin sources the collection's role run builds into its receiver images. Bump it
+      # in the change that changes the plugin protocol, once that plugin tag exists.
+      WHERRY_PLUGIN_VERSION: nomad/v0.3.1
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -102,6 +118,34 @@ jobs:
         run: |
           . "$RUNNER_TEMP/kafka/env"
           go test -count=1 -timeout 30m ${{ matrix.package }}
+      - name: Check out wherry-plugins for the role run
+        if: matrix.package == './cmd/wherry/'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: benemon/wherry-plugins
+          ref: ${{ env.WHERRY_PLUGIN_VERSION }}
+          path: wherry-plugins
+          persist-credentials: false
+      - name: Check out this revision for the role run's receiver images
+        if: matrix.package == './cmd/wherry/'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: wherry-plugins/wherry-src
+          persist-credentials: false
+      - name: Install the role run's tools
+        if: matrix.package == './cmd/wherry/'
+        run: ansible/tests/ci.sh install
+      - name: Prepare the role run's Kafka, Nomad, kind and images
+        if: matrix.package == './cmd/wherry/'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ansible/tests/ci.sh prepare
+      - name: Probe a kind pod's route to the broker
+        if: matrix.package == './cmd/wherry/'
+        run: ansible/tests/ci.sh probe
+      - name: Build, check and retire the collection's example
+        if: matrix.package == './cmd/wherry/'
+        run: ansible/tests/ci.sh run
 
   s3:
     runs-on: ubuntu-latest

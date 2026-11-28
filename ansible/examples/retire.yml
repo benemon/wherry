@@ -1,0 +1,59 @@
+# Decommissions the deployment site.yml built: every role with state=absent. The operator directory goes into
+# wherry_backup_dir and Kafka keeps wherry's objects; to clear them too, pass wherry_operator_clear_kafka=true with
+# wherry_kafka_bin_dir and wherry_kafka_admin_config, which run Kafka's scripts and need Java 17 or later.
+# ansible-playbook -i inventory.yml retire.yml -e wherry_confirm_absent=true
+---
+- name: Remove the Nomad and Kubernetes receivers
+  hosts: controllers
+  gather_facts: false
+  roles:
+    - role: benemon.wherry.nomad_receiver
+      vars:
+        state: absent
+        wherry_nomad_receiver_prefix: wherry-receiver
+        wherry_nomad_agent_prefix: agent-
+    - role: benemon.wherry.kubernetes_receiver
+      vars:
+        state: absent
+        wherry_plugin_version: "{{ wherry_plugin_versions.kubernetes }}"
+
+- name: Remove the systemd receiver
+  hosts: systemd_receivers
+  gather_facts: false
+  become: true
+  roles:
+    - role: benemon.wherry.systemd_receiver
+      vars:
+        state: absent
+
+- name: Retire the host and the operator
+  hosts: controllers
+  gather_facts: false
+  roles:
+    - role: benemon.wherry.host
+      vars:
+        state: absent
+    - role: benemon.wherry.operator
+      vars:
+        state: absent
+
+- name: Retire the Nomad and Kubernetes platforms
+  hosts: controllers
+  gather_facts: false
+  roles:
+    - role: benemon.wherry.nomad
+      vars:
+        state: absent
+        wherry_nomad_policy_prefix: wherry-receiver
+    - role: benemon.wherry.kubernetes
+      vars:
+        state: absent
+
+- name: Retire the systemd platform
+  hosts: systemd_receivers
+  gather_facts: false
+  become: true
+  roles:
+    - role: benemon.wherry.systemd
+      vars:
+        state: absent

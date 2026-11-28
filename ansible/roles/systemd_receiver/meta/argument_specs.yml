@@ -1,0 +1,40 @@
+argument_specs:
+  main:
+    short_description: Install and run a wherry receiver on a systemd host, or remove it.
+    description:
+      - >-
+        With state=present, the control node verifies each release's checksums.txt with cosign against that release's
+        own tag, checks each archive against it, and checks the plugin binary against its pin; the host gets both
+        binaries under a versioned directory behind a current link, the configuration and the bundle, and the service
+        is started.
+      - With state=absent, stops the service and removes the installed releases, the wherry link, the configuration and the bundle.
+    options:
+      state:
+        type: str
+        choices: [present, absent]
+        default: present
+        description: Whether the receiver should run.
+      wherry_confirm_absent:
+        type: bool
+        default: false
+        description: Must be true for state=absent.
+      wherry_version:
+        type: str
+        description: Wherry release tag.
+      wherry_plugin_version:
+        type: str
+        description: Systemd plugin release version.
+      wherry_systemd_receiver_plugin_sha256:
+        type: str
+        description: SHA-256 of the systemd plugin binary.
+      wherry_systemd_receiver_config:
+        type: dict
+        no_log: true
+        description: Applied receiver local configuration.
+      wherry_systemd_receiver_bundle:
+        type: str
+        no_log: true
+        description: Applied receiver credential bundle.
+      wherry_systemd_receiver_cache_dir:
+        type: path
+        description: Where the control node keeps downloaded releases; the role defaults it to ~/.cache/wherry.

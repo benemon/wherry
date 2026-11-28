@@ -1,0 +1,53 @@
+argument_specs:
+  main:
+    short_description: Deploy a wherry receiver on Kubernetes or OpenShift, or delete it.
+    description:
+      - >-
+        With state=absent, deletes the objects of the pinned receiver.yaml and of wherry_kubernetes_overlay_resources,
+        and the Secrets and ConfigMaps the base's generators made, state claim included.
+    options:
+      state:
+        type: str
+        choices: [present, absent]
+        default: present
+        description: Whether the receiver should run.
+      wherry_confirm_absent:
+        type: bool
+        default: false
+        description: Must be true for state=absent.
+      wherry_plugin_version:
+        type: str
+        required: true
+        description: Kubernetes plugin example and release version.
+      wherry_kubernetes_kubeconfig:
+        type: path
+        required: true
+        description: Kubernetes kubeconfig file.
+      wherry_kubernetes_receiver_name:
+        type: str
+        description: Receiver name.
+      wherry_kubernetes_namespace:
+        type: str
+        required: true
+        description: Receiver namespace.
+      wherry_kubernetes_receiver_image:
+        type: str
+        description: Receiver container image.
+      wherry_kubernetes_receiver_bundle:
+        type: str
+        no_log: true
+        description: Applied receiver credential bundle.
+      wherry_kubernetes_receiver_config:
+        type: dict
+        no_log: true
+        description: Applied receiver local configuration.
+      wherry_kubernetes_overlay_resources:
+        type: list
+        elements: path
+        default: []
+        description: Resource files the generated overlay adds.
+      wherry_kubernetes_overlay_patches:
+        type: list
+        elements: str
+        default: []
+        description: Patch files the generated overlay applies; a path starting base/ names a fetched example file, such as base/fsgroup.yaml.

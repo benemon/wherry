@@ -1,0 +1,4 @@
+---
+state: present
+wherry_confirm_absent: false
+wherry_operator_clear_kafka: false

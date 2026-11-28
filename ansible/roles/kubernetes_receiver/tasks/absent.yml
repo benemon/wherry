@@ -1,0 +1,82 @@
+---
+- name: Check the Kubernetes plugin version is pinned
+  ansible.builtin.assert:
+    that: wherry_plugin_version in _wherry_kubernetes_plugin_commits
+    fail_msg: "Unsupported Kubernetes plugin version {{ wherry_plugin_version }}."
+    quiet: true
+
+- name: Create the Kubernetes example directory
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: wherry-kubernetes.
+  register: _wherry_kubernetes_example_dir
+  delegate_to: localhost
+  check_mode: false
+  changed_when: false
+
+# The base's generated Secret and ConfigMap names end in a hash of their content, so they are found by the
+# generator's name; every other object is named in receiver.yaml or the overlay's resources, deleted in reverse so the
+# Deployment's pods go before the claims they hold.
+- name: Delete the Kubernetes receiver
+  block:
+    - name: Fetch the pinned Kubernetes examples
+      ansible.builtin.get_url:
+        url: >-
+          https://raw.githubusercontent.com/benemon/wherry-plugins/{{ _wherry_kubernetes_plugin_commits[wherry_plugin_version] }}/examples/kubernetes/{{ item }}
+        dest: "{{ _wherry_kubernetes_example_dir.path }}/{{ item }}"
+        mode: "0600"
+      loop:
+        - kustomization.yaml
+        - receiver.yaml
+      delegate_to: localhost
+      check_mode: false
+      changed_when: false
+
+    - name: Delete the receiver's objects
+      kubernetes.core.k8s:
+        kubeconfig: "{{ wherry_kubernetes_kubeconfig }}"
+        state: absent
+        namespace: "{{ wherry_kubernetes_namespace }}"
+        wait: true
+        definition: >-
+          {{ ((lookup('ansible.builtin.file', _wherry_kubernetes_example_dir.path ~ '/receiver.yaml') | from_yaml_all | list) +
+          ((query('ansible.builtin.file', *wherry_kubernetes_overlay_resources) if wherry_kubernetes_overlay_resources else []) |
+           map('from_yaml_all') | map('list') | flatten(levels=1))) | reverse | list }}
+
+    - name: List the receiver's generated Secrets and ConfigMaps
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ wherry_kubernetes_kubeconfig }}"
+        api_version: v1
+        kind: "{{ item }}"
+        namespace: "{{ wherry_kubernetes_namespace }}"
+      loop: [Secret, ConfigMap]
+      register: _wherry_kubernetes_generated
+      no_log: true
+
+    - name: Delete the receiver's generated Secrets and ConfigMaps
+      kubernetes.core.k8s:
+        kubeconfig: "{{ wherry_kubernetes_kubeconfig }}"
+        state: absent
+        api_version: v1
+        kind: "{{ item.kind }}"
+        namespace: "{{ wherry_kubernetes_namespace }}"
+        name: "{{ item.metadata.name }}"
+      loop: >-
+        {{ _wherry_kubernetes_generated.results | map(attribute='resources') | flatten |
+        selectattr('metadata.name', 'match', '(' ~ (_wherry_kubernetes_generators | map('regex_escape') | join('|')) ~ ')-[a-z0-9]+$') }}
+      loop_control:
+        label: "{{ item.kind }}/{{ item.metadata.name }}"
+      vars:
+        _wherry_kubernetes_base: "{{ lookup('ansible.builtin.file', _wherry_kubernetes_example_dir.path ~ '/kustomization.yaml') | from_yaml }}"
+        _wherry_kubernetes_generators: >-
+          {{ ((_wherry_kubernetes_base.secretGenerator | default([], true)) + (_wherry_kubernetes_base.configMapGenerator | default([], true))) |
+          map(attribute='name') }}
+
+  always:
+    - name: Remove the Kubernetes example directory
+      ansible.builtin.file:
+        path: "{{ _wherry_kubernetes_example_dir.path }}"
+        state: absent
+      delegate_to: localhost
+      check_mode: false
+      changed_when: false

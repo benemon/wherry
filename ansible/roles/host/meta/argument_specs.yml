@@ -1,0 +1,53 @@
+argument_specs:
+  main:
+    short_description: Enrol a wherry host, or archive and clear its identity.
+    description:
+      - With state=present, enrols the host when the operator holds no bundle for it.
+      - >-
+        With state=absent, archives the host's state directory, bundle, host key, configuration and scram.next into
+        wherry_backup_dir, then removes the state directory, bundle and host key and recreates an empty state
+        directory.
+      - The bundle, host key and state directory are those the configuration names, else the CLI's defaults for that configuration path.
+    options:
+      state:
+        type: str
+        choices: [present, absent]
+        default: present
+        description: Whether the host should be enrolled or its identity cleared.
+      wherry_confirm_absent:
+        type: bool
+        default: false
+        description: Must be true for state=absent.
+      wherry_host:
+        type: str
+        description: Host name; needed with state=present.
+      wherry_host_tenant:
+        type: str
+        description: Host tenant; needed with state=present.
+      wherry_operator_dir:
+        type: path
+        description: Operator directory; needed with state=present.
+      wherry_host_ca_cert:
+        type: path
+        description: Kafka CA certificate file for host init; needed with state=present.
+      wherry_host_config_dir:
+        type: path
+        description: Host configuration directory; unset, the host's $XDG_CONFIG_HOME/wherry, by default ~/.config/wherry.
+      wherry_backup_dir:
+        type: path
+        description: Directory for the dated archive; needed with state=absent.
+  live:
+    short_description: Wait for named receivers to be live to a wherry host.
+    options:
+      wherry_operator_dir:
+        type: path
+        required: true
+        description: Operator directory.
+      wherry_host_config_dir:
+        type: path
+        description: Host configuration directory; unset, the host's $XDG_CONFIG_HOME/wherry.
+      wherry_live_receivers:
+        type: list
+        elements: str
+        required: true
+        description: Receiver names that must report live.

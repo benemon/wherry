@@ -1,0 +1,49 @@
+argument_specs:
+  main:
+    short_description: Create the Nomad namespaces wherry uses, or delete them and the receiver policies.
+    description:
+      - With state=absent, deletes the ACL policies whose names start with wherry_nomad_policy_prefix, then each namespace.
+    options:
+      state:
+        type: str
+        choices: [present, absent]
+        default: present
+        description: Whether the namespaces should exist.
+      wherry_confirm_absent:
+        type: bool
+        default: false
+        description: Must be true for state=absent.
+      wherry_nomad_address:
+        type: str
+        required: true
+        description: Nomad API address.
+      wherry_nomad_ca_cert:
+        type: path
+        description: CA certificate file for a Nomad API under HTTPS.
+      wherry_nomad_token:
+        type: str
+        required: true
+        no_log: true
+        description: Nomad ACL token.
+      wherry_nomad_namespaces:
+        type: list
+        elements: dict
+        required: true
+        description: Nomad namespaces and their capabilities; state=absent reads the names alone.
+        options:
+          name:
+            type: str
+            required: true
+            description: Namespace name.
+          description:
+            type: str
+            description: Namespace description.
+          capabilities:
+            type: dict
+            description: Namespace capabilities, as benemon.nomad.nomad_namespace takes them.
+          node_pool_configuration:
+            type: dict
+            description: Namespace node pool configuration, a Nomad Enterprise feature.
+      wherry_nomad_policy_prefix:
+        type: str
+        description: Prefix, starting with wherry, of the receiver ACL policies state=absent deletes.

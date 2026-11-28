@@ -1,0 +1,75 @@
+argument_specs:
+  main:
+    short_description: Deploy a wherry receiver as a Nomad job, or purge receivers and their runs.
+    description:
+      - >-
+        With state=present, creates the receiver's workload ACL policy, dynamic host volume, Nomad variable and job
+        from the pinned example. It fails before any change if the pinned wherry-receiver.volume.hcl differs from the
+        role's volume options.
+      - >-
+        With state=absent, purges in each of wherry_nomad_namespaces the jobs and variables whose names start with
+        either prefix, and the volumes whose names start with wherry_nomad_receiver_prefix.
+    options:
+      state:
+        type: str
+        choices: [present, absent]
+        default: present
+        description: Whether the receiver should run.
+      wherry_confirm_absent:
+        type: bool
+        default: false
+        description: Must be true for state=absent.
+      wherry_plugin_version:
+        type: str
+        description: Nomad plugin version, which names the pinned example commit; needed with state=present.
+      wherry_nomad_address:
+        type: str
+        required: true
+        description: Nomad API address.
+      wherry_nomad_ca_cert:
+        type: path
+        description: CA certificate file for a Nomad API under HTTPS.
+      wherry_nomad_token:
+        type: str
+        required: true
+        no_log: true
+        description: Nomad ACL token.
+      wherry_nomad_receiver_name:
+        type: str
+        description: Receiver name, job ID, policy and volume name.
+      wherry_nomad_receiver_namespace:
+        type: str
+        description: Nomad namespace for the receiver job.
+      wherry_nomad_receiver_node_pool:
+        type: str
+        description: Nomad node pool for the receiver job and volume.
+      wherry_nomad_receiver_image:
+        type: str
+        description: Receiver container image.
+      wherry_nomad_receiver_driver:
+        type: str
+        description: Nomad task driver for the receiver image.
+      wherry_nomad_receiver_metrics_port:
+        type: int
+        description: Static host metrics port, or zero for a dynamic port.
+      wherry_nomad_receiver_policy_rules:
+        type: str
+        description: Nomad ACL policy rules for the receiver.
+      wherry_nomad_receiver_bundle:
+        type: str
+        no_log: true
+        description: Applied receiver credential bundle.
+      wherry_nomad_receiver_config:
+        type: dict
+        no_log: true
+        description: Applied receiver local configuration.
+      wherry_nomad_namespaces:
+        type: list
+        elements: dict
+        description: Namespaces, each with a name, whose wherry objects state=absent purges.
+      wherry_nomad_receiver_prefix:
+        type: str
+        description: Prefix, starting with wherry, of the receiver jobs, variables and volumes state=absent purges.
+      wherry_nomad_agent_prefix:
+        type: str
+        description: Prefix of the agent jobs and variables state=absent purges.

@@ -1,0 +1,6 @@
+---
+_wherry_systemd_receiver_plugin_commits:
+  "0.3.0": bed01cdc83b0cfa766ca63aa15bfc6ced63ac45c
+wherry_systemd_receiver_cache_dir: "{{ lookup('ansible.builtin.env', 'HOME') }}/.cache/wherry"
+state: present
+wherry_confirm_absent: false

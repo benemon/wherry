@@ -1,0 +1,9 @@
+---
+- name: Refuse state=absent without wherry_confirm_absent
+  ansible.builtin.assert:
+    that: state == 'present' or wherry_confirm_absent | bool
+    fail_msg: state=absent stops the receiver and removes its releases, configuration and bundle; set wherry_confirm_absent to true to proceed.
+    quiet: true
+
+- name: Apply the systemd receiver's state
+  ansible.builtin.include_tasks: "{{ state }}.yml"

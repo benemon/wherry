@@ -1,0 +1,17 @@
+---
+- name: Refuse state=absent without wherry_confirm_absent
+  ansible.builtin.assert:
+    that: state == 'present' or wherry_confirm_absent | bool
+    fail_msg: state=absent deletes the namespace and everything in it; set wherry_confirm_absent to true to proceed.
+    quiet: true
+
+- name: Set the wherry Kubernetes namespace's state
+  kubernetes.core.k8s:
+    kubeconfig: "{{ wherry_kubernetes_kubeconfig }}"
+    state: "{{ state }}"
+    wait: "{{ state == 'absent' }}"
+    definition:
+      apiVersion: "{{ 'project.openshift.io/v1' if wherry_kubernetes_openshift | bool else 'v1' }}"
+      kind: "{{ 'Project' if wherry_kubernetes_openshift | bool else 'Namespace' }}"
+      metadata:
+        name: "{{ wherry_kubernetes_namespace }}"

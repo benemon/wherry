@@ -1,0 +1,5 @@
+---
+_wherry_systemd_plugin_commits:
+  "0.3.0": bed01cdc83b0cfa766ca63aa15bfc6ced63ac45c
+state: present
+wherry_confirm_absent: false

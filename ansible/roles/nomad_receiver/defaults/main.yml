@@ -1,0 +1,5 @@
+---
+_wherry_nomad_plugin_commits:
+  "0.3.1": 11a1095a7e3786b2c80f47b1cedf92543fddc36f
+state: present
+wherry_confirm_absent: false

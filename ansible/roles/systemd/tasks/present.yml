@@ -1,0 +1,109 @@
+---
+- name: Check the arguments state=present needs
+  ansible.builtin.assert:
+    that: wherry_plugin_version is defined
+    fail_msg: state=present needs wherry_plugin_version.
+    quiet: true
+
+- name: Check the systemd plugin version is pinned
+  ansible.builtin.assert:
+    that: wherry_plugin_version in _wherry_systemd_plugin_commits
+    fail_msg: "Unsupported systemd plugin version {{ wherry_plugin_version }}."
+    quiet: true
+
+- name: Create the systemd example directory
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: wherry-systemd.
+  register: _wherry_systemd_example_dir
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+
+- name: Fetch and install the systemd platform files
+  block:
+    - name: Fetch the pinned systemd examples
+      ansible.builtin.get_url:
+        url: >-
+          https://raw.githubusercontent.com/benemon/wherry-plugins/{{ _wherry_systemd_plugin_commits[wherry_plugin_version] }}/examples/systemd/{{ item }}
+        dest: "{{ _wherry_systemd_example_dir.path }}/{{ item }}"
+        mode: "0600"
+      loop:
+        - wherry-receiver.service
+        - wherry.slice
+        - wherry-tmpfiles.conf
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      changed_when: false
+
+    - name: Create the systemd private state root
+      ansible.builtin.file:
+        path: /var/lib/private
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Create the receiver state roots
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - /var/lib/private/wherry-agents
+        - /var/lib/wherry-agents
+        - /wherry
+
+    - name: Create the receiver configuration directory
+      ansible.builtin.file:
+        path: /etc/wherry
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Install the receiver unit and agent slice
+      ansible.builtin.copy:
+        src: "{{ _wherry_systemd_example_dir.path }}/{{ item }}"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - wherry-receiver.service
+        - wherry.slice
+      register: _wherry_systemd_units
+
+    - name: Install the receiver tmpfiles configuration
+      ansible.builtin.copy:
+        src: "{{ _wherry_systemd_example_dir.path }}/wherry-tmpfiles.conf"
+        dest: /etc/tmpfiles.d/wherry.conf
+        owner: root
+        group: root
+        mode: "0644"
+      register: _wherry_systemd_tmpfiles
+
+    - name: Create the receiver tmpfiles paths
+      ansible.builtin.command:
+        argv: [systemd-tmpfiles, --create, /etc/tmpfiles.d/wherry.conf]
+      changed_when: false
+
+    - name: Enable the receiver service
+      ansible.builtin.systemd_service:
+        name: wherry-receiver
+        enabled: true
+        daemon_reload: "{{ _wherry_systemd_units.changed or _wherry_systemd_tmpfiles.changed }}"
+
+  always:
+    - name: Remove the systemd example directory
+      ansible.builtin.file:
+        path: "{{ _wherry_systemd_example_dir.path }}"
+        state: absent
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      changed_when: false

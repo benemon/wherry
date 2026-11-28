@@ -1,0 +1,28 @@
+---
+- name: Check the arguments state=absent needs
+  ansible.builtin.assert:
+    that:
+      - wherry_nomad_namespaces is defined
+      - wherry_nomad_receiver_prefix is defined and wherry_nomad_receiver_prefix is match('wherry')
+      - wherry_nomad_agent_prefix is defined and wherry_nomad_agent_prefix | length > 0
+    fail_msg: >-
+      state=absent needs wherry_nomad_namespaces, a wherry_nomad_receiver_prefix that starts with wherry, and a
+      non-empty wherry_nomad_agent_prefix.
+    quiet: true
+
+- name: Remove wherry receivers and runs from Nomad
+  module_defaults:
+    group/benemon.nomad.nomad:
+      address: "{{ wherry_nomad_address }}"
+      ca_cert: "{{ wherry_nomad_ca_cert | default(omit) }}"
+      token: "{{ wherry_nomad_token }}"
+  block:
+    - name: List Nomad namespaces
+      benemon.nomad.nomad_namespace_info:
+      register: _wherry_nomad_namespace_list
+
+    - name: Clear wherry objects from each Nomad namespace
+      ansible.builtin.include_tasks: absent-namespace.yml
+      loop: "{{ wherry_nomad_namespaces | map(attribute='name') | intersect(_wherry_nomad_namespace_list.namespaces | map(attribute='Name')) }}"
+      loop_control:
+        loop_var: _wherry_nomad_namespace

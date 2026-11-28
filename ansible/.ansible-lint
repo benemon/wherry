@@ -1,0 +1,4 @@
+---
+# The roles' public variables share the collection's wherry_ prefix, so one inventory serves every role.
+skip_list:
+  - var-naming[no-role-prefix]
