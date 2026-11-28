@@ -1,0 +1,109 @@
+argument_specs:
+  main:
+    short_description: Set up a wherry operator, tenant, pools and receivers, or move the operator aside.
+    description:
+      - >-
+        With wherry_operator_state=present, checks the CLI version, runs operator init once, creates the tenant, applies
+        each pool and allows the tenant on it, then writes and applies each receiver record. A pool or receiver reports
+        a change when its record in the operator directory changes, since wherry operator apply reports none.
+      - >-
+        With wherry_operator_state=absent, moves the operator directory into a dated backup. With
+        wherry_operator_clear_kafka it first deletes wherry's topics, pool groups, and the ACLs, SCRAM credentials and
+        quotas of every wherry.rcv. and wherry.tnt. principal, keeping the super user and wherry.operator.
+      - Clearing Kafka runs Kafka's administration scripts, which need Java 17 or later on the host the role runs on.
+    options:
+      wherry_operator_state:
+        type: str
+        choices: [present, absent]
+        default: present
+        description: Whether the operator should be set up or moved aside.
+      wherry_operator_confirm_absent:
+        type: bool
+        default: false
+        description: Must be true for wherry_operator_state=absent.
+      wherry_operator_dir:
+        type: path
+        required: true
+        description: Operator directory; the host role reads the same variable.
+      wherry_operator_version:
+        type: str
+        description: Installed wherry release tag, by default wherry_version; needed with state present.
+      wherry_operator_broker:
+        type: str
+        description: Kafka bootstrap address for operator init, by default wherry_broker; needed with state present.
+      wherry_operator_ca_cert:
+        type: path
+        description: Kafka CA certificate file, by default wherry_ca_cert; needed with state present.
+      wherry_operator_super_user:
+        type: str
+        description: Kafka super user; needed with state present.
+      wherry_operator_super_user_password:
+        type: str
+        no_log: true
+        description: Kafka super user's password; needed with state present.
+      wherry_operator_tenant:
+        type: str
+        description: Tenant to create and allow on each pool, by default wherry_tenant; needed with state present.
+      wherry_operator_pools:
+        type: list
+        elements: dict
+        default: []
+        description: Pools and their terms files.
+        options:
+          name:
+            type: str
+            required: true
+            description: Pool name.
+          file:
+            type: path
+            required: true
+            description: Pool terms file.
+      wherry_operator_receivers:
+        type: list
+        elements: dict
+        default: []
+        description: Receiver records.
+        options:
+          name:
+            type: str
+            required: true
+            description: Receiver name.
+          pool:
+            type: str
+            required: true
+            description: Receiver pool.
+          broker:
+            type: str
+            required: true
+            description: Kafka bootstrap address in the receiver's bundle.
+          plugin_sha256:
+            type: dict
+            required: true
+            description: Plugin binary SHA-256 pins by plugin type.
+          config:
+            type: dict
+            required: true
+            no_log: true
+            description: The receiver's local configuration, written as config.yaml.
+          plugins:
+            type: dict
+            required: true
+            description: Each plugin type's labels, config and list of profiles.
+      wherry_operator_backup_dir:
+        type: path
+        description: Directory for the dated backup, by default wherry_backup_dir; needed with state absent.
+      wherry_operator_clear_kafka:
+        type: bool
+        default: false
+        description: With state absent, also clear wherry's objects from Kafka.
+      wherry_operator_kafka_bin_dir:
+        type: path
+        description:
+          - Kafka's bin directory, with kafka-acls.sh, kafka-configs.sh, kafka-consumer-groups.sh, kafka-share-groups.sh and kafka-topics.sh.
+          - Needed with wherry_operator_clear_kafka.
+      wherry_operator_kafka_admin_config:
+        type: path
+        no_log: true
+        description:
+          - Kafka client configuration file that authenticates as the super user.
+          - Needed with wherry_operator_clear_kafka.

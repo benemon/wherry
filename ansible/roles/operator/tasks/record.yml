@@ -1,0 +1,102 @@
+---
+# One receiver's record under __wherry_operator_record_root: receiver.yaml, config.yaml and plugins/, with stale plugin
+# files removed. The receiver's config is no_log in the argument spec, so no task here loops over the record itself.
+# A scratch copy for a check-mode validation (__wherry_operator_record_tracked false) reports no change.
+- name: Select the record of {{ __wherry_operator_receiver_name }}
+  ansible.builtin.set_fact:
+    __wherry_operator_receiver: "{{ wherry_operator_receivers | selectattr('name', 'equalto', __wherry_operator_receiver_name) | first }}"
+    __wherry_operator_record_dir: "{{ __wherry_operator_record_root }}/{{ __wherry_operator_receiver_name }}"
+  no_log: true
+
+- name: Create the plugin directories of {{ __wherry_operator_receiver_name }}
+  ansible.builtin.file:
+    path: "{{ __wherry_operator_record_dir }}/plugins/{{ item }}/profiles"
+    state: directory
+    mode: "0700"
+  loop: "{{ __wherry_operator_receiver.plugins | list }}"
+  register: __wherry_operator_record_dirs
+  changed_when: __wherry_operator_record_dirs.changed and __wherry_operator_record_tracked
+
+- name: Write the local configuration of {{ __wherry_operator_receiver_name }}
+  ansible.builtin.copy:
+    content: "{{ __wherry_operator_receiver.config | to_nice_yaml(indent=2, sort_keys=false) }}"
+    dest: "{{ __wherry_operator_record_dir }}/config.yaml"
+    mode: "0600"
+  register: __wherry_operator_record_config
+  changed_when: __wherry_operator_record_config.changed and __wherry_operator_record_tracked
+  no_log: true
+
+- name: Write the record of {{ __wherry_operator_receiver_name }}
+  ansible.builtin.copy:
+    content: >-
+      {{ {'pool': __wherry_operator_receiver.pool, 'broker': __wherry_operator_receiver.broker,
+          'plugin_sha256': __wherry_operator_receiver.plugin_sha256} | to_nice_yaml(indent=2, sort_keys=false) }}
+    dest: "{{ __wherry_operator_record_dir }}/receiver.yaml"
+    mode: "0600"
+  register: __wherry_operator_record_head
+  changed_when: __wherry_operator_record_head.changed and __wherry_operator_record_tracked
+
+- name: Write the plugin configurations of {{ __wherry_operator_receiver_name }}
+  ansible.builtin.copy:
+    content: >-
+      {{ __wherry_operator_receiver.plugins[item] | dict2items | rejectattr('key', 'equalto', 'profiles') |
+      items2dict | to_nice_yaml(indent=2, sort_keys=false) }}
+    dest: "{{ __wherry_operator_record_dir }}/plugins/{{ item }}/plugin.yaml"
+    mode: "0600"
+  loop: "{{ __wherry_operator_receiver.plugins | list }}"
+  register: __wherry_operator_record_plugins
+  changed_when: __wherry_operator_record_plugins.changed and __wherry_operator_record_tracked
+  no_log: true
+
+# File order is routing order, so each profile's file name carries its place in the list.
+- name: Name the profile files of {{ __wherry_operator_receiver_name }}
+  ansible.builtin.set_fact:
+    __wherry_operator_profile_files: >-
+      {%- set files = namespace(items=[]) -%}
+      {%- for plugin in __wherry_operator_receiver.plugins | list -%}
+      {%- for profile in __wherry_operator_receiver.plugins[plugin].profiles | default([]) -%}
+      {%- set files.items = files.items + [{'plugin': plugin, 'index': loop.index0,
+            'path': __wherry_operator_record_dir ~ '/plugins/' ~ plugin ~ '/profiles/' ~ ('%02d' | format(loop.index)) ~ '-' ~ profile.name ~ '.yaml'}] -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ files.items }}
+
+- name: Write the plugin profiles of {{ __wherry_operator_receiver_name }}
+  ansible.builtin.copy:
+    content: "{{ __wherry_operator_receiver.plugins[item.plugin].profiles[item.index] | to_nice_yaml(indent=2, sort_keys=false) }}"
+    dest: "{{ item.path }}"
+    mode: "0600"
+  loop: "{{ __wherry_operator_profile_files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  register: __wherry_operator_record_profiles
+  changed_when: __wherry_operator_record_profiles.changed and __wherry_operator_record_tracked
+  no_log: true
+
+- name: Find the plugin files of {{ __wherry_operator_receiver_name }}
+  ansible.builtin.find:
+    paths: "{{ __wherry_operator_record_dir }}/plugins"
+    recurse: true
+    file_type: any
+  register: __wherry_operator_record_found
+
+- name: Remove the stale plugin files of {{ __wherry_operator_receiver_name }}
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: >-
+    {{ __wherry_operator_record_found.files | map(attribute='path') |
+    reject('in', __wherry_operator_profile_files | map(attribute='path')) |
+    reject('match', '^' ~ (__wherry_operator_record_dir | regex_escape) ~ '/plugins/(' ~
+           (__wherry_operator_receiver.plugins | list | map('regex_escape') | join('|')) ~ ')(/plugin[.]yaml|/profiles)?$') }}
+  register: __wherry_operator_record_stale
+  changed_when: __wherry_operator_record_stale.changed and __wherry_operator_record_tracked
+
+- name: Note a changed record of {{ __wherry_operator_receiver_name }}
+  ansible.builtin.set_fact:
+    __wherry_operator_changed_receivers: "{{ __wherry_operator_changed_receivers + [__wherry_operator_receiver_name] }}"
+  when:
+    - __wherry_operator_record_tracked
+    - >-
+      __wherry_operator_record_config.changed or __wherry_operator_record_head.changed or __wherry_operator_record_dirs.changed or
+      __wherry_operator_record_plugins.changed or __wherry_operator_record_profiles.changed or __wherry_operator_record_stale.changed

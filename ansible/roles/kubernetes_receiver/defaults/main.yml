@@ -1,0 +1,12 @@
+---
+wherry_kubernetes_receiver_state: present
+wherry_kubernetes_receiver_confirm_absent: false
+wherry_kubernetes_receiver_kubeconfig: "{{ wherry_kubernetes_kubeconfig | default(none) }}"
+wherry_kubernetes_receiver_namespace: "{{ wherry_kubernetes_namespace | default(none) }}"
+wherry_kubernetes_receiver_plugin_version: "{{ wherry_kubernetes_plugin_version | default(none) }}"
+wherry_kubernetes_receiver_name: null
+wherry_kubernetes_receiver_image: null
+wherry_kubernetes_receiver_bundle: null
+wherry_kubernetes_receiver_config: null
+wherry_kubernetes_receiver_overlay_resources: []
+wherry_kubernetes_receiver_overlay_patches: []

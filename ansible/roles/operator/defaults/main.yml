@@ -1,0 +1,15 @@
+---
+wherry_operator_state: present
+wherry_operator_confirm_absent: false
+wherry_operator_version: "{{ wherry_version | default(none) }}"
+wherry_operator_broker: "{{ wherry_broker | default(none) }}"
+wherry_operator_ca_cert: "{{ wherry_ca_cert | default(none) }}"
+wherry_operator_super_user: null
+wherry_operator_super_user_password: null
+wherry_operator_tenant: "{{ wherry_tenant | default(none) }}"
+wherry_operator_pools: []
+wherry_operator_receivers: []
+wherry_operator_backup_dir: "{{ wherry_backup_dir | default(none) }}"
+wherry_operator_clear_kafka: false
+wherry_operator_kafka_bin_dir: null
+wherry_operator_kafka_admin_config: null

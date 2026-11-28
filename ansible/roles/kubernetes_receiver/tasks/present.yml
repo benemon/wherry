@@ -1,0 +1,203 @@
+---
+- name: Check the arguments wherry_kubernetes_receiver_state=present needs
+  ansible.builtin.assert:
+    that:
+      - wherry_kubernetes_receiver_plugin_version is not none
+      - wherry_kubernetes_receiver_name is not none
+      - wherry_kubernetes_receiver_image is not none
+      - wherry_kubernetes_receiver_bundle is not none or ansible_check_mode
+      - wherry_kubernetes_receiver_config is not none or ansible_check_mode
+    fail_msg: >-
+      wherry_kubernetes_receiver_state=present needs wherry_kubernetes_receiver_plugin_version (default
+      wherry_kubernetes_plugin_version), _name, _image, _bundle and _config.
+    quiet: true
+
+- name: Check the Kubernetes plugin version is pinned
+  ansible.builtin.assert:
+    that: wherry_kubernetes_receiver_plugin_version in __wherry_kubernetes_receiver_plugin_commits
+    fail_msg: "Unsupported Kubernetes plugin version {{ wherry_kubernetes_receiver_plugin_version }}."
+    quiet: true
+
+- name: Check the receiver image names a tag or digest
+  ansible.builtin.assert:
+    that: wherry_kubernetes_receiver_image is regex('(:[^/:@]+|@sha256:[0-9a-f]{64})$')
+    fail_msg: "Receiver image {{ wherry_kubernetes_receiver_image }} names no tag or digest."
+    quiet: true
+
+- name: Create the Kubernetes render directory
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: "wherry-{{ wherry_kubernetes_receiver_name }}."
+  register: __wherry_kubernetes_receiver_render_dir
+  delegate_to: localhost
+  check_mode: false
+  changed_when: false
+
+- name: Render and deploy the Kubernetes receiver
+  block:
+    - name: Create the Kubernetes example directory
+      ansible.builtin.file:
+        path: "{{ __wherry_kubernetes_receiver_render_dir.path }}/base"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      check_mode: false
+      changed_when: false
+
+    - name: Fetch the pinned Kubernetes examples
+      ansible.builtin.get_url:
+        url: "{{ __wherry_kubernetes_receiver_examples }}/{{ item }}"
+        dest: "{{ __wherry_kubernetes_receiver_render_dir.path }}/base/{{ item }}"
+        mode: "0600"
+      loop:
+        - kustomization.yaml
+        - receiver.yaml
+        - fsgroup.yaml
+      delegate_to: localhost
+      check_mode: false
+      changed_when: false
+
+    - name: Install the receiver bundle in the base
+      ansible.builtin.copy:
+        content: "{{ wherry_kubernetes_receiver_bundle | default('', true) }}"
+        dest: "{{ __wherry_kubernetes_receiver_render_dir.path }}/base/receiver.bundle"
+        mode: "0600"
+      delegate_to: localhost
+      check_mode: false
+      changed_when: false
+      no_log: true
+
+    - name: Install the applied receiver configuration in the base
+      ansible.builtin.copy:
+        content: "{{ wherry_kubernetes_receiver_config | default({}, true) | to_nice_yaml(indent=2, sort_keys=false) }}"
+        dest: "{{ __wherry_kubernetes_receiver_render_dir.path }}/base/config.yaml"
+        mode: "0600"
+      delegate_to: localhost
+      check_mode: false
+      changed_when: false
+      no_log: true
+
+    - name: Write Kubernetes overlay resources
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ __wherry_kubernetes_receiver_render_dir.path }}/{{ item | basename }}"
+        mode: "0600"
+      loop: >-
+        {{ wherry_kubernetes_receiver_overlay_resources +
+        (wherry_kubernetes_receiver_overlay_patches | reject('match', '^base/')) }}
+      loop_control:
+        label: "{{ item }}"
+      delegate_to: localhost
+      check_mode: false
+      changed_when: false
+
+    - name: Start the Kubernetes patch list
+      ansible.builtin.set_fact:
+        __wherry_kubernetes_receiver_patch_refs: []
+
+    - name: Add Kubernetes overlay patches
+      ansible.builtin.set_fact:
+        __wherry_kubernetes_receiver_patch_refs: >-
+          {{ __wherry_kubernetes_receiver_patch_refs +
+          [{'path': (item if item is match('^base/') else item | basename)}] }}
+      loop: "{{ wherry_kubernetes_receiver_overlay_patches }}"
+      loop_control:
+        label: "{{ item }}"
+
+    # The base's images entry has already renamed the image, so the overlay matches the base's newName and newTag.
+    - name: Write the Kubernetes overlay
+      ansible.builtin.copy:
+        content: "{{ __wherry_kubernetes_receiver_kustomization | to_nice_yaml(indent=2, sort_keys=false) }}"
+        dest: "{{ __wherry_kubernetes_receiver_render_dir.path }}/kustomization.yaml"
+        mode: "0600"
+      vars:
+        __wherry_kubernetes_receiver_base_image: >-
+          {{ (lookup('ansible.builtin.file', __wherry_kubernetes_receiver_render_dir.path ~ '/base/kustomization.yaml') | from_yaml).images |
+          selectattr('name', 'equalto', 'wherry-receiver') | first }}
+        __wherry_kubernetes_receiver_image_parts: "{{ wherry_kubernetes_receiver_image | regex_findall(__wherry_kubernetes_receiver_image_pattern) | first }}"
+        __wherry_kubernetes_receiver_image_pattern: '^([^@]+?)(?::([^/:@]+))?(?:@(sha256:[0-9a-f]{64}))?$'
+        __wherry_kubernetes_receiver_kustomization:
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          namespace: "{{ wherry_kubernetes_receiver_namespace }}"
+          resources: "{{ ['base'] + (wherry_kubernetes_receiver_overlay_resources | map('basename')) }}"
+          images:
+            - "{{ {'name': __wherry_kubernetes_receiver_base_image.newName ~ ':' ~ __wherry_kubernetes_receiver_base_image.newTag,
+                   'newName': __wherry_kubernetes_receiver_image_parts[0]} |
+                 combine({'newTag': __wherry_kubernetes_receiver_image_parts[1]} if __wherry_kubernetes_receiver_image_parts[1] else {}) |
+                 combine({'digest': __wherry_kubernetes_receiver_image_parts[2]} if __wherry_kubernetes_receiver_image_parts[2] else {}) }}"
+          patches: "{{ __wherry_kubernetes_receiver_patch_refs }}"
+      delegate_to: localhost
+      check_mode: false
+      changed_when: false
+
+    - name: Build the Kubernetes receiver manifests
+      ansible.builtin.set_fact:
+        __wherry_kubernetes_receiver_render: >-
+          {{ lookup('kubernetes.core.kustomize', dir=__wherry_kubernetes_receiver_render_dir.path, binary_path='kubectl') }}
+      no_log: true
+
+    - name: Look up the receiver's namespace
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ wherry_kubernetes_receiver_kubeconfig }}"
+        api_version: v1
+        kind: Namespace
+        name: "{{ wherry_kubernetes_receiver_namespace }}"
+      register: __wherry_kubernetes_receiver_namespace_info
+
+    # The API server dry-runs an object only in a namespace that exists, which a first run in check mode has not created.
+    - name: Note whether the receiver's objects can be applied
+      ansible.builtin.set_fact:
+        __wherry_kubernetes_receiver_appliable: "{{ __wherry_kubernetes_receiver_namespace_info.resources | length > 0 or not ansible_check_mode }}"
+
+    - name: Apply Kubernetes receiver secrets
+      when: __wherry_kubernetes_receiver_appliable
+      kubernetes.core.k8s:
+        kubeconfig: "{{ wherry_kubernetes_receiver_kubeconfig }}"
+        state: present
+        definition: >-
+          {{ __wherry_kubernetes_receiver_render | from_yaml_all |
+          selectattr('kind', 'equalto', 'Secret') | list }}
+      no_log: true
+
+    # The ConfigMap carries the receiver's config, which the argument spec marks no_log.
+    - name: Apply Kubernetes receiver resources
+      when: __wherry_kubernetes_receiver_appliable
+      kubernetes.core.k8s:
+        kubeconfig: "{{ wherry_kubernetes_receiver_kubeconfig }}"
+        state: present
+        definition: >-
+          {{ __wherry_kubernetes_receiver_render | from_yaml_all |
+          rejectattr('kind', 'equalto', 'Secret') | list }}
+      no_log: true
+
+    # Check mode creates no Deployment to wait for.
+    - name: Wait for the Kubernetes receiver rollout
+      when: not ansible_check_mode
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ wherry_kubernetes_receiver_kubeconfig }}"
+        api_version: apps/v1
+        kind: Deployment
+        name: wherry-receiver
+        namespace: "{{ wherry_kubernetes_receiver_namespace }}"
+      register: __wherry_kubernetes_receiver_deployment
+      until:
+        - __wherry_kubernetes_receiver_deployment.resources | length == 1
+        - >-
+          __wherry_kubernetes_receiver_deployment.resources[0].status.observedGeneration | default(0) ==
+          __wherry_kubernetes_receiver_deployment.resources[0].metadata.generation
+        - >-
+          __wherry_kubernetes_receiver_deployment.resources[0].status.updatedReplicas | default(0) ==
+          __wherry_kubernetes_receiver_deployment.resources[0].spec.replicas
+      retries: 60
+      delay: 5
+
+  always:
+    - name: Remove the Kubernetes render directory
+      ansible.builtin.file:
+        path: "{{ __wherry_kubernetes_receiver_render_dir.path }}"
+        state: absent
+      delegate_to: localhost
+      check_mode: false
+      changed_when: false
+      no_log: true

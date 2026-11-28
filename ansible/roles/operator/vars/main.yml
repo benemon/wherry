@@ -1,0 +1,2 @@
+---
+__wherry_operator_receiver_names: "{{ wherry_operator_receivers | map(attribute='name') }}"

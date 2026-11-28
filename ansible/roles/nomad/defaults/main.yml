@@ -1,0 +1,3 @@
+---
+wherry_nomad_state: present
+wherry_nomad_confirm_absent: false

@@ -1,0 +1,19 @@
+namespace: benemon
+name: wherry
+version: 0.1.0
+readme: README.md
+authors:
+  - Benjamin Holmes
+description: Builds, resets and retires wherry operators, hosts and receiver platforms.
+license:
+  - MPL-2.0
+tags: [infrastructure, automation, nomad, kubernetes]
+repository: https://github.com/benemon/wherry
+issues: https://github.com/benemon/wherry/issues
+dependencies:
+  benemon.nomad: "==0.4.0"
+  kubernetes.core: ">=6.2.0"
+build_ignore:
+  - .ansible-lint
+  - examples
+  - tests

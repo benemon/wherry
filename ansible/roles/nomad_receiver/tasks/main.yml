@@ -1,0 +1,26 @@
+---
+- name: Refuse wherry_nomad_receiver_state=absent without wherry_nomad_receiver_confirm_absent
+  ansible.builtin.assert:
+    that: wherry_nomad_receiver_state == 'present' or wherry_nomad_receiver_confirm_absent | bool
+    fail_msg: >-
+      wherry_nomad_receiver_state=absent deletes the receiver's job, variable, volume and policy; set
+      wherry_nomad_receiver_confirm_absent to true to proceed.
+    quiet: true
+
+- name: Check the Nomad connection
+  ansible.builtin.assert:
+    that:
+      - wherry_nomad_receiver_address is not none
+      - wherry_nomad_receiver_token is not none
+    fail_msg: The role needs wherry_nomad_receiver_address and _token, by default wherry_nomad_address and wherry_nomad_token.
+    quiet: true
+
+- name: Apply the Nomad receiver's state
+  module_defaults:
+    group/benemon.nomad.nomad:
+      address: "{{ wherry_nomad_receiver_address }}"
+      ca_cert: "{{ wherry_nomad_receiver_ca_cert }}"
+      token: "{{ wherry_nomad_receiver_token }}"
+  block:
+    - name: Include the tasks of the requested state
+      ansible.builtin.include_tasks: "{{ wherry_nomad_receiver_state }}.yml"

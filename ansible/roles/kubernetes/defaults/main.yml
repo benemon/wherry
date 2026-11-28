@@ -1,0 +1,4 @@
+---
+wherry_kubernetes_state: present
+wherry_kubernetes_confirm_absent: false
+wherry_kubernetes_openshift: false

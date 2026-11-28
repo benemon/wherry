@@ -1,0 +1,4 @@
+---
+wherry_systemd_state: present
+wherry_systemd_confirm_absent: false
+wherry_systemd_plugin_version: null

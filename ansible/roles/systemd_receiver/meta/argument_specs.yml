@@ -1,0 +1,41 @@
+argument_specs:
+  main:
+    short_description: Install and run a wherry receiver on a systemd host, or remove it.
+    description:
+      - >-
+        With wherry_systemd_receiver_state=present, the control node verifies each release's checksums.txt with cosign against that release's
+        own tag, checks each archive against it, and checks the plugin binary against its pin; the host gets both
+        binaries under a versioned directory behind a current link, the configuration and the bundle, and the service
+        is started.
+      - With wherry_systemd_receiver_state=absent, stops the service and removes the installed releases, the wherry link, the configuration and the bundle.
+    options:
+      wherry_systemd_receiver_state:
+        type: str
+        choices: [present, absent]
+        default: present
+        description: Whether the receiver should run.
+      wherry_systemd_receiver_confirm_absent:
+        type: bool
+        default: false
+        description: Must be true for wherry_systemd_receiver_state=absent.
+      wherry_systemd_receiver_version:
+        type: str
+        description: wherry release tag to install, by default wherry_version; needed with state present.
+      wherry_systemd_receiver_plugin_version:
+        type: str
+        description: Systemd plugin version, by default wherry_systemd_plugin_version; needed with state present.
+      wherry_systemd_receiver_plugin_sha256:
+        type: str
+        description: SHA-256 of the systemd plugin binary, as in the receiver record; needed with state present.
+      wherry_systemd_receiver_config:
+        type: dict
+        no_log: true
+        description: The receiver record's config.yaml as a mapping; needed with state present.
+      wherry_systemd_receiver_bundle:
+        type: str
+        no_log: true
+        description: The receiver's bundle; needed with state present.
+      wherry_systemd_receiver_cache_dir:
+        type: path
+        default: ~/.cache/wherry
+        description: Where the control node keeps downloaded releases.

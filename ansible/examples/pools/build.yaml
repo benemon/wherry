@@ -1,0 +1,5 @@
+agents:
+  - name: mock
+default_agent: mock
+delivery_limit: 5
+lock_duration: 15s

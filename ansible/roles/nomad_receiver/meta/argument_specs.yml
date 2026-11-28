@@ -1,0 +1,79 @@
+argument_specs:
+  main:
+    short_description: Deploy a wherry receiver as a Nomad job, or delete it.
+    description:
+      - >-
+        With wherry_nomad_receiver_state=present, creates the receiver's workload ACL policy, dynamic host volume,
+        Nomad variable and job from the pinned example. It fails before any change if the pinned
+        wherry-receiver.volume.hcl differs from the role's volume options.
+      - >-
+        With wherry_nomad_receiver_state=absent, deletes the named receiver's job, variable nomad/jobs/<name>, volume and
+        policy. With wherry_nomad_receiver_purge_prefix it also purges, in each of wherry_nomad_receiver_purge_namespaces,
+        every job and variable whose name starts with either prefix and every volume and policy whose name starts with
+        wherry_nomad_receiver_job_prefix.
+    options:
+      wherry_nomad_receiver_state:
+        type: str
+        choices: [present, absent]
+        default: present
+        description: Whether the receiver should run.
+      wherry_nomad_receiver_confirm_absent:
+        type: bool
+        default: false
+        description: Must be true for wherry_nomad_receiver_state=absent.
+      wherry_nomad_receiver_address:
+        type: str
+        description: Nomad API address, by default wherry_nomad_address.
+      wherry_nomad_receiver_ca_cert:
+        type: path
+        description: CA certificate file for a Nomad API under HTTPS, by default wherry_nomad_ca_cert.
+      wherry_nomad_receiver_token:
+        type: str
+        no_log: true
+        description: Nomad ACL token, by default wherry_nomad_token.
+      wherry_nomad_receiver_plugin_version:
+        type: str
+        description: Nomad plugin version, which names the pinned example commit, by default wherry_nomad_plugin_version; needed with state present.
+      wherry_nomad_receiver_name:
+        type: str
+        description: Receiver job ID, and the name of its ACL policy, volume and variable nomad/jobs/<name>; needed with state present.
+      wherry_nomad_receiver_namespace:
+        type: str
+        description: Namespace of the job, variable and volume; needed with a name.
+      wherry_nomad_receiver_node_pool:
+        type: str
+        description: Node pool of the job and volume; needed with state present.
+      wherry_nomad_receiver_image:
+        type: str
+        description: Receiver image; needed with state present.
+      wherry_nomad_receiver_driver:
+        type: str
+        description: Task driver that runs the image; needed with state present.
+      wherry_nomad_receiver_metrics_port:
+        type: int
+        description: Static host port for metrics, or 0 for a dynamic port; needed with state present.
+      wherry_nomad_receiver_policy_rules:
+        type: str
+        description: ACL policy rules for the job's workload identity; needed with state present.
+      wherry_nomad_receiver_bundle:
+        type: str
+        no_log: true
+        description: The receiver's bundle; needed with state present.
+      wherry_nomad_receiver_config:
+        type: dict
+        no_log: true
+        description: The receiver record's config.yaml as a mapping; needed with state present.
+      wherry_nomad_receiver_purge_prefix:
+        type: bool
+        default: false
+        description: With state absent, also purge every receiver and agent run by prefix.
+      wherry_nomad_receiver_job_prefix:
+        type: str
+        description: Prefix, starting with wherry, of the receiver jobs, variables, volumes and policies the purge deletes.
+      wherry_nomad_receiver_agent_prefix:
+        type: str
+        description: Prefix of the agent jobs and variables the purge deletes.
+      wherry_nomad_receiver_purge_namespaces:
+        type: list
+        elements: str
+        description: Namespaces the purge clears, by default the names in wherry_nomad_namespaces.

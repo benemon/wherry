@@ -1,0 +1,11 @@
+---
+- name: Refuse wherry_systemd_state=absent without wherry_systemd_confirm_absent
+  ansible.builtin.assert:
+    that: wherry_systemd_state == 'present' or wherry_systemd_confirm_absent | bool
+    fail_msg: >-
+      wherry_systemd_state=absent stops the receiver and removes the platform's files and state; set
+      wherry_systemd_confirm_absent to true to proceed.
+    quiet: true
+
+- name: Apply the systemd platform's state
+  ansible.builtin.include_tasks: "{{ wherry_systemd_state }}.yml"

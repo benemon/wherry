@@ -1,0 +1,44 @@
+argument_specs:
+  main:
+    short_description: Create or delete the Nomad namespaces wherry uses.
+    options:
+      wherry_nomad_state:
+        type: str
+        choices: [present, absent]
+        default: present
+        description: Whether the namespaces should exist.
+      wherry_nomad_confirm_absent:
+        type: bool
+        default: false
+        description: Must be true for wherry_nomad_state=absent.
+      wherry_nomad_address:
+        type: str
+        required: true
+        description: Nomad API address.
+      wherry_nomad_ca_cert:
+        type: path
+        description: CA certificate file for a Nomad API under HTTPS.
+      wherry_nomad_token:
+        type: str
+        required: true
+        no_log: true
+        description: Nomad ACL token.
+      wherry_nomad_namespaces:
+        type: list
+        elements: dict
+        required: true
+        description: Nomad namespaces and their capabilities; state absent deletes each by name. nomad_receiver reads the same variable.
+        options:
+          name:
+            type: str
+            required: true
+            description: Namespace name.
+          description:
+            type: str
+            description: Namespace description.
+          capabilities:
+            type: dict
+            description: Namespace capabilities, as benemon.nomad.nomad_namespace takes them.
+          node_pool_configuration:
+            type: dict
+            description: Namespace node pool configuration, a Nomad Enterprise feature.

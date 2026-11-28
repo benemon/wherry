@@ -1,0 +1,6 @@
+---
+__wherry_systemd_plugin_commits:
+  "0.3.0": bed01cdc83b0cfa766ca63aa15bfc6ced63ac45c
+__wherry_systemd_examples: >-
+  {{ 'https://raw.githubusercontent.com/benemon/wherry-plugins/' ~
+  __wherry_systemd_plugin_commits[wherry_systemd_plugin_version] ~ '/examples/systemd' }}

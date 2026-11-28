@@ -1,0 +1,55 @@
+argument_specs:
+  main:
+    short_description: Deploy a wherry receiver on Kubernetes or OpenShift, or delete it.
+    description:
+      - >-
+        With wherry_kubernetes_receiver_state=present, renders the pinned Kustomize base with the bundle, the record's
+        config.yaml and an overlay of the namespace, image and the given resources and patches on the control node,
+        applies the Secrets and then the rest, and waits for the rollout (not in check mode).
+      - >-
+        With wherry_kubernetes_receiver_state=absent, deletes the objects of the pinned receiver.yaml and of
+        wherry_kubernetes_receiver_overlay_resources, and the Secrets and ConfigMaps the base's generators made, state
+        claim included.
+    options:
+      wherry_kubernetes_receiver_state:
+        type: str
+        choices: [present, absent]
+        default: present
+        description: Whether the receiver should run.
+      wherry_kubernetes_receiver_confirm_absent:
+        type: bool
+        default: false
+        description: Must be true for wherry_kubernetes_receiver_state=absent.
+      wherry_kubernetes_receiver_plugin_version:
+        type: str
+        description: Kubernetes plugin version, which names the pinned example commit, by default wherry_kubernetes_plugin_version.
+      wherry_kubernetes_receiver_kubeconfig:
+        type: path
+        description: kubeconfig file, by default wherry_kubernetes_kubeconfig.
+      wherry_kubernetes_receiver_namespace:
+        type: str
+        description: Receiver namespace, by default wherry_kubernetes_namespace.
+      wherry_kubernetes_receiver_name:
+        type: str
+        description: Receiver name; needed with state present.
+      wherry_kubernetes_receiver_image:
+        type: str
+        description: Receiver image, with a tag or a digest; needed with state present.
+      wherry_kubernetes_receiver_bundle:
+        type: str
+        no_log: true
+        description: The receiver's bundle; needed with state present.
+      wherry_kubernetes_receiver_config:
+        type: dict
+        no_log: true
+        description: The receiver record's config.yaml as a mapping; needed with state present.
+      wherry_kubernetes_receiver_overlay_resources:
+        type: list
+        elements: path
+        default: []
+        description: Resource files the overlay adds, and state absent deletes.
+      wherry_kubernetes_receiver_overlay_patches:
+        type: list
+        elements: str
+        default: []
+        description: Patch files the overlay applies; a path starting base/ names a fetched example file, such as base/fsgroup.yaml.

@@ -1,0 +1,153 @@
+---
+- name: Check the arguments wherry_systemd_receiver_state=present needs
+  ansible.builtin.assert:
+    that:
+      - wherry_systemd_receiver_version is not none
+      - wherry_systemd_receiver_plugin_version is not none
+      - wherry_systemd_receiver_plugin_sha256 is not none
+      - wherry_systemd_receiver_config is not none or ansible_check_mode
+      - wherry_systemd_receiver_bundle is not none or ansible_check_mode
+    fail_msg: >-
+      wherry_systemd_receiver_state=present needs wherry_systemd_receiver_version (default wherry_version),
+      _plugin_version (default wherry_systemd_plugin_version), _plugin_sha256, _config and _bundle.
+    quiet: true
+
+- name: Check the systemd plugin version is pinned
+  ansible.builtin.assert:
+    that: wherry_systemd_receiver_plugin_version in __wherry_systemd_receiver_plugin_commits
+    fail_msg: "Unsupported systemd plugin version {{ wherry_systemd_receiver_plugin_version }}."
+    quiet: true
+
+- name: Gather the host's architecture
+  ansible.builtin.setup:
+    gather_subset: ['!all', min]
+  when: ansible_facts.architecture is not defined
+
+- name: Set the systemd receiver release directories
+  ansible.builtin.set_fact:
+    __wherry_systemd_receiver_wherry_dir: >-
+      {{ wherry_systemd_receiver_cache_dir }}/wherry/{{ wherry_systemd_receiver_version }}/{{ __wherry_systemd_receiver_arch }}
+    __wherry_systemd_receiver_plugin_dir: >-
+      {{ wherry_systemd_receiver_cache_dir }}/wherry-plugin-systemd/{{ wherry_systemd_receiver_plugin_version }}/{{ __wherry_systemd_receiver_arch }}
+
+# Each release's checksums.txt is verified with cosign against the release workflow at that release's own tag, each
+# archive against its checksums.txt, and each archive unpacks only its binary into its own release's directory.
+- name: Stage the wherry and systemd plugin releases
+  ansible.builtin.include_tasks: release.yml
+  args:
+    apply:
+      delegate_to: localhost
+      run_once: true
+      become: false
+  loop:
+    - dir: "{{ __wherry_systemd_receiver_wherry_dir }}"
+      url: "https://github.com/benemon/wherry/releases/download/{{ wherry_systemd_receiver_version }}"
+      identity: "^https://github[.]com/benemon/wherry/[.]github/workflows/release[.]yml@refs/tags/{{ wherry_systemd_receiver_version | regex_escape }}$"
+      archive: "wherry_{{ wherry_systemd_receiver_version }}_linux_{{ __wherry_systemd_receiver_arch }}"
+      binary: wherry
+    - dir: "{{ __wherry_systemd_receiver_plugin_dir }}"
+      url: "https://github.com/benemon/wherry-plugins/releases/download/systemd/v{{ wherry_systemd_receiver_plugin_version }}"
+      identity: >-
+        ^https://github[.]com/benemon/wherry-plugins/[.]github/workflows/release[.]yml@refs/tags/systemd/v{{
+        wherry_systemd_receiver_plugin_version | regex_escape }}$
+      archive: "wherry-plugin-systemd_v{{ wherry_systemd_receiver_plugin_version }}_linux_{{ __wherry_systemd_receiver_arch }}"
+      binary: wherry-plugin-systemd
+  loop_control:
+    loop_var: __wherry_systemd_receiver_release
+    label: "{{ __wherry_systemd_receiver_release.archive }}"
+
+- name: Inspect the systemd plugin checksum
+  ansible.builtin.stat:
+    path: "{{ __wherry_systemd_receiver_plugin_dir }}/bin/wherry-plugin-systemd"
+    checksum_algorithm: sha256
+  register: __wherry_systemd_receiver_plugin_binary
+  delegate_to: localhost
+  run_once: true
+  become: false
+
+- name: Check the systemd plugin checksum
+  ansible.builtin.assert:
+    that: __wherry_systemd_receiver_plugin_binary.stat.checksum == wherry_systemd_receiver_plugin_sha256
+    fail_msg: The systemd plugin binary does not match its receiver pin.
+    quiet: true
+
+- name: Create the versioned receiver directory
+  ansible.builtin.file:
+    path: "/usr/local/libexec/wherry/{{ wherry_systemd_receiver_version }}/plugins"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the receiver binaries
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "{{ item.destination }}"
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - source: "{{ __wherry_systemd_receiver_wherry_dir }}/bin/wherry"
+      destination: "/usr/local/libexec/wherry/{{ wherry_systemd_receiver_version }}/wherry"
+    - source: "{{ __wherry_systemd_receiver_plugin_dir }}/bin/wherry-plugin-systemd"
+      destination: "/usr/local/libexec/wherry/{{ wherry_systemd_receiver_version }}/plugins/wherry-plugin-systemd"
+  notify: Restart wherry-receiver
+
+- name: Select the receiver release
+  ansible.builtin.file:
+    src: "/usr/local/libexec/wherry/{{ wherry_systemd_receiver_version }}"
+    dest: /usr/local/libexec/wherry/current
+    state: link
+    force: true
+  notify: Restart wherry-receiver
+
+- name: Link the wherry command
+  ansible.builtin.file:
+    src: /usr/local/libexec/wherry/current/wherry
+    dest: /usr/local/bin/wherry
+    state: link
+    force: true
+
+- name: Gather the host's SELinux state
+  ansible.builtin.setup:
+    gather_subset: ['!all', '!min', selinux]
+  when: ansible_facts.selinux is not defined
+
+- name: Restore receiver binary labels
+  ansible.builtin.command:
+    argv: [restorecon, -Rv, /usr/local/bin, /usr/local/libexec/wherry]
+  register: __wherry_systemd_receiver_restorecon
+  changed_when: __wherry_systemd_receiver_restorecon.stdout | length > 0
+  when: ansible_facts.selinux.status == 'enabled'
+
+- name: Install the receiver configuration
+  ansible.builtin.copy:
+    content: "{{ wherry_systemd_receiver_config | default({}, true) | to_nice_yaml(indent=2, sort_keys=false) }}"
+    dest: /etc/wherry/config.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart wherry-receiver
+  no_log: true
+
+- name: Install the receiver bundle
+  ansible.builtin.copy:
+    content: "{{ wherry_systemd_receiver_bundle | default('', true) }}"
+    dest: /etc/wherry/receiver.bundle
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart wherry-receiver
+  no_log: true
+
+- name: Inspect the receiver service unit
+  ansible.builtin.stat:
+    path: /etc/systemd/system/wherry-receiver.service
+  register: __wherry_systemd_receiver_present_unit
+
+# In check mode on a host the systemd role has not yet installed, there is no unit to start.
+- name: Start the receiver service
+  ansible.builtin.systemd_service:
+    name: wherry-receiver
+    state: started
+  when: __wherry_systemd_receiver_present_unit.stat.exists or not ansible_check_mode

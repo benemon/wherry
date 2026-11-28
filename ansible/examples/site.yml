@@ -1,0 +1,179 @@
+# Builds the deployment inventory.yml describes. Each receiver runs one profile of the mock agent, wherry dev mock from
+# the receiver's own wherry; replace the profiles with your agents.
+# ansible-galaxy collection install git+https://github.com/benemon/wherry.git#/ansible,<tag>
+# ansible-playbook -i inventory.yml site.yml
+---
+- name: Configure the wherry operator
+  hosts: controllers
+  gather_facts: false
+  roles:
+    - role: benemon.wherry.operator
+      vars:
+        wherry_operator_super_user: wherry-admin
+        wherry_operator_super_user_password: "{{ lookup('ansible.builtin.env', 'WHERRY_KAFKA_ADMIN_PASSWORD') }}"
+        wherry_operator_pools:
+          - name: build
+            file: "{{ playbook_dir }}/pools/build.yaml"
+        wherry_operator_receivers:
+          - name: nomad-1
+            pool: build
+            broker: "{{ wherry_broker }}"
+            plugin_sha256: {nomad: "{{ example_plugin_sha256.nomad }}"}
+            config:
+              bundle: /secrets/receiver.bundle
+              ca_cert: "{{ lookup('ansible.builtin.file', wherry_ca_cert) }}"
+              state_dir: /var/lib/wherry/state
+              plugin_dir: /usr/local/libexec/wherry/plugins
+              metrics_addr: ":9464"
+              drain_timeout: 20s
+            plugins:
+              nomad:
+                labels: {platform: nomad}
+                config:
+                  namespace: wherry
+                  node_pool: default
+                  runtime: {driver: docker}
+                profiles:
+                  - name: mock
+                    agent: mock
+                    config:
+                      runtime:
+                        config:
+                          image: "{{ example_receiver_images.nomad }}"
+                          entrypoint: [/bin/sh, -c]
+                          args: ['cd "$NOMAD_TASK_DIR" && exec /usr/local/bin/wherry dev mock']
+          - name: kubernetes-1
+            pool: build
+            broker: "{{ wherry_broker }}"
+            plugin_sha256: {kubernetes: "{{ example_plugin_sha256.kubernetes }}"}
+            config:
+              bundle: /etc/wherry/bundle/bundle.yaml
+              ca_cert: "{{ lookup('ansible.builtin.file', wherry_ca_cert) }}"
+              state_dir: /var/lib/wherry/state
+              plugin_dir: /usr/local/libexec/wherry/plugins
+              metrics_addr: ":9464"
+              drain_timeout: 20s
+            plugins:
+              kubernetes:
+                labels: {platform: kubernetes}
+                config:
+                  namespace: "{{ wherry_kubernetes_namespace }}"
+                  runs_claim: wherry-runs
+                  runs_dir: /var/lib/wherry/runs
+                profiles:
+                  - name: mock
+                    agent: mock
+                    config:
+                      runtime:
+                        image: "{{ example_receiver_images.kubernetes }}"
+                        user: "1001"
+                        command: [/bin/sh, -c]
+                        args: [cd /wherry && exec /usr/local/bin/wherry dev mock]
+          - name: systemd-1
+            pool: build
+            broker: "{{ wherry_broker }}"
+            plugin_sha256: {systemd: "{{ example_plugin_sha256.systemd }}"}
+            config:
+              bundle: /run/credentials/wherry-receiver.service/bundle
+              ca_cert: "{{ lookup('ansible.builtin.file', wherry_ca_cert) }}"
+              state_dir: /var/lib/wherry/state
+              plugin_dir: /usr/local/libexec/wherry/current/plugins
+              metrics_addr: ":9464"
+              drain_timeout: 20s
+            plugins:
+              systemd:
+                labels: {platform: systemd}
+                profiles:
+                  - name: mock
+                    agent: mock
+                    config:
+                      runtime:
+                        command: [/bin/sh, -c]
+                        args: [cd /wherry && exec /usr/local/bin/wherry dev mock]
+
+- name: Enrol the wherry host
+  hosts: controllers
+  gather_facts: false
+  roles:
+    - role: benemon.wherry.host
+
+- name: Configure the receiver platforms
+  hosts: controllers
+  gather_facts: false
+  roles:
+    - role: benemon.wherry.nomad
+    - role: benemon.wherry.kubernetes
+
+- name: Configure the systemd platform
+  hosts: systemd_receivers
+  gather_facts: false
+  become: true
+  roles:
+    - role: benemon.wherry.systemd
+
+- name: Deploy the Nomad and Kubernetes receivers
+  hosts: controllers
+  gather_facts: false
+  roles:
+    - role: benemon.wherry.nomad_receiver
+      vars:
+        wherry_nomad_receiver_name: wherry-receiver-nomad-1
+        wherry_nomad_receiver_namespace: wherry
+        wherry_nomad_receiver_node_pool: default
+        wherry_nomad_receiver_image: "{{ example_receiver_images.nomad }}"
+        wherry_nomad_receiver_driver: docker
+        wherry_nomad_receiver_metrics_port: 0
+        wherry_nomad_receiver_policy_rules: |
+          namespace "wherry" {
+            capabilities = ["submit-job", "list-jobs", "read-job", "read-logs", "read-fs", "alloc-exec"]
+
+            variables {
+              path "nomad/jobs/agent-*" {
+                capabilities = ["write", "read", "destroy"]
+              }
+            }
+          }
+
+          node {
+            policy = "read"
+          }
+
+          node_pool "default" {
+            policy = "read"
+          }
+        wherry_nomad_receiver_bundle: >-
+          {{ lookup('ansible.builtin.file', wherry_operator_dir ~ '/bundles/receivers/nomad-1.bundle', errors=example_lookup_errors) }}
+        wherry_nomad_receiver_config: >-
+          {{ lookup('ansible.builtin.file', wherry_operator_dir ~ '/receivers/nomad-1/config.yaml', errors=example_lookup_errors) | from_yaml }}
+    - role: benemon.wherry.kubernetes_receiver
+      vars:
+        wherry_kubernetes_receiver_name: kubernetes-1
+        wherry_kubernetes_receiver_image: "{{ example_receiver_images.kubernetes }}"
+        wherry_kubernetes_receiver_bundle: >-
+          {{ lookup('ansible.builtin.file', wherry_operator_dir ~ '/bundles/receivers/kubernetes-1.bundle', errors=example_lookup_errors) }}
+        wherry_kubernetes_receiver_config: >-
+          {{ lookup('ansible.builtin.file', wherry_operator_dir ~ '/receivers/kubernetes-1/config.yaml', errors=example_lookup_errors) | from_yaml }}
+
+- name: Deploy the systemd receiver
+  hosts: systemd_receivers
+  gather_facts: false
+  become: true
+  roles:
+    - role: benemon.wherry.systemd_receiver
+      vars:
+        wherry_systemd_receiver_plugin_sha256: "{{ example_plugin_sha256.systemd }}"
+        wherry_systemd_receiver_config: >-
+          {{ lookup('ansible.builtin.file', wherry_operator_dir ~ '/receivers/systemd-1/config.yaml', errors=example_lookup_errors) | from_yaml }}
+        wherry_systemd_receiver_bundle: >-
+          {{ lookup('ansible.builtin.file', wherry_operator_dir ~ '/bundles/receivers/systemd-1.bundle', errors=example_lookup_errors) }}
+
+- name: Wait for every receiver
+  hosts: controllers
+  gather_facts: false
+  tasks:
+    - name: Gate receiver health
+      ansible.builtin.include_role:
+        name: benemon.wherry.host
+        tasks_from: live
+      vars:
+        wherry_host_live_receivers: [nomad-1, kubernetes-1, systemd-1]

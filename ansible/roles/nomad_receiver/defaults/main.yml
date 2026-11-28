@@ -1,0 +1,20 @@
+---
+wherry_nomad_receiver_state: present
+wherry_nomad_receiver_confirm_absent: false
+wherry_nomad_receiver_address: "{{ wherry_nomad_address | default(none) }}"
+wherry_nomad_receiver_ca_cert: "{{ wherry_nomad_ca_cert | default(none) }}"
+wherry_nomad_receiver_token: "{{ wherry_nomad_token | default(none) }}"
+wherry_nomad_receiver_plugin_version: "{{ wherry_nomad_plugin_version | default(none) }}"
+wherry_nomad_receiver_name: null
+wherry_nomad_receiver_namespace: null
+wherry_nomad_receiver_node_pool: null
+wherry_nomad_receiver_image: null
+wherry_nomad_receiver_driver: null
+wherry_nomad_receiver_metrics_port: null
+wherry_nomad_receiver_policy_rules: null
+wherry_nomad_receiver_bundle: null
+wherry_nomad_receiver_config: null
+wherry_nomad_receiver_purge_prefix: false
+wherry_nomad_receiver_job_prefix: null
+wherry_nomad_receiver_agent_prefix: null
+wherry_nomad_receiver_purge_namespaces: "{{ wherry_nomad_namespaces | default([]) | map(attribute='name') }}"

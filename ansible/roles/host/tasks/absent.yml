@@ -1,0 +1,96 @@
+---
+- name: Check the arguments wherry_host_state=absent needs
+  ansible.builtin.assert:
+    that: wherry_host_backup_dir is not none
+    fail_msg: wherry_host_state=absent needs wherry_host_backup_dir, by default wherry_backup_dir.
+    quiet: true
+
+- name: Read the host configuration
+  ansible.builtin.slurp:
+    src: "{{ __wherry_host_config }}"
+  register: __wherry_host_config_file
+  failed_when: false
+  no_log: true
+
+# internal/client/config.go DefaultPaths: a configuration that names no bundle, host_key or state_dir takes the
+# default configuration's directory files and $XDG_STATE_HOME/wherry, or, for any other path P, P.bundle.yaml,
+# P.host.key and P.state. scram.next sits beside the bundle (internal/client/scram.go).
+- name: Set the host identity and state paths
+  ansible.builtin.set_fact:
+    __wherry_host_paths: >-
+      {{ {'bundle': __wherry_host_named.bundle | default(__wherry_host_derived.bundle, true) | regex_replace('^~(?=/|$)', ansible_facts.env.HOME),
+          'host_key': __wherry_host_named.host_key | default(__wherry_host_derived.host_key, true) | regex_replace('^~(?=/|$)', ansible_facts.env.HOME),
+          'state_dir': __wherry_host_named.state_dir | default(__wherry_host_derived.state_dir, true) | regex_replace('^~(?=/|$)', ansible_facts.env.HOME)} }}
+  vars:
+    __wherry_host_named: "{{ (__wherry_host_config_file.content | b64decode | from_yaml) if 'content' in __wherry_host_config_file else {} }}"
+    __wherry_host_derived: >-
+      {{ {'bundle': __wherry_host_config | dirname ~ '/bundle.yaml', 'host_key': __wherry_host_config | dirname ~ '/host.key',
+          'state_dir': __wherry_host_default_state}
+         if __wherry_host_config == __wherry_host_default_config else
+         {'bundle': __wherry_host_config ~ '.bundle.yaml', 'host_key': __wherry_host_config ~ '.host.key',
+          'state_dir': __wherry_host_config ~ '.state'} }}
+
+- name: Inspect the host state and identity
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ __wherry_host_paths.state_dir }}"
+    - "{{ __wherry_host_paths.bundle }}"
+    - "{{ __wherry_host_paths.host_key }}"
+    - "{{ __wherry_host_config }}"
+    - "{{ __wherry_host_paths.bundle | dirname }}/scram.next"
+  register: __wherry_host_files
+
+- name: Inspect the host state directory
+  ansible.builtin.find:
+    paths: "{{ __wherry_host_paths.state_dir }}"
+    recurse: true
+    hidden: true
+    file_type: any
+  register: __wherry_host_state
+
+- name: Name the host archive
+  ansible.builtin.set_fact:
+    __wherry_host_archive: "{{ wherry_host_backup_dir }}/host-{{ now(utc=true, fmt='%Y%m%d-%H%M%S') }}.tgz"
+
+# The configuration and scram.next are archived but stay, since host init keeps an existing configuration; a host
+# holding only them has no identity to retire.
+- name: Archive and clear the host identity and state
+  when: >-
+    __wherry_host_state.matched > 0 or
+    (__wherry_host_files.results[1:3] | selectattr('stat.exists') | list | length > 0)
+  block:
+    - name: Create the backup directory
+      ansible.builtin.file:
+        path: "{{ wherry_host_backup_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Archive the host identity and state
+      ansible.builtin.command:
+        argv: >-
+          {{ ['tar', '-czf', __wherry_host_archive, '-C', '/'] +
+          (__wherry_host_files.results | selectattr('stat.exists') | map(attribute='item') | map('regex_replace', '^/', '')) }}
+      changed_when: true
+      no_log: true
+
+    - name: Protect the host archive
+      ansible.builtin.file:
+        path: "{{ __wherry_host_archive }}"
+        mode: "0600"
+
+    - name: Clear the host state and identity
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ __wherry_host_paths.state_dir }}"
+        - "{{ __wherry_host_paths.bundle }}"
+        - "{{ __wherry_host_paths.host_key }}"
+      no_log: true
+
+    - name: Recreate the host state directory
+      ansible.builtin.file:
+        path: "{{ __wherry_host_paths.state_dir }}"
+        state: directory
+        mode: "0700"
